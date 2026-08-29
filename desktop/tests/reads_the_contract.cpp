@@ -81,18 +81,18 @@ private slots:
         QCOMPARE(one.name, u"Assassination Classroom"_s);
         QCOMPARE(one.entryCount, 21);
         QCOMPARE(one.chapterCount, 180);
-        QCOMPARE(one.ownedVolumes, 21);
+        QCOMPARE(one.holding.ownedVolumes, 21);
         QCOMPARE(one.declaredVolumes, std::optional<int>(21));
         QCOMPARE(one.author, std::optional<QString>(u"Yūsei Matsui"_s));
         QCOMPARE(one.medium, std::optional<Api::Medium>(Api::Medium::Manga));
         QCOMPARE(one.readingDirection,
                  std::optional<Api::ReadingDirection>(Api::ReadingDirection::RightToLeft));
         QCOMPARE(one.run, std::optional<Api::Run>(Api::Run::Completed));
-        QCOMPARE(one.readStatus, Api::ReadStatus::InProgress);
+        QCOMPARE(one.holding.readStatus, Api::ReadStatus::InProgress);
         QCOMPARE(one.genres, QList<QString>({u"Action"_s, u"Comédie"_s}));
-        QCOMPARE(one.missingChapters, QList<double>({3.5}));
-        QVERIFY(one.missingVolumes.isEmpty());
-        QCOMPARE(one.lastAddedAt, std::optional<qint64>(1755000000));
+        QCOMPARE(one.holding.missingChapters, QList<double>({3.5}));
+        QVERIFY(one.holding.missingVolumes.isEmpty());
+        QCOMPARE(one.holding.lastAddedAt, std::optional<qint64>(1755000000));
     }
 
     /// Null is how the contract says "not recorded". An empty string would say "recorded as

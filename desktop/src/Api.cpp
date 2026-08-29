@@ -241,12 +241,13 @@ Read<Series> series(const QJsonObject &from)
     one.publisher = field.maybeText(u"publisher"_s);
     one.language = field.maybeText(u"language"_s);
     one.declaredVolumes = field.maybeWhole(u"declaredVolumes"_s);
-    one.addedAt = field.maybeBig(u"addedAt"_s);
-    one.lastAddedAt = field.maybeBig(u"lastAddedAt"_s);
-    one.ownedVolumes = field.maybeWhole(u"ownedVolumes"_s).value_or(0);
     one.genres = field.words(u"genres"_s);
-    one.missingVolumes = field.reals(u"missingVolumes"_s);
-    one.missingChapters = field.reals(u"missingChapters"_s);
+
+    one.holding.addedAt = field.maybeBig(u"addedAt"_s);
+    one.holding.lastAddedAt = field.maybeBig(u"lastAddedAt"_s);
+    one.holding.ownedVolumes = field.maybeWhole(u"ownedVolumes"_s).value_or(0);
+    one.holding.missingVolumes = field.reals(u"missingVolumes"_s);
+    one.holding.missingChapters = field.reals(u"missingChapters"_s);
 
     // Vocabulary the client may not know yet never refuses a row — see the note in Api.h.
     if (const auto word = field.maybeText(u"medium"_s))
@@ -265,7 +266,7 @@ Read<Series> series(const QJsonObject &from)
     if (const auto word = field.maybeText(u"status"_s))
         one.run = (*word == u"completed"_s) ? Run::Completed : Run::Ongoing;
     if (const auto word = field.maybeText(u"readStatus"_s))
-        one.readStatus = readStatus(*word);
+        one.holding.readStatus = readStatus(*word);
 
     return {one, {}};
 }

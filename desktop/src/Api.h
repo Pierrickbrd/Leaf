@@ -12,8 +12,8 @@
 // learn a new word before this client does, and a shelf that emptied itself over one would be
 // worse than a shelf with one odd tile.
 //
-// Nothing here knows how anything is worded or drawn. `ownedVolumes` is a number; whether it
-// reads "21 tomes" or "7 albums" is the shelf's business.
+// Nothing here knows how anything is worded or drawn. `Holding::ownedVolumes` is a number;
+// whether it reads "21 tomes" or "7 albums" is the shelf's business.
 
 #include <QJsonObject>
 #include <QList>
@@ -27,6 +27,18 @@ enum class Medium { Manga, Bd, Comics, Manhwa, Manhua, Webtoon, Artbook, Other }
 enum class ReadingDirection { LeftToRight, RightToLeft, Vertical };
 enum class Run { Ongoing, Completed };
 enum class ReadStatus { Unread, InProgress, Read };
+
+/// What this library holds of an edition, as opposed to what the edition is. The same
+/// printing on somebody else's shelf carries the same name, the same author and the same
+/// volume count, and none of these: they are facts about a collection, not about a work.
+struct Holding {
+    ReadStatus readStatus = ReadStatus::Unread;
+    int ownedVolumes = 0;
+    QList<double> missingVolumes;
+    QList<double> missingChapters;
+    std::optional<qint64> addedAt;
+    std::optional<qint64> lastAddedAt;
+};
 
 /// A row of the shelf. "Series" is the API's word; in the model it is an EDITION.
 struct Series {
@@ -51,14 +63,9 @@ struct Series {
     std::optional<ReadingDirection> readingDirection;
     std::optional<Run> run;
     std::optional<int> declaredVolumes;
-    std::optional<qint64> addedAt;
-    std::optional<qint64> lastAddedAt;
-
-    ReadStatus readStatus = ReadStatus::Unread;
-    int ownedVolumes = 0;
-    QList<double> missingVolumes;
-    QList<double> missingChapters;
     QList<QString> genres;
+
+    Holding holding;
 };
 
 /// One page of the shelf. `total` is the count behind the current filters, not the library.
