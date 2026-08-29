@@ -1,0 +1,103 @@
+name: server
+
+# Filtered by path, like every other block: touching the Kotlin, the QML or the contract
+# must not rebuild the Rust. One workflow per block, and they never meet.
+on:
+  push:
+    paths:
+      - 'server/**'
+      - 'contract/openapi.yaml'
+      - 'tools/**'
+      - '.github/workflows/server.yml'
+  pull_request:
+    paths:
+      - 'server/**'
+      - 'contract/openapi.yaml'
+      - 'tools/**'
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: server
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tools:
+    # The standard library is enough — no toolchain, no pip install, nothing to build —
+    # so this waits on nothing: three milliseconds of tests must not sit behind a Rust
+    # build, and must still run when that build is what broke.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: the tools hold their own tests
+        run: python3 -m unittest discover -s tools -p 'test_*.py'
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+
+      # Formatting first: it fails in a second, and there is no point compiling to be told
+      # about a blank line afterwards.
+      - run: cargo fmt --check
+
+      # Warnings are errors here. The whole reason for this language is that the compiler
+      # is allowed to be strict, and letting it whisper would give that away.
+      - run: cargo clippy --all-targets -- -D warnings
+
+      - run: cargo test --all-targets
+
+  contract:
+    # The contract is what both clients will be generated from, so a divergence between it
+    # and the server is not a documentation problem — it is a client that will not compile,
+    # or worse, one that compiles and reads a field that is never sent. Thirty-six
+    # operations and their schemas is more than hand-written assertions can hold.
+    needs: build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+
+      - run: pip install pyyaml jsonschema
+      - run: python3 tools/fixture.py "$RUNNER_TEMP/leaf"
+      - run: cargo build --release
+        working-directory: server
+
+      - name: serve the fixture and check every answer against the contract
+        env:
+          LEAF_KEYS: "ci:0123456789abcdef:read,import"
+        run: |
+          LEAF_LIBRARY="$RUNNER_TEMP/leaf/library" \
+          LEAF_INBOX="$RUNNER_TEMP/leaf/inbox" \
+          LEAF_CACHE="$RUNNER_TEMP/leaf/cache" \
+          LEAF_DROP="$RUNNER_TEMP/leaf/drop" \
+          LEAF_DB="$RUNNER_TEMP/leaf/data/leaf.sqlite" \
+          LEAF_PORT=8477 \
+          server/target/release/leaf-server serve &
+          for _ in $(seq 60); do
+            curl -sf -H "X-Leaf-Key: 0123456789abcdef" http://127.0.0.1:8477/health && break
+            sleep 1
+          done
+          sleep 2
+          python3 tools/conformance.py http://127.0.0.1:8477 0123456789abcdef

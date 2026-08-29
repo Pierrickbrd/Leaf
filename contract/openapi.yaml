@@ -1,0 +1,1795 @@
+openapi: 3.1.0
+
+info:
+  title: Leaf
+  version: "1"
+  summary: A reading server for a comics library.
+  description: |
+    The contract between the server and its clients, and the only thing that couples them.
+
+    **What this file is for.** Three things, in order of how much they matter:
+
+    1. It is the **specification the Rust server is ported against**. Where this file and
+       the Kotlin implementation disagree, the implementation is right and this file is a
+       bug — until the port begins, at which point this file is right and both must be
+       fixed.
+    2. It is where both clients generate their models from, rather than transcribing them
+       by hand into Kotlin and into C++ and hoping the two stay in step.
+    3. It is the record of what a change would break. A field removed, a route renamed, a
+       meaning changed — those are the three things that bump `api`.
+
+    **Versioning.** `api` is an integer served by `/health`, and there is deliberately no
+    `/v1` prefix on the paths: running two versions of this server side by side is not
+    something a one-person library will ever do, and the prefix would add noise to every
+    URL to solve a problem that does not arise. A client reads `api` when it connects and
+    says "update the application" rather than failing three screens later.
+
+    **Vocabulary.** A *series* in this API is an **edition** in the model — the level that
+    carries entries, chapters and progress. A *work* groups editions of one story and is
+    never a result of its own; it is a filter (`?work=`). An *entry* is a file: a volume,
+    or a chapter that arrived on its own. A *chapter* is a marker, which may live inside a
+    volume or be an entry in itself.
+
+servers:
+  - url: http://127.0.0.1:8081
+    description: The loopback default. Anything else needs a key.
+  - url: https://{host}:{port}
+    description: Behind a proxy, or with LEAF_TLS_* set.
+    variables:
+      host: { default: leaf.local }
+      port: { default: "8081" }
+
+security:
+  - LeafKey: []
+
+tags:
+  - name: reading
+    description: Everything a client needs to show a library and open a volume.
+  - name: progress
+    description: |
+      Where the reader stands. Kept per edition: reading chapter 100 in one edition does
+      not mark it read in another. Recording it needs only the read right — otherwise a
+      phone could not remember where you stopped.
+  - name: records
+    description: Editing metadata. No file moves.
+  - name: import
+    description: Getting files in, one at a time or a folder at once.
+  - name: maintenance
+    description: Scanning, and knowing whether one is running.
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      tags: [reading]
+      summary: What the server is, and whether it is up.
+      description: |
+        The only route that answers without a key — which is what makes it usable as a
+        container health check. It says nothing a caller could not learn by trying to
+        connect, except the size of the library.
+      security: []
+      responses:
+        "200":
+          description: The server is answering.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  # ------------------------------------------------------------------ reading
+
+  /series:
+    get:
+      operationId: listSeries
+      tags: [reading]
+      summary: The shelf, filtered, sorted and paged.
+      description: |
+        Repeating a parameter widens the choice, naming a second one narrows it: two
+        authors means either of them, an author and a genre means both. That is what a row
+        of filter chips does, and what anyone expects it to do.
+
+        Blank values are dropped, so a client clearing a chip and sending an empty value
+        asks for everything rather than for series whose author is the empty string.
+      parameters:
+        - { $ref: "#/components/parameters/FilterRead" }
+        - { $ref: "#/components/parameters/FilterWork" }
+        - { $ref: "#/components/parameters/FilterUniverse" }
+        - { $ref: "#/components/parameters/FilterAuthor" }
+        - { $ref: "#/components/parameters/FilterGenre" }
+        - { $ref: "#/components/parameters/FilterMedium" }
+        - { $ref: "#/components/parameters/FilterStatus" }
+        - { $ref: "#/components/parameters/FilterLanguage" }
+        - { $ref: "#/components/parameters/FilterPublisher" }
+        - name: sort
+          in: query
+          description: Unknown values fall back to `name` rather than failing.
+          schema:
+            type: string
+            enum: [name, added, updated, volumes]
+            default: name
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: size
+          in: query
+          description: |
+            `0` asks for every match on purpose. Anything else is clamped to 500. `total`
+            always says how many there are, so a client can see it has only part.
+          schema: { type: integer, minimum: 0, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: One page, and the size of the whole.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SeriesPage" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /filters:
+    get:
+      operationId: getFilters
+      tags: [reading]
+      summary: The values worth offering, each with its count.
+      description: |
+        A client has no way to know that this library holds four authors and eleven
+        genres, and guessing would offer choices matching nothing. Counted from the same
+        expressions the filter runs over, so a chip can never return an empty shelf.
+      responses:
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: Every filterable value.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Facets" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /format:
+    get:
+      operationId: getFormat
+      tags: [reading]
+      summary: The rules of the on-disk format.
+      description: |
+        Where files go, and what may be written in them.
+
+        Served rather than written into an application, because a page baked into a client
+        drifts from the server the first time the scanner learns something — and drifts in
+        silence, since nothing compares the two.
+
+        Every rule here is executed by a test that builds the shape it describes and checks
+        the outcome, and every field is one the matching sidecar reads back. The depths come
+        from the constants the walk itself uses.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The format, as data.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Format" }
+
+  /series/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      operationId: getSeries
+      tags: [reading]
+      summary: One series.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The series.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Series" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      operationId: patchSeries
+      tags: [records]
+      summary: Edit what the files say about a series.
+      description: |
+        Writes the sidecar and rescans the work it belongs to — not the library, which
+        would cost as much as the library is big. Requires the **import** right.
+
+        The Kotlin answered **200 with an error body** on an unknown id after a
+        successful patch — a wart this file recorded so the port would not reproduce it by
+        accident. The Rust answers 404 in both cases: the series was not there to patch, or
+        the rescan removed it. Both answer 404.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SeriesPatch" }
+      responses:
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The series as it now stands.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Series" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+      x-leaf-permission: import
+
+  /series/{id}/entries:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      operationId: listSeriesEntries
+      tags: [reading]
+      summary: Volumes and standalone chapters, mixed, in reading order.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The entries.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Entry" } }
+
+  /series/{id}/chapters:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      operationId: listSeriesChapters
+      tags: [reading]
+      summary: The whole edition sequence, whatever the materialisation.
+      description: |
+        Chapters inside volumes and chapters that are entries of their own, in one list.
+        The founding rule made visible: the file is the unit of reading, the chapter is
+        the unit of numbering.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The chapters.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Chapter" } }
+
+  /series/{id}/arcs:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      operationId: listSeriesArcs
+      tags: [reading]
+      summary: The story arcs, as ranges.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The arcs.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Arc" } }
+    patch:
+      operationId: replaceSeriesArcs
+      tags: [records]
+      summary: Replace the arcs of a series.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: array, items: { $ref: "#/components/schemas/ArcInput" } }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The arcs as they now stand.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Arc" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+      x-leaf-permission: import
+
+  /series/{id}/cover:
+    parameters:
+      - { $ref: "#/components/parameters/Id" }
+      - { $ref: "#/components/parameters/Width" }
+    get:
+      operationId: getSeriesCover
+      tags: [reading]
+      summary: The tile of a grid.
+      description: One request, not one to find the first entry and another for its cover.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200": { $ref: "#/components/responses/Image" }
+        "304": { $ref: "#/components/responses/NotModified" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /series/{id}/progress:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      operationId: getSeriesProgress
+      tags: [progress]
+      summary: Where the reader stands in every entry of a series.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: One record per entry that has been opened.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Progress" } }
+
+  /entries/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      operationId: getEntry
+      tags: [reading]
+      summary: One entry.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The entry.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Entry" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      operationId: patchEntry
+      tags: [records]
+      summary: Edit what a file says about itself.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EntryPatch" }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The entry as it now stands.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Entry" }
+        "404": { $ref: "#/components/responses/NotFound" }
+      x-leaf-permission: import
+
+  /entries/{id}/chapters:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      operationId: listEntryChapters
+      tags: [reading]
+      summary: A volume's markers.
+      description: What no other tool can read today — 2 677 chapters had nowhere to live.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The markers, in reading order.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Chapter" } }
+
+  /entries/{id}/pages:
+    parameters:
+      - { $ref: "#/components/parameters/Id" }
+      - { $ref: "#/components/parameters/Width" }
+    get:
+      operationId: listEntryPages
+      tags: [reading]
+      summary: The pages of an entry.
+      description: |
+        `?width` tells the server what the pages will be asked for at, so the first of them
+        can be prepared while the client is still drawing the list. Without it nothing is
+        prepared: a guessed width is work thrown away.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The pages, in order.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Page" } }
+
+  /entries/{id}/pages/{number}:
+    parameters:
+      - { $ref: "#/components/parameters/Id" }
+      - name: number
+        in: path
+        required: true
+        schema: { type: integer, minimum: 0 }
+      - { $ref: "#/components/parameters/Width" }
+    get:
+      operationId: getPage
+      tags: [reading]
+      summary: A page, at the width you ask for.
+      description: |
+        Without `?width` the original bytes are served untouched. With it the page comes
+        back downscaled — **never upscaled**: asking for 4000 on a 1500-wide scan returns
+        the original rather than a blurred enlargement.
+
+        Cached on disk under an ETag built from the file's modification time, so a client
+        may keep it for as long as it likes.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200": { $ref: "#/components/responses/Image" }
+        "304": { $ref: "#/components/responses/NotModified" }
+        "400":
+          description: The page number was not a number.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /entries/{id}/cover:
+    parameters:
+      - { $ref: "#/components/parameters/Id" }
+      - { $ref: "#/components/parameters/Width" }
+    get:
+      operationId: getEntryCover
+      tags: [reading]
+      summary: The cover, small by default.
+      description: A thumbnail is a page asked for narrow. There is no separate thing.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200": { $ref: "#/components/responses/Image" }
+        "304": { $ref: "#/components/responses/NotModified" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /entries/{id}/file:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      operationId: downloadEntryFile
+      tags: [reading]
+      summary: The original file, stamped.
+      description: |
+        How a volume comes back down to be retouched. It leaves carrying its own
+        identity — work, edition, number — written into the archive, so that it can find
+        its way home when it is sent back.
+
+        Note the side effect: this **writes** to the file before serving it. A GET that
+        modifies is unusual, and deliberate — the stamp has to be in the copy that leaves,
+        not in the one that stays.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The archive.
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+              description: attachment, with the file's own name.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ----------------------------------------------------------------- progress
+
+  /entries/{id}/progress:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      operationId: getEntryProgress
+      tags: [progress]
+      summary: Where the reader stands in one entry.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The record.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Progress" }
+        "204":
+          description: Never opened. Not an error, and not an empty object either.
+    patch:
+      operationId: recordProgress
+      tags: [progress]
+      summary: Record a position.
+      description: |
+        **Progress never moves backwards on its own.** That is the rule that makes an
+        offline queue safe: a phone replaying yesterday's positions cannot undo today's
+        reading. Re-reading is a normal thing to do, so it stays possible — by saying
+        `rewind` explicitly.
+
+        The page is clamped to the entry's page count, so a client that has the wrong idea
+        of how long a volume is cannot store a position that does not exist.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProgressPatch" }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The record as it now stands.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Progress" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: forgetProgress
+      tags: [progress]
+      summary: Forget a position.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "204": { description: "Forgotten, whether or not there was anything to forget." }
+
+  /next:
+    get:
+      operationId: getUpNext
+      tags: [progress]
+      summary: What to open next.
+      description: |
+        Two different things, deliberately kept apart and labelled: what you are in the
+        middle of, most recent first, then the entry following the last one you finished in
+        each series.
+
+        A series you have never opened appears in neither. "Next" means next *for you*, not
+        a catalogue.
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, default: 20 }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: What to open, in order.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/UpNext" } }
+
+  # ------------------------------------------------------------------- search
+
+  /search:
+    get:
+      operationId: search
+      tags: [reading]
+      summary: Find something by name.
+      description: |
+        Accents, case and apostrophes are folded on both sides, so `ecarlate` reaches
+        *écarlate* and `lattaque` reaches *L'Attaque*. Each term is turned into a prefix,
+        so a half-typed word already finds something.
+
+        **Neither a universe nor a work is ever a hit.** Searching "Parasite" answers with
+        its two editions rather than with one line that then asks which you meant — the
+        editions are what can be opened.
+
+        The shelf's own filters apply: a search runs *inside* what is showing, not beside
+        it. A lit chip is a statement about what you are looking at.
+
+        All of them, and this file listed five of the eight for a while. The server always
+        honoured the other three — one query type serves both routes — so a client written
+        from the short list would have searched past a publisher or a language the shelf was
+        filtering by, and handed back exactly what the shelf was hiding. `work` is the one
+        `/series` parameter deliberately absent: it means "the other editions of this work",
+        which is a way of navigating rather than a thing to search inside.
+
+        When nothing matches exactly, a second pass offers near misses over series only,
+        each marked `approximate`. It has to reach the screen as a guess: an approximate
+        hit shown like an exact one costs more trust than finding nothing.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string }
+        - name: kind
+          in: query
+          description: Repeatable. Empty means all three.
+          schema:
+            type: array
+            items: { type: string, enum: [EDITION, ENTRY, CHAPTER] }
+          style: form
+          explode: true
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 40 }
+        - { $ref: "#/components/parameters/FilterRead" }
+        - { $ref: "#/components/parameters/FilterUniverse" }
+        - { $ref: "#/components/parameters/FilterAuthor" }
+        - { $ref: "#/components/parameters/FilterGenre" }
+        - { $ref: "#/components/parameters/FilterMedium" }
+        - { $ref: "#/components/parameters/FilterStatus" }
+        - { $ref: "#/components/parameters/FilterLanguage" }
+        - { $ref: "#/components/parameters/FilterPublisher" }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: Hits, by relevance.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/SearchHit" } }
+
+  # ------------------------------------------------------------------- import
+
+  /drop:
+    get:
+      operationId: listDrop
+      tags: [import]
+      summary: What is waiting in the shared folder.
+      description: |
+        The short path, for when the application and the server share a machine. Sending
+        nine gigabytes through the loopback works, but the server then writes a second copy
+        of bytes already on the disk — and the disk is the scarce thing.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The listing, and whether the short path exists at all.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DropListing" }
+      x-leaf-permission: import
+    post:
+      operationId: takeFromDrop
+      tags: [import]
+      summary: Take a file from the shared folder.
+      description: |
+        Only how the bytes arrive changes. Everything after — reading the sidecar,
+        proposing a destination, waiting for a confirmation — is the upload path, because
+        it is the same code.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DropRequest" }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: Where the server thinks it belongs. Nothing has moved yet.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Proposal" }
+      x-leaf-permission: import
+
+  /entries:
+    post:
+      operationId: offerFile
+      tags: [import]
+      summary: Offer one file, and be told where it would go.
+      description: |
+        Nothing is filed without a confirmation: the server proposes and waits. The
+        proposal carries how sure it is, and why, so a client can decide whether to ask.
+
+        Streamed to disk under a ceiling — an unbounded upload fills a disk with no bug
+        involved, only patience.
+      parameters:
+        - name: X-Leaf-Name
+          in: header
+          required: true
+          description: The file's own name. Any path in it is discarded.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: A proposal.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Proposal" }
+        "400":
+          description: No name given, or larger than the ceiling.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+      x-leaf-permission: import
+
+  # Renamed at the port, while there were still no clients. It used to be
+  # /entries/received/{id}, which shared a shape with /entries/{id}/file and only worked
+  # because a router matches the literal segment first. A staged file is not an entry — it
+  # is a proposal awaiting a confirmation — and this name says so.
+  /intake/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    delete:
+      operationId: abandonOfferedFile
+      tags: [import]
+      summary: Abandon a file that was offered.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "204": { description: Dropped. }
+      x-leaf-permission: import
+
+  /intake/{id}/file:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    post:
+      operationId: fileOfferedFile
+      tags: [import]
+      summary: Confirm the destination, and file it.
+      description: |
+        Only then does the file move, and only the series that received it is rescanned.
+
+        The one file this ever writes over is one somebody named: `replacesEntryId`, or the
+        occupant of a name whose collision was answered with `onCollision`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FileRequest" }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: Where it went.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Filed" }
+        "409":
+          description: |
+            A file of that name is already in the series and `onCollision` did not say
+            which one wins. Send the request again with REPLACE or RENAME.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Collision" }
+        "404": { $ref: "#/components/responses/NotFound" }
+      x-leaf-permission: import
+
+  /intake:
+    get:
+      operationId: listIntake
+      tags: [import]
+      summary: Every file staged and waiting for a decision.
+      description: |
+        Nothing sweeps the inbox, and the inbox sits on the library's own filesystem — so a
+        proposal made and never answered holds the library's own space for good.
+
+        Without this there is no way to reach one: every other route takes an id, and a
+        desktop that crashed took the only copy of it with it.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: What is waiting, longest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Waiting" }
+      x-leaf-permission: import
+
+  /import:
+    get:
+      operationId: listImports
+      tags: [import]
+      summary: Every bulk session opened and not yet finished.
+      description: |
+        A session is a partial transfer, and what it holds is exactly what you would not
+        have to send again. Nothing removes one on its own: that value decays, but deciding
+        when it has decayed is not the server's to decide, and this server has never removed
+        a file nobody named.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: What is open, longest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Open" }
+      x-leaf-permission: import
+    post:
+      operationId: openImport
+      tags: [import]
+      summary: Announce a folder, and be told what is missing.
+      description: |
+        The bulk path: a whole folder at once, for a first seeding or a complete series.
+        Three steps — announce, send what is missing, commit.
+
+        A manifest never means "here is everything that exists" unless its scope says so.
+        The desktop is a workbench, not a mirror: a series imported and then deleted
+        locally can no longer be announced in full.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ImportRequest" }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: What to send, and what is already there.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImportOpened" }
+      x-leaf-permission: import
+
+  /import/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      operationId: getImportState
+      tags: [import]
+      summary: How much of each file the server holds.
+      description: Enough for a broken transfer to know where to pick up.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The state of the transfer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImportState" }
+        "404": { $ref: "#/components/responses/NotFound" }
+      x-leaf-permission: import
+    delete:
+      operationId: abandonImport
+      tags: [import]
+      summary: Abandon an import.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "204": { description: "Dropped, inbox cleaned." }
+      x-leaf-permission: import
+
+  /import/{id}/file:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    put:
+      operationId: sendImportFile
+      tags: [import]
+      summary: Send one file, from an offset.
+      description: |
+        A break at 95 % of a 130 MB volume resumes at the byte, not at zero. The client
+        asks for the state first to know where to pick up.
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: Relative to the manifest root. Never escapes it.
+          schema: { type: string }
+        - name: Content-Range
+          in: header
+          description: "`bytes 104857600-134217727/134217728`. Absent means from zero."
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: How much the server now holds.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Received" }
+        "409":
+          description: |
+            The offset is past what the server holds. The body carries what it *does*
+            hold, so the client knows exactly where to resume rather than starting over.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BadOffset" }
+        "404": { $ref: "#/components/responses/NotFound" }
+      x-leaf-permission: import
+
+  /import/{id}/commit:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    post:
+      operationId: commitImport
+      tags: [import]
+      summary: Move the inbox into the library.
+      description: |
+        A rename, which is why the inbox has to sit on the same filesystem — instant and
+        atomic, against a multi-gigabyte copy that is neither.
+
+        **Nothing is ever deleted here.** What is left over is reported as an orphan and
+        shown to you by name before you decide. A wrong manifest therefore cannot destroy
+        anything.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: |
+            What was installed, what was left over, and what travelled wrong. The session
+            survives a commit that could not install everything, so the rest can be sent
+            against the same id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImportResult" }
+        "404": { $ref: "#/components/responses/NotFound" }
+      x-leaf-permission: import
+
+  /cleanup:
+    post:
+      operationId: cleanup
+      tags: [import]
+      summary: Delete named files.
+      description: |
+        Deletion on an explicit, file-by-file order, and never otherwise. It is the only
+        route that removes anything from the library, and it never infers what to remove.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CleanupRequest" }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: What was actually removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  removed: { type: array, items: { type: string } }
+                required: [removed]
+      x-leaf-permission: import
+
+  # -------------------------------------------------------------- maintenance
+
+  /scan:
+    get:
+      operationId: getScanStatus
+      tags: [maintenance]
+      summary: Where the scan is, and what the last one found.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScanStatus" }
+    post:
+      operationId: startScan
+      tags: [maintenance]
+      summary: Start a scan.
+      description: |
+        Answers at once and scans behind: a full library takes tens of seconds, which no
+        client should hold a connection open for. One at a time.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "202":
+          description: Started.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScanStatus" }
+        "409":
+          description: One is already running.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScanStatus" }
+      x-leaf-permission: import
+
+components:
+
+  securitySchemes:
+    LeafKey:
+      type: apiKey
+      in: header
+      name: X-Leaf-Key
+      description: |
+        A secret string each device knows, compared in constant time against the ones in
+        the configuration. No accounts, no passwords, no sign-in screen — the smallest
+        thing that holds.
+
+        **Keys carry rights.** The desktop imports, the phone only reads. Operations marked
+        `x-leaf-permission: import` need a key that carries that right; everything else
+        needs only a recognised key. Lose the phone and whoever finds it gets to look at
+        comics, not to write to the disk.
+
+        Recording progress deliberately needs only the read right: otherwise the phone
+        could not remember where you stopped.
+
+        With no key configured at all the server answers everyone, and says so loudly at
+        startup. It refuses to start in that state on anything but the loopback.
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    Width:
+      name: width
+      in: query
+      description: The width the image is wanted at. Never upscales beyond the original.
+      schema: { type: integer, minimum: 1 }
+    FilterRead:
+      name: read
+      in: query
+      description: Repeatable.
+      schema:
+        type: array
+        items: { type: string, enum: [UNREAD, IN_PROGRESS, READ] }
+      style: form
+      explode: true
+    FilterWork:
+      name: work
+      in: query
+      description: |
+        By work id — how "the other editions of this one" is asked for. Repeatable.
+      schema: { type: array, items: { type: string } }
+      style: form
+      explode: true
+    FilterUniverse:
+      name: universe
+      in: query
+      description: By universe name. Repeatable.
+      schema: { type: array, items: { type: string } }
+      style: form
+      explode: true
+    FilterAuthor:
+      name: author
+      in: query
+      description: Repeatable.
+      schema: { type: array, items: { type: string } }
+      style: form
+      explode: true
+    FilterGenre:
+      name: genre
+      in: query
+      description: Folded before matching, so "Shônen" and "shonen" are one filter. Repeatable.
+      schema: { type: array, items: { type: string } }
+      style: form
+      explode: true
+    FilterMedium:
+      name: medium
+      in: query
+      description: Repeatable.
+      schema:
+        type: array
+        items:
+          type: string
+          enum: [manga, bd, comics, manhwa, manhua, webtoon, artbook, other]
+      style: form
+      explode: true
+    FilterStatus:
+      name: status
+      in: query
+      description: Repeatable.
+      schema:
+        type: array
+        items: { type: string, enum: [ongoing, completed] }
+      style: form
+      explode: true
+    FilterLanguage:
+      name: language
+      in: query
+      description: Repeatable.
+      schema: { type: array, items: { type: string } }
+      style: form
+      explode: true
+    FilterPublisher:
+      name: publisher
+      in: query
+      description: Repeatable.
+      schema: { type: array, items: { type: string } }
+      style: form
+      explode: true
+
+  responses:
+    Image:
+      description: The image bytes.
+      headers:
+        ETag:
+          schema: { type: string }
+          description: Built from the file's modification time. Send it back as `If-None-Match`.
+        Cache-Control:
+          schema: { type: string }
+          description: "`private, max-age=31536000` — a page keyed by its ETag never goes stale."
+      content:
+        image/jpeg:
+          schema: { type: string, format: binary }
+        image/png:
+          schema: { type: string, format: binary }
+        image/webp:
+          schema: { type: string, format: binary }
+    NotModified:
+      description: The ETag matched. Nothing sent.
+    NotFound:
+      description: No such thing.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: |
+        No key, an unrecognised one, or one that does not carry the right this route needs.
+        The three are deliberately the same answer — telling a caller which of the three it
+        was is telling it how to get closer.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyRequests:
+      description: |
+        Too many wrong keys from this address. A 32-byte key is not guessable, so this is
+        not what stands between the library and an attacker — the key is. But an endpoint
+        answering unlimited attempts at full speed is an invitation, and makes a
+        misconfigured device indistinguishable from an attack in the log.
+
+        A key that works clears the slate: the device was misconfigured, not hostile.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+          description: Seconds.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+
+    Health:
+      type: object
+      properties:
+        status: { type: string, examples: [ok] }
+        api:
+          type: integer
+          description: Bumped when a change would break a client that has not been rebuilt.
+        format:
+          type: integer
+          description: The version of the on-disk format the server reads and writes.
+        library: { type: integer, description: How many series it holds. }
+        localDrop:
+          type: boolean
+          default: false
+          description: Whether the shared-folder path is configured.
+      required: [status, api, format, library]
+
+    Series:
+      type: object
+      description: |
+        A series is an **edition**. `id` opens it; `workId` is what ties it to its
+        siblings — the other editions of the same story.
+      properties:
+        id: { type: string }
+        workId: { type: string }
+        name:
+          type: string
+          description: |
+            Built from the levels that add something. A universe already contained in the
+            work's name says nothing twice: "Parasite · Édition Deluxe", not
+            "Parasite · Parasite · Édition Deluxe".
+          examples: ["Terres d'Arran · Elfes"]
+        universe: { type: [string, "null"] }
+        work: { type: string }
+        edition: { type: [string, "null"] }
+        author: { type: [string, "null"] }
+        medium:
+          type: [string, "null"]
+          enum: [manga, bd, comics, manhwa, manhua, webtoon, artbook, other, null]
+        readingDirection:
+          type: [string, "null"]
+          enum: [LEFT_TO_RIGHT, RIGHT_TO_LEFT, VERTICAL, null]
+        status:
+          type: [string, "null"]
+          enum: [ongoing, completed, null]
+          description: Decides whether an extra volume files itself or asks.
+        readStatus:
+          type: string
+          enum: [UNREAD, IN_PROGRESS, READ]
+          default: UNREAD
+          description: |
+            Computed, never declared. The one filter a reading application is asked for
+            most, and the one you cannot reach by typing: a name is searched, a state is
+            filtered.
+        declaredVolumes:
+          type: [integer, "null"]
+          description: What exists out in the world. Declared, not counted.
+        ownedVolumes:
+          type: integer
+          default: 0
+          description: What you own. Counted. The two do not say the same thing.
+        missingVolumes:
+          type: array
+          items: { type: number }
+          description: |
+            The gaps in your collection. A volume whose chapters are here under another
+            name is **not** among them: you hold its content, and content is what you would
+            be missing.
+        missingChapters:
+          type: array
+          items: { type: number }
+          description: |
+            The other granularity — the gaps in the story itself. 683, 684, 685, 687
+            reports the 686, without knowing anything about volumes.
+
+            A false gap here is worth having: it means a volume you own declares no chapter
+            markers, which is something to fix rather than to hide.
+        entryCount: { type: integer }
+        chapterCount: { type: integer }
+        arcCount: { type: integer }
+        genres: { type: array, items: { type: string } }
+        publisher: { type: [string, "null"] }
+        language: { type: [string, "null"] }
+        addedAt:
+          type: [integer, "null"]
+          description: Epoch millis. When the first volume arrived.
+        lastAddedAt:
+          type: [integer, "null"]
+          description: Epoch millis. When the latest did.
+      required: [id, workId, name, work, entryCount, chapterCount, arcCount]
+
+    SeriesPage:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Series" } }
+        total:
+          type: integer
+          description: |
+            How many match the filter, not how many were returned. Without it a client
+            cannot tell a short page from the end of the library.
+        page: { type: integer }
+        size: { type: integer }
+      required: [items, total, page, size]
+
+    Facet:
+      type: object
+      properties:
+        value: { type: string }
+        count:
+          type: integer
+          description: A filter offering a choice that returns nothing is a bug.
+      required: [value, count]
+
+    Facets:
+      type: object
+      properties:
+        readStatuses: { type: array, items: { $ref: "#/components/schemas/Facet" } }
+        universes: { type: array, items: { $ref: "#/components/schemas/Facet" } }
+        authors: { type: array, items: { $ref: "#/components/schemas/Facet" } }
+        genres: { type: array, items: { $ref: "#/components/schemas/Facet" } }
+        media: { type: array, items: { $ref: "#/components/schemas/Facet" } }
+        statuses: { type: array, items: { $ref: "#/components/schemas/Facet" } }
+        languages: { type: array, items: { $ref: "#/components/schemas/Facet" } }
+        publishers: { type: array, items: { $ref: "#/components/schemas/Facet" } }
+
+    Entry:
+      type: object
+      description: A file — a volume, or a chapter that arrived on its own.
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [VOLUME, CHAPTER] }
+        number: { type: [number, "null"], description: The volume number. }
+        title: { type: [string, "null"] }
+        sortKey:
+          type: [number, "null"]
+          description: |
+            What orders it in the edition: the first chapter's number, otherwise the volume
+            number. Position belongs to the edition; number identifies across editions.
+        pageCount: { type: integer }
+        chapterCount: { type: integer }
+        file: { type: string, description: "The file name alone, never a path." }
+        size: { type: integer, description: Bytes. }
+        isbn: { type: [string, "null"] }
+        publishedOn: { type: [string, "null"], examples: ["2011-03-04"] }
+        summary: { type: [string, "null"] }
+        addedAt:
+          type: [integer, "null"]
+          description: |
+            Recorded on arrival and never again. A rescan rebuilds everything else, not
+            this — a column added later leaves everything before it blank for ever.
+        ownCover:
+          type: boolean
+          default: false
+          description: Whether a cover was chosen on disk rather than taken from page 0.
+      required: [id, type, pageCount, chapterCount, file, size]
+
+    Chapter:
+      type: object
+      description: |
+        A marker. It may live inside a volume or be an entry of its own — the numbering is
+        the same either way, which is the whole point of the model.
+      properties:
+        id: { type: string }
+        raw: { type: string, description: What the file actually said. }
+        label: { type: string, description: What to show. }
+        number:
+          type: [number, "null"]
+          description: Unique within an edition. Null for an unnumbered bonus.
+        title: { type: [string, "null"] }
+        kind: { type: string, enum: [CHAPTER, BONUS] }
+        position: { type: integer, description: Order within its entry. }
+        startPage:
+          type: [integer, "null"]
+          description: |
+            Where it begins in the volume. Null is common and honest — ComicInfo has no
+            such field, so 3 008 chapters here have none. A reader must treat null as "I do
+            not know" rather than as zero.
+        entryId: { type: string }
+      required: [id, raw, label, kind, position, entryId]
+
+    Arc:
+      type: object
+      description: |
+        A range, not a list: four volumes can belong to two arcs, because an arc does not
+        end where a volume ends.
+      properties:
+        id: { type: string }
+        name: { type: string }
+        unit: { type: string, enum: [CHAPTER, VOLUME] }
+        from: { type: number }
+        to: { type: number }
+        position: { type: integer }
+      required: [id, name, unit, from, to, position]
+
+    ArcInput:
+      type: object
+      properties:
+        name: { type: string }
+        unit: { type: string, enum: [CHAPTER, VOLUME], default: CHAPTER }
+        from: { type: number }
+        to: { type: number }
+      required: [name, from, to]
+
+    Page:
+      type: object
+      properties:
+        number: { type: integer }
+        name: { type: string, description: The entry name inside the archive. }
+        mediaType: { type: string, examples: ["image/jpeg"] }
+        width: { type: [integer, "null"] }
+        height: { type: [integer, "null"] }
+        size: { type: [integer, "null"] }
+        spread:
+          type: boolean
+          default: false
+          description: |
+            Wider than tall: two pages side by side. The reader needs to know — fitted to
+            screen width, each half comes out at half the resolution of a single page.
+      required: [number, name, mediaType]
+
+    Progress:
+      type: object
+      properties:
+        entryId: { type: string }
+        page: { type: integer }
+        pageCount: { type: integer }
+        finished: { type: boolean }
+        updatedAt: { type: integer, description: Epoch millis. }
+        chapter:
+          description: |
+            Which chapter that page falls in. Derived from the markers rather than stored:
+            two records of one fact eventually disagree, and this one costs a lookup.
+          oneOf:
+            - { $ref: "#/components/schemas/Chapter" }
+            - { type: "null" }
+      required: [entryId, page, pageCount, finished, updatedAt]
+
+    ProgressPatch:
+      type: object
+      properties:
+        page: { type: integer, minimum: 0 }
+        finished: { type: boolean }
+        rewind:
+          type: boolean
+          default: false
+          description: |
+            Say so to move backwards. Without it a lower page is ignored, which is what
+            makes replaying an offline queue safe.
+
+    UpNext:
+      type: object
+      properties:
+        seriesId: { type: string }
+        seriesName: { type: string }
+        entry: { $ref: "#/components/schemas/Entry" }
+        progress:
+          oneOf:
+            - { $ref: "#/components/schemas/Progress" }
+            - { type: "null" }
+        reason:
+          type: string
+          enum: [IN_PROGRESS, NEXT_UP]
+          description: The client groups on this — they are not the same offer.
+      required: [seriesId, seriesName, entry, reason]
+
+    SearchHit:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum: [EDITION, ENTRY, CHAPTER]
+          description: The three things that can be opened.
+        id: { type: string }
+        label: { type: string }
+        seriesId:
+          type: [string, "null"]
+          description: So a hit can be opened without a second call.
+        seriesName: { type: [string, "null"] }
+        entryId: { type: [string, "null"] }
+        approximate:
+          type: boolean
+          default: false
+          description: A guess. It must reach the screen looking like one.
+      required: [kind, id, label]
+
+    SeriesPatch:
+      type: object
+      description: Every field optional; absent means unchanged.
+      properties:
+        name: { type: string }
+        title: { type: string }
+        medium: { type: string }
+        author: { type: string }
+        status: { type: string, enum: [ongoing, completed] }
+        readingDirection: { type: string, enum: [LEFT_TO_RIGHT, RIGHT_TO_LEFT, VERTICAL] }
+        genres: { type: array, items: { type: string } }
+        summary: { type: string }
+        publisher: { type: string }
+        volumeCount: { type: integer }
+        format: { type: string }
+        language: { type: string }
+
+    EntryPatch:
+      type: object
+      description: Every field optional; absent means unchanged.
+      properties:
+        number: { type: number }
+        title: { type: string }
+        isbn: { type: string }
+        publishedOn: { type: string }
+        summary: { type: string }
+
+    DropListing:
+      type: object
+      properties:
+        enabled: { type: boolean, description: Whether the short path is configured at all. }
+        files:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              size: { type: integer }
+            required: [name, size]
+      required: [enabled]
+
+    DropRequest:
+      type: object
+      properties:
+        name: { type: string, description: A plain file name already in the drop folder. }
+        consume:
+          type: boolean
+          default: true
+          description: |
+            True moves it — instant on the same filesystem, and the point of the whole
+            thing. False copies and leaves yours alone.
+      required: [name]
+
+    FileReading:
+      type: object
+      description: What the file said about itself.
+      properties:
+        work: { type: [string, "null"] }
+        edition: { type: [string, "null"] }
+        type: { type: [string, "null"], enum: [VOLUME, CHAPTER, null] }
+        number: { type: [number, "null"] }
+        title: { type: [string, "null"] }
+        chapterCount: { type: integer, default: 0 }
+
+    Proposal:
+      type: object
+      properties:
+        received: { type: string, description: The id to confirm or abandon it by. }
+        name: { type: string }
+        size: { type: integer }
+        read: { $ref: "#/components/schemas/FileReading" }
+        confidence:
+          type: string
+          enum: [CERTAIN, REPLACEMENT, AMBIGUOUS, UNKNOWN]
+          description: |
+            CERTAIN — one series matches and the number is free.
+            REPLACEMENT — something already occupies that place.
+            AMBIGUOUS — several series match; the client has to ask.
+            UNKNOWN — the file does not say where it comes from.
+        reason: { type: string, description: "In words, for the client to show." }
+        candidates:
+          type: array
+          items:
+            type: object
+            properties:
+              seriesId: { type: string }
+              name: { type: string }
+            required: [seriesId, name]
+        replaces: { type: [string, "null"], description: The entry it would replace. }
+        concerns:
+          type: array
+          items: { type: string }
+          description: |
+            What the file says about itself that does not hold together: a `type` that is
+            neither VOLUME nor CHAPTER, a marker starting past the last page, two markers on
+            one page, a number disagreeing with the file's own name.
+
+            The same reading a scan does, run on the file in your hand rather than on a
+            library you are not looking at — a scan reports it into a list nobody reads until
+            something is already wrong, and this arrives at the one moment somebody is
+            looking straight at the file and can still say no. Never a refusal: the file is
+            filed if you say so.
+      required: [received, name, size, read, confidence, reason]
+
+    FileRequest:
+      type: object
+      properties:
+        seriesId: { type: string }
+        replacesEntryId: { type: [string, "null"] }
+        onCollision:
+          type: [string, "null"]
+          enum: [REPLACE, RENAME, null]
+          description: |
+            What to do when a file of that name is already in the series. Absent means
+            "ask me", and the server does: it answers **409** with a `Collision` rather
+            than choosing. A name is not an identity, and the one thing that must never
+            happen quietly is a volume being written over.
+      required: [seriesId]
+
+    Collision:
+      type: object
+      description: |
+        A file of that name is already in the series, and nobody has said which one wins.
+
+        Carries what each of the two says about itself, so the question put to a person is
+        about the volumes rather than about the file names — which is the only level at
+        which it can be answered.
+      properties:
+        path: { type: string, description: The file already at that name. }
+        entryId:
+          type: [string, "null"]
+          description: |
+            The entry it is, when the index knows it. Absent for a file dropped into the
+            folder and not yet scanned.
+        occupies: { $ref: "#/components/schemas/FileReading" }
+        arriving: { $ref: "#/components/schemas/FileReading" }
+        sameVolume:
+          type: boolean
+          description: |
+            Whether the two describe the same volume: the same `id`, or the same work,
+            edition, type and number. **Not the title** — a volume corrected locally to fix
+            its title and then brought back is that volume, and calling it another would
+            file a duplicate beside the one it was meant to correct. Silence is never a
+            match: a file that says nothing about itself cannot be shown to be the same as
+            anything.
+
+            True is where REPLACE is the sensible answer; false is where RENAME is. Both
+            stay available either way — the protection is that one of them was named, not
+            that the server chose.
+        agrees:
+          type: array
+          items: { type: string }
+          description: |
+            The declared fields the two agree on, `title` included. The title cannot
+            identify, but two files agreeing on nothing except their title agreeing exactly
+            is worth seeing before deciding — so it is reported rather than weighed.
+        identical:
+          type: boolean
+          description: |
+            The same bytes on both sides. Settles it: nothing to lose by replacing, nothing
+            to gain by keeping two. The sizes are compared first, so this costs a read only
+            when they match.
+        wouldBecome: { type: string, description: The name it would take under RENAME. }
+      required: [path, occupies, arriving, sameVolume, agrees, identical, wouldBecome]
+
+    Filed:
+      type: object
+      properties:
+        entryId: { type: string }
+        path: { type: string }
+        replacement:
+          type: boolean
+          description: |
+            A file that was there is gone. True whichever way that was decided — by naming
+            the entry to replace, or by answering a collision with REPLACE.
+        renamed:
+          type: boolean
+          default: false
+          description: Filed under a name of its own because the one it wanted was taken.
+        note:
+          type: [string, "null"]
+          description: Filled in when the declared count moved, or should have.
+      required: [entryId, path, replacement]
+
+    ManifestFile:
+      type: object
+      properties:
+        path: { type: string, description: Relative to the root. Never escapes it. }
+        size: { type: integer }
+        checksum:
+          type: [string, "null"]
+          description: |
+            SHA-256, lowercase hex. Optional — computing it costs a full read of the file at
+            both ends, so it is the sender's call.
+
+            It does two things. A file already in the library is compared on its **contents**
+            rather than only its length, so a change that keeps the size — correcting a title
+            in an `entry.json` from "Tome 1" to "Tome 2" leaves the archive exactly as long
+            as it was — is seen and asked for. And what arrives is verified before it is
+            installed: a mismatch is reported in `corrupt`, dropped, and the file stays
+            pending rather than going into the library.
+
+            Without one, only the size is compared, in both directions.
+      required: [path, size]
+
+    ImportRequest:
+      type: object
+      properties:
+        root: { type: string, description: The folder chosen in the application. }
+        files: { type: array, items: { $ref: "#/components/schemas/ManifestFile" } }
+        scope:
+          type: string
+          enum: [ADDITION, COMPLETE]
+          default: ADDITION
+          description: |
+            ADDITION — I am bringing these files and say nothing about the rest.
+            COMPLETE — here is the whole series; whatever is not in it is reported as an
+            orphan. Never deleted, only reported.
+      required: [root, files]
+
+    Waiting:
+      type: object
+      properties:
+        id: { type: string, description: What to confirm or abandon it by. }
+        name: { type: string }
+        size: { type: integer }
+        lastTouchedAt:
+          type: integer
+          description: Milliseconds. What matters is how long it has sat there.
+        origin:
+          type: string
+          enum: [UPLOAD, DROP]
+        onlyCopy:
+          type: boolean
+          description: |
+            True when abandoning it does not send you back to a file you still have. A drop
+            taken with `consume` — the default — has left your folder, so the staged copy is
+            the last one.
+      required: [id, name, size, lastTouchedAt, origin, onlyCopy]
+
+    Open:
+      type: object
+      properties:
+        id: { type: string }
+        root: { type: string }
+        complete: { type: integer, description: How many of the manifest's files are here in full. }
+        of: { type: integer }
+        bytes:
+          type: integer
+          description: |
+            What the session holds on disk. The inbox sits on the library's own filesystem,
+            so this is the library's own space.
+        lastTouchedAt: { type: integer, description: Milliseconds. }
+      required: [id, root, complete, of, bytes, lastTouchedAt]
+
+    ImportOpened:
+      type: object
+      properties:
+        id: { type: string }
+        root: { type: string }
+        toSend: { type: array, items: { type: string } }
+        alreadyThere: { type: array, items: { type: string } }
+        bytesToSend: { type: integer }
+      required: [id, root, toSend, alreadyThere, bytesToSend]
+
+    ImportState:
+      type: object
+      properties:
+        id: { type: string }
+        root: { type: string }
+        received:
+          type: object
+          additionalProperties: { type: integer }
+          description: Path to the number of bytes held. Enough to resume.
+        missing: { type: array, items: { type: string } }
+      required: [id, root, received, missing]
+
+    ImportResult:
+      type: object
+      properties:
+        root: { type: string }
+        installed: { type: integer }
+        orphans:
+          type: array
+          items: { type: string }
+          description: On the server, absent from your manifest. Never deleted automatically.
+        corrupt:
+          type: array
+          items: { type: string }
+          description: |
+            Arrived complete and did not match the checksum announced for them. Left in the
+            inbox rather than installed, and the session is kept so they can be sent again:
+            a volume that travelled wrong is worse than one that did not travel, because
+            nothing afterwards would tell you.
+        pending:
+          type: array
+          items: { type: string }
+          description: |
+            Announced, and not here in full — the ones the transfer had not reached when it
+            stopped. Nothing is wrong with them.
+
+            This is what makes stopping in the middle a decision rather than an accident:
+            commit installs every volume that arrived whole and names the ones still to come.
+        open:
+          type: boolean
+          description: |
+            The session is still there. Send what is pending against the same id and commit
+            again; the bytes already transferred are not sent twice. False when everything
+            went home and the session was cleared.
+      required: [root, installed, orphans, open]
+
+    CleanupRequest:
+      type: object
+      properties:
+        root: { type: string }
+        files: { type: array, items: { type: string } }
+      required: [root, files]
+
+    Received:
+      type: object
+      description: |
+        The Kotlin spelled the byte count as text, because it built the response from a
+        Map<String, String>. Changed at the port: it is a number, like every other count
+        in this API.
+      properties:
+        path: { type: string }
+        received: { type: integer }
+      required: [path, received]
+
+    BadOffset:
+      type: object
+      properties:
+        error: { type: string }
+        received: { type: integer, description: What the server holds. Resume from there. }
+      required: [error, received]
+
+    Format:
+      type: object
+      properties:
+        format:
+          type: integer
+          description: |
+            The version of the on-disk format this server reads and writes, and what a
+            `leaf` marker in a sidecar is compared against.
+        sidecars:
+          type: array
+          items:
+            type: object
+            properties:
+              file: { type: string, description: "Its name, which is fixed." }
+              place: { type: string, description: Where it goes. }
+              fields:
+                type: array
+                items: { type: string }
+                description: Every field it may carry, in the spelling it takes on disk.
+            required: [file, place, fields]
+        folders:
+          type: array
+          items:
+            type: object
+            properties:
+              holds: { type: string, description: What the folder contains. }
+              becomes:
+                type: string
+                enum: [UNIVERSE, WORK, SHELF]
+                description: |
+                  What the library makes of it. SHELF is not a level: a folder made to tidy
+                  up, walked through, with what is inside judged on its own terms.
+              because: { type: string, description: "In words, for an application to show." }
+            required: [holds, becomes, because]
+        limits:
+          type: object
+          properties:
+            modelDepth:
+              type: integer
+              description: Folders below a declared level — universe, work, edition. Deeper is not read.
+            maxShelves:
+              type: integer
+              description: How many folders declaring nothing may be stacked before the walk stops.
+          required: [modelDepth, maxShelves]
+      required: [format, sidecars, folders, limits]
+
+    ScanStatus:
+      type: object
+      properties:
+        state: { type: string, enum: [IDLE, RUNNING, DONE] }
+        startedAt: { type: [integer, "null"] }
+        finishedAt: { type: [integer, "null"] }
+        summary: { type: [string, "null"], description: "The last report, once there is one." }
+      required: [state]
+
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+      required: [error]
