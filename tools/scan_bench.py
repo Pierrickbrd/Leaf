@@ -426,8 +426,10 @@ def main(argv=None, system=None):
         print(str(refusal), file=sys.stderr)
         return 2
 
+    # A list each, never one shared: `dict.fromkeys(..., [])` would hand every variant the
+    # same list. The strings below have no such trap, so they take the shorter form.
     times = {label: [] for label, _ in _VARIANTS}
-    outputs = {label: "" for label, _ in _VARIANTS}
+    outputs = dict.fromkeys((label for label, _ in _VARIANTS), "")
 
     # Interleaved, one pass of each variant per round. Running one variant to the end
     # first would leave the second reading a page cache the first had warmed, and the

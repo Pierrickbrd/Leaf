@@ -26,6 +26,7 @@
 #include <QLatin1StringView>
 
 #include <cstddef>
+#include <string_view>
 
 consteval QLatin1StringView operator""_ascii(const char *text, std::size_t size)
 {
@@ -33,7 +34,12 @@ consteval QLatin1StringView operator""_ascii(const char *text, std::size_t size)
         if (static_cast<unsigned char>(text[i]) >= 0x80)
             // Nobody sees this at run time. Reaching a throw inside a consteval function is
             // what makes the call ill-formed, and the compiler quotes the line back.
-            throw "not ASCII — Latin-1 would mangle it. Use u\"…\"_s for text people read.";
+            //
+            // A string_view rather than the bare literal: it is a value, where a literal is
+            // a pointer, and it is constexpr-constructible — so the message the compiler
+            // quotes survives while the thrown thing stops being an address.
+            throw std::string_view(
+                "not ASCII — Latin-1 would mangle it. Use u\"…\"_s for text people read.");
 
     return QLatin1StringView(text, static_cast<qsizetype>(size));
 }

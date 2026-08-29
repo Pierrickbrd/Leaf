@@ -58,8 +58,12 @@ if BASE.startswith("https://"):
     if digest != PIN:
         sys.exit(f"the certificate offered is not the one pinned\n  offered {digest}\n  pinned  {PIN}")
     print(f"certificate pinned: {digest[:16]}…")
-    # Verified by hand above, which is the whole point of pinning: no authority is involved.
-    CONTEXT = ssl._create_unverified_context()
+    # The pinned certificate becomes the only authority there is: Python verifies against
+    # it, and against nothing else. Which certificate that is was settled by the fingerprint
+    # above — so the check is not skipped, its trust anchor is simply this one server rather
+    # than a public root store. Hostname verification stays on: the certificate carries the
+    # host it was generated for as a subject alternative name.
+    CONTEXT = ssl.create_default_context(cadata=offered)
 
 failures = []
 
