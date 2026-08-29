@@ -153,6 +153,19 @@ pub fn a_volume(server: &Server) {
 }
 
 impl Server {
+    /// The ETag one route hands out, for the test that asks for it again.
+    pub async fn tagged(&self, uri: &str) -> Option<String> {
+        let response = router(self.state())
+            .oneshot(request("GET", uri, READ_ONLY).body(Body::empty()).unwrap())
+            .await
+            .expect("a response");
+        response
+            .headers()
+            .get(axum::http::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    }
+
     /// One entry's id, for the routes that take one.
     pub fn entry(&self) -> String {
         self.db

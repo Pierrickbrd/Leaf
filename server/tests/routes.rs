@@ -9,7 +9,7 @@ use axum::body::Body;
 use axum::http::StatusCode;
 
 mod common;
-use common::{a_volume, request, Server, IMPORTER, READ_ONLY};
+use common::{a_volume, archive_bytes, request, Server, IMPORTER, READ_ONLY};
 
 async fn get(server: &Server, uri: &str) -> (StatusCode, serde_json::Value) {
     server
@@ -18,6 +18,14 @@ async fn get(server: &Server, uri: &str) -> (StatusCode, serde_json::Value) {
                 .body(Body::empty())
                 .unwrap(),
         )
+        .await
+}
+
+/// The same, with the key that carries the import right: the import and intake listings
+/// are the write side, and a read-only key has no business seeing what is in flight.
+async fn as_importer(server: &Server, uri: &str) -> (StatusCode, serde_json::Value) {
+    server
+        .send(request("GET", uri, IMPORTER).body(Body::empty()).unwrap())
         .await
 }
 
@@ -330,4 +338,218 @@ async fn every_read_route_refuses_a_key_it_does_not_know() {
         // 403, as the contract declares: the key was read and refused, not missing.
         assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
     }
+}
+
+// ------------------------------------------------------------------- the edits
+
+async fn patch(
+    server: &Server,
+    uri: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    server
+        .send(
+            request("PATCH", uri, IMPORTER)
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn an_entry_takes_an_edit_and_answers_with_what_it_now_is() {
+    let (server, _, entry) = a_library().await;
+    let (status, body) = patch(
+        &server,
+        &format!("/entries/{entry}"),
+        serde_json::json!({"title": "Un titre"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["title"], "Un titre");
+}
+
+#[tokio::test]
+async fn the_arcs_of_a_series_are_replaced_whole() {
+    // A range of chapters, never a list of volumes: an arc that covers volumes 1–4 and 4–6
+    // would count volume 4 twice and put the boundary tens of pages out.
+    let (server, series, _) = a_library().await;
+    let (status, body) = patch(
+        &server,
+        &format!("/series/{series}/arcs"),
+        serde_json::json!([{"name": "Un cycle", "unit": "CHAPTER", "from": 1, "to": 2}]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, listed) = get(&server, &format!("/series/{series}/arcs")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed[0]["name"], "Un cycle");
+    assert_eq!(listed[0]["unit"], "CHAPTER");
+}
+
+#[tokio::test]
+async fn editing_something_that_is_not_there_is_a_404_on_every_route_that_takes_an_id() {
+    let (server, _, _) = a_library().await;
+    for (uri, body) in [
+        ("/series/nope", serde_json::json!({"summary": "…"})),
+        ("/entries/nope", serde_json::json!({"title": "…"})),
+        ("/series/nope/arcs", serde_json::json!([])),
+    ] {
+        let (status, _) = patch(&server, uri, body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+    }
+}
+
+// ------------------------------------------------------------------ the intake
+
+#[tokio::test]
+async fn a_file_offered_is_described_before_it_is_filed() {
+    let (server, series, _) = a_library().await;
+
+    // Offered: the server says where it would go and how sure it is.
+    let (status, proposal) = server
+        .send(
+            request("POST", "/entries", IMPORTER)
+                .header("Content-Type", "application/octet-stream")
+                .header("X-Leaf-Name", "Tome 2.cbz")
+                .body(Body::from(archive_bytes(None)))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{proposal}");
+    let offered = proposal["received"].as_str().expect("an id").to_string();
+
+    // Nothing is in the library until it is confirmed.
+    let (status, waiting) = as_importer(&server, "/intake").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(waiting.is_array(), "{waiting}");
+
+    // Confirmed: only then is it filed.
+    let (status, filed) = server
+        .send(
+            request("POST", &format!("/intake/{offered}/file"), IMPORTER)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"seriesId": series}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert!(status.is_success(), "{status} {filed}");
+}
+
+#[tokio::test]
+async fn a_file_offered_and_then_thought_better_of_is_abandoned() {
+    let (server, _, _) = a_library().await;
+    let (_, proposal) = server
+        .send(
+            request("POST", "/entries", IMPORTER)
+                .header("Content-Type", "application/octet-stream")
+                .header("X-Leaf-Name", "Tome 3.cbz")
+                .body(Body::from(archive_bytes(None)))
+                .unwrap(),
+        )
+        .await;
+    let offered = proposal["received"].as_str().expect("an id").to_string();
+
+    let (status, _) = server
+        .send(
+            request("DELETE", &format!("/intake/{offered}"), IMPORTER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert!(status.is_success(), "{status}");
+}
+
+// ------------------------------------------------------------------ the import
+
+#[tokio::test]
+async fn an_import_is_opened_looked_at_and_given_up_on() {
+    let (server, _, _) = a_library().await;
+
+    let (status, opened) = server
+        .send(
+            request("POST", "/import", IMPORTER)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "root": "Essai",
+                        "files": [{"path": "Tome 1.cbz", "size": 4}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{opened}");
+    let id = opened["id"].as_str().expect("an id").to_string();
+
+    let (status, state) = as_importer(&server, &format!("/import/{id}")).await;
+    assert_eq!(status, StatusCode::OK, "{state}");
+
+    let (status, listed) = as_importer(&server, "/import").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(listed.is_array(), "{listed}");
+
+    let (status, _) = server
+        .send(
+            request("DELETE", &format!("/import/{id}"), IMPORTER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn cleanup_removes_what_it_is_named_and_nothing_it_is_not() {
+    // Deletion on an explicit, by-name order, never inferred from a manifest.
+    let (server, _, _) = a_library().await;
+    let (status, body) = server
+        .send(
+            request("POST", "/cleanup", IMPORTER)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"root": "Bleach", "files": []}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // A list of what went, not a count: the client shows the names.
+    assert_eq!(body["removed"], serde_json::json!([]));
+    // Naming nothing removed nothing: the volume is still there.
+    assert!(server.library().join("Bleach/Tome 1.cbz").is_file());
+}
+
+// -------------------------------------------------------------------- the etag
+
+#[tokio::test]
+async fn a_cover_already_held_comes_back_as_not_modified() {
+    let (server, _, entry) = a_library().await;
+    let response = server
+        .send(
+            request("GET", &format!("/entries/{entry}/cover"), READ_ONLY)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.0, StatusCode::OK);
+
+    let tag = server
+        .tagged(&format!("/entries/{entry}/cover"))
+        .await
+        .expect("an ETag");
+    let (status, _) = server
+        .send(
+            request("GET", &format!("/entries/{entry}/cover"), READ_ONLY)
+                .header("If-None-Match", &tag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
 }
