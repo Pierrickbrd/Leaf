@@ -12,6 +12,7 @@ import unittest
 
 from scan_bench import (
     System,
+    _VARIANTS,
     disk_facts,
     main,
     check_the_arguments,
@@ -592,6 +593,69 @@ class RunsTheBench(unittest.TestCase):
                     f"scan {folder} --no-dimensions",
                 ],
             )
+
+
+
+def _mute_binary(folder):
+    """A binary that works and says nothing a report can be read out of."""
+    fake = pathlib.Path(folder, "mute-leaf")
+    fake.write_text("#!/bin/sh\necho 'scanning…'\nexit 0\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    return fake
+
+
+class TheRealSystem(unittest.TestCase):
+    """The three calls the fake System stands in for, against a real disk."""
+
+    def test_it_reads_a_file_and_says_nothing_about_one_it_cannot(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = pathlib.Path(folder, "rotational")
+            path.write_text("0\n")
+            self.assertEqual(System().read(str(path)), "0\n")
+            # A probe that is not there is not an error — every disk answers a different
+            # subset of them, and `disk_facts` is what decides that none answered.
+            self.assertIsNone(System().read(str(pathlib.Path(folder, "absent"))))
+
+    def test_it_resolves_a_link_and_it_looks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            here = pathlib.Path(folder, "here")
+            here.mkdir()
+            (here / "link").symlink_to(here)
+            self.assertEqual(System().realpath(str(here / "link")), str(here))
+            self.assertTrue(System().exists(str(here)))
+            self.assertFalse(System().exists(str(pathlib.Path(folder, "nowhere"))))
+
+
+class StopsBeforeTheClockStarts(unittest.TestCase):
+    def test_an_argument_that_names_nothing_stops_the_bench(self):
+        # `check_the_arguments` refuses on its own account elsewhere; what is checked here
+        # is that the bench acts on the refusal instead of running three scans anyway.
+        with tempfile.TemporaryDirectory() as folder:
+            log = pathlib.Path(folder, "calls")
+            code, said = _bench(
+                ["--binary", str(pathlib.Path(folder, "absent")),
+                 "--corpus", folder,
+                 "--db", str(pathlib.Path(folder, "i.sqlite")),
+                 "--passes", "1"],
+                _spinning_usb_for(folder),
+            )
+            self.assertEqual(code, 2)
+            self.assertIn("is not a file", said)
+            self.assertFalse(log.exists())
+
+    def test_output_that_is_not_a_report_is_refused_after_the_passes(self):
+        # It exits 0, so every pass "worked" — and printed no summary line at all. This is
+        # the case that used to reach `parse_summary` and come back out as a traceback.
+        with tempfile.TemporaryDirectory() as folder:
+            code, said = _bench(
+                ["--binary", str(_mute_binary(folder)),
+                 "--corpus", folder,
+                 "--db", str(pathlib.Path(folder, "i.sqlite")),
+                 "--passes", "1"],
+                _spinning_usb_for(folder),
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("not a report", said)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,8 @@
 
 #include <qt6keychain/keychain.h>
 
+#include <memory>
+
 namespace {
 const QString Entry = QStringLiteral("server-key");
 
@@ -101,9 +103,14 @@ void Settings::load()
     // owned by something else is deleted twice over: QtKeychain keeps queued jobs in a list
     // of its own, so tearing this down while a read is in flight left that list holding a
     // pointer to freed memory — a crash measured at one millisecond into the read.
-    auto *job = new QKeychain::ReadPasswordJob(service());
-    job->setAutoDelete(true);
-    job->setKey(Entry);
+    //
+    // Owned here only until it starts, and by QtKeychain from then on. `release` sits on the
+    // exact line where that changes hands: before it, leaving this function early takes the
+    // job with it; after it, `setAutoDelete` is what frees it.
+    auto owned = std::make_unique<QKeychain::ReadPasswordJob>(service());
+    owned->setAutoDelete(true);
+    owned->setKey(Entry);
+    auto *job = owned.get();
     QPointer<Settings> alive(this);
     connect(job, &QKeychain::Job::finished, job, [this, job, alive] {
         if (!alive) {
@@ -119,7 +126,7 @@ void Settings::load()
         m_loaded = true;
         emit changed();
     });
-    job->start();
+    owned.release()->start();
 }
 
 void Settings::fromFile()

@@ -17,6 +17,7 @@ import zipfile
 
 from from_tomes_json import (
     arcs_of,
+    main,
     a_folder_name,
     inside,
     under,
@@ -299,6 +300,64 @@ class WritesTheTree(unittest.TestCase):
                       "Black Edition", None)
             self.assertIn("One-Shot: no such folder, skipped", said.getvalue())
             self.assertFalse((root / "library/Death Note/Black Edition/One-Shot.cbz").exists())
+
+
+class RunsFromTheCommandLine(unittest.TestCase):
+    def run_it(self, *argv):
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
+            return main(list(argv)), said.getvalue()
+
+    def test_a_source_without_a_tomes_json_is_refused_before_anything(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            code, said = self.run_it(str(root), str(root / "library"))
+            self.assertEqual(code, 1)
+            self.assertIn("no tomes.json", said)
+            self.assertFalse((root / "library").exists())
+
+    def test_the_names_default_to_the_folders_they_sit_in(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            source = prepared(root)
+            code, _ = self.run_it(str(source), str(root / "library"), "--status", "completed")
+            self.assertEqual(code, 0)
+            # The work from the parent folder, the edition from the source folder.
+            self.assertTrue((root / "library/Death Note/Black Edition/edition.json").is_file())
+
+    def test_an_empty_edition_means_the_work_has_only_one(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            code, _ = self.run_it(str(prepared(root)), str(root / "library"), "--edition", "")
+            self.assertEqual(code, 0)
+            self.assertTrue((root / "library/Death Note/Tome 1.cbz").is_file())
+            self.assertFalse((root / "library/Death Note/Black Edition").exists())
+
+    def test_the_names_can_be_given_instead(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            code, _ = self.run_it(str(prepared(root)), str(root / "library"),
+                                  "--work", "Death Note", "--edition", "Poche",
+                                  "--universe", "Shonen")
+            self.assertEqual(code, 0)
+            self.assertTrue((root / "library/Shonen/universe.json").is_file())
+            self.assertTrue((root / "library/Shonen/Death Note/Poche/edition.json").is_file())
+
+    def test_a_dry_run_says_so_and_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            code, said = self.run_it(str(prepared(root)), str(root / "library"), "--dry-run")
+            self.assertEqual(code, 0)
+            self.assertIn("(dry run)", said)
+            self.assertFalse((root / "library").exists())
+
+    def test_a_name_that_is_a_path_stops_it_at_the_command_line(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            source = prepared(root)
+            with self.assertRaises(SystemExit):
+                self.run_it(str(source), str(root / "library"), "--work", "../../escaped")
+            self.assertFalse((root.parent / "escaped").exists())
 
 
 if __name__ == "__main__":
