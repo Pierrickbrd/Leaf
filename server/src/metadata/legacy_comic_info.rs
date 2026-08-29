@@ -59,6 +59,35 @@ fn resolve(name: &str) -> String {
     }
 }
 
+/// Where a tag's text goes once it closes: a chapter's <Name> makes a chapter, a tag at the
+/// top level becomes a field, and anything else is dropped. An empty value is not a value.
+///
+/// `or_insert` and not `insert`: the first spelling of a tag wins, which is the rule this
+/// format needs for a document that repeats one.
+fn record(
+    path: &[String],
+    tag: String,
+    value: String,
+    tags: &mut std::collections::HashMap<String, String>,
+    chapters: &mut Vec<ChapterJson>,
+) {
+    if value.is_empty() {
+        return;
+    }
+    if path.iter().any(|p| p == "Chapter") {
+        // The tag nothing reads — non-standard, and yet it carries 2 677 chapters. No
+        // start page is declared anywhere: that is the data to create.
+        if tag == "Name" {
+            chapters.push(ChapterJson {
+                raw: Some(value),
+                ..Default::default()
+            });
+        }
+    } else if path.len() <= 1 {
+        tags.entry(tag).or_insert(value);
+    }
+}
+
 pub fn read(content: &[u8]) -> Option<LegacyRead> {
     let text = std::str::from_utf8(content).ok()?;
     let mut reader = Reader::from_str(text);
@@ -96,23 +125,7 @@ pub fn read(content: &[u8]) -> Option<LegacyRead> {
                 let Some(tag) = path.pop() else { break };
                 let value = current.trim().to_string();
                 current.clear();
-                if value.is_empty() {
-                    continue;
-                }
-                let inside_chapter = path.iter().any(|p| p == "Chapter");
-                if inside_chapter {
-                    // The tag nothing reads — non-standard, and yet it carries 2 677
-                    // chapters. No start page is declared anywhere: that is the data to
-                    // create.
-                    if tag == "Name" {
-                        chapters.push(ChapterJson {
-                            raw: Some(value),
-                            ..Default::default()
-                        });
-                    }
-                } else if path.len() <= 1 {
-                    tags.entry(tag).or_insert(value);
-                }
+                record(&path, tag, value, &mut tags, &mut chapters);
             }
             Ok(Event::Eof) => break,
             Err(_) => return None,

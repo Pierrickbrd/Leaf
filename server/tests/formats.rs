@@ -10,39 +10,39 @@ use leaf_server::api::pages::Pages;
 use leaf_server::scan::scanner::Scanner;
 use leaf_server::store::Db;
 
+/// The bar pattern, plus a vertical rule every 300 pixels.
+fn opaque(x: u32, y: u32) -> image::Rgb<u8> {
+    if y % 120 < 30 || x % 300 < 6 {
+        image::Rgb([20, 20, 20])
+    } else {
+        image::Rgb([250, 250, 250])
+    }
+}
+
+/// The left third transparent, and black underneath it — which is what a PNG saved with a
+/// transparent background actually holds.
+fn translucent(x: u32, y: u32, width: u32) -> image::Rgba<u8> {
+    if x < width / 3 {
+        image::Rgba([0, 0, 0, 0])
+    } else if y % 120 < 30 {
+        image::Rgba([20, 20, 20, 255])
+    } else {
+        image::Rgba([250, 250, 250, 255])
+    }
+}
+
 /// A page with a plain white background and a black bar, in whatever format is asked for.
 fn drawn(format: image::ImageFormat, alpha: bool) -> Vec<u8> {
     let (w, h) = (900u32, 1200u32);
     let mut out = std::io::Cursor::new(Vec::new());
-    if alpha {
-        let mut buffer = image::RgbaImage::new(w, h);
-        for (x, y, pixel) in buffer.enumerate_pixels_mut() {
-            // The left third transparent, and black underneath it — which is what a PNG
-            // saved with a transparent background actually holds.
-            *pixel = if x < w / 3 {
-                image::Rgba([0, 0, 0, 0])
-            } else if y % 120 < 30 {
-                image::Rgba([20, 20, 20, 255])
-            } else {
-                image::Rgba([250, 250, 250, 255])
-            };
-        }
-        image::DynamicImage::ImageRgba8(buffer)
-            .write_to(&mut out, format)
-            .unwrap();
+    let page = if alpha {
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(w, h, |x, y| {
+            translucent(x, y, w)
+        }))
     } else {
-        let mut buffer = image::RgbImage::new(w, h);
-        for (x, y, pixel) in buffer.enumerate_pixels_mut() {
-            *pixel = if y % 120 < 30 || x % 300 < 6 {
-                image::Rgb([20, 20, 20])
-            } else {
-                image::Rgb([250, 250, 250])
-            };
-        }
-        image::DynamicImage::ImageRgb8(buffer)
-            .write_to(&mut out, format)
-            .unwrap();
-    }
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, opaque))
+    };
+    page.write_to(&mut out, format).unwrap();
     out.into_inner()
 }
 

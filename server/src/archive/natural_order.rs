@@ -9,37 +9,36 @@ pub fn compare(a: &str, b: &str) -> Ordering {
     let (mut i, mut j) = (0usize, 0usize);
 
     while i < a.len() && j < b.len() {
-        if a[i].is_ascii_digit() && b[j].is_ascii_digit() {
-            let (mut end_a, mut end_b) = (i, j);
-            while end_a < a.len() && a[end_a].is_ascii_digit() {
-                end_a += 1;
-            }
-            while end_b < b.len() && b[end_b].is_ascii_digit() {
-                end_b += 1;
-            }
-            // Compare the value, not the spelling: 007 and 7 are the same number.
-            let num_a = trimmed(&a[i..end_a]);
-            let num_b = trimmed(&b[j..end_b]);
-            match num_a
-                .len()
-                .cmp(&num_b.len())
-                .then_with(|| num_a.cmp(&num_b))
-            {
-                Ordering::Equal => {}
-                other => return other,
-            }
-            i = end_a;
-            j = end_b;
+        let step = if a[i].is_ascii_digit() && b[j].is_ascii_digit() {
+            let (end_a, end_b) = (digits_end(&a, i), digits_end(&b, j));
+            let step = numbers(&a[i..end_a], &b[j..end_b]);
+            (i, j) = (end_a, end_b);
+            step
         } else {
-            match a[i].to_lowercase().cmp(b[j].to_lowercase()) {
-                Ordering::Equal => {}
-                other => return other,
-            }
-            i += 1;
-            j += 1;
+            let step = a[i].to_lowercase().cmp(b[j].to_lowercase());
+            (i, j) = (i + 1, j + 1);
+            step
+        };
+        if step != Ordering::Equal {
+            return step;
         }
     }
     (a.len() - i).cmp(&(b.len() - j))
+}
+
+/// Compare the value, not the spelling: 007 and 7 are the same number. Compared as text
+/// once the leading zeroes are gone, so that a number longer than an i64 still sorts.
+fn numbers(a: &[char], b: &[char]) -> Ordering {
+    let (a, b) = (trimmed(a), trimmed(b));
+    a.len().cmp(&b.len()).then_with(|| a.cmp(&b))
+}
+
+/// The end of the run of digits starting at `from`.
+fn digits_end(chars: &[char], from: usize) -> usize {
+    from + chars[from..]
+        .iter()
+        .take_while(|c| c.is_ascii_digit())
+        .count()
 }
 
 fn trimmed(digits: &[char]) -> String {

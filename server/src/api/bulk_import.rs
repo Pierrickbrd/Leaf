@@ -315,30 +315,9 @@ impl BulkImport {
                 pending.push(f.path.clone());
                 continue;
             }
-            // Only when the client announced one. It costs a full read of the file, which
-            // on nine gigabytes is not free, so it is the sender's call — but a checksum
-            // that is sent and never compared is worse than none, because it reads like a
-            // guarantee.
-            if let Some(announced) = &f.checksum {
-                match checksum(&source) {
-                    Ok(found) if found.eq_ignore_ascii_case(announced) => {}
-                    Ok(found) => {
-                        tracing::warn!(file = %f.path, announced, found, "checksum does not match");
-                        // Dropped, not kept. The bytes are known to be wrong, so keeping
-                        // them helps nobody — and `state` reports a file of the right size
-                        // as held, which would have told the client there was nothing left
-                        // to send while every commit went on refusing it.
-                        let _ = std::fs::remove_file(&source);
-                        corrupt.push(f.path.clone());
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::warn!(file = %f.path, error = %e, "could not read to check");
-                        let _ = std::fs::remove_file(&source);
-                        corrupt.push(f.path.clone());
-                        continue;
-                    }
-                }
+            if !checksum_holds(&source, f.checksum.as_deref(), &f.path) {
+                corrupt.push(f.path.clone());
+                continue;
             }
             let destination = under(&target, &f.path)?;
             if let Some(parent) = destination.parent() {
@@ -404,43 +383,49 @@ impl BulkImport {
             if !id.starts_with("imp_") {
                 continue;
             }
-            let Some(manifest) = self.manifest(&folder.path()) else {
-                continue;
-            };
-            let target = self.library.join(&manifest.root);
-            let (mut bytes, mut complete, mut touched) = (0u64, 0usize, 0i64);
-            for f in &manifest.files {
-                if already_home(&target, f) {
-                    complete += 1;
-                    continue;
-                }
-                let Ok(held) = under(&folder.path(), &f.path) else {
-                    continue;
-                };
-                if let Ok(meta) = std::fs::metadata(&held) {
-                    bytes += meta.len();
-                    touched = touched.max(crate::api::intake::modified_at(&meta));
-                    if meta.len() == f.size {
-                        complete += 1;
-                    }
-                }
+            if let Some(open) = self.open_session(&folder.path(), id) {
+                out.push(open);
             }
-            if touched == 0 {
-                touched = std::fs::metadata(folder.path())
-                    .map(|m| crate::api::intake::modified_at(&m))
-                    .unwrap_or(0);
-            }
-            out.push(Open {
-                id,
-                of: manifest.files.len(),
-                root: manifest.root,
-                complete,
-                bytes,
-                last_touched_at: touched,
-            });
         }
         out.sort_by_key(|o| o.last_touched_at);
         Ok(out)
+    }
+
+    /// What one session folder holds, or nothing when it holds no manifest — a folder
+    /// under the inbox that is not an import is not an error, it is not ours.
+    fn open_session(&self, folder: &Path, id: String) -> Option<Open> {
+        let manifest = self.manifest(folder)?;
+        let target = self.library.join(&manifest.root);
+        let (mut bytes, mut complete, mut touched) = (0u64, 0usize, 0i64);
+        for f in &manifest.files {
+            if already_home(&target, f) {
+                complete += 1;
+                continue;
+            }
+            let Ok(meta) = under(folder, &f.path).and_then(|held| Ok(std::fs::metadata(held)?))
+            else {
+                continue;
+            };
+            bytes += meta.len();
+            touched = touched.max(crate::api::intake::modified_at(&meta));
+            if meta.len() == f.size {
+                complete += 1;
+            }
+        }
+        // Nothing has arrived yet, so the folder's own age is all there is to sort on.
+        if touched == 0 {
+            touched = std::fs::metadata(folder)
+                .map(|m| crate::api::intake::modified_at(&m))
+                .unwrap_or(0);
+        }
+        Some(Open {
+            id,
+            of: manifest.files.len(),
+            root: manifest.root,
+            complete,
+            bytes,
+            last_touched_at: touched,
+        })
     }
 
     pub fn abandon(&self, id: &str) -> Result<()> {
@@ -623,4 +608,26 @@ pub fn checksum(file: &Path) -> Result<String> {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect())
+}
+
+/// Whether the file that arrived may be installed.
+///
+/// Checked only when the client announced a checksum. It costs a full read of the file,
+/// which on nine gigabytes is not free, so it is the sender's call — but a checksum that is
+/// sent and never compared is worse than none, because it reads like a guarantee.
+///
+/// A file that fails is dropped, not kept. The bytes are known to be wrong, so keeping them
+/// helps nobody — and `state` reports a file of the right size as held, which would have
+/// told the client there was nothing left to send while every commit went on refusing it.
+fn checksum_holds(source: &Path, announced: Option<&str>, name: &str) -> bool {
+    let Some(announced) = announced else {
+        return true;
+    };
+    match checksum(source) {
+        Ok(found) if found.eq_ignore_ascii_case(announced) => return true,
+        Ok(found) => tracing::warn!(file = %name, announced, found, "checksum does not match"),
+        Err(e) => tracing::warn!(file = %name, error = %e, "could not read to check"),
+    }
+    let _ = std::fs::remove_file(source);
+    false
 }

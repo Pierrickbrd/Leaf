@@ -264,22 +264,8 @@ impl Scanner {
         layout::readable(folder).with_context(|| format!("listing {}", folder.display()))?;
         let (kind, _) = layout::kind(folder);
 
-        // A shelf. Not a level of the model — a folder somebody made to tidy up, holding
-        // works and universes that each say what they are. Walked through, so that what is
-        // inside is judged on its own terms rather than becoming an edition of the tidying.
         if kind == Kind::Container {
-            if left == 0 {
-                report.disregarded.push(format!(
-                    "{}: folders nested past what is worth following, so nothing under it is \
-                     read",
-                    name_of(folder)
-                ));
-                return Ok(());
-            }
-            for inside in layout::sub_folders(folder) {
-                self.visit(cx, &inside, universe_id, left - 1, seen, report)?;
-            }
-            return Ok(());
+            return self.visit_container(cx, folder, universe_id, left, seen, report);
         }
 
         // From here the model applies, and it is three floors deep: universe, work, edition.
@@ -297,30 +283,67 @@ impl Scanner {
         }
 
         if kind == Kind::Universe && universe_id.is_none() {
-            let id = self.record_universe(cx, folder, seen, report)?;
-            let name = self.universe_name(cx, &id)?;
-            for work in layout::sub_folders(folder) {
-                // Universes do not nest: the model is universe, work, edition, and a fourth
-                // level has nowhere to go. One below another is read as a work and its own
-                // works become its editions — which is a defensible answer, and a baffling
-                // one to meet without being told.
-                if layout::kind(&work) == (layout::Kind::Universe, true) {
-                    report.disregarded.push(format!(
-                        "{}/{}/universe.json — a universe cannot hold another, so this is \
-                         read as a work of \"{}\"",
-                        name_of(folder),
-                        name_of(&work),
-                        name_of(folder)
-                    ));
-                }
-                self.visit_work(cx, &work, Some(&id), name.as_deref(), seen, report)?;
+            return self.visit_universe(cx, folder, seen, report);
+        }
+
+        let name = match universe_id {
+            Some(id) => self.universe_name(cx, id)?,
+            None => None,
+        };
+        self.visit_work(cx, folder, universe_id, name.as_deref(), seen, report)
+    }
+
+    /// A shelf. Not a level of the model — a folder somebody made to tidy up, holding works
+    /// and universes that each say what they are. Walked through, so that what is inside is
+    /// judged on its own terms rather than becoming an edition of the tidying.
+    fn visit_container(
+        &self,
+        cx: &Cx<'_>,
+        folder: &Path,
+        universe_id: Option<&str>,
+        left: usize,
+        seen: &mut Seen,
+        report: &mut ScanReport,
+    ) -> Result<()> {
+        if left == 0 {
+            report.disregarded.push(format!(
+                "{}: folders nested past what is worth following, so nothing under it is \
+                 read",
+                name_of(folder)
+            ));
+            return Ok(());
+        }
+        for inside in layout::sub_folders(folder) {
+            self.visit(cx, &inside, universe_id, left - 1, seen, report)?;
+        }
+        Ok(())
+    }
+
+    /// A universe and the works under it.
+    fn visit_universe(
+        &self,
+        cx: &Cx<'_>,
+        folder: &Path,
+        seen: &mut Seen,
+        report: &mut ScanReport,
+    ) -> Result<()> {
+        let id = self.record_universe(cx, folder, seen, report)?;
+        let name = self.universe_name(cx, &id)?;
+        for work in layout::sub_folders(folder) {
+            // Universes do not nest: the model is universe, work, edition, and a fourth
+            // level has nowhere to go. One below another is read as a work and its own
+            // works become its editions — which is a defensible answer, and a baffling
+            // one to meet without being told.
+            if layout::kind(&work) == (layout::Kind::Universe, true) {
+                report.disregarded.push(format!(
+                    "{}/{}/universe.json — a universe cannot hold another, so this is \
+                     read as a work of \"{}\"",
+                    name_of(folder),
+                    name_of(&work),
+                    name_of(folder)
+                ));
             }
-        } else {
-            let name = match universe_id {
-                Some(id) => self.universe_name(cx, id)?,
-                None => None,
-            };
-            self.visit_work(cx, folder, universe_id, name.as_deref(), seen, report)?;
+            self.visit_work(cx, &work, Some(&id), name.as_deref(), seen, report)?;
         }
         Ok(())
     }
@@ -693,18 +716,7 @@ impl Scanner {
         }
 
         let from_name = label::parse(&stem_of(file));
-        // Case-insensitive: "chapter" is unmistakably CHAPTER, and reading it as VOLUME
-        // because of a lower-case c inverts what the file plainly says. Anything that is
-        // still neither is a typo, and `checks::coherence` says so rather than guessing.
-        let kind = if entry
-            .as_ref()
-            .is_some_and(|e| e.kind.eq_ignore_ascii_case("CHAPTER"))
-            || from_name.label.to_lowercase().contains("chap")
-        {
-            "CHAPTER"
-        } else {
-            "VOLUME"
-        };
+        let kind = entry_kind(entry.as_ref(), &from_name.label);
 
         // For a chapter the file name wins: ComicInfo pins a volume number on it for lack of
         // any way to say otherwise — Chapitre 686.5 declares Number 75 there.
@@ -717,37 +729,14 @@ impl Scanner {
                 .or(from_name.number)
         };
 
-        let entry_volume = entry.as_ref().and_then(|e| e.volume);
-        let chapters = if kind == "CHAPTER" && entry.as_ref().is_none_or(|e| e.chapters.is_empty())
-        {
-            // The entry is the chapter and says nothing more: its file name describes it.
-            // Declaring a single chapter in entry.json is the way to add an anchor or a
-            // label — which is exactly what a standalone bonus file needs.
-            self.draft(
-                &ChapterJson {
-                    raw: Some(from_name.raw.clone()),
-                    number: own.as_ref().and_then(|o| o.number).or(from_name.number),
-                    title: from_name.title.clone(),
-                    ..Default::default()
-                },
-                chapter_pattern,
-                None,
-                entry_volume,
-                report,
-            )
-            .into_iter()
-            .collect()
-        } else {
-            self.anchor_chain(
-                entry
-                    .as_ref()
-                    .map(|e| e.chapters.clone())
-                    .unwrap_or_default(),
-                chapter_pattern,
-                entry_volume,
-                report,
-            )
-        };
+        let chapters = self.chapters_of(
+            kind,
+            entry.as_ref(),
+            own.as_ref(),
+            &from_name,
+            chapter_pattern,
+            report,
+        );
 
         report.contradictions.extend(checks::coherence(
             &name_of(file),
@@ -757,14 +746,14 @@ impl Scanner {
             from_name.number,
         ));
 
+        // Only on a volume: a chapter file is its own chapter, and starts at its first page.
         if kind == "VOLUME" {
-            for chapter in chapters.iter().filter(|c| c.start_page.is_none()) {
-                report.chapters_without_start_page.push(format!(
-                    "{} → {}",
-                    name_of(file),
-                    chapter.label
-                ));
-            }
+            report.chapters_without_start_page.extend(
+                chapters
+                    .iter()
+                    .filter(|c| c.start_page.is_none())
+                    .map(|c| format!("{} → {}", name_of(file), c.label)),
+            );
         }
 
         Ok(Some(ReadEntry {
@@ -800,6 +789,45 @@ impl Scanner {
     ///
     /// A bonus with no number of its own is not adrift: it sits after whatever preceded it,
     /// and that is enough to place it on the edition's single scale.
+    /// The chapters this entry declares, drafted and ready to be written down.
+    fn chapters_of(
+        &self,
+        kind: &str,
+        entry: Option<&EntryJson>,
+        own: Option<&EntryJson>,
+        from_name: &label::ParsedLabel,
+        chapter_pattern: Option<&str>,
+        report: &mut ScanReport,
+    ) -> Vec<ChapterDraft> {
+        let entry_volume = entry.and_then(|e| e.volume);
+        if kind == "CHAPTER" && entry.is_none_or(|e| e.chapters.is_empty()) {
+            // The entry is the chapter and says nothing more: its file name describes it.
+            // Declaring a single chapter in entry.json is the way to add an anchor or a
+            // label — which is exactly what a standalone bonus file needs.
+            return self
+                .draft(
+                    &ChapterJson {
+                        raw: Some(from_name.raw.clone()),
+                        number: own.and_then(|o| o.number).or(from_name.number),
+                        title: from_name.title.clone(),
+                        ..Default::default()
+                    },
+                    chapter_pattern,
+                    None,
+                    entry_volume,
+                    report,
+                )
+                .into_iter()
+                .collect();
+        }
+        self.anchor_chain(
+            entry.map(|e| e.chapters.clone()).unwrap_or_default(),
+            chapter_pattern,
+            entry_volume,
+            report,
+        )
+    }
+
     fn anchor_chain(
         &self,
         source: Vec<ChapterJson>,
@@ -1411,4 +1439,19 @@ fn short(value: f64) -> String {
 fn read_json<T: serde::de::DeserializeOwned>(folder: &Path, name: &str) -> Option<T> {
     let bytes = std::fs::read(folder.join(name)).ok()?;
     crate::metadata::sidecars::read(&bytes)
+}
+
+/// VOLUME or CHAPTER, from what the entry declares and failing that from its file name.
+///
+/// Case-insensitive: "chapter" is unmistakably CHAPTER, and reading it as VOLUME because of
+/// a lower-case c inverts what the file plainly says. Anything that is still neither is a
+/// typo, and `checks::coherence` says so rather than guessing.
+fn entry_kind(declared: Option<&EntryJson>, from_name: &str) -> &'static str {
+    if declared.is_some_and(|e| e.kind.eq_ignore_ascii_case("CHAPTER"))
+        || from_name.to_lowercase().contains("chap")
+    {
+        "CHAPTER"
+    } else {
+        "VOLUME"
+    }
 }

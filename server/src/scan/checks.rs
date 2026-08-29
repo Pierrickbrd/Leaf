@@ -202,6 +202,21 @@ pub fn coherence(
     let Some(declared) = declared else {
         return Vec::new();
     };
+    let mut out = about_the_entry(file, declared, kind, from_name);
+    let mut starts: Vec<i32> = Vec::new();
+    for chapter in &declared.chapters {
+        out.extend(about_a_chapter(file, chapter, page_count, &mut starts));
+    }
+    out
+}
+
+/// What the entry says about itself.
+fn about_the_entry(
+    file: &str,
+    declared: &EntryJson,
+    kind: &str,
+    from_name: Option<f64>,
+) -> Vec<String> {
     let mut out = Vec::new();
 
     // A type that is neither, however it was spelled. The reader falls back on the file
@@ -216,21 +231,17 @@ pub fn coherence(
         ));
     }
 
-    if let Some(number) = declared.number {
-        if !number.is_finite() || number < 0.0 {
-            out.push(format!("{file}: number is {number}"));
-        }
+    if let Some(number) = declared.number.filter(|n| !n.is_finite() || *n < 0.0) {
+        out.push(format!("{file}: number is {number}"));
     }
 
     // `volume` says which volume a loose chapter came from. On a volume it is the volume
     // itself, and a volume that came from another volume is not a thing.
-    if kind == "VOLUME" {
-        if let Some(from) = declared.volume {
-            out.push(format!(
-                "{file}: type is VOLUME and volume is {from} — that field says which volume a \
-                 loose chapter came from, and is ignored here"
-            ));
-        }
+    if let Some(from) = declared.volume.filter(|_| kind == "VOLUME") {
+        out.push(format!(
+            "{file}: type is VOLUME and volume is {from} — that field says which volume a \
+             loose chapter came from, and is ignored here"
+        ));
     }
 
     // The number wins over the file name, which is the rule. Worth a word all the same when
@@ -243,39 +254,50 @@ pub fn coherence(
         }
     }
 
-    let mut starts: Vec<i32> = Vec::new();
-    for c in &declared.chapters {
-        let name = c
-            .title
-            .clone()
-            .or_else(|| c.raw.clone())
-            .or_else(|| c.number.map(|n| n.to_string()))
-            .unwrap_or_else(|| "a chapter".to_string());
+    out
+}
 
+/// What one declared chapter says. `starts` carries the start pages already met in this
+/// entry, so that two chapters claiming the same page can be told apart from one chapter
+/// claiming a page nobody else wanted.
+fn about_a_chapter(
+    file: &str,
+    chapter: &ChapterJson,
+    page_count: i32,
+    starts: &mut Vec<i32>,
+) -> Vec<String> {
+    let name = chapter
+        .title
+        .clone()
+        .or_else(|| chapter.raw.clone())
+        .or_else(|| chapter.number.map(|n| n.to_string()))
+        .unwrap_or_else(|| "a chapter".to_string());
+    let mut out = Vec::new();
+
+    if let Some(start) = chapter.start_page {
         // A marker past the last page is a marker nothing can ever reach.
-        if let Some(start) = c.start_page {
-            if page_count > 0 && start >= page_count {
-                out.push(format!(
-                    "{file}: \"{name}\" starts at page {start} of {page_count}"
-                ));
-            }
-            if starts.contains(&start) {
-                out.push(format!(
-                    "{file}: \"{name}\" starts at page {start}, where another already does — \
-                     only one of them can ever be reached"
-                ));
-            }
-            starts.push(start);
-        }
-
-        // `after` places what has no number of its own. With a number it never applies.
-        if c.number.is_some() && c.after.is_some() {
+        if page_count > 0 && start >= page_count {
             out.push(format!(
-                "{file}: \"{name}\" carries a number and an after — the number places it and \
-                 the after is ignored"
+                "{file}: \"{name}\" starts at page {start} of {page_count}"
             ));
         }
+        if starts.contains(&start) {
+            out.push(format!(
+                "{file}: \"{name}\" starts at page {start}, where another already does — \
+                 only one of them can ever be reached"
+            ));
+        }
+        starts.push(start);
     }
+
+    // `after` places what has no number of its own. With a number it never applies.
+    if chapter.number.is_some() && chapter.after.is_some() {
+        out.push(format!(
+            "{file}: \"{name}\" carries a number and an after — the number places it and \
+             the after is ignored"
+        ));
+    }
+
     out
 }
 

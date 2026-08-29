@@ -38,46 +38,62 @@ pub fn search_key(text: &str) -> String {
         if is_combining_mark(ch) {
             continue;
         }
-        match ch {
-            // Apostrophes join rather than separate: "L'Attaque" has to be reachable by
-            // typing "lattaque", which is what someone in a hurry actually produces.
-            '\'' | '\u{2019}' | '\u{02bc}' | '`' => {}
-            // The ligatures NFD does not take apart, because they are letters and not a
-            // letter plus a mark. Before the general arm below, which would otherwise keep
-            // them whole: they are alphabetic, and "ae" is what somebody types.
-            'æ' | 'Æ' | 'œ' | 'Œ' | 'ß' | 'ø' | 'Ø' => {
-                if pending_space && !out.is_empty() {
+        match folded(ch) {
+            Folded::Joins => {}
+            // A space is only ever written between two things, never before the first.
+            Folded::Separates => pending_space = !out.is_empty(),
+            Folded::Spelled(letters) => {
+                if pending_space {
                     out.push(' ');
                 }
                 pending_space = false;
-                out.push_str(match ch {
-                    'æ' | 'Æ' => "ae",
-                    'œ' | 'Œ' => "oe",
-                    'ß' => "ss",
-                    _ => "o",
-                });
+                out.push_str(letters);
             }
-            // A letter or a digit, in whatever script it is written. NFD has already taken
-            // the accent off anything that had one, so what reaches here is the letter
-            // itself — a Latin one, a kana, an ideograph, an Arabic letter alike.
-            //
-            // to_lowercase and not to_ascii_lowercase: outside ASCII the two disagree, and
-            // one of them silently does nothing.
-            ch if ch.is_alphanumeric() => {
-                if pending_space && !out.is_empty() {
+            Folded::Letter(letter) => {
+                if pending_space {
                     out.push(' ');
                 }
                 pending_space = false;
-                out.extend(ch.to_lowercase());
-            }
-            _ => {
-                if !out.is_empty() {
-                    pending_space = true;
-                }
+                out.extend(letter.to_lowercase());
             }
         }
     }
     out
+}
+
+/// What one character becomes in a search key.
+enum Folded {
+    /// Written as nothing, and joining what sits on either side of it.
+    Joins,
+    /// Written as nothing, and separating what sits on either side of it.
+    Separates,
+    /// A letter somebody types as several.
+    Spelled(&'static str),
+    /// The letter itself, still to be lowercased.
+    Letter(char),
+}
+
+fn folded(ch: char) -> Folded {
+    match ch {
+        // Apostrophes join rather than separate: "L'Attaque" has to be reachable by
+        // typing "lattaque", which is what someone in a hurry actually produces.
+        '\'' | '\u{2019}' | '\u{02bc}' | '`' => Folded::Joins,
+        // The ligatures NFD does not take apart, because they are letters and not a
+        // letter plus a mark. Before the general arm below, which would otherwise keep
+        // them whole: they are alphabetic, and "ae" is what somebody types.
+        'æ' | 'Æ' => Folded::Spelled("ae"),
+        'œ' | 'Œ' => Folded::Spelled("oe"),
+        'ß' => Folded::Spelled("ss"),
+        'ø' | 'Ø' => Folded::Spelled("o"),
+        // A letter or a digit, in whatever script it is written. NFD has already taken
+        // the accent off anything that had one, so what reaches here is the letter
+        // itself — a Latin one, a kana, an ideograph, an Arabic letter alike.
+        //
+        // to_lowercase and not to_ascii_lowercase: outside ASCII the two disagree, and
+        // one of them silently does nothing.
+        ch if ch.is_alphanumeric() => Folded::Letter(ch),
+        _ => Folded::Separates,
+    }
 }
 
 /// The Unicode categories NFD leaves behind once a letter has been taken apart: Mn, Mc,

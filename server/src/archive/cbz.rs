@@ -104,92 +104,133 @@ pub fn read(path: &Path, measure_dimensions: bool) -> Result<Content> {
     let mut reread: Vec<(usize, String)> = Vec::new();
 
     for i in 0..archive.len() {
-        let (name, size, head) = {
-            let mut entry = archive.by_index(i)?;
-            if entry.is_dir() {
-                continue;
-            }
-            OPENED.fetch_add(1, Ordering::Relaxed);
-            let mut head = vec![0u8; HEAD];
-            let mut filled = 0;
-            while filled < HEAD {
-                match entry.read(&mut head[filled..])? {
-                    0 => break,
-                    n => filled += n,
-                }
-            }
-            head.truncate(filled);
-            (entry.name().to_string(), entry.size(), head)
+        let Some((name, size, head)) = head_of(&mut archive, i)? else {
+            continue;
         };
-
-        match crate::archive::images::media_type(&head) {
-            None => {
-                if size <= MAX_SIDECAR {
-                    if size <= head.len() as u64 {
-                        sidecars.push((name, head[..size as usize].to_vec()));
-                    } else {
-                        reread.push((i, name));
-                    }
-                }
-            }
-            Some(kind) => {
-                // From the bytes already in hand, and back to the archive only when they
-                // turned out not to be enough.
-                let dimension = if measure_dimensions {
-                    crate::archive::images::dimension(&head)
-                } else {
-                    None
-                };
-                let needs_more =
-                    measure_dimensions && dimension.is_none() && size > head.len() as u64;
-                pages.push(ArchivePage {
-                    name: name.clone(),
-                    media_type: kind.to_string(),
-                    size: Some(size),
-                    dimension,
-                });
-                if needs_more {
+        match classify(&name, size, &head, measure_dimensions) {
+            Member::Ignored => {}
+            Member::Later => reread.push((i, name)),
+            Member::Sidecar(bytes) => sidecars.push((name, bytes)),
+            Member::Page { page, again } => {
+                if again {
                     reread.push((i, name));
                 }
+                pages.push(page);
             }
         }
     }
 
     // The few that the head did not settle, read in full — up to the ceiling.
     for (index, name) in reread {
-        let mut bytes = Vec::new();
-        {
-            let entry = archive.by_index(index)?;
-            OPENED.fetch_add(1, Ordering::Relaxed);
-            entry.take(MAX_PAGE).read_to_end(&mut bytes)?;
-        }
+        let bytes = whole(&mut archive, index)?;
         match pages.iter_mut().find(|p| p.name == name) {
             Some(page) => page.dimension = crate::archive::images::dimension(&bytes),
             None => sidecars.push((name, bytes)),
         }
     }
 
-    pages.sort_by(|a, b| {
-        crate::archive::natural_order::compare(a.short_name(), b.short_name())
-            .then_with(|| crate::archive::natural_order::compare(&a.name, &b.name))
-    });
+    pages.sort_by(page_order);
 
+    Ok(Content {
+        duplicate_names: duplicated(&pages),
+        pages,
+        sidecars,
+    })
+}
+
+/// What one member of the archive turned out to be, from its first bytes alone.
+enum Member {
+    /// A page. `again` when the head did not hold its dimensions and the rest of it might.
+    Page { page: ArchivePage, again: bool },
+    /// A sidecar, whole, because it was smaller than the head that was read.
+    Sidecar(Vec<u8>),
+    /// Worth a second seek: a sidecar too big to have arrived with the head, or a page the
+    /// head could not measure.
+    Later,
+    /// Neither, and not worth another seek — a stray video in a CBZ is not metadata.
+    Ignored,
+}
+
+fn classify(name: &str, size: u64, head: &[u8], measure_dimensions: bool) -> Member {
+    let Some(kind) = crate::archive::images::media_type(head) else {
+        if size > MAX_SIDECAR {
+            return Member::Ignored;
+        }
+        return if size <= head.len() as u64 {
+            Member::Sidecar(head[..size as usize].to_vec())
+        } else {
+            Member::Later
+        };
+    };
+    // From the bytes already in hand, and back to the archive only when they turned out
+    // not to be enough.
+    let dimension = measure_dimensions
+        .then(|| crate::archive::images::dimension(head))
+        .flatten();
+    Member::Page {
+        again: measure_dimensions && dimension.is_none() && size > head.len() as u64,
+        page: ArchivePage {
+            name: name.to_string(),
+            media_type: kind.to_string(),
+            size: Some(size),
+            dimension,
+        },
+    }
+}
+
+/// By page name, folders ignored — see the note on `read`. The full name breaks the tie, so
+/// that two pages of the same short name still land in a fixed order.
+fn page_order(a: &ArchivePage, b: &ArchivePage) -> std::cmp::Ordering {
+    crate::archive::natural_order::compare(a.short_name(), b.short_name())
+        .then_with(|| crate::archive::natural_order::compare(&a.name, &b.name))
+}
+
+/// One member read whole, up to the ceiling.
+fn whole(archive: &mut zip::ZipArchive<File>, index: usize) -> Result<Vec<u8>> {
+    let entry = archive.by_index(index)?;
+    OPENED.fetch_add(1, Ordering::Relaxed);
+    let mut bytes = Vec::new();
+    entry.take(MAX_PAGE).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// The name, the declared size, and the first bytes of one member — enough to say what it
+/// is without reading it whole. `None` for a directory entry, which holds nothing.
+fn head_of(
+    archive: &mut zip::ZipArchive<File>,
+    i: usize,
+) -> Result<Option<(String, u64, Vec<u8>)>> {
+    let mut entry = archive.by_index(i)?;
+    if entry.is_dir() {
+        return Ok(None);
+    }
+    OPENED.fetch_add(1, Ordering::Relaxed);
+    let mut head = vec![0u8; HEAD];
+    let mut filled = 0;
+    while filled < HEAD {
+        match entry.read(&mut head[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    head.truncate(filled);
+    Ok(Some((entry.name().to_string(), entry.size(), head)))
+}
+
+/// The short names carried by more than one page — the same 001.jpg under two chapter
+/// folders. Sorted, so that a scan report reads the same way twice.
+fn duplicated(pages: &[ArchivePage]) -> Vec<String> {
     let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for page in &pages {
+    for page in pages {
         *counts.entry(page.short_name()).or_default() += 1;
     }
-    let mut duplicate_names: Vec<String> = counts
+    let mut names: Vec<String> = counts
         .into_iter()
         .filter(|(_, n)| *n > 1)
         .map(|(name, _)| name.to_string())
         .collect();
-    duplicate_names.sort();
-
-    Ok(Content {
-        pages,
-        sidecars,
-        duplicate_names,
-    })
+    names.sort();
+    names
 }
 
 /// One entry, by its full name inside the archive. `None` when it is not there.

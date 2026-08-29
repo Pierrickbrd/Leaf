@@ -56,11 +56,8 @@ impl Keys {
         self.keys.is_empty()
     }
 
-    /// Reads the configuration, or refuses.
-    ///
-    /// A short secret is not a key, it is a password someone will guess. The throttle slows
-    /// an attacker down; it does not make `phone:a:read` safe, and startup is the only
-    /// moment where saying so still helps.
+    /// Reads the whole configuration, one key per line. Refuses only when it holds nothing
+    /// usable — see `one_key` for what a single line is allowed to get away with.
     pub fn parse(configuration: Option<&str>) -> Result<Self> {
         let mut keys = Vec::new();
         let mut malformed = 0usize;
@@ -70,43 +67,10 @@ impl Keys {
             .map(str::trim)
             .filter(|l| !l.is_empty())
         {
-            let parts: Vec<&str> = line.split(':').collect();
-            if parts.len() < 2 {
-                // By characters, not bytes: `&line[..12]` lands mid-character on anything
-                // accented and takes the server down at startup with a slice panic, which
-                // is a poor way to report a typo in a configuration file.
-                let shown: String = line.chars().take(12).collect();
-                tracing::warn!(key = %shown, "malformed key, ignored");
-                malformed += 1;
-                continue;
+            match one_key(line)? {
+                Some(key) => keys.push(key),
+                None => malformed += 1,
             }
-            let (name, secret) = (parts[0], parts[1]);
-            if secret.chars().count() < MINIMUM_SECRET {
-                bail!(
-                    "the key \"{name}\" has a secret of {} characters, {MINIMUM_SECRET} are needed",
-                    secret.chars().count()
-                );
-            }
-
-            let mut permissions: BTreeSet<Permission> = parts
-                .get(2)
-                .unwrap_or(&"")
-                .split(',')
-                .filter_map(|p| match p.trim().to_ascii_lowercase().as_str() {
-                    "read" => Some(Permission::Read),
-                    "import" => Some(Permission::Import),
-                    _ => None,
-                })
-                .collect();
-            if permissions.is_empty() {
-                permissions.insert(Permission::Read);
-            }
-
-            keys.push(Key {
-                name: name.to_string(),
-                digest: digest(secret),
-                permissions,
-            });
         }
 
         // Configured and yet empty: every line was malformed. Refused rather than
@@ -122,15 +86,21 @@ impl Keys {
         }
 
         let keys = Keys { keys };
-        if keys.open() {
-            tracing::warn!("No key configured: the server accepts everyone. Do not expose it.");
-        } else {
-            for key in &keys.keys {
-                let rights: Vec<&str> = key.permissions.iter().map(|p| p.name()).collect();
-                tracing::info!(key = %key.name, rights = %rights.join(", "), "Key");
-            }
-        }
+        keys.announce();
         Ok(keys)
+    }
+
+    /// Says at startup what the server will accept, which is the one moment where saying so
+    /// still helps.
+    fn announce(&self) {
+        if self.open() {
+            tracing::warn!("No key configured: the server accepts everyone. Do not expose it.");
+            return;
+        }
+        for key in &self.keys {
+            let rights: Vec<&str> = key.permissions.iter().map(|p| p.name()).collect();
+            tracing::info!(key = %key.name, rights = %rights.join(", "), "Key");
+        }
     }
 
     /// The key behind a secret, or nothing.
@@ -162,4 +132,49 @@ fn careful_equals(a: &[u8; 32], b: &[u8; 32]) -> bool {
         difference |= a[i] ^ b[i];
     }
     difference == 0
+}
+
+/// One `name:secret:rights` line. `None` when it is not one — which is warned about and
+/// counted, not refused: a single typo in a configuration file should not stop a server
+/// that has other, usable keys.
+///
+/// A short secret is refused outright, because it is not a key: it is a password someone
+/// will guess. The throttle slows an attacker down; it does not make `phone:a:read` safe.
+fn one_key(line: &str) -> Result<Option<Key>> {
+    let parts: Vec<&str> = line.split(':').collect();
+    if parts.len() < 2 {
+        // By characters, not bytes: `&line[..12]` lands mid-character on anything
+        // accented and takes the server down at startup with a slice panic, which
+        // is a poor way to report a typo in a configuration file.
+        let shown: String = line.chars().take(12).collect();
+        tracing::warn!(key = %shown, "malformed key, ignored");
+        return Ok(None);
+    }
+    let (name, secret) = (parts[0], parts[1]);
+    if secret.chars().count() < MINIMUM_SECRET {
+        bail!(
+            "the key \"{name}\" has a secret of {} characters, {MINIMUM_SECRET} are needed",
+            secret.chars().count()
+        );
+    }
+
+    let mut permissions: BTreeSet<Permission> = parts
+        .get(2)
+        .unwrap_or(&"")
+        .split(',')
+        .filter_map(|p| match p.trim().to_ascii_lowercase().as_str() {
+            "read" => Some(Permission::Read),
+            "import" => Some(Permission::Import),
+            _ => None,
+        })
+        .collect();
+    if permissions.is_empty() {
+        permissions.insert(Permission::Read);
+    }
+
+    Ok(Some(Key {
+        name: name.to_string(),
+        digest: digest(secret),
+        permissions,
+    }))
 }
