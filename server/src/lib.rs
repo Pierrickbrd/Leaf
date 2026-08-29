@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod archive;
+pub mod boot;
 pub mod config;
 pub mod metadata;
 pub mod net;

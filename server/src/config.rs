@@ -1,7 +1,8 @@
-//! Configured through the environment, so the container has nothing else to do.
+//! Configured through the environment, and from nowhere else.
 //!
-//! The same names the Kotlin server reads, deliberately: the compose file, the `.env` and
-//! every note written about running it stay true across the port.
+//! One place to look when a server is behaving oddly, and one thing for a unit file to set.
+//! Nothing here reads a configuration file: a setting that can arrive by two routes is a
+//! setting somebody will change in the wrong one.
 
 use std::env;
 use std::path::PathBuf;
@@ -33,6 +34,17 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
+        Self::read(|name| env::var(name).ok())
+    }
+
+    /// Every setting, from wherever they come.
+    ///
+    /// `from_env` reads the process environment; a test reads whatever it likes. The two
+    /// are the same code, because a defaulting rule that only the real environment can
+    /// exercise is a rule nothing checks — and every value below has one.
+    pub fn read(get: impl Fn(&str) -> Option<String>) -> Self {
+        let get = |name: &str| get(name).filter(|v| !v.is_empty());
+        let path = |name: &str| get(name).map(PathBuf::from);
         let library = path("LEAF_LIBRARY").unwrap_or_else(|| PathBuf::from("library"));
         let beside = |name: &str| {
             library
@@ -46,14 +58,13 @@ impl Config {
             db: path("LEAF_DB").unwrap_or_else(|| PathBuf::from("data/leaf.sqlite")),
             drop: path("LEAF_DROP"),
             trust_proxy: matches!(
-                env::var("LEAF_TRUST_PROXY")
+                get("LEAF_TRUST_PROXY")
                     .unwrap_or_default()
                     .to_lowercase()
                     .as_str(),
                 "1" | "true" | "yes"
             ),
-            max_upload_bytes: env::var("LEAF_MAX_UPLOAD_MB")
-                .ok()
+            max_upload_bytes: get("LEAF_MAX_UPLOAD_MB")
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(2048)
                 * 1024
@@ -63,8 +74,7 @@ impl Config {
             // chances to configure half of it.
             tls_key: path("LEAF_TLS_KEY")
                 .or_else(|| path("LEAF_TLS_CERT").map(|c| c.with_extension("key"))),
-            tls_hosts: env::var("LEAF_TLS_HOSTS")
-                .ok()
+            tls_hosts: get("LEAF_TLS_HOSTS")
                 .map(|v| {
                     v.split(',')
                         .map(str::trim)
@@ -75,20 +85,12 @@ impl Config {
                 .unwrap_or_default(),
             // Loopback by default. A server run straight on a desktop has no business
             // being reachable from the rest of the house, and a warning is not a
-            // protection. The container sets 0.0.0.0 explicitly.
-            host: env::var("LEAF_HOST").unwrap_or_else(|_| "127.0.0.1".into()),
-            port: env::var("LEAF_PORT")
-                .ok()
+            // protection. Binding wider is a thing the unit file says out loud.
+            host: get("LEAF_HOST").unwrap_or_else(|| "127.0.0.1".into()),
+            port: get("LEAF_PORT")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8081),
             library,
         }
     }
-}
-
-fn path(name: &str) -> Option<PathBuf> {
-    env::var(name)
-        .ok()
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
 }
