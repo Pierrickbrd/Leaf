@@ -82,7 +82,7 @@ bool Settings::fromEnvironment()
     }
     m_address = address;
     m_key = key;
-    m_storage = Environment;
+    m_storage = Storage::Environment;
     return true;
 }
 
@@ -111,7 +111,7 @@ void Settings::load()
         }
         if (job->error() == QKeychain::NoError && !job->textData().isEmpty()) {
             m_key = job->textData();
-            m_storage = Keyring;
+            m_storage = Storage::Keyring;
         }
         // The file answers for whatever is still missing — always the address, which never
         // goes in the keyring, and the key when nobody put one there.
@@ -150,7 +150,7 @@ void Settings::fromFile()
     if (m_key.isEmpty()) {
         m_key = file.value(QStringLiteral("key")).toString().trimmed();
         if (!m_key.isEmpty()) {
-            m_storage = ProtectedFile;
+            m_storage = Storage::ProtectedFile;
         }
     }
 }

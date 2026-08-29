@@ -113,9 +113,11 @@ private:
     {
         if (m_trouble.isEmpty()) {
             const QJsonValue value = m_from.value(name);
-            const QString state = value.isUndefined() ? QStringLiteral("is missing")
-                : value.isNull()                      ? QStringLiteral("is null")
-                                                      : QStringLiteral("is not %1").arg(wanted);
+            QString state = QStringLiteral("is not %1").arg(wanted);
+            if (value.isUndefined())
+                state = QStringLiteral("is missing");
+            else if (value.isNull())
+                state = QStringLiteral("is null");
             m_trouble = QStringLiteral("%1 %2").arg(QString(name), state);
         }
         return {};
@@ -149,42 +151,46 @@ namespace Api {
 
 Medium medium(const QString &word)
 {
+    using enum Medium;
+
     const QString plain = word.toLower();
     if (plain == "manga"_ascii)
-        return Medium::Manga;
+        return Manga;
     if (plain == "bd"_ascii)
-        return Medium::Bd;
+        return Bd;
     if (plain == "comics"_ascii)
-        return Medium::Comics;
+        return Comics;
     if (plain == "manhwa"_ascii)
-        return Medium::Manhwa;
+        return Manhwa;
     if (plain == "manhua"_ascii)
-        return Medium::Manhua;
+        return Manhua;
     if (plain == "webtoon"_ascii)
-        return Medium::Webtoon;
+        return Webtoon;
     if (plain == "artbook"_ascii)
-        return Medium::Artbook;
-    return Medium::Other;
+        return Artbook;
+    return Other;
 }
 
 QString spell(Medium value)
 {
+    using enum Medium;
+
     switch (value) {
-    case Medium::Manga:
+    case Manga:
         return QStringLiteral("manga");
-    case Medium::Bd:
+    case Bd:
         return QStringLiteral("bd");
-    case Medium::Comics:
+    case Comics:
         return QStringLiteral("comics");
-    case Medium::Manhwa:
+    case Manhwa:
         return QStringLiteral("manhwa");
-    case Medium::Manhua:
+    case Manhua:
         return QStringLiteral("manhua");
-    case Medium::Webtoon:
+    case Webtoon:
         return QStringLiteral("webtoon");
-    case Medium::Artbook:
+    case Artbook:
         return QStringLiteral("artbook");
-    case Medium::Other:
+    case Other:
         return QStringLiteral("other");
     }
     return QStringLiteral("other");
@@ -192,21 +198,25 @@ QString spell(Medium value)
 
 ReadStatus readStatus(const QString &word)
 {
+    using enum ReadStatus;
+
     if (word == "IN_PROGRESS"_ascii)
-        return ReadStatus::InProgress;
+        return InProgress;
     if (word == "READ"_ascii)
-        return ReadStatus::Read;
-    return ReadStatus::Unread;
+        return Read;
+    return Unread;
 }
 
 QString spell(ReadStatus value)
 {
+    using enum ReadStatus;
+
     switch (value) {
-    case ReadStatus::InProgress:
+    case InProgress:
         return QStringLiteral("IN_PROGRESS");
-    case ReadStatus::Read:
+    case Read:
         return QStringLiteral("READ");
-    case ReadStatus::Unread:
+    case Unread:
         return QStringLiteral("UNREAD");
     }
     return QStringLiteral("UNREAD");
@@ -244,12 +254,15 @@ Read<Series> series(const QJsonObject &from)
     if (const auto word = field.maybeText("medium"_ascii))
         one.medium = medium(*word);
     if (const auto word = field.maybeText("readingDirection"_ascii)) {
+        // Scoped to the block rather than the function: three names are worth shortening
+        // here, and everything around them belongs to other enums.
+        using enum ReadingDirection;
         if (*word == "RIGHT_TO_LEFT"_ascii)
-            one.readingDirection = ReadingDirection::RightToLeft;
+            one.readingDirection = RightToLeft;
         else if (*word == "VERTICAL"_ascii)
-            one.readingDirection = ReadingDirection::Vertical;
+            one.readingDirection = Vertical;
         else if (*word == "LEFT_TO_RIGHT"_ascii)
-            one.readingDirection = ReadingDirection::LeftToRight;
+            one.readingDirection = LeftToRight;
     }
     if (const auto word = field.maybeText("status"_ascii))
         one.run = (*word == "completed"_ascii) ? Run::Completed : Run::Ongoing;
@@ -322,8 +335,7 @@ Read<UpNext> upNext(const QJsonObject &from)
     card.entryTitle = inside.maybeText("title"_ascii);
 
     // Absent progress is not a fault: it is what "you have not started this one" looks like.
-    const QJsonValue progress = from.value("progress"_ascii);
-    if (progress.isObject()) {
+    if (const QJsonValue progress = from.value("progress"_ascii); progress.isObject()) {
         const QJsonObject where = progress.toObject();
         Fields at(where);
         card.page = at.maybeWhole("page"_ascii);

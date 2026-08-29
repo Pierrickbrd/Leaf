@@ -82,7 +82,7 @@ private slots:
 
         QCOMPARE(settings.address(), QStringLiteral("https://from-env:8081"));
         QCOMPARE(settings.key(), QStringLiteral("from-env"));
-        QCOMPARE(settings.storage(), Settings::Environment);
+        QCOMPARE(settings.storage(), Settings::Storage::Environment);
         QVERIFY(settings.configured());
         QVERIFY(settings.missing().isEmpty());
     }

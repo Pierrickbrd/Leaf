@@ -36,12 +36,14 @@ QString volumes(int count, std::optional<Api::Medium> medium)
 
 QString readStatus(Api::ReadStatus status)
 {
+    using enum Api::ReadStatus;
+
     switch (status) {
-    case Api::ReadStatus::Unread:
+    case Unread:
         return u"Non lues"_s;
-    case Api::ReadStatus::InProgress:
+    case InProgress:
         return u"En cours"_s;
-    case Api::ReadStatus::Read:
+    case Read:
         return u"Terminées"_s;
     }
     return {};
@@ -49,24 +51,26 @@ QString readStatus(Api::ReadStatus status)
 
 QString medium(Api::Medium value)
 {
+    using enum Api::Medium;
+
     switch (value) {
-    case Api::Medium::Manga:
+    case Manga:
         return u"Manga"_s;
     // An acronym keeps its case. This is the reason none of this is a capitalise-the-first
     // -letter helper applied to the contract's spelling.
-    case Api::Medium::Bd:
+    case Bd:
         return u"BD"_s;
-    case Api::Medium::Comics:
+    case Comics:
         return u"Comics"_s;
-    case Api::Medium::Manhwa:
+    case Manhwa:
         return u"Manhwa"_s;
-    case Api::Medium::Manhua:
+    case Manhua:
         return u"Manhua"_s;
-    case Api::Medium::Webtoon:
+    case Webtoon:
         return u"Webtoon"_s;
-    case Api::Medium::Artbook:
+    case Artbook:
         return u"Artbook"_s;
-    case Api::Medium::Other:
+    case Other:
         return u"Autre"_s;
     }
     return {};
@@ -82,11 +86,11 @@ QString where(Api::UpNext::Kind kind, std::optional<double> number_, std::option
 {
     QStringList parts;
 
-    if (number_)
+    if (number_.has_value())
         parts << (kind == Api::UpNext::Kind::Chapter ? u"Chapitre "_s : u"Tome "_s)
                      + number(*number_);
 
-    if (page && pageCount > 0)
+    if (page.has_value() && pageCount > 0)
         parts << u"Page %1/%2"_s.arg(*page).arg(pageCount);
 
     // A chapter entry already said which chapter it is; repeating it would read as two.

@@ -41,7 +41,7 @@ class Settings : public QObject
 public:
     /// Where the key came from. Worth showing rather than hiding: somebody told their key
     /// sits in a file can decide to move it, and somebody who is not, cannot.
-    enum Storage { Unknown, Environment, Keyring, ProtectedFile };
+    enum class Storage { Unknown, Environment, Keyring, ProtectedFile };
     Q_ENUM(Storage)
 
     explicit Settings(QObject *parent = nullptr);
@@ -81,5 +81,5 @@ private:
     QString m_address;
     QString m_key;
     bool m_loaded = false;
-    Storage m_storage = Unknown;
+    Storage m_storage = Storage::Unknown;
 };

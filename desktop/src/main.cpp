@@ -11,8 +11,8 @@
 int main(int argc, char *argv[])
 {
     QGuiApplication application(argc, argv);
-    application.setOrganizationName(QStringLiteral("Leaf"));
-    application.setApplicationName(QStringLiteral("Leaf"));
+    QGuiApplication::setOrganizationName(QStringLiteral("Leaf"));
+    QGuiApplication::setApplicationName(QStringLiteral("Leaf"));
 
     // Basic, not Fusion and not the native style: the client draws its own palette — a
     // light one and a dark one, both decided — and a style that paints its own controls
@@ -29,5 +29,5 @@ int main(int argc, char *argv[])
     // path that call would have resolved to.
     engine.load(QUrl(QStringLiteral("qrc:/qt/qml/Leaf/Main.qml")));
 
-    return application.exec();
+    return QGuiApplication::exec();
 }
