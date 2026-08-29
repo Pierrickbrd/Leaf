@@ -1,7 +1,7 @@
 //! The two pure functions the whole model leans on: how a name is folded before it is
 //! matched, and where the holes in a collection are.
 //!
-//! Both ported from the Kotlin unchanged. They have tests of their own because they are the
+//! Both have tests of their own because they are the
 //! kind of code that is easy to get subtly wrong and impossible to notice: a fold that
 //! keeps an accent finds nothing, a gap that counts wrong tells you to buy a volume you own.
 

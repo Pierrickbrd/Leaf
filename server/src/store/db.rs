@@ -7,10 +7,10 @@
 //! SQLite is a synchronous library. There is no async SQLite: every crate that offers one
 //! runs the real calls on a pool of blocking threads behind an async façade.
 //!
-//! The Kotlin server expressed "the transaction currently open" with the **thread** — a
-//! `ThreadLocal` flag routing reads to the writer's connection while a transaction was
-//! open, because the scanner reads back what it has just written. In async Rust a task
-//! changes thread at every `.await`, so that mechanism is not merely awkward, it is wrong.
+//! The obvious way to express "the transaction currently open" is a `ThreadLocal` flag,
+//! routing reads to the writer's connection while a transaction is open — the scanner reads
+//! back what it has just written. In async Rust a task changes thread at every `.await`, so
+//! that mechanism is not merely awkward, it is wrong.
 //!
 //! So the database stays out of the runtime. Handlers are async; every call in here is
 //! made from inside [`tokio::task::spawn_blocking`], and the transaction is a **value**
@@ -18,8 +18,8 @@
 //! through the same [`Cx`] because it is the parameter they were given.
 //!
 //! One thread hop per request. At three clients that is noise, and it buys a rule the
-//! compiler enforces — the shape the Kotlin arrived at only after a bug where an edit
-//! landing during a scan was silently rolled back, and a scan was visible half-done.
+//! compiler enforces rather than one arrived at after an edit landing during a scan was
+//! silently rolled back, and a scan was visible half-done.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -166,9 +166,9 @@ impl Db {
 
     /// Applies what this database has not seen, in order, and stops on the first failure.
     ///
-    /// Swallowing errors was the real danger of the first version of this in Kotlin: a
-    /// migration that failed for a genuine reason looked exactly like one that had already
-    /// run, and the server started on a half-migrated schema without a word.
+    /// Swallowing errors is the real danger here: a migration that failed for a genuine
+    /// reason looks exactly like one that had already run, and the server would start on a
+    /// half-migrated schema without a word.
     fn migrate(&self, already_current: bool) -> Result<()> {
         if already_current {
             self.set_version(schema_version())?;

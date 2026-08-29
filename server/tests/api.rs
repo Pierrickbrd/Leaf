@@ -48,8 +48,8 @@ async fn health_answers_the_shape_the_contract_promises() {
     assert_eq!(1, body["api"]);
     assert_eq!(1, body["format"]);
     assert_eq!(0, body["library"]);
-    // Skipped at its default, exactly as kotlinx.serialization did with encodeDefaults =
-    // false. A client reading it as absent-means-false is reading it correctly.
+    // Skipped at its default. A client reading it as absent-means-false is reading it
+    // correctly.
     assert!(
         body.get("localDrop").is_none(),
         "a default must not cross the wire"

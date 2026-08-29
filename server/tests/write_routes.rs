@@ -205,7 +205,7 @@ async fn a_transfer_resumes_where_the_server_says_it_stopped() {
         )
         .await;
     assert_eq!(StatusCode::OK, status);
-    // A number, like every other count in this API. The Kotlin spelled it as text.
+    // A number, like every other count in this API.
     assert_eq!(4, sent["received"]);
 
     let (status, state) = server
@@ -368,7 +368,7 @@ async fn health_says_whether_the_short_path_exists() {
                 .unwrap(),
         )
         .await;
-    // Skipped at its default, as kotlinx.serialization did with encodeDefaults = false.
+    // Skipped at its default: a default does not cross the wire.
     assert!(body.get("localDrop").is_none());
 
     let folder = server.dir.path().join("drop");

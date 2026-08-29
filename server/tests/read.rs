@@ -1,8 +1,7 @@
 //! The read side: what a filter means, what a shelf costs, and what crosses the wire.
 //!
-//! Seeded directly rather than by scanning folders. The Kotlin tests built their fixtures
-//! with the scanner because it was there; a repository test that needs a scanner to run is
-//! a repository test that fails for two reasons, and only one of them is its own.
+//! Seeded directly rather than by scanning folders: a repository test that needs a scanner
+//! to run is a repository test that fails for two reasons, and only one of them is its own.
 
 use std::sync::Arc;
 
@@ -470,8 +469,8 @@ async fn a_default_never_crosses_the_wire() {
     let (_, body) = library.get("/series").await;
     let first = &body["items"][0];
 
-    // Verified against the Kotlin server, which ran with encodeDefaults = false: an unread
-    // series omits readStatus entirely, because "UNREAD" is the default.
+    // A default does not cross the wire: an unread series omits readStatus entirely,
+    // because "UNREAD" is the default.
     assert!(
         first.get("readStatus").is_none(),
         "readStatus must be absent when UNREAD"

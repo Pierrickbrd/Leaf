@@ -16,7 +16,7 @@ pub mod throttle;
 /// A fault in the request rather than in the server.
 ///
 /// Carried inside an `anyhow::Error` like anything else and pulled back out at the edge —
-/// which is where the Kotlin did it too, in one `StatusPages` block. A malformed request is
+/// in one place rather than in every handler. A malformed request is
 /// the caller's problem, and it has to come back as a 400 carrying JSON rather than as an
 /// internal error that says nothing.
 #[derive(Debug, thiserror::Error)]

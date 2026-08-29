@@ -1,7 +1,7 @@
-//! The store, ported test for test from the Kotlin.
+//! The store: what a transaction is, and what a write that meets one is worth.
 //!
-//! These are the oracle. The Rust server is not "done" when it compiles, it is done when
-//! it answers the same way — and the answers are what these describe.
+//! These are the oracle. The server is not "done" when it compiles, it is done when it
+//! answers the way these describe.
 
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
@@ -155,10 +155,10 @@ fn data_survives_the_migration() {
 
 /// What happens when a request arrives while a scan is running.
 ///
-/// The Kotlin needed a bug and a redesign to answer these correctly — one shared JDBC
-/// connection put the edit inside the scan's transaction, so a rollback took it along,
-/// silently, after the request had already answered 200. Here the transaction is a value
-/// handed to a closure, so there is nothing for an edit to fall into by accident.
+/// One shared connection would put the edit inside the scan's transaction, so a rollback
+/// would take it along — silently, after the request had already answered 200. Here the
+/// transaction is a value handed to a closure, so there is nothing for an edit to fall into
+/// by accident.
 #[test]
 fn a_write_during_a_long_transaction_survives_that_transaction_failing() {
     let dir = temp();

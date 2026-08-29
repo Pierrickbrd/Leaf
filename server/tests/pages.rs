@@ -340,10 +340,9 @@ fn a_dropped_prefetch_gives_its_claim_back() {
     }
 
     // A claim that is never given back means that page is never prepared again — one
-    // stutter, at the same page, every time it is read. In Kotlin the stock rejection
-    // policies dropped a task in silence, without running the code that would have
-    // released it; here the dropped value comes back in the error, so releasing it is the
-    // only thing there is to do with it.
+    // stutter, at the same page, every time it is read. A queue that drops a task in
+    // silence never runs the code that would have released it; here the dropped value comes
+    // back in the error, so releasing it is the only thing there is to do with it.
     // A deadline rather than a count of naps, and a generous one: what is being waited on
     // is the one warm that was accepted actually preparing a page — decode, resize, encode
     // — which is real work on a machine that may be busy with other things. This asserts

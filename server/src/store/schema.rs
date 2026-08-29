@@ -4,8 +4,8 @@
 //! Nothing here requires chapters to exist: a series may be flat volumes. Chapter markers
 //! and arcs are tables that stay empty, not columns that must be filled.
 //!
-//! Ported statement for statement from the Kotlin. The SQL is the part of that server
-//! worth keeping unchanged — it is where the model lives, and it has tests behind it.
+//! The SQL is written out rather than generated: it is where the model lives, and it has
+//! tests behind it.
 
 /// Run in order on every start. `IF NOT EXISTS` throughout, so this is idempotent and a
 /// fresh database is created already current.

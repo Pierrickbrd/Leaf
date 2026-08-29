@@ -178,10 +178,10 @@ fn the_client_can_ask_for_one_level_only() {
 /// The guess answers about the level that was asked for, or not at all.
 ///
 /// It is series-only by construction: it reads what it compares, so what it reads has to
-/// stay bounded by the shelf — two hundred rows rather than fifty thousand. That made it
-/// answer with a series to a client that had asked for chapters, which the Kotlin did too.
-/// Decided at the port: a client that asked for chapters and got none wants "no chapters",
-/// not "here is a series you might have meant".
+/// stay bounded by the shelf — two hundred rows rather than fifty thousand. Left as it is,
+/// that answers with a series to a client that asked for chapters: and a client that asked
+/// for chapters and got none wants "no chapters", not "here is a series you might have
+/// meant".
 #[test]
 fn the_guess_is_offered_only_when_a_series_was_asked_for() {
     let f = Fixture::new();

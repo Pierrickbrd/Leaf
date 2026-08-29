@@ -6,8 +6,8 @@
 //!
 //! The guard is an **extractor**, so it appears in the handler's signature: a route that
 //! reads takes a [`Reader`], one that writes takes an [`Importer`]. A handler missing one
-//! is a handler that reads as unguarded, which is the property the Kotlin got from spelling
-//! the check out on every route — without spelling anything out.
+//! is a handler that reads as unguarded — the property a check spelled out on every route
+//! would buy, without spelling anything out.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -967,10 +967,8 @@ async fn receive_import_file(
     };
 
     let received = stream_to(body, target, from, ceiling).await?;
-    // A number, like every other count in this API. The Kotlin spelled it as text because
-    // it built the response from a Map<String, String>, which was an accident of the type
-    // rather than a decision — wart 2, decided at the port while there is no client to
-    // break.
+    // A number, like every other count in this API. Built from a map of strings it would
+    // come back as text, which is an accident of the type rather than a decision.
     Ok(Json(serde_json::json!({ "path": path, "received": received })).into_response())
 }
 

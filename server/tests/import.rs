@@ -159,7 +159,7 @@ fn a_sidecar_carries_what_was_said_and_nothing_else() {
         .expect("patching");
 
     // These files are read and edited by hand. One touched field must not write out
-    // fourteen nulls beside it — which is what `encodeDefaults = false` gave the Kotlin.
+    // fourteen nulls beside it, which is what writing every field at its default would do.
     let written = std::fs::read_to_string(world.library().join("Bleach/work.json")).unwrap();
     assert!(
         !written.contains("null"),
