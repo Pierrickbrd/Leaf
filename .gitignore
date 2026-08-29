@@ -18,9 +18,10 @@ data/
 
 .idea/
 
-# Python bytecode from the tools.
+# Python bytecode and coverage data from the tools.
 __pycache__/
 *.pyc
+.coverage
 
 # Qt et CMake — chaque bloc construit avec son outil.
 desktop/build/

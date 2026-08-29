@@ -270,11 +270,16 @@ Warnings are errors in every block: `-D warnings` for Rust, `-Werror` for C++.
 Tests are named as sentences — `patching_something_that_is_not_there_is_a_404` — and each one
 exists because something in that list was once wrong.
 
-Two of the client's tests are builds that **must fail**: `Ascii.h` makes a non-ASCII byte in a
-Latin-1 literal a compile error, and `refuses_latin1.sh` checks that it still does, and for
-the stated reason. The sources are UTF-8, so `é` is two bytes; read as Latin-1 it silently
-becomes `Ã©`, a perfectly valid string that is simply the wrong one. No run-time test can
-catch that — it would have to be a test of every literal ever written.
+**Every literal in the client is `u"…"_s`** — UTF-16, which carries a title in any script.
+There is no second form to choose between, and `bytes_stay_utf8.py` refuses the word `Latin1`
+anywhere so that there never is one again.
+
+The rule earns its keep because the failure is silent. The sources are UTF-8, so `é` is two
+bytes; read as Latin-1 it becomes `Ã©`, a perfectly valid string that is simply the wrong one.
+No run-time test catches that — it would have to be a test of every literal ever written — so
+the guard checks the *name* rather than the argument. An argument has an unbounded number of
+shapes (`"\xC3\xA9"`, the same in octal, a raw string, two adjacent literals, a variable);
+the name has one.
 
 ## Licence
 
