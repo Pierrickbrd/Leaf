@@ -8,7 +8,7 @@ name: sonar
 # Filtering it by path would mean analysing a repository half of which was not read.
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
