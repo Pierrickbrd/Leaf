@@ -32,13 +32,14 @@ volume rather than restarting in each chapter.
 **The source is only ever read.** Nothing is written back, moved or renamed: the prepared
 tree stays exactly as it was.
 
-    python3 tools/from-tomes-json.py SOURCE DESTINATION [--dry-run]
+    python3 tools/from_tomes_json.py SOURCE DESTINATION [--dry-run]
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os.path
 import re
 import sys
 import zipfile
@@ -118,6 +119,26 @@ def arcs_of(source: dict) -> list[dict]:
     return sorted(arcs, key=lambda a: a["from"])
 
 
+def chapter_entry(chapter: dict, kind: str, highest: float | None) -> tuple[dict, float | None]:
+    """One chapter's line in entry.json, and the highest number seen so far.
+
+    A chapter whose "number" is a word — a one-shot, a special — has no number. It is
+    anchored instead, and shows its title alone rather than a made-up label. Inventing 109
+    here would be a lie the series carried for ever.
+    """
+    number = chapter.get("number")
+    entry = {"title": chapter.get("title")}
+    if isinstance(number, (int, float)) and not isinstance(number, bool):
+        entry["number"] = number
+        highest = number if highest is None else max(highest, number)
+    else:
+        entry["after"] = highest if highest is not None else 0
+        entry["label"] = ""
+    if kind == "VOLUME" and chapter.get("start_page") is not None:
+        entry["startPage"] = chapter["start_page"]
+    return entry, highest
+
+
 def entry_of(volume: dict, work: str, edition: str, last_number: float | None) -> tuple[dict, float | None]:
     """One entry's entry.json, and the chapter number it leaves behind.
 
@@ -129,23 +150,9 @@ def entry_of(volume: dict, work: str, edition: str, last_number: float | None) -
     chapters = []
     highest = last_number
     for chapter in volume.get("chapters") or []:
-        number = chapter.get("number")
-        numeric = isinstance(number, (int, float)) and not isinstance(number, bool)
-        entry = {"title": chapter.get("title")}
-        if numeric:
-            entry["number"] = number
-            highest = number if highest is None else max(highest, number)
-        else:
-            # A chapter whose "number" is a word — a one-shot, a special — has no number.
-            # It is anchored instead, and shows its title alone rather than a made-up
-            # label. Inventing 109 here would be a lie the series carried for ever.
-            entry["after"] = highest if highest is not None else 0
-            entry["label"] = ""
-        if kind == "VOLUME" and chapter.get("start_page") is not None:
-            entry["startPage"] = chapter["start_page"]
-        chapters.append(entry)
+        one, highest = chapter_entry(chapter, kind, highest)
+        chapters.append(one)
 
-    number = volume.get("canonical_number")
     written = {
         "leaf": FORMAT_VERSION,
         "work": work,
@@ -153,6 +160,7 @@ def entry_of(volume: dict, work: str, edition: str, last_number: float | None) -
         "type": kind,
     }
     # A standalone chapter takes its number from its chapter, not from a volume count.
+    number = volume.get("canonical_number")
     if kind == "VOLUME" and isinstance(number, (int, float)):
         written["number"] = number
     for key, field in (("title", "title"), ("gtin", "isbn"), ("release_date_fr", "publishedOn"), ("summary_fr", "summary")):
@@ -161,6 +169,181 @@ def entry_of(volume: dict, work: str, edition: str, last_number: float | None) -
     if chapters:
         written["chapters"] = chapters
     return written, highest
+
+
+def work_of(data: dict, work_name: str, status: str) -> dict:
+    """What stays true of the work whichever edition you are holding."""
+    work = {
+        "leaf": FORMAT_VERSION,
+        "title": work_name,
+        "medium": MEDIUM.get((data.get("content_type") or "").strip().lower(), "other"),
+        # Nothing in the prepared file says whether a series is finished — a count that
+        # differs from the main count only means there is a one-shot beside it. So it is
+        # asked for rather than guessed: an ongoing series takes new volumes on its own,
+        # a completed one asks first, and getting that backwards is silently annoying.
+        "status": status,
+        "readingDirection": reading_direction(data.get("Manga")),
+    }
+    for key, field in (("Writer", "author"), ("Summary", "summary")):
+        if data.get(key):
+            work[field] = data[key]
+    if data.get("Genre"):
+        work["genres"] = [g.strip() for g in data["Genre"].split(",") if g.strip()]
+    return work
+
+
+def edition_of(data: dict, edition_name: str | None, status: str) -> dict:
+    """What is true of this printing of it, and of no other."""
+    edition: dict = {
+        "leaf": FORMAT_VERSION,
+        "status": status,
+        # What was published, and only the numbered volumes: a one-shot is not volume 7.
+        "volumeCount": data.get("main_series_count") or data.get("Count"),
+    }
+    for key, field in (("Publisher", "publisher"), ("LanguageISO", "language"), ("Format", "format")):
+        if data.get(key):
+            edition[field] = data[key]
+    if edition_name:
+        edition["name"] = edition_name
+    label = chapter_label(data.get("chapter_name_template"), data.get("chapter_number_width"))
+    if label:
+        edition["chapterLabel"] = label
+    arcs = arcs_of(data)
+    if arcs:
+        edition["arcs"] = arcs
+    return edition
+
+
+def a_folder_name(value: str, what: str) -> str:
+    """The one folder name `value` was asked to be.
+
+    `--work ../../etc` would otherwise write outside the destination, and quietly: every
+    path in here is built by joining, and a join with `..` walks straight back out. Taken
+    apart rather than checked, so that what reaches the joining is a name by construction
+    and not a string that passed a test — and refused rather than trimmed, because a name
+    that had to be trimmed is not the name anybody meant.
+    """
+    name = os.path.basename(value)
+    if name != value or name in ("", ".", ".."):
+        raise SystemExit(f'--{what}: "{value}" names a folder, so it cannot be a path')
+    return name
+
+
+def inside(root: Path, name: str) -> Path:
+    """`root` with one more name on it, wherever that name came from.
+
+    The names off the command line are taken apart where they arrive; this is for the ones
+    that come out of tomes.json, which nothing has vouched for either.
+    """
+    return root / a_folder_name(name, "output")
+
+
+def under(library: Path, path: Path) -> Path:
+    """`path`, resolved, having checked it really is inside the library.
+
+    The second check, at the other end from `a_folder_name`, and the one that catches what
+    a name alone cannot: a symlink halfway along the path, pointing anywhere. Resolved
+    first and compared afterwards, because two paths only mean the same folder once
+    everything standing in the way has been followed.
+    """
+    resolved = os.path.realpath(path)
+    root = os.path.realpath(library)
+    if resolved != root and not resolved.startswith(root + os.sep):
+        raise SystemExit(f"{path} is outside {library}")
+    return Path(resolved)
+
+
+def write_json(path: Path, content: dict) -> None:
+    """Straight into the open file, rather than through one big string.
+
+    `write_text` takes the path and the whole document in a single call, which reads as
+    though the two were the same kind of thing. They are not: the path has been checked and
+    the content is whatever the source file and the command line said. Opening first keeps
+    them apart.
+    """
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(content, file, ensure_ascii=False, indent=2)
+        file.write("\n")
+
+
+def write_universe(root: Path, path: Path, name: str) -> None:
+    """Written once and never rewritten: a second work joining a universe does not get to
+    rename it."""
+    root.mkdir(parents=True, exist_ok=True)
+    if not path.is_file():
+        write_json(path, {"leaf": FORMAT_VERSION, "name": name})
+
+
+def write_sidecars(
+    edition_dir: Path,
+    work_file: Path,
+    edition_file: Path | None,
+    work: dict,
+    edition: dict,
+    existing_work: bool,
+) -> None:
+    edition_dir.mkdir(parents=True, exist_ok=True)
+    # A second edition must not rewrite what the first one settled about the work.
+    if not existing_work:
+        write_json(work_file, work)
+    if edition_file:
+        write_json(edition_file, edition)
+
+
+def announce(
+    work: dict,
+    edition: dict,
+    work_name: str,
+    edition_name: str | None,
+    arcs: list,
+    existing_work: bool,
+) -> None:
+    """What is about to be written, in the order it will be read."""
+    if edition_name:
+        print(f"  work.json    → {work_name}: {work['medium']}, {work['status']}, {work['readingDirection']}"
+              + ("  (already there, left alone)" if existing_work else ""))
+        print(f"  edition.json → {edition_name}: {edition['volumeCount']} volumes, "
+              f"label {edition.get('chapterLabel', '—')}, {len(arcs)} arc(s)")
+    else:
+        print(f"  work.json    → {work_name}: {work['medium']}, {work['status']}, {work['readingDirection']}, "
+              f"{work['volumeCount']} volumes, label {work.get('chapterLabel', '—')}, {len(arcs)} arc(s)")
+
+
+def write_volumes(
+    source: Path,
+    edition_dir: Path,
+    data: dict,
+    work_name: str,
+    edition_name: str | None,
+    dry_run: bool,
+) -> None:
+    """Every volume in number order, each as one archive holding its pages and its entry.json.
+
+    Stored rather than deflated: the pages are already compressed images, and asking zip to
+    compress them again costs the whole library's worth of CPU to save nothing.
+    """
+    highest: float | None = None
+    for key in sorted(data["volumes"], key=lambda k: int(k)):
+        volume = data["volumes"][key]
+        folder = source / volume["path"]
+        if not folder.is_dir():
+            print(f"  ! {volume['path']}: no such folder, skipped")
+            continue
+
+        pages = images_of(folder)
+        written, highest = entry_of(volume, work_name, edition_name, highest)
+        anchored = sum(1 for c in written.get("chapters", []) if "after" in c)
+        print(f"  {volume['output']:<14} {written['type']:<7} {len(pages):>4} pages · "
+              f"{len(written.get('chapters', [])):>2} chapters"
+              + (f" · {anchored} anchored" if anchored else ""))
+
+        if dry_run:
+            continue
+        target = inside(edition_dir, volume["output"])
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_STORED) as archive:
+            for page in pages:
+                archive.write(page, page.name)
+            archive.writestr("entry.json", json.dumps(written, ensure_ascii=False, indent=2))
 
 
 def build(
@@ -184,107 +367,38 @@ def build(
     # A universe groups works that are not editions of one another — Parasite holds the
     # series proper and its spin-off, which is by a different author. Without the file
     # the scanner would have to guess, and a folder of folders looks the same either way.
-    root = destination / universe_name if universe_name else destination
-    work_dir = root / work_name
+    library = under(destination, destination)
+    root = under(library, library / universe_name) if universe_name else library
+    work_dir = under(library, root / work_name)
     # A work with a single edition has no folder for it: the volumes sit beside work.json
     # and the edition fields live there too. Nothing is declared for a choice that is not
     # being offered.
-    edition_dir = work_dir / edition_name if edition_name else work_dir
+    edition_dir = under(library, work_dir / edition_name) if edition_name else work_dir
 
-    medium = MEDIUM.get((data.get("content_type") or "").strip().lower(), "other")
-    work = {
-        "leaf": FORMAT_VERSION,
-        "title": work_name,
-        "medium": medium,
-        # Nothing in the prepared file says whether a series is finished — a count that
-        # differs from the main count only means there is a one-shot beside it. So it is
-        # asked for rather than guessed: an ongoing series takes new volumes on its own,
-        # a completed one asks first, and getting that backwards is silently annoying.
-        "status": status,
-        "readingDirection": reading_direction(data.get("Manga")),
-    }
-    for key, field in (("Writer", "author"), ("Summary", "summary")):
-        if data.get(key):
-            work[field] = data[key]
-    if data.get("Genre"):
-        work["genres"] = [g.strip() for g in data["Genre"].split(",") if g.strip()]
+    # Every file this writes, checked one by one rather than trusting the folder it sits in:
+    # the check belongs on the path that reaches the disk, not on the one it was built from.
+    universe_file = under(library, root / "universe.json") if universe_name else None
+    work_file = under(library, work_dir / "work.json")
+    edition_file = under(library, edition_dir / "edition.json") if edition_name else None
 
-    edition: dict = {
-        "leaf": FORMAT_VERSION,
-        "status": status,
-        # What was published, and only the numbered volumes: a one-shot is not volume 7.
-        "volumeCount": data.get("main_series_count") or data.get("Count"),
-    }
-    for key, field in (("Publisher", "publisher"), ("LanguageISO", "language"), ("Format", "format")):
-        if data.get(key):
-            edition[field] = data[key]
-    label = chapter_label(data.get("chapter_name_template"), data.get("chapter_number_width"))
-    if edition_name:
-        edition["name"] = edition_name
-    if label:
-        edition["chapterLabel"] = label
-    arcs = arcs_of(data)
-    if arcs:
-        edition["arcs"] = arcs
-
-    if universe_name and not dry_run:
-        root.mkdir(parents=True, exist_ok=True)
-        universe_file = root / "universe.json"
-        if not universe_file.is_file():
-            universe_file.write_text(
-                json.dumps({"leaf": FORMAT_VERSION, "name": universe_name}, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-    if universe_name:
-        print(f"  universe.json→ {universe_name}")
-
-    work_file = work_dir / "work.json"
-    existing_work = work_file.is_file()
-
-    if edition_name:
-        print(f"  work.json    → {work_name}: {medium}, {work['status']}, {work['readingDirection']}"
-              + ("  (already there, left alone)" if existing_work else ""))
-        print(f"  edition.json → {edition_name}: {edition['volumeCount']} volumes, "
-              f"label {edition.get('chapterLabel', '—')}, {len(arcs)} arc(s)")
-    else:
+    work = work_of(data, work_name, status)
+    edition = edition_of(data, edition_name, status)
+    arcs = edition.get("arcs", [])
+    if not edition_name:
         # Implicit edition: everything lands in work.json, and dropping an edition.json
         # beside the volumes would flip how the scanner classifies the folder.
         work.update({k: v for k, v in edition.items() if k not in ("leaf", "name")})
-        print(f"  work.json    → {work_name}: {medium}, {work['status']}, {work['readingDirection']}, "
-              f"{work['volumeCount']} volumes, label {work.get('chapterLabel', '—')}, {len(arcs)} arc(s)")
 
+    if universe_name:
+        if not dry_run:
+            write_universe(root, universe_file, universe_name)
+        print(f"  universe.json→ {universe_name}")
+
+    existing_work = work_file.is_file()
+    announce(work, edition, work_name, edition_name, arcs, existing_work)
     if not dry_run:
-        edition_dir.mkdir(parents=True, exist_ok=True)
-        # A second edition must not rewrite what the first one settled about the work.
-        if not existing_work:
-            work_file.write_text(json.dumps(work, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        if edition_name:
-            (edition_dir / "edition.json").write_text(
-                json.dumps(edition, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-            )
-
-    highest: float | None = None
-    for key in sorted(data["volumes"], key=lambda k: int(k)):
-        volume = data["volumes"][key]
-        folder = source / volume["path"]
-        if not folder.is_dir():
-            print(f"  ! {volume['path']}: no such folder, skipped")
-            continue
-
-        pages = images_of(folder)
-        written, highest = entry_of(volume, work_name, edition_name, highest)
-        target = edition_dir / volume["output"]
-        anchored = sum(1 for c in written.get("chapters", []) if "after" in c)
-        print(f"  {volume['output']:<14} {written['type']:<7} {len(pages):>4} pages · "
-              f"{len(written.get('chapters', [])):>2} chapters"
-              + (f" · {anchored} anchored" if anchored else ""))
-
-        if dry_run:
-            continue
-        with zipfile.ZipFile(target, "w", zipfile.ZIP_STORED) as archive:
-            for page in pages:
-                archive.write(page, page.name)
-            archive.writestr("entry.json", json.dumps(written, ensure_ascii=False, indent=2))
+        write_sidecars(edition_dir, work_file, edition_file, work, edition, existing_work)
+    write_volumes(source, edition_dir, data, work_name, edition_name, dry_run)
 
 
 def main() -> int:
@@ -310,8 +424,15 @@ def main() -> int:
         print(f"no tomes.json in {arguments.source}", file=sys.stderr)
         return 1
 
-    work_name = arguments.work or arguments.source.parent.name
-    edition_name = arguments.source.name if arguments.edition is None else (arguments.edition or None)
+    # Every name that becomes a folder is taken apart here, at the one place they arrive,
+    # rather than anywhere further in where the path is already half built.
+    universe_name = a_folder_name(arguments.universe, "universe") if arguments.universe else None
+    work_name = a_folder_name(arguments.work, "work") if arguments.work else arguments.source.parent.name
+    if arguments.edition is None:
+        edition_name = arguments.source.name
+    else:
+        # `--edition ""` is the way to say a work has only one, and needs no folder for it.
+        edition_name = a_folder_name(arguments.edition, "edition") if arguments.edition else None
 
     print(f"{arguments.source.name} → {arguments.destination}" + ("  (dry run)" if arguments.dry_run else ""))
     build(
@@ -321,7 +442,7 @@ def main() -> int:
         arguments.status,
         work_name,
         edition_name,
-        arguments.universe,
+        universe_name,
     )
     return 0
 

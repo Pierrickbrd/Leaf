@@ -25,11 +25,16 @@ import time
 # Spelled exactly as the server writes it. Being lenient about the whitespace bought
 # nothing — this parses one formatter's output, not a human's — and every variable-length
 # run beside another is somewhere for the matcher to backtrack.
+#
+# Bounded rather than open: `\d+` before a literal makes `search` walk back over the digits
+# it just took at every position it fails, which is quadratic on a long report. Twenty
+# digits is every number the server can count to, and it costs the matcher a fixed ceiling.
+_COUNT = r"(\d{1,20})"
 _HEADER = re.compile(
-    r"(\d+) universe\(s\), (\d+) work\(s\), (\d+) edition\(s\), "
-    r"(\d+) entry\(ies\), (\d+) chapter\(s\), (\d+) page\(s\)"
+    rf"{_COUNT} universe\(s\), {_COUNT} work\(s\), {_COUNT} edition\(s\), "
+    rf"{_COUNT} entry\(ies\), {_COUNT} chapter\(s\), {_COUNT} page\(s\)"
 )
-_REANALYSED = re.compile(r"(\d+) entry\(ies\) reanalysed")
+_REANALYSED = re.compile(rf"{_COUNT} entry\(ies\) reanalysed")
 
 _COUNTERS = ("universes", "works", "editions", "entries", "chapters", "pages")
 
