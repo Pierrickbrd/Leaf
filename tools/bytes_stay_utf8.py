@@ -58,21 +58,33 @@ AS_A_TYPE = re.compile(r"^QLatin1String(?:View)?$")
 A_DECLARATION = re.compile(r"\s+[A-Za-z_]\w*\s*(?:[,);]|$)")
 
 
-def main() -> int:
-    found = []
+def files_to_read():
+    """Every source file the rule covers, in a stable order."""
     for place in LOOKED_AT:
         if not place.is_dir():
             continue
         for path in sorted(place.rglob("*")):
-            if path.suffix not in {".h", ".cpp", ".qml"} or path in SPARED:
-                continue
-            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                for hit in ANY.finditer(line):
-                    word = hit.group(0)
-                    after = line[hit.end():]
-                    if AS_A_TYPE.match(word) and A_DECLARATION.match(after):
-                        continue  # the type of a parameter, carrying ASCII
-                    found.append((path.relative_to(ROOT), number, word, line.strip()))
+            if path.suffix in {".h", ".cpp", ".qml"} and path not in SPARED:
+                yield path
+
+
+def asks_for_latin1(path):
+    """Every place in one file that names Latin-1 other than as a parameter's type."""
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        for hit in ANY.finditer(line):
+            word = hit.group(0)
+            after = line[hit.end():]
+            if AS_A_TYPE.match(word) and A_DECLARATION.match(after):
+                continue  # the type of a parameter, carrying ASCII
+            yield number, word, line.strip()
+
+
+def main() -> int:
+    found = [
+        (path.relative_to(ROOT), number, word, line)
+        for path in files_to_read()
+        for number, word, line in asks_for_latin1(path)
+    ]
 
     for path, number, word, line in found:
         print(f"✗ {path}:{number} — {word}\n    {line}")

@@ -93,7 +93,9 @@ def chapter_label(template: str | None, width: int | None) -> str | None:
     if not template:
         return None
     prefix = template.split("{title}")[0]
-    prefix = re.sub(r"\s*[:\-–—]\s*$", "", prefix).strip()
+    # Trailing separator off, then the spaces around it. A regex with a variable-length
+    # run on both sides of the separator backtracks; two strips do not.
+    prefix = prefix.strip().rstrip(":-–—").strip()
     if "{number}" not in prefix:
         return None
     padding = "0" * width if width and width > 1 else ""
@@ -305,7 +307,8 @@ def main() -> int:
     arguments = parser.parse_args()
 
     if not (arguments.source / "tomes.json").is_file():
-        return print(f"no tomes.json in {arguments.source}") or 1
+        print(f"no tomes.json in {arguments.source}", file=sys.stderr)
+        return 1
 
     work_name = arguments.work or arguments.source.parent.name
     edition_name = arguments.source.name if arguments.edition is None else (arguments.edition or None)

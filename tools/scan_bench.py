@@ -22,11 +22,14 @@ import time
 # Bounded rather than open quantifiers: `\s+\s*` chains backtrack super-linearly on input
 # that nearly matches, and the report this reads is one line of a machine's own output —
 # eight spaces is already far more slack than it will ever need.
+# Spelled exactly as the server writes it. Being lenient about the whitespace bought
+# nothing — this parses one formatter's output, not a human's — and every variable-length
+# run beside another is somewhere for the matcher to backtrack.
 _HEADER = re.compile(
-    r"(\d+)\s{1,8}universe\(s\),\s{0,8}(\d+)\s{1,8}work\(s\),\s{0,8}(\d+)\s{1,8}edition\(s\),\s{0,8}"
-    r"(\d+)\s{1,8}entry\(ies\),\s{0,8}(\d+)\s{1,8}chapter\(s\),\s{0,8}(\d+)\s{1,8}page\(s\)"
+    r"(\d+) universe\(s\), (\d+) work\(s\), (\d+) edition\(s\), "
+    r"(\d+) entry\(ies\), (\d+) chapter\(s\), (\d+) page\(s\)"
 )
-_REANALYSED = re.compile(r"(\d+)\s{1,8}entry\(ies\)\s{1,8}reanalysed")
+_REANALYSED = re.compile(r"(\d+) entry\(ies\) reanalysed")
 
 _COUNTERS = ("universes", "works", "editions", "entries", "chapters", "pages")
 
@@ -288,27 +291,17 @@ def _every_counter_is_zero(measures):
     return bool(counted) and not any(counted)
 
 
-def render_report(corpus, facts, measures):
-    """The disk first, the numbers after. Never the other way round."""
-    rotational = "unknown" if facts["rotational"] is None else (
-        "yes" if facts["rotational"] else "no"
-    )
+def _describe_the_disk(corpus, facts):
+    """The header block: what the numbers below were taken on."""
+    if facts["rotational"] is None:
+        rotational = "unknown"
+    else:
+        rotational = "yes" if facts["rotational"] else "no"
     link = f"{facts['link_mbps']} Mbit/s" if facts["link_mbps"] else "—"
     read_ahead = (
         "unknown" if facts["read_ahead_kb"] is None else f"{facts['read_ahead_kb']} kB"
     )
-
-    lines = ["Scan bench", ""]
-
-    if _every_counter_is_zero(measures):
-        lines += [
-            "  !! EVERY COUNTER IS ZERO — these passes scanned nothing at all.",
-            "  !! Check --corpus: a path that holds no library scans in under a second",
-            "  !! and reports timings that measure nothing. Do not record these numbers.",
-            "",
-        ]
-
-    lines += [
+    return [
         f"  corpus       {corpus}",
         f"  device       {facts['source']}  (base {facts['base']})",
         f"  rotational   {rotational}",
@@ -319,20 +312,41 @@ def render_report(corpus, facts, measures):
         "",
     ]
 
-    for label, measure in measures.items():
-        summary = measure["stats"]
+
+def _describe_one_variant(label, measure):
+    """One variant's timings: the spread, the cold pass, and what the scan found."""
+    summary = measure["stats"]
+    lines = [
+        f"  {label:<16} median {summary['median']:.1f} s"
+        f"   (min {summary['min']:.1f} · max {summary['max']:.1f}"
+        f" · {summary['passes']} pass(es))"
+    ]
+    if measure.get("first") is not None:
+        lines.append(f"                   first (coldest) {measure['first']:.1f} s")
+    if measure.get("counts"):
         lines.append(
-            f"  {label:<16} median {summary['median']:.1f} s"
-            f"   (min {summary['min']:.1f} · max {summary['max']:.1f}"
-            f" · {summary['passes']} pass(es))"
+            "                   "
+            + ", ".join(f"{value} {name}" for name, value in measure["counts"].items())
         )
-        if measure.get("first") is not None:
-            lines.append(f"                   first (coldest) {measure['first']:.1f} s")
-        if measure.get("counts"):
-            lines.append(
-                "                   "
-                + ", ".join(f"{value} {name}" for name, value in measure["counts"].items())
-            )
+    return lines
+
+
+_SCANNED_NOTHING = [
+    "  !! EVERY COUNTER IS ZERO — these passes scanned nothing at all.",
+    "  !! Check --corpus: a path that holds no library scans in under a second",
+    "  !! and reports timings that measure nothing. Do not record these numbers.",
+    "",
+]
+
+
+def render_report(corpus, facts, measures):
+    """The disk first, the numbers after. Never the other way round."""
+    lines = ["Scan bench", ""]
+    if _every_counter_is_zero(measures):
+        lines += _SCANNED_NOTHING
+    lines += _describe_the_disk(corpus, facts)
+    for label, measure in measures.items():
+        lines += _describe_one_variant(label, measure)
 
     if any(measure.get("first") is not None for measure in measures.values()):
         lines += [

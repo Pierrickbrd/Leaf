@@ -35,6 +35,17 @@ KEY = sys.argv[2] if len(sys.argv) > 2 else ""
 PIN = (sys.argv[3] if len(sys.argv) > 3 else "").replace(":", "").lower()
 
 SPEC = yaml.safe_load(open("contract/openapi.yaml"))
+# The contract's own path templates. They are the keys this script looks the schemas up
+# under, so they have to read exactly as `openapi.yaml` spells them — naming them once
+# means a rename in the contract is a rename here, and not four of them.
+SERIES = "/series"
+ONE_SERIES = "/series/{id}"
+ONE_ENTRY = "/entries/{id}"
+ENTRY_PROGRESS = "/entries/{id}/progress"
+UP_NEXT = "/next"
+IMPORT = "/import"
+ONE_IMPORT = "/import/{id}"
+
 CONTEXT = None
 
 if BASE.startswith("https://"):
@@ -121,53 +132,53 @@ def check(label, path, template, method="GET", body=None, headers=None):
 
 print("— reading —")
 check("health", "/health", "/health")
-page = check("series", "/series", "/series")
+page = check("series", SERIES, SERIES)
 series = page["items"][0]["id"]
 check("filters", "/filters", "/filters")
 check("format", "/format", "/format")
-check("one series", f"/series/{series}", "/series/{id}")
+check("one series", f"/series/{series}", ONE_SERIES)
 entries = check("series entries", f"/series/{series}/entries", "/series/{id}/entries")
 check("series chapters", f"/series/{series}/chapters", "/series/{id}/chapters")
 check("series arcs", f"/series/{series}/arcs", "/series/{id}/arcs")
 check("series progress", f"/series/{series}/progress", "/series/{id}/progress")
-check("unknown series", "/series/nope", "/series/{id}")
+check("unknown series", "/series/nope", ONE_SERIES)
 entry = entries[0]["id"]
-check("one entry", f"/entries/{entry}", "/entries/{id}")
+check("one entry", f"/entries/{entry}", ONE_ENTRY)
 check("entry chapters", f"/entries/{entry}/chapters", "/entries/{id}/chapters")
 check("entry pages", f"/entries/{entry}/pages", "/entries/{id}/pages")
-check("unknown entry", "/entries/nope", "/entries/{id}")
+check("unknown entry", "/entries/nope", ONE_ENTRY)
 check("search", "/search?q=a", "/search")
 check("search by kind", "/search?q=a&kind=CHAPTER", "/search")
-check("up next", "/next", "/next")
+check("up next", UP_NEXT, UP_NEXT)
 check("scan status", "/scan", "/scan")
 
 print("— progress —")
-check("record", f"/entries/{entry}/progress", "/entries/{id}/progress", "PATCH", {"page": 1})
-check("read back", f"/entries/{entry}/progress", "/entries/{id}/progress")
-check("up next after", "/next", "/next")
-check("forget", f"/entries/{entry}/progress", "/entries/{id}/progress", "DELETE")
+check("record", f"/entries/{entry}/progress", ENTRY_PROGRESS, "PATCH", {"page": 1})
+check("read back", f"/entries/{entry}/progress", ENTRY_PROGRESS)
+check("up next after", UP_NEXT, UP_NEXT)
+check("forget", f"/entries/{entry}/progress", ENTRY_PROGRESS, "DELETE")
 
 print("— records —")
-check("patch series", f"/series/{series}", "/series/{id}", "PATCH", {"summary": "…"})
-check("patch unknown", "/series/nope", "/series/{id}", "PATCH", {"summary": "…"})
+check("patch series", f"/series/{series}", ONE_SERIES, "PATCH", {"summary": "…"})
+check("patch unknown", "/series/nope", ONE_SERIES, "PATCH", {"summary": "…"})
 check("patch arcs", f"/series/{series}/arcs", "/series/{id}/arcs", "PATCH",
       [{"name": "Un cycle", "unit": "VOLUME", "from": 1, "to": 2}])
-check("patch entry", f"/entries/{entry}", "/entries/{id}", "PATCH", {"title": "Un titre"})
+check("patch entry", f"/entries/{entry}", ONE_ENTRY, "PATCH", {"title": "Un titre"})
 
 print("— import —")
 check("drop listing", "/drop", "/drop")
 check("waiting intake", "/intake", "/intake")
-check("open imports", "/import", "/import")
-opened = check("open import", "/import", "/import", "POST",
+check("open imports", IMPORT, IMPORT)
+opened = check("open import", IMPORT, IMPORT, "POST",
                {"root": "Essai", "files": [{"path": "Tome 1.cbz", "size": 4}]})
-check("import state", f"/import/{opened['id']}", "/import/{id}")
-check("unknown import", "/import/imp_deadbeef", "/import/{id}")
-check("abandon import", f"/import/{opened['id']}", "/import/{id}", "DELETE")
+check("import state", f"/import/{opened['id']}", ONE_IMPORT)
+check("unknown import", "/import/imp_deadbeef", ONE_IMPORT)
+check("abandon import", f"/import/{opened['id']}", ONE_IMPORT, "DELETE")
 check("cleanup", "/cleanup", "/cleanup", "POST", {"root": "Essai", "files": []})
 
 if KEY:
     print("— the guard —")
-    check("no key", "/series", "/series", headers={"X-Leaf-Key": ""})
+    check("no key", SERIES, SERIES, headers={"X-Leaf-Key": ""})
 
 print()
 if failures:

@@ -419,18 +419,16 @@ class RefusesAnIndexInMemory(unittest.TestCase):
     """
 
     def test_a_tmpfs_index_stops_the_bench(self):
+        in_memory = FakeSystem(commands={}, files={}, fstype="tmpfs")
         with self.assertRaises(ValueError) as refused:
-            refuse_a_volatile_index(
-                FakeSystem(commands={}, files={}, fstype="tmpfs"), "/tmp/bench.sqlite"
-            )
+            refuse_a_volatile_index(in_memory, "/tmp/bench.sqlite")
         self.assertIn("tmpfs", str(refused.exception))
         self.assertIn("memory", str(refused.exception))
 
     def test_a_ramfs_index_stops_the_bench_too(self):
+        in_memory = FakeSystem(commands={}, files={}, fstype="ramfs")
         with self.assertRaises(ValueError):
-            refuse_a_volatile_index(
-                FakeSystem(commands={}, files={}, fstype="ramfs"), "/tmp/bench.sqlite"
-            )
+            refuse_a_volatile_index(in_memory, "/tmp/bench.sqlite")
 
     def test_an_index_on_a_real_filesystem_is_allowed(self):
         # ext4 under a home directory — what the corrected plan actually uses, /srv
