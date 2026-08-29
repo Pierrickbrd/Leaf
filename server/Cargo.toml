@@ -28,7 +28,6 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # SIMD resize. Measured on a real page: 1.9 ms against 31 for the scalar one, and against
 # 9.6 for Java's Graphics2D — the one place in this server where Rust is plainly faster.
 fast_image_resize = { version = "5", features = ["image"] }
-sha1 = "0.10"
 # Encoding, which is where a cold page actually spends its time — measured at 18.4 ms of the
 # 31 the whole path costs, against 7.9 for the decode. This one does it in 6.3, in Rust, with
 # SIMD: the same size out and the same fidelity, and no C to install in the container.
@@ -54,6 +53,10 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 
+# One hash for the whole server: identities derived from a path, cache file names, the
+# constant-time key comparison, and the checksum an import is verified against. SHA-1 was
+# here for the first two until nothing in the index depended on it yet — which was the last
+# moment it could be changed for free.
 sha2 = "0.10"
 
 thiserror = "2"

@@ -17,8 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use sha1::{Digest, Sha1};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 use crate::archive::cbz;
 use crate::metadata::label;
@@ -1372,7 +1371,7 @@ fn digest_of(name: &str, detail: &str, label: &str) -> String {
 /// Stable across scans, so an entry keeps its progress when the library is reindexed, and
 /// distinct per level, so a work and its implicit edition do not collide on one path.
 pub fn id_of(path: &Path, suffix: &str) -> String {
-    let digest = Sha1::digest(format!("{}{suffix}", absolute(path)).as_bytes());
+    let digest = Sha256::digest(format!("{}{suffix}", absolute(path)).as_bytes());
     digest
         .iter()
         .map(|b| format!("{b:02x}"))

@@ -24,7 +24,7 @@ use std::sync::{Mutex, OnceLock};
 use anyhow::Result;
 use fast_image_resize::images::Image as FirImage;
 use fast_image_resize::{PixelType, ResizeAlg, ResizeOptions, Resizer};
-use sha1::{Digest, Sha1};
+use sha2::{Digest, Sha256};
 
 use crate::archive::cbz;
 use crate::store::Db;
@@ -368,7 +368,7 @@ impl Pages {
         let width = width
             .map(|w| w.to_string())
             .unwrap_or_else(|| "src".to_string());
-        let digest = Sha1::digest(format!("{key}/{modified_at}/{width}").as_bytes());
+        let digest = Sha256::digest(format!("{key}/{modified_at}/{width}").as_bytes());
         digest.iter().map(|b| format!("{b:02x}")).collect()
     }
 
