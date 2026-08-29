@@ -1,0 +1,44 @@
+name: sonar
+
+# The one workflow that is deliberately NOT filtered by path.
+#
+# Every other workflow here is scoped to its block, so that touching the QML never runs the
+# Rust tests. This one looks at every block at once, which is the whole point of it: a single
+# analysis across the server, the client and the tools, with one quality gate for all three.
+# Filtering it by path would mean analysing a repository half of which was not read.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Sonar assigns findings to commits and computes "new code" from history.
+          # A shallow clone leaves it guessing at both.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+
+      # Clippy already runs with warnings as errors in the server workflow. Here it runs
+      # only to be written down: the analyser imports these findings instead of arriving at
+      # its own, weaker, version of them. `|| true` because a lint that fails the build is
+      # the server workflow's business to report, not this one's — and an empty report would
+      # tell Sonar less than a report of the failure.
+      - name: clippy, written down
+        working-directory: server
+        run: cargo clippy --all-targets --message-format=json > ../clippy.json || true
+
+      - uses: SonarSource/sonarqube-scan-action@v4.1.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
