@@ -40,13 +40,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 LOOKED_AT = [ROOT / "desktop" / "src", ROOT / "desktop" / "tests", ROOT / "desktop" / "qml"]
 
-# Where the guard itself lives. It is the one file that has to name what it is guarding.
-SPARED = {ROOT / "desktop" / "src" / "Ascii.h"}
+# Nothing is spared any more. The one file that used to name what it guards — Ascii.h, which
+# offered a checked Latin-1 literal and deleted Qt's unchecked one — is gone: the client is
+# UTF-16 throughout, so there is no safe Latin-1 to distinguish from an unsafe one.
+SPARED: set = set()
 
 # The whole identifier, not the word: there is no word boundary between the Q and the L of
 # QLatin1String, so a pattern anchored with \b matches QStringConverter::Latin1 and sails
 # straight past QLatin1String("é") — which is the case that matters most.
-ANY = re.compile(r"\w*Latin1\w*")
+# `_L1` too, and it has to be spelled out: there is no "Latin1" inside it, so the pattern
+# above sails straight past `u"é"_L1` — the one door the compiler used to close, back when a
+# deleted operator stood in Ascii.h. That file is gone: the client is UTF-16 throughout and
+# has no safe Latin-1 path left to protect, so the rule is simply that Latin-1 never appears.
+# A rule with no exceptions is one a name check can enforce completely.
+ANY = re.compile(r"\w*Latin1\w*|(?<![\w])_L1\b")
 
 # `QLatin1StringView name` — a type, then an identifier, then the end of the declaration.
 #

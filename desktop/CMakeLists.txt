@@ -17,8 +17,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 
 # The sources are UTF-8, and so is what they compile to — pinned rather than inherited, so a
-# machine with an odd locale builds the same bytes as this one. Ascii.h holds the other half
-# of this: what UTF-8 must never be read back as.
+# machine with an odd locale builds the same bytes as this one. Every literal in this client
+# is UTF-16 (`u"…"_s`), so a title in any script survives from the source to the screen, and
+# no literal has to be judged ASCII by whoever writes it.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-finput-charset=UTF-8 -fexec-charset=UTF-8)
 endif()
@@ -105,27 +106,6 @@ target_include_directories(writes-french PRIVATE src)
 target_link_libraries(writes-french PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME writes-french COMMAND writes-french)
 
-# Built only by the test that insists it fails. Plain add_executable: there is no QObject
-# here, and no reason to run moc over a file whose purpose is to be rejected.
-add_executable(mangles-utf8 EXCLUDE_FROM_ALL tests/mangles_utf8.cpp)
-target_include_directories(mangles-utf8 PRIVATE src)
-target_link_libraries(mangles-utf8 PRIVATE Qt6::Core)
-# The spellings no compiler can be made to refuse: QLatin1String("é") written out in full,
-# and toLatin1(), which turns what it has no room for into a '?'.
-# Run here and not only in CI. It was CI-only, so when the Latin-1 work renamed the literal
-# suffix this stopped matching anything and nobody found out until it was asked by hand.
-add_test(NAME knows-the-contract
-    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/client_knows_the_contract.py)
-
-add_test(NAME bytes-stay-utf8
-    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/bytes_stay_utf8.py)
-
-add_executable(reaches-for-l1 EXCLUDE_FROM_ALL tests/reaches_for_l1.cpp)
-target_include_directories(reaches-for-l1 PRIVATE src)
-target_link_libraries(reaches-for-l1 PRIVATE Qt6::Core)
-
-add_test(NAME refuses-latin1
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/refuses_latin1.sh ${CMAKE_BINARY_DIR})
 
 qt_add_executable(against-the-real-server EXCLUDE_FROM_ALL
     tests/against_real.cpp
@@ -133,6 +113,14 @@ qt_add_executable(against-the-real-server EXCLUDE_FROM_ALL
 target_include_directories(against-the-real-server PRIVATE src)
 target_link_libraries(against-the-real-server PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+
+# The two Python guards. They run here as well as in continuous integration, because a check
+# that only ever runs on a server is a check nobody notices going quiet.
+add_test(NAME knows-the-contract
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/client_knows_the_contract.py)
+
+add_test(NAME bytes-stay-utf8
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/bytes_stay_utf8.py)
 
 set_tests_properties(keeps-the-key talks-to-the-server
     PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

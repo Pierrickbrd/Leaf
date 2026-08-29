@@ -11,8 +11,6 @@
 
 #include "Api.h"
 
-#include "Ascii.h"
-
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonValue>
@@ -25,43 +23,43 @@ namespace {
 QJsonObject aSeries()
 {
     return QJsonObject{
-        {"id"_ascii, "ed-1"_ascii},
-        {"workId"_ascii, "wk-1"_ascii},
-        {"name"_ascii, "Assassination Classroom"_ascii},
-        {"work"_ascii, "Assassination Classroom"_ascii},
-        {"entryCount"_ascii, 21},
-        {"chapterCount"_ascii, 180},
-        {"arcCount"_ascii, 0},
-        {"universe"_ascii, QJsonValue::Null},
-        {"edition"_ascii, QJsonValue::Null},
-        {"author"_ascii, u"Yūsei Matsui"_s},
-        {"medium"_ascii, "manga"_ascii},
-        {"readingDirection"_ascii, "RIGHT_TO_LEFT"_ascii},
-        {"status"_ascii, "completed"_ascii},
-        {"readStatus"_ascii, "IN_PROGRESS"_ascii},
-        {"declaredVolumes"_ascii, 21},
-        {"ownedVolumes"_ascii, 21},
-        {"missingVolumes"_ascii, QJsonArray{}},
-        {"missingChapters"_ascii, QJsonArray{3.5}},
-        {"genres"_ascii, QJsonArray{"Action"_ascii, u"Comédie"_s}},
-        {"publisher"_ascii, "Kana"_ascii},
-        {"language"_ascii, "fr"_ascii},
-        {"addedAt"_ascii, 1750000000},
-        {"lastAddedAt"_ascii, 1755000000},
+        {u"id"_s, u"ed-1"_s},
+        {u"workId"_s, u"wk-1"_s},
+        {u"name"_s, u"Assassination Classroom"_s},
+        {u"work"_s, u"Assassination Classroom"_s},
+        {u"entryCount"_s, 21},
+        {u"chapterCount"_s, 180},
+        {u"arcCount"_s, 0},
+        {u"universe"_s, QJsonValue::Null},
+        {u"edition"_s, QJsonValue::Null},
+        {u"author"_s, u"Yūsei Matsui"_s},
+        {u"medium"_s, u"manga"_s},
+        {u"readingDirection"_s, u"RIGHT_TO_LEFT"_s},
+        {u"status"_s, u"completed"_s},
+        {u"readStatus"_s, u"IN_PROGRESS"_s},
+        {u"declaredVolumes"_s, 21},
+        {u"ownedVolumes"_s, 21},
+        {u"missingVolumes"_s, QJsonArray{}},
+        {u"missingChapters"_s, QJsonArray{3.5}},
+        {u"genres"_s, QJsonArray{u"Action"_s, u"Comédie"_s}},
+        {u"publisher"_s, u"Kana"_s},
+        {u"language"_s, u"fr"_s},
+        {u"addedAt"_s, 1750000000},
+        {u"lastAddedAt"_s, 1755000000},
     };
 }
 
 QJsonObject anEntry()
 {
     return QJsonObject{
-        {"id"_ascii, "en-12"_ascii},
-        {"type"_ascii, "VOLUME"_ascii},
-        {"number"_ascii, 12},
-        {"title"_ascii, QJsonValue::Null},
-        {"pageCount"_ascii, 190},
-        {"chapterCount"_ascii, 4},
-        {"file"_ascii, "Tome 12.cbz"_ascii},
-        {"size"_ascii, 61234567},
+        {u"id"_s, u"en-12"_s},
+        {u"type"_s, u"VOLUME"_s},
+        {u"number"_s, 12},
+        {u"title"_s, QJsonValue::Null},
+        {u"pageCount"_s, 190},
+        {u"chapterCount"_s, 4},
+        {u"file"_s, u"Tome 12.cbz"_s},
+        {u"size"_s, 61234567},
     };
 }
 
@@ -72,6 +70,7 @@ class ReadsTheContract : public QObject
     Q_OBJECT
 
 private slots:
+    void anyScriptSurvives();
     void a_whole_series_arrives_intact()
     {
         const Api::Read<Api::Series> got = Api::series(aSeries());
@@ -111,7 +110,7 @@ private slots:
     void a_missing_required_field_refuses_and_says_which()
     {
         QJsonObject without = aSeries();
-        without.remove("name"_ascii);
+        without.remove(u"name"_s);
 
         const Api::Read<Api::Series> got = Api::series(without);
         QVERIFY(!got.ok());
@@ -122,7 +121,7 @@ private slots:
     void a_required_field_set_to_null_refuses_too()
     {
         QJsonObject nulled = aSeries();
-        nulled["work"_ascii] = QJsonValue::Null;
+        nulled[u"work"_s] = QJsonValue::Null;
 
         const Api::Read<Api::Series> got = Api::series(nulled);
         QVERIFY(!got.ok());
@@ -134,7 +133,7 @@ private slots:
     void a_word_the_client_never_heard_keeps_the_row()
     {
         QJsonObject odd = aSeries();
-        odd["medium"_ascii] = "lianhuanhua"_ascii;
+        odd[u"medium"_s] = u"lianhuanhua"_s;
 
         const Api::Read<Api::Series> got = Api::series(odd);
         QVERIFY2(got.ok(), qPrintable(got.trouble));
@@ -145,13 +144,13 @@ private slots:
     void a_page_says_where_the_broken_item_is()
     {
         QJsonObject broken = aSeries();
-        broken.remove("arcCount"_ascii);
+        broken.remove(u"arcCount"_s);
 
         const QJsonObject body{
-            {"total"_ascii, 3},
-            {"page"_ascii, 0},
-            {"size"_ascii, 100},
-            {"items"_ascii, QJsonArray{aSeries(), broken, aSeries()}},
+            {u"total"_s, 3},
+            {u"page"_s, 0},
+            {u"size"_s, 100},
+            {u"items"_s, QJsonArray{aSeries(), broken, aSeries()}},
         };
 
         const Api::Read<Api::Page> got = Api::page(body);
@@ -163,10 +162,10 @@ private slots:
     void a_good_page_keeps_its_counts()
     {
         const QJsonObject body{
-            {"total"_ascii, 337},
-            {"page"_ascii, 2},
-            {"size"_ascii, 100},
-            {"items"_ascii, QJsonArray{aSeries(), aSeries()}},
+            {u"total"_s, 337},
+            {u"page"_s, 2},
+            {u"size"_s, 100},
+            {u"items"_s, QJsonArray{aSeries(), aSeries()}},
         };
 
         const Api::Read<Api::Page> got = Api::page(body);
@@ -181,23 +180,23 @@ private slots:
     void the_band_reads_where_you_stopped()
     {
         const QJsonObject body{
-            {"seriesId"_ascii, "ed-1"_ascii},
-            {"seriesName"_ascii, "Assassination Classroom"_ascii},
-            {"reason"_ascii, "IN_PROGRESS"_ascii},
-            {"entry"_ascii, anEntry()},
-            {"progress"_ascii,
+            {u"seriesId"_s, u"ed-1"_s},
+            {u"seriesName"_s, u"Assassination Classroom"_s},
+            {u"reason"_s, u"IN_PROGRESS"_s},
+            {u"entry"_s, anEntry()},
+            {u"progress"_s,
              QJsonObject{
-                 {"entryId"_ascii, "en-12"_ascii},
-                 {"page"_ascii, 47},
-                 {"pageCount"_ascii, 190},
-                 {"finished"_ascii, false},
-                 {"updatedAt"_ascii, 1755000000},
-                 {"chapter"_ascii, QJsonObject{{"id"_ascii, "ch-98"_ascii},
-                                            {"raw"_ascii, "098"_ascii},
-                                            {"label"_ascii, "Chapitre 98"_ascii},
-                                            {"kind"_ascii, "CHAPTER"_ascii},
-                                            {"position"_ascii, 2},
-                                            {"entryId"_ascii, "en-12"_ascii}}},
+                 {u"entryId"_s, u"en-12"_s},
+                 {u"page"_s, 47},
+                 {u"pageCount"_s, 190},
+                 {u"finished"_s, false},
+                 {u"updatedAt"_s, 1755000000},
+                 {u"chapter"_s, QJsonObject{{u"id"_s, u"ch-98"_s},
+                                            {u"raw"_s, u"098"_s},
+                                            {u"label"_s, u"Chapitre 98"_s},
+                                            {u"kind"_s, u"CHAPTER"_s},
+                                            {u"position"_s, 2},
+                                            {u"entryId"_s, u"en-12"_s}}},
              }},
         };
 
@@ -216,11 +215,11 @@ private slots:
     void nothing_started_parses_with_no_page()
     {
         const QJsonObject body{
-            {"seriesId"_ascii, "ed-1"_ascii},
-            {"seriesName"_ascii, "Berserk"_ascii},
-            {"reason"_ascii, "NEXT_UP"_ascii},
-            {"entry"_ascii, anEntry()},
-            {"progress"_ascii, QJsonValue::Null},
+            {u"seriesId"_s, u"ed-1"_s},
+            {u"seriesName"_s, u"Berserk"_s},
+            {u"reason"_s, u"NEXT_UP"_s},
+            {u"entry"_s, anEntry()},
+            {u"progress"_s, QJsonValue::Null},
         };
 
         const Api::Read<Api::UpNext> got = Api::upNext(body);
@@ -234,9 +233,9 @@ private slots:
     void a_band_card_with_no_entry_refuses()
     {
         const QJsonObject body{
-            {"seriesId"_ascii, "ed-1"_ascii},
-            {"seriesName"_ascii, "Berserk"_ascii},
-            {"reason"_ascii, "NEXT_UP"_ascii},
+            {u"seriesId"_s, u"ed-1"_s},
+            {u"seriesName"_s, u"Berserk"_s},
+            {u"reason"_s, u"NEXT_UP"_s},
         };
 
         const Api::Read<Api::UpNext> got = Api::upNext(body);
@@ -248,11 +247,11 @@ private slots:
     void facets_keep_their_counts_and_drop_what_has_none()
     {
         const QJsonObject body{
-            {"media"_ascii, QJsonArray{QJsonObject{{"value"_ascii, "manga"_ascii}, {"count"_ascii, 41}},
-                                    QJsonObject{{"value"_ascii, "bd"_ascii}, {"count"_ascii, 12}},
-                                    QJsonObject{{"value"_ascii, "comics"_ascii}}}},
-            {"readStatuses"_ascii,
-             QJsonArray{QJsonObject{{"value"_ascii, "UNREAD"_ascii}, {"count"_ascii, 12}}}},
+            {u"media"_s, QJsonArray{QJsonObject{{u"value"_s, u"manga"_s}, {u"count"_s, 41}},
+                                    QJsonObject{{u"value"_s, u"bd"_s}, {u"count"_s, 12}},
+                                    QJsonObject{{u"value"_s, u"comics"_s}}}},
+            {u"readStatuses"_s,
+             QJsonArray{QJsonObject{{u"value"_s, u"UNREAD"_s}, {u"count"_s, 12}}}},
         };
 
         const Api::Read<Api::Facets> got = Api::facets(body);
@@ -276,6 +275,34 @@ private slots:
             QCOMPARE(Api::spell(Api::readStatus(word)), word);
     }
 };
+
+// Any script, from the start.
+//
+// A library is not French. A work is named in the language it was published in, and the
+// client has no say in which: Japanese, Chinese, Arabic, Cyrillic, or a Latin name with a
+// macron on it. This asserts that what the server sends is what the client holds — the
+// reason every literal here is UTF-16 rather than judged ASCII one at a time.
+void ReadsTheContract::anyScriptSurvives()
+{
+    const QList<QString> names = {
+        u"ハイキュー!!"_s,          // Japanese
+        u"进击的巨人"_s,             // Chinese
+        u"هجوم العمالقة"_s,          // Arabic, right to left
+        u"Атака титанов"_s,         // Cyrillic
+        u"Haikyū — l'été"_s,        // Latin, macron and an apostrophe
+    };
+
+    for (const QString &name : names) {
+        QJsonObject one = aSeries();
+        one[u"name"_s] = name;
+        one[u"work"_s] = name;
+
+        const Api::Read<Api::Series> read = Api::series(one);
+        QVERIFY2(read.ok(), qPrintable(read.trouble));
+        QCOMPARE(read.value->name, name);
+        QCOMPARE(read.value->work, name);
+    }
+}
 
 QTEST_APPLESS_MAIN(ReadsTheContract)
 #include "reads_the_contract.moc"

@@ -51,11 +51,13 @@ SOURCE = ROOT / "desktop" / "src" / "Api.cpp"
 # `field.text("workId"_ascii)` and friends. The name is what sits inside the quotes, and it is
 # the only thing here that has to match the contract.
 #
-# This suffix was `_L1` until the Latin-1 guard renamed it, and this line was not renamed with
-# it: the guard went on running and quietly matched nothing, so every field looked unread. A
-# guard that can silently see nothing is worth no more than no guard, which is why `body_of`
-# now refuses a function it reads nothing out of.
-READS = re.compile(r'"([A-Za-z][A-Za-z0-9]*)"_ascii')
+# The spelling has changed three times: `_L1`, then `_ascii`, now `u"…"_s` — the client went
+# to UTF-16 everywhere so that no literal has to be judged ASCII by a human. The first time,
+# this line was not renamed with it: the guard went on running and quietly matched nothing, so
+# every field looked read. The second and third times it said so itself, which is the whole
+# point of `body_of` refusing a function it reads nothing out of. A guard that can silently
+# see nothing is worth no more than no guard.
+READS = re.compile(r'u"([A-Za-z][A-Za-z0-9]*)"_s')
 
 
 def body_of(source: str, name: str) -> str:

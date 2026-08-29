@@ -1,7 +1,5 @@
 #include "Api.h"
 
-#include "Ascii.h"
-
 #include <QJsonArray>
 #include <QJsonValue>
 
@@ -23,13 +21,13 @@ public:
 
     /// Present and not null. A JSON `null` is the contract's way of saying "not recorded",
     /// so it counts as absent everywhere here.
-    bool has(QLatin1StringView name) const
+    bool has(QStringView name) const
     {
         const QJsonValue value = m_from.value(name);
         return !value.isUndefined() && !value.isNull();
     }
 
-    QString text(QLatin1StringView name)
+    QString text(QStringView name)
     {
         const QJsonValue value = m_from.value(name);
         if (!value.isString())
@@ -37,7 +35,7 @@ public:
         return value.toString();
     }
 
-    int whole(QLatin1StringView name)
+    int whole(QStringView name)
     {
         const QJsonValue value = m_from.value(name);
         if (!value.isDouble()) {
@@ -47,7 +45,7 @@ public:
         return value.toInt();
     }
 
-    QJsonObject object(QLatin1StringView name)
+    QJsonObject object(QStringView name)
     {
         const QJsonValue value = m_from.value(name);
         if (!value.isObject()) {
@@ -57,7 +55,7 @@ public:
         return value.toObject();
     }
 
-    std::optional<QString> maybeText(QLatin1StringView name) const
+    std::optional<QString> maybeText(QStringView name) const
     {
         if (!has(name))
             return std::nullopt;
@@ -65,7 +63,7 @@ public:
         return value.isString() ? std::optional<QString>(value.toString()) : std::nullopt;
     }
 
-    std::optional<int> maybeWhole(QLatin1StringView name) const
+    std::optional<int> maybeWhole(QStringView name) const
     {
         if (!has(name))
             return std::nullopt;
@@ -73,7 +71,7 @@ public:
         return value.isDouble() ? std::optional<int>(value.toInt()) : std::nullopt;
     }
 
-    std::optional<qint64> maybeBig(QLatin1StringView name) const
+    std::optional<qint64> maybeBig(QStringView name) const
     {
         if (!has(name))
             return std::nullopt;
@@ -81,7 +79,7 @@ public:
         return value.isDouble() ? std::optional<qint64>(value.toInteger()) : std::nullopt;
     }
 
-    std::optional<double> maybeReal(QLatin1StringView name) const
+    std::optional<double> maybeReal(QStringView name) const
     {
         if (!has(name))
             return std::nullopt;
@@ -90,7 +88,7 @@ public:
     }
 
     /// An absent list and an empty list are the same thing, so neither is worth a complaint.
-    QList<QString> words(QLatin1StringView name) const
+    QList<QString> words(QStringView name) const
     {
         QList<QString> all;
         for (const QJsonValue &value : m_from.value(name).toArray())
@@ -99,7 +97,7 @@ public:
         return all;
     }
 
-    QList<double> reals(QLatin1StringView name) const
+    QList<double> reals(QStringView name) const
     {
         QList<double> all;
         for (const QJsonValue &value : m_from.value(name).toArray())
@@ -109,7 +107,7 @@ public:
     }
 
 private:
-    QString complain(QLatin1StringView name, const QString &wanted)
+    QString complain(QStringView name, const QString &wanted)
     {
         if (m_trouble.isEmpty()) {
             const QJsonValue value = m_from.value(name);
@@ -118,7 +116,7 @@ private:
                 state = QStringLiteral("is missing");
             else if (value.isNull())
                 state = QStringLiteral("is null");
-            m_trouble = QStringLiteral("%1 %2").arg(QString(name), state);
+            m_trouble = QStringLiteral("%1 %2").arg(name.toString(), state);
         }
         return {};
     }
@@ -133,14 +131,14 @@ Api::Read<T> refused(const QString &what, const QString &trouble)
     return {std::nullopt, QStringLiteral("%1: %2").arg(what, trouble)};
 }
 
-QList<Api::Facet> facetsUnder(const QJsonObject &from, QLatin1StringView name)
+QList<Api::Facet> facetsUnder(const QJsonObject &from, QStringView name)
 {
     QList<Api::Facet> all;
     for (const QJsonValue &value : from.value(name).toArray()) {
         const QJsonObject one = value.toObject();
-        const QJsonValue count = one.value("count"_ascii);
-        if (one.value("value"_ascii).isString() && count.isDouble())
-            all.append({one.value("value"_ascii).toString(), count.toInt()});
+        const QJsonValue count = one.value(u"count"_s);
+        if (one.value(u"value"_s).isString() && count.isDouble())
+            all.append({one.value(u"value"_s).toString(), count.toInt()});
     }
     return all;
 }
@@ -154,19 +152,19 @@ Medium medium(const QString &word)
     using enum Medium;
 
     const QString plain = word.toLower();
-    if (plain == "manga"_ascii)
+    if (plain == u"manga"_s)
         return Manga;
-    if (plain == "bd"_ascii)
+    if (plain == u"bd"_s)
         return Bd;
-    if (plain == "comics"_ascii)
+    if (plain == u"comics"_s)
         return Comics;
-    if (plain == "manhwa"_ascii)
+    if (plain == u"manhwa"_s)
         return Manhwa;
-    if (plain == "manhua"_ascii)
+    if (plain == u"manhua"_s)
         return Manhua;
-    if (plain == "webtoon"_ascii)
+    if (plain == u"webtoon"_s)
         return Webtoon;
-    if (plain == "artbook"_ascii)
+    if (plain == u"artbook"_s)
         return Artbook;
     return Other;
 }
@@ -200,9 +198,9 @@ ReadStatus readStatus(const QString &word)
 {
     using enum ReadStatus;
 
-    if (word == "IN_PROGRESS"_ascii)
+    if (word == u"IN_PROGRESS"_s)
         return InProgress;
-    if (word == "READ"_ascii)
+    if (word == u"READ"_s)
         return Read;
     return Unread;
 }
@@ -227,46 +225,46 @@ Read<Series> series(const QJsonObject &from)
     Fields field(from);
     Series one;
 
-    one.id = field.text("id"_ascii);
-    one.workId = field.text("workId"_ascii);
-    one.name = field.text("name"_ascii);
-    one.work = field.text("work"_ascii);
-    one.entryCount = field.whole("entryCount"_ascii);
-    one.chapterCount = field.whole("chapterCount"_ascii);
-    one.arcCount = field.whole("arcCount"_ascii);
+    one.id = field.text(u"id"_s);
+    one.workId = field.text(u"workId"_s);
+    one.name = field.text(u"name"_s);
+    one.work = field.text(u"work"_s);
+    one.entryCount = field.whole(u"entryCount"_s);
+    one.chapterCount = field.whole(u"chapterCount"_s);
+    one.arcCount = field.whole(u"arcCount"_s);
     if (field.broken())
         return refused<Series>(QStringLiteral("series"), field.trouble());
 
-    one.universe = field.maybeText("universe"_ascii);
-    one.edition = field.maybeText("edition"_ascii);
-    one.author = field.maybeText("author"_ascii);
-    one.publisher = field.maybeText("publisher"_ascii);
-    one.language = field.maybeText("language"_ascii);
-    one.declaredVolumes = field.maybeWhole("declaredVolumes"_ascii);
-    one.addedAt = field.maybeBig("addedAt"_ascii);
-    one.lastAddedAt = field.maybeBig("lastAddedAt"_ascii);
-    one.ownedVolumes = field.maybeWhole("ownedVolumes"_ascii).value_or(0);
-    one.genres = field.words("genres"_ascii);
-    one.missingVolumes = field.reals("missingVolumes"_ascii);
-    one.missingChapters = field.reals("missingChapters"_ascii);
+    one.universe = field.maybeText(u"universe"_s);
+    one.edition = field.maybeText(u"edition"_s);
+    one.author = field.maybeText(u"author"_s);
+    one.publisher = field.maybeText(u"publisher"_s);
+    one.language = field.maybeText(u"language"_s);
+    one.declaredVolumes = field.maybeWhole(u"declaredVolumes"_s);
+    one.addedAt = field.maybeBig(u"addedAt"_s);
+    one.lastAddedAt = field.maybeBig(u"lastAddedAt"_s);
+    one.ownedVolumes = field.maybeWhole(u"ownedVolumes"_s).value_or(0);
+    one.genres = field.words(u"genres"_s);
+    one.missingVolumes = field.reals(u"missingVolumes"_s);
+    one.missingChapters = field.reals(u"missingChapters"_s);
 
     // Vocabulary the client may not know yet never refuses a row — see the note in Api.h.
-    if (const auto word = field.maybeText("medium"_ascii))
+    if (const auto word = field.maybeText(u"medium"_s))
         one.medium = medium(*word);
-    if (const auto word = field.maybeText("readingDirection"_ascii)) {
+    if (const auto word = field.maybeText(u"readingDirection"_s)) {
         // Scoped to the block rather than the function: three names are worth shortening
         // here, and everything around them belongs to other enums.
         using enum ReadingDirection;
-        if (*word == "RIGHT_TO_LEFT"_ascii)
+        if (*word == u"RIGHT_TO_LEFT"_s)
             one.readingDirection = RightToLeft;
-        else if (*word == "VERTICAL"_ascii)
+        else if (*word == u"VERTICAL"_s)
             one.readingDirection = Vertical;
-        else if (*word == "LEFT_TO_RIGHT"_ascii)
+        else if (*word == u"LEFT_TO_RIGHT"_s)
             one.readingDirection = LeftToRight;
     }
-    if (const auto word = field.maybeText("status"_ascii))
-        one.run = (*word == "completed"_ascii) ? Run::Completed : Run::Ongoing;
-    if (const auto word = field.maybeText("readStatus"_ascii))
+    if (const auto word = field.maybeText(u"status"_s))
+        one.run = (*word == u"completed"_s) ? Run::Completed : Run::Ongoing;
+    if (const auto word = field.maybeText(u"readStatus"_s))
         one.readStatus = readStatus(*word);
 
     return {one, {}};
@@ -276,13 +274,13 @@ Read<Page> page(const QJsonObject &from)
 {
     Fields field(from);
     Page some;
-    some.total = field.whole("total"_ascii);
-    some.page = field.whole("page"_ascii);
-    some.size = field.whole("size"_ascii);
+    some.total = field.whole(u"total"_s);
+    some.page = field.whole(u"page"_s);
+    some.size = field.whole(u"size"_s);
     if (field.broken())
         return refused<Page>(QStringLiteral("page"), field.trouble());
 
-    const QJsonValue items = from.value("items"_ascii);
+    const QJsonValue items = from.value(u"items"_s);
     if (!items.isArray())
         return refused<Page>(QStringLiteral("page"), QStringLiteral("items is not a list"));
 
@@ -299,14 +297,14 @@ Read<Page> page(const QJsonObject &from)
 Read<Facets> facets(const QJsonObject &from)
 {
     Facets all;
-    all.readStatuses = facetsUnder(from, "readStatuses"_ascii);
-    all.universes = facetsUnder(from, "universes"_ascii);
-    all.authors = facetsUnder(from, "authors"_ascii);
-    all.genres = facetsUnder(from, "genres"_ascii);
-    all.media = facetsUnder(from, "media"_ascii);
-    all.statuses = facetsUnder(from, "statuses"_ascii);
-    all.languages = facetsUnder(from, "languages"_ascii);
-    all.publishers = facetsUnder(from, "publishers"_ascii);
+    all.readStatuses = facetsUnder(from, u"readStatuses"_s);
+    all.universes = facetsUnder(from, u"universes"_s);
+    all.authors = facetsUnder(from, u"authors"_s);
+    all.genres = facetsUnder(from, u"genres"_s);
+    all.media = facetsUnder(from, u"media"_s);
+    all.statuses = facetsUnder(from, u"statuses"_s);
+    all.languages = facetsUnder(from, u"languages"_s);
+    all.publishers = facetsUnder(from, u"publishers"_s);
     return {all, {}};
 }
 
@@ -314,38 +312,38 @@ Read<UpNext> upNext(const QJsonObject &from)
 {
     Fields field(from);
     UpNext card;
-    card.seriesId = field.text("seriesId"_ascii);
-    card.seriesName = field.text("seriesName"_ascii);
-    const QString reason = field.text("reason"_ascii);
-    const QJsonObject entry = field.object("entry"_ascii);
+    card.seriesId = field.text(u"seriesId"_s);
+    card.seriesName = field.text(u"seriesName"_s);
+    const QString reason = field.text(u"reason"_s);
+    const QJsonObject entry = field.object(u"entry"_s);
     if (field.broken())
         return refused<UpNext>(QStringLiteral("upNext"), field.trouble());
 
-    card.reason = (reason == "IN_PROGRESS"_ascii) ? UpNext::Reason::InProgress : UpNext::Reason::NextUp;
+    card.reason = (reason == u"IN_PROGRESS"_s) ? UpNext::Reason::InProgress : UpNext::Reason::NextUp;
 
     Fields inside(entry);
-    card.entryId = inside.text("id"_ascii);
-    card.pageCount = inside.whole("pageCount"_ascii);
-    const QString kind = inside.text("type"_ascii);
+    card.entryId = inside.text(u"id"_s);
+    card.pageCount = inside.whole(u"pageCount"_s);
+    const QString kind = inside.text(u"type"_s);
     if (inside.broken())
         return refused<UpNext>(QStringLiteral("upNext.entry"), inside.trouble());
 
-    card.entryKind = (kind == "CHAPTER"_ascii) ? UpNext::Kind::Chapter : UpNext::Kind::Volume;
-    card.entryNumber = inside.maybeReal("number"_ascii);
-    card.entryTitle = inside.maybeText("title"_ascii);
+    card.entryKind = (kind == u"CHAPTER"_s) ? UpNext::Kind::Chapter : UpNext::Kind::Volume;
+    card.entryNumber = inside.maybeReal(u"number"_s);
+    card.entryTitle = inside.maybeText(u"title"_s);
 
     // Absent progress is not a fault: it is what "you have not started this one" looks like.
-    if (const QJsonValue progress = from.value("progress"_ascii); progress.isObject()) {
+    if (const QJsonValue progress = from.value(u"progress"_s); progress.isObject()) {
         const QJsonObject where = progress.toObject();
         Fields at(where);
-        card.page = at.maybeWhole("page"_ascii);
-        if (const auto pages = at.maybeWhole("pageCount"_ascii); pages && *pages > 0)
+        card.page = at.maybeWhole(u"page"_s);
+        if (const auto pages = at.maybeWhole(u"pageCount"_s); pages && *pages > 0)
             card.pageCount = *pages;
-        const QJsonValue chapter = where.value("chapter"_ascii);
+        const QJsonValue chapter = where.value(u"chapter"_s);
         if (chapter.isObject()) {
             // Named, not a temporary: Fields keeps a reference to what it reads.
             const QJsonObject inChapter = chapter.toObject();
-            card.chapterLabel = Fields(inChapter).maybeText("label"_ascii);
+            card.chapterLabel = Fields(inChapter).maybeText(u"label"_s);
         }
     }
 
