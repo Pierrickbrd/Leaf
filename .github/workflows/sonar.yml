@@ -24,7 +24,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, llvm-tools-preview
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -38,6 +38,24 @@ jobs:
       - name: clippy, written down
         working-directory: server
         run: cargo clippy --all-targets --message-format=json > ../clippy.json || true
+
+      - uses: taiki-e/install-action@v2.87.1
+        with:
+          tool: cargo-llvm-cov
+
+      # Which lines the tests actually reach. The percentage itself says little; what is
+      # worth knowing is which branches are never visited — in a codebase whose tests each
+      # exist because something in them was once wrong, a path nobody exercises any more is
+      # the same kind of fact as a path that is dead.
+      - name: coverage, Rust
+        working-directory: server
+        run: cargo llvm-cov --workspace --lcov --output-path ../lcov.info
+
+      - name: coverage, Python
+        run: |
+          python3 -m pip install --quiet coverage
+          python3 -m coverage run --source=tools -m unittest discover -s tools -p 'test_*.py'
+          python3 -m coverage xml -o coverage.xml
 
       - uses: SonarSource/sonarqube-scan-action@v8.2.1
         env:
