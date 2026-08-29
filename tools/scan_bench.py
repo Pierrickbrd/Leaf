@@ -19,11 +19,14 @@ import sys
 import time
 
 # The format of `server/src/scan/report.rs:46`, word for word.
+# Bounded rather than open quantifiers: `\s+\s*` chains backtrack super-linearly on input
+# that nearly matches, and the report this reads is one line of a machine's own output —
+# eight spaces is already far more slack than it will ever need.
 _HEADER = re.compile(
-    r"(\d+)\s+universe\(s\),\s*(\d+)\s+work\(s\),\s*(\d+)\s+edition\(s\),\s*"
-    r"(\d+)\s+entry\(ies\),\s*(\d+)\s+chapter\(s\),\s*(\d+)\s+page\(s\)"
+    r"(\d+)\s{1,8}universe\(s\),\s{0,8}(\d+)\s{1,8}work\(s\),\s{0,8}(\d+)\s{1,8}edition\(s\),\s{0,8}"
+    r"(\d+)\s{1,8}entry\(ies\),\s{0,8}(\d+)\s{1,8}chapter\(s\),\s{0,8}(\d+)\s{1,8}page\(s\)"
 )
-_REANALYSED = re.compile(r"(\d+)\s+entry\(ies\)\s+reanalysed")
+_REANALYSED = re.compile(r"(\d+)\s{1,8}entry\(ies\)\s{1,8}reanalysed")
 
 _COUNTERS = ("universes", "works", "editions", "entries", "chapters", "pages")
 
@@ -225,6 +228,33 @@ def refuse_a_volatile_index(system, db):
         )
 
 
+def check_the_arguments(binary, corpus, db):
+    """Refuses arguments that do not name what they claim to.
+
+    Everything here reaches `subprocess` and the filesystem, so what they point at is
+    established once, at the top, rather than discovered three scans in. A binary that is
+    not executable, a corpus that is not a directory and an index whose folder does not
+    exist are all mistakes worth naming before a quarter of an hour is spent on them.
+    """
+    binary_path = pathlib.Path(binary).resolve()
+    if not binary_path.is_file():
+        raise ValueError(f"refusing --binary {binary}: {binary_path} is not a file")
+    if not os.access(binary_path, os.X_OK):
+        raise ValueError(f"refusing --binary {binary}: {binary_path} is not executable")
+
+    corpus_path = pathlib.Path(corpus).resolve()
+    if not corpus_path.is_dir():
+        raise ValueError(f"refusing --corpus {corpus}: {corpus_path} is not a directory")
+
+    index = pathlib.Path(db).resolve()
+    if not index.parent.is_dir():
+        raise ValueError(
+            f"refusing --db {db}: {index.parent} does not exist. The index needs a folder "
+            "that is already there — the bench will not make one, because a typo would "
+            "then create it rather than say so"
+        )
+    return binary_path, corpus_path, index
+
 def run_pass(binary, corpus, db, no_dimensions=False):
     """One scan pass, on a fresh index.
 
@@ -355,6 +385,12 @@ def main(argv=None, system=None):
 
     try:
         refuse_the_production_index(args.db)
+    except ValueError as refusal:
+        print(str(refusal), file=sys.stderr)
+        return 2
+
+    try:
+        check_the_arguments(args.binary, args.corpus, args.db)
     except ValueError as refusal:
         print(str(refusal), file=sys.stderr)
         return 2

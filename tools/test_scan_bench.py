@@ -14,6 +14,7 @@ from scan_bench import (
     System,
     disk_facts,
     main,
+    check_the_arguments,
     parse_summary,
     refuse_a_volatile_index,
     refuse_the_production_index,
@@ -79,17 +80,24 @@ class FakeSystem:
     """
 
     _FSTYPE = "findmnt -no FSTYPE --target "
+    _SOURCE = "findmnt -no SOURCE --target "
 
-    def __init__(self, commands, files, links=None, fstype="ext4"):
+    def __init__(self, commands, files, links=None, fstype="ext4", source=None):
         self.commands = commands
         self.files = files
         self.links = links or {}
         self.fstype = fstype
+        # Tests that need a corpus which really exists on disk cannot spell its
+        # temporary path into `commands`. They give `source` instead, and every
+        # findmnt asks the same question of it.
+        self.source = source
 
     def run(self, *cmd):
         joined = " ".join(cmd)
         if joined.startswith(self._FSTYPE):
             return self.fstype + "\n"
+        if self.source is not None and joined.startswith(self._SOURCE):
+            return self.source + "\n"
         return self.commands[joined]
 
     def read(self, path):
@@ -138,6 +146,15 @@ INTERNAL_LV = FakeSystem(
     links={"/dev/mapper/ubuntu--vg-ubuntu--lv": "/dev/dm-0"},
 )
 
+
+def _spinning_usb_for(corpus):
+    """The rotational-USB fixture, answering for a corpus that really exists."""
+    return FakeSystem(
+        commands={"lsblk -ndo PKNAME /dev/sda1": "sda\n", "lsblk -ndo TRAN /dev/sda": "usb\n"},
+        files=dict(SPINNING_USB.files),
+        links=dict(SPINNING_USB.links),
+        source="/dev/sda1",
+    )
 
 class NamesTheDisk(unittest.TestCase):
     def test_a_rotational_usb_disk_says_its_driver_and_its_link(self):
@@ -346,6 +363,53 @@ def _fake_binary(folder, name="fake-leaf", body="", status=0):
     return fake
 
 
+class RefusesArgumentsThatNameNothing(unittest.TestCase):
+    """Everything the bench is given reaches subprocess or the filesystem.
+
+    A typo in --corpus used to mean three scans of nothing and a report full of zeroes;
+    a typo in --binary meant a traceback after the first pass. Both are worth catching
+    before the clock starts.
+    """
+
+    def test_a_binary_that_is_not_a_file_is_refused(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with self.assertRaises(ValueError) as refused:
+                check_the_arguments(str(pathlib.Path(folder, "nope")), folder, str(pathlib.Path(folder, "i.sqlite")))
+            self.assertIn("not a file", str(refused.exception))
+
+    def test_a_binary_that_cannot_be_executed_is_refused(self):
+        with tempfile.TemporaryDirectory() as folder:
+            plain = pathlib.Path(folder, "plain")
+            plain.write_text("not a program")
+            with self.assertRaises(ValueError) as refused:
+                check_the_arguments(str(plain), folder, str(pathlib.Path(folder, "i.sqlite")))
+            self.assertIn("not executable", str(refused.exception))
+
+    def test_a_corpus_that_is_not_a_directory_is_refused(self):
+        with tempfile.TemporaryDirectory() as folder:
+            fake = _fake_binary(folder, body="true\n")
+            with self.assertRaises(ValueError) as refused:
+                check_the_arguments(str(fake), str(fake), str(pathlib.Path(folder, "i.sqlite")))
+            self.assertIn("not a directory", str(refused.exception))
+
+    def test_an_index_whose_folder_is_missing_is_refused(self):
+        # Not created on the fly: a typo would then silently make the folder rather
+        # than say the path was wrong.
+        with tempfile.TemporaryDirectory() as folder:
+            fake = _fake_binary(folder, body="true\n")
+            with self.assertRaises(ValueError) as refused:
+                check_the_arguments(str(fake), folder, str(pathlib.Path(folder, "gone", "i.sqlite")))
+            self.assertIn("does not exist", str(refused.exception))
+
+    def test_arguments_that_all_name_what_they_claim_are_allowed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            fake = _fake_binary(folder, body="true\n")
+            binary, corpus, index = check_the_arguments(
+                str(fake), folder, str(pathlib.Path(folder, "i.sqlite")))
+            self.assertTrue(binary.is_file())
+            self.assertTrue(corpus.is_dir())
+            self.assertEqual(index.name, "i.sqlite")
+
 class RefusesAnIndexInMemory(unittest.TestCase):
     """`/tmp` is a tmpfs on the server this bench was written for.
 
@@ -383,12 +447,12 @@ class RefusesAnIndexInMemory(unittest.TestCase):
             code, said = _bench(
                 [
                     "--binary", str(fake),
-                    "--corpus", "/mnt/shelf/library",
+                    "--corpus", folder,
                     "--db", "/tmp/bench.sqlite",
                 ],
                 FakeSystem(
-                    commands=SPINNING_USB.commands, files=SPINNING_USB.files,
-                    links=SPINNING_USB.links, fstype="tmpfs",
+                    commands={}, files=dict(SPINNING_USB.files),
+                    links=dict(SPINNING_USB.links), fstype="tmpfs", source="/dev/sda1",
                 ),
             )
             self.assertEqual(code, 2)
@@ -446,10 +510,10 @@ class RunsTheBench(unittest.TestCase):
             code, said = _bench(
                 [
                     "--binary", str(fake),
-                    "--corpus", "/mnt/shelf/library",
+                    "--corpus", folder,
                     "--db", "/var/lib/leaf/leaf.sqlite",
                 ],
-                SPINNING_USB,
+                _spinning_usb_for(folder),
             )
             self.assertEqual(code, 2)
             self.assertIn("read progress", said)
@@ -464,15 +528,21 @@ class RunsTheBench(unittest.TestCase):
         self.assertIn("--passes", said)
 
     def test_a_disk_that_cannot_be_named_stops_the_bench(self):
-        nowhere = FakeSystem(
-            commands={"findmnt -no SOURCE --target /srv/library": ""}, files={}
-        )
-        code, said = _bench(
-            ["--binary", "/nowhere", "--corpus", "/srv/library", "--db", "/srv/bench/i.sqlite"],
-            nowhere,
-        )
-        self.assertEqual(code, 2)
-        self.assertIn("findmnt", said)
+        # The arguments all name real things — it is the disk probe that comes up
+        # empty, and that alone must stop the bench.
+        with tempfile.TemporaryDirectory() as folder:
+            fake = _fake_binary(folder, body="true\n")
+            nowhere = FakeSystem(commands={}, files={}, source="")
+            code, said = _bench(
+                [
+                    "--binary", str(fake),
+                    "--corpus", folder,
+                    "--db", str(pathlib.Path(folder, "i.sqlite")),
+                ],
+                nowhere,
+            )
+            self.assertEqual(code, 2)
+            self.assertIn("findmnt", said)
 
     def test_a_failing_binary_stops_after_the_first_pass(self):
         # Three full scans of the real library take a quarter of an hour. A binary
@@ -487,15 +557,15 @@ class RunsTheBench(unittest.TestCase):
             code, said = _bench(
                 [
                     "--binary", str(broken),
-                    "--corpus", "/mnt/shelf/library",
+                    "--corpus", folder,
                     "--db", str(pathlib.Path(folder, "bench.sqlite")),
                     "--passes", "3",
                 ],
-                SPINNING_USB,
+                _spinning_usb_for(folder),
             )
             self.assertEqual(code, 1)
             self.assertIn("error: the index will not open", said)
-            self.assertEqual(log.read_text().splitlines(), ["scan /mnt/shelf/library"])
+            self.assertEqual(log.read_text().splitlines(), [f"scan {folder}"])
 
     def test_the_two_variants_alternate_instead_of_running_one_after_the_other(self):
         # Running every whole pass first would leave the no-dimensions passes reading
@@ -507,21 +577,21 @@ class RunsTheBench(unittest.TestCase):
             code, said = _bench(
                 [
                     "--binary", str(fake),
-                    "--corpus", "/mnt/shelf/library",
+                    "--corpus", folder,
                     "--db", str(pathlib.Path(folder, "bench.sqlite")),
                     "--passes", "2",
                 ],
-                SPINNING_USB,
+                _spinning_usb_for(folder),
             )
             self.assertEqual(code, 0)
             self.assertIn("first (coldest)", said)
             self.assertEqual(
                 log.read_text().splitlines(),
                 [
-                    "scan /mnt/shelf/library",
-                    "scan /mnt/shelf/library --no-dimensions",
-                    "scan /mnt/shelf/library",
-                    "scan /mnt/shelf/library --no-dimensions",
+                    f"scan {folder}",
+                    f"scan {folder} --no-dimensions",
+                    f"scan {folder}",
+                    f"scan {folder} --no-dimensions",
                 ],
             )
 

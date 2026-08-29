@@ -17,12 +17,12 @@ set -- \
     "mangles-utf8"   "not ASCII"                        "a non-ASCII byte in a Latin-1 literal" \
     "reaches-for-l1" "deleted function\|is ambiguous"    "Qt's own Latin-1 suffix"
 
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
     target=$1 expected=$2 guards=$3
     shift 3
 
     cmake --build "$build" --target "$target" > "$log" 2>&1
-    if [ $? -eq 0 ]; then
+    if [[ $? -eq 0 ]]; then
         echo "✗ $target compiled. $guards is no longer refused."
         exit 1
     fi

@@ -16,7 +16,7 @@ trap 'rm -f "$log"' EXIT
 QT_QPA_PLATFORM=offscreen timeout 6 "$binary" > "$log" 2>&1
 outcome=$?
 
-if [ $outcome -ne 124 ]; then
+if [[ $outcome -ne 124 ]]; then
     echo "✗ it exited on its own with $outcome — a window that opens does not stop"
     cat "$log"
     exit 1
