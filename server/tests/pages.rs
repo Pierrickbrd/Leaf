@@ -344,10 +344,14 @@ fn a_dropped_prefetch_gives_its_claim_back() {
     // policies dropped a task in silence, without running the code that would have
     // released it; here the dropped value comes back in the error, so releasing it is the
     // only thing there is to do with it.
-    let mut waited = 0;
-    while pages.pending() > 0 && waited < 100 {
+    // A deadline rather than a count of naps, and a generous one: what is being waited on
+    // is the one warm that was accepted actually preparing a page — decode, resize, encode
+    // — which is real work on a machine that may be busy with other things. This asserts
+    // liveness, not speed: a claim that leaks never comes back at all, so the only cost of
+    // waiting longer than necessary is that the broken case takes longer to prove.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while pages.pending() > 0 && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(50));
-        waited += 1;
     }
     assert_eq!(0, pages.pending(), "a dropped prefetch kept its claim");
 }
