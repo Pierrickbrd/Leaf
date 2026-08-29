@@ -389,21 +389,25 @@ def main(argv=None, system=None):
         print(str(refusal), file=sys.stderr)
         return 2
 
+    # What comes back is what gets used, everywhere below. Checking one path and then
+    # running another is not a check: a symlink or a `..` would make the two disagree,
+    # and the one that reaches the disk would be the one nobody looked at.
     try:
-        check_the_arguments(args.binary, args.corpus, args.db)
+        binary, corpus, index = check_the_arguments(args.binary, args.corpus, args.db)
     except ValueError as refusal:
         print(str(refusal), file=sys.stderr)
         return 2
+    binary, corpus, index = str(binary), str(corpus), str(index)
 
     system = system or System()
     try:
-        refuse_a_volatile_index(system, args.db)
+        refuse_a_volatile_index(system, index)
     except ValueError as refusal:
         print(str(refusal), file=sys.stderr)
         return 2
 
     try:
-        facts = disk_facts(system, args.corpus)
+        facts = disk_facts(system, corpus)
     except ValueError as refusal:
         print(str(refusal), file=sys.stderr)
         return 2
@@ -417,12 +421,10 @@ def main(argv=None, system=None):
     # parallelising the reads.
     for _ in range(args.passes):
         for label, no_dimensions in _VARIANTS:
-            seconds, output, status = run_pass(
-                args.binary, args.corpus, args.db, no_dimensions
-            )
+            seconds, output, status = run_pass(binary, corpus, index, no_dimensions)
             if status != 0:
                 print(
-                    f"the {label} pass failed: {args.binary} exited {status}. "
+                    f"the {label} pass failed: {binary} exited {status}. "
                     "Stopping here rather than timing a binary that does not work.",
                     file=sys.stderr,
                 )
@@ -444,7 +446,7 @@ def main(argv=None, system=None):
         print(f"the passes ran, but their output is not a report: {refusal}", file=sys.stderr)
         return 1
 
-    print(render_report(args.corpus, facts, measures))
+    print(render_report(corpus, facts, measures))
     return 0
 
 
