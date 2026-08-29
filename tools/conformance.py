@@ -64,6 +64,10 @@ if BASE.startswith("https://"):
     # than a public root store. Hostname verification stays on: the certificate carries the
     # host it was generated for as a subject alternative name.
     CONTEXT = ssl.create_default_context(cadata=offered)
+    # Written down rather than inherited. Python's defaults are already this on any version
+    # this script would run on, but a floor that depends on the interpreter is a floor
+    # nobody can read from here — and the server speaks 1.2 and 1.3, nothing older.
+    CONTEXT.minimum_version = ssl.TLSVersion.TLSv1_2
 
 failures = []
 
