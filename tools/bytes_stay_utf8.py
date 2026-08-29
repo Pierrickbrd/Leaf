@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Refuses the word Latin1 in the client, except as the name of a parameter's type.
+"""Refuses the word Latin1 anywhere in the client.
 
-`Ascii.h` closes two doors at the compiler: `_ascii` is consteval and rejects a non-ASCII
-byte whatever form it is written in — escaped, octal, raw, concatenated, the compiler sees
-the bytes — and Qt's `_L1` is deleted, so reaching for it fails whether or not a file opens
-the namespace. What no compiler can refuse is the same mistake spelled out, because these are
+Every literal in this client is `u"…"_s` — UTF-16, which carries a title in any script — so
+there is no safe Latin-1 left to tell apart from an unsafe one, and the rule has no
+exceptions. What no compiler can refuse is the mistake spelled out, because these are
 ordinary Qt constructors.
 
 **This does not look at what is passed.** An earlier version did, and it was worthless: every
@@ -20,13 +19,9 @@ one of these got past it, and each is a thing somebody writes without meaning an
     QStringDecoder(QStringConverter::Latin1)   a whole converter, never on the list
 
 An argument has an unbounded number of shapes, so the argument is the wrong thing to check.
-The name is not: `Latin1` appears in the client only where somebody has asked for Latin-1,
-and the one honest reason to ask is to name the type of a parameter that carries ASCII —
-`QLatin1StringView name`, which is what the JSON field readers take.
-
-Everything else is refused, including `toLatin1`, which turns whatever it has no room for
-into a literal '?' so that Haikyū becomes Haiky?. Write `_ascii` for bytes that are ASCII and
-`u"…"_s` for text people read; `toUtf8` is right every time bytes have to leave.
+The name is not: `Latin1` appears only where somebody asked for Latin-1, and nobody here has
+a reason to. This includes `toLatin1`, which turns whatever it has no room for into a literal
+'?' — so that Haikyū becomes Haiky?.
 
     tools/bytes_stay_utf8.py
 
@@ -40,29 +35,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 LOOKED_AT = [ROOT / "desktop" / "src", ROOT / "desktop" / "tests", ROOT / "desktop" / "qml"]
 
-# Nothing is spared any more. The one file that used to name what it guards — Ascii.h, which
-# offered a checked Latin-1 literal and deleted Qt's unchecked one — is gone: the client is
-# UTF-16 throughout, so there is no safe Latin-1 to distinguish from an unsafe one.
-SPARED: set = set()
-
 # The whole identifier, not the word: there is no word boundary between the Q and the L of
 # QLatin1String, so a pattern anchored with \b matches QStringConverter::Latin1 and sails
 # straight past QLatin1String("é") — which is the case that matters most.
-# `_L1` too, and it has to be spelled out: there is no "Latin1" inside it, so the pattern
-# above sails straight past `u"é"_L1` — the one door the compiler used to close, back when a
-# deleted operator stood in Ascii.h. That file is gone: the client is UTF-16 throughout and
-# has no safe Latin-1 path left to protect, so the rule is simply that Latin-1 never appears.
-# A rule with no exceptions is one a name check can enforce completely.
-ANY = re.compile(r"\w*Latin1\w*|(?<![\w])_L1\b")
-
-# `QLatin1StringView name` — a type, then an identifier, then the end of the declaration.
 #
-# The last part is not decoration. `QLatin1String sournois("é");` is also a type followed by
-# an identifier, and it mangles: what makes a parameter harmless is that nothing is being
-# built. So what may follow the name is a comma, a close bracket or a semicolon — never a
-# `(`, a `{` or an `=`.
-AS_A_TYPE = re.compile(r"^QLatin1String(?:View)?$")
-A_DECLARATION = re.compile(r"\s+[A-Za-z_]\w*\s*(?:[,);]|$)")
+# `_L1` too, and it has to be spelled out: there is no "Latin1" inside it, so the pattern
+# above sails straight past `u"é"_L1`. That door used to be closed by a deleted operator in
+# Ascii.h; the file is gone, and this line is what stands in its place.
+ANY = re.compile(r"\w*Latin1\w*|(?<![\w])_L1\b")
 
 
 def files_to_read():
@@ -71,19 +51,15 @@ def files_to_read():
         if not place.is_dir():
             continue
         for path in sorted(place.rglob("*")):
-            if path.suffix in {".h", ".cpp", ".qml"} and path not in SPARED:
+            if path.suffix in {".h", ".cpp", ".qml"}:
                 yield path
 
 
 def asks_for_latin1(path):
-    """Every place in one file that names Latin-1 other than as a parameter's type."""
+    """Every place in one file that names Latin-1."""
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         for hit in ANY.finditer(line):
-            word = hit.group(0)
-            after = line[hit.end():]
-            if AS_A_TYPE.match(word) and A_DECLARATION.match(after):
-                continue  # the type of a parameter, carrying ASCII
-            yield number, word, line.strip()
+            yield number, hit.group(0), line.strip()
 
 
 def main() -> int:
@@ -97,11 +73,11 @@ def main() -> int:
         print(f"✗ {path}:{number} — {word}\n    {line}")
 
     if found:
-        print(f"\n{len(found)} place(s) asking for Latin-1. Use _ascii for ASCII bytes,"
-              "\nu\"…\"_s for text people read, toUtf8 for bytes that have to leave.")
+        print(f"\n{len(found)} place(s) asking for Latin-1. Every literal here is u\"…\"_s,"
+              "\nwhich carries any script; toUtf8 for bytes that have to leave.")
         return 1
 
-    print("Latin-1 appears nowhere but as the type of a parameter.")
+    print("Latin-1 appears nowhere in the client.")
     return 0
 
 

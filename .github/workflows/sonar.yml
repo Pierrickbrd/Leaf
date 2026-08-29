@@ -14,7 +14,9 @@ on:
 
 jobs:
   scan:
-    runs-on: ubuntu-latest
+    # Pinned, like the desktop workflow: the C++ below is built against this
+    # distribution's Qt packages, and "latest" moving would change what is measured.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,6 +58,43 @@ jobs:
           python3 -m pip install --quiet coverage
           python3 -m coverage run --source=tools -m unittest discover -s tools -p 'test_*.py'
           python3 -m coverage xml -o coverage.xml
+
+      - name: install Qt 6 and the QML modules
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build gcovr qt6-base-dev qt6-declarative-dev libqt6svg6-dev \
+            qml6-module-qtquick qml6-module-qtquick-controls \
+            qml6-module-qtquick-layouts qml6-module-qtquick-templates \
+            qml6-module-qtqml-workerscript qtkeychain-qt6-dev
+          pip install --quiet pyyaml
+
+      # The client's own tests already walk this code — the analyser was simply not being
+      # told. Without an instrumented build it counted all 384 lines as reached by nothing,
+      # which is not the same fact as a client nobody tests, and read like it.
+      #
+      # A build of its own, beside the one the desktop workflow makes: `--coverage` changes
+      # the object files, and a coverage build is not what anybody should be shipping.
+      - name: coverage, C++
+        run: |
+          cmake -S desktop -B desktop/coverage -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="--coverage -O0" -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+          cmake --build desktop/coverage
+          ctest --test-dir desktop/coverage --output-on-failure
+
+      # From inside the build tree, because that is where gcov may write its intermediates.
+      # `--fail-under-line` is not a coverage target — the quality gate is that. It is a
+      # tripwire on the measurement itself: `--gcov-ignore-errors` lets a broken run report
+      # an empty file rather than fail, and an empty report reads exactly like a client
+      # nobody tests. This is what would say so.
+      - name: coverage, C++, written down
+        working-directory: desktop/coverage
+        run: |
+          gcovr --root "$GITHUB_WORKSPACE" \
+                --filter "$GITHUB_WORKSPACE/desktop/src/" \
+                --gcov-ignore-errors=no_working_dir_found \
+                --sonarqube "$GITHUB_WORKSPACE/coverage-cpp.xml" \
+                --print-summary --fail-under-line 70 .
 
       - uses: SonarSource/sonarqube-scan-action@v8.2.1
         env:
