@@ -74,7 +74,7 @@ fn last_number(label: &str) -> Option<f64> {
     let mut i = 0;
     while i < chars.len() {
         if chars[i].is_ascii_digit()
-            || (chars[i] == '-' && chars.get(i + 1).is_some_and(|c| c.is_ascii_digit()))
+            || (chars[i] == '-' && chars.get(i + 1).is_some_and(char::is_ascii_digit))
         {
             let start = i;
             if chars[i] == '-' {
@@ -128,7 +128,7 @@ pub fn compose(pattern: Option<&str>, number: Option<f64>) -> Option<String> {
             break;
         };
         let inside = &after[2..close]; // "" or ":000"
-        let padding = inside.strip_prefix(':').map(|z| z.len()).unwrap_or(0);
+        let padding = inside.strip_prefix(':').map(str::len).unwrap_or(0);
         let valid = inside.is_empty()
             || inside
                 .strip_prefix(':')

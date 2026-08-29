@@ -223,7 +223,10 @@ impl Db {
         // the `Transaction` below, and a transaction rolls back when it is dropped — so the
         // connection is in a known state and the only thing poisoning would achieve is
         // turning one panic into a server that can never write again.
-        let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tx: Transaction<'_> = guard.transaction()?;
         let result = f(&Cx {
             conn: &tx,

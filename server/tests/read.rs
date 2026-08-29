@@ -172,7 +172,7 @@ impl Library {
 }
 
 fn filter_of(field: &str, values: &[&str]) -> SeriesFilter {
-    let values: Vec<String> = values.iter().map(|v| v.to_string()).collect();
+    let values: Vec<String> = values.iter().map(ToString::to_string).collect();
     let mut f = SeriesFilter::default();
     match field {
         "author" => f.authors = values,

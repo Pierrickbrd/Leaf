@@ -146,7 +146,9 @@ fn fields_of<T: Serialize>(value: &T) -> Vec<String> {
 /// the point of them: a field added to a sidecar and forgotten here does not quietly go
 /// missing from what the server tells the applications the format is. It fails to compile.
 mod filled {
-    use crate::metadata::sidecars::*;
+    use crate::metadata::sidecars::{
+        ArcJson, ChapterJson, EditionJson, EntryJson, UniverseJson, WorkJson, FORMAT_VERSION,
+    };
 
     pub fn universe() -> UniverseJson {
         UniverseJson {

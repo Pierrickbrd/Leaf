@@ -278,7 +278,7 @@ impl Intake {
     pub fn propose_for(&self, file: &Path) -> Result<Proposal> {
         let id = file
             .parent()
-            .and_then(|p| p.file_name())
+            .and_then(std::path::Path::file_name)
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
         let read = read_entry_json(file);
