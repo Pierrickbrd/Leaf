@@ -17,6 +17,7 @@
 #include <QString>
 
 #include <functional>
+#include <type_traits>
 
 class Settings;
 
@@ -94,10 +95,25 @@ private:
     /// the spot and no request outlived the call that made it.
     struct Waiting {
         QString path;
-        QUrlQuery query;
+        /// Encoded, and named so — not a `QUrlQuery`, and not a query anybody can read.
+        ///
+        /// `QUrlQuery` declares a copy constructor, a copy assignment and a destructor, and
+        /// no move constructor — so moving one calls the copy, which Qt does not mark
+        /// `noexcept`. Held by value in a `QList` that grows, that is a relocation which may
+        /// throw while it is carrying up to thirty-two `std::function`s, each holding a
+        /// screen's `this`. The round trip costs nothing: measured on the very string this
+        /// file was written for, `q=Haiky%C5%AB%20!!%20%26%20l'%C3%A9t%C3%A9` parses back
+        /// equal to the query it came from, ampersand included.
+        QString encodedQuery;
         QPointer<const QObject> caller;
         std::function<void(const Answer &)> then;
     };
+
+    /// Checked, not assumed. Every member above promises a `noexcept` move, so `QList`
+    /// relocates the queue rather than copying it. A member added later that does not
+    /// promise it fails this line, instead of failing the next time the queue grows.
+    static_assert(std::is_nothrow_move_constructible_v<Waiting>,
+                  "a held request has to move without throwing: QList relocates them");
 
     Settings *m_settings;
     QNetworkAccessManager m_network;

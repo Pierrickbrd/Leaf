@@ -315,6 +315,46 @@ private slots:
         QVERIFY2(m_pretend->heard.startsWith("GET /series "), m_pretend->heard.constData());
     }
 
+    /// And what was asked for is still what is sent, half a second later.
+    ///
+    /// A held request keeps its query as encoded text rather than as a `QUrlQuery`, which
+    /// cannot be moved without throwing — see `Waiting::query`. Text is a form a query can be
+    /// lost in: an ampersand handed back to the parser cuts it in half, and this is the one
+    /// place where that would happen out of everyone's sight, because the request that was
+    /// checked on the way in is not the object that goes out.
+    void a_query_held_over_the_keyring_is_sent_exactly_as_it_was_given()
+    {
+        Settings opening;
+        QVERIFY2(!opening.loaded(), "the keyring cannot have answered yet");
+        Server server(&opening);
+
+        const QString typed = QString::fromUtf8("Haikyū !! & l\u2019été");
+        QUrlQuery query;
+        query.addQueryItem(QStringLiteral("q"), typed);
+        query.addQueryItem(QStringLiteral("kind"), QStringLiteral("EDITION"));
+
+        int answered = 0;
+        server.get(QStringLiteral("/search"), query, this,
+                   [&](const Server::Answer &) { ++answered; });
+        QCOMPARE(answered, 0);
+
+        opening.setAddress(
+            QStringLiteral("http://127.0.0.1:%1").arg(m_pretend->serverPort()));
+        opening.setKey(QStringLiteral("8f3a92c1d4e5b6a7"));
+        for (int i = 0; i < 250 && answered == 0; ++i) {
+            QTest::qWait(20);
+        }
+        QCOMPARE(answered, 1);
+
+        const QByteArray line = m_pretend->heard.split(' ').value(1);
+        const QUrlQuery sent{QUrl::fromEncoded(line)};
+        QCOMPARE(sent.queryItemValue(QStringLiteral("q"), QUrl::FullyDecoded), typed);
+        QCOMPARE(sent.queryItemValue(QStringLiteral("kind")), QStringLiteral("EDITION"));
+        // Two parameters and not three: the ampersand stayed inside the term it was typed
+        // in rather than starting one of its own.
+        QCOMPARE(sent.queryItems().size(), 2);
+    }
+
     /// And a screen that is gone by then is told nothing at all.
     ///
     /// Holding a request holds the `std::function` that answers it, and that function is a
