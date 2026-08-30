@@ -527,3 +527,44 @@ fn a_collision_says_whether_the_two_files_are_byte_for_byte_the_same() {
     // And it names what it would be called if both were kept.
     assert!(described.contains("Tome 1 (2).cbz"), "{described}");
 }
+
+#[test]
+fn a_file_that_names_no_number_cannot_be_replacing_anything() {
+    // Without a number there is no place in the edition to be occupied, so the answer is
+    // "this goes here", not "this replaces that one".
+    let world = World::new();
+    world.volume("Bleach", "Tome 1.cbz", "Bleach", 1.0);
+    world.scan();
+
+    let said = world.offer(
+        "Un bonus.cbz",
+        Some(&EntryJson {
+            leaf: Some(1),
+            work: Some("Bleach".into()),
+            ..Default::default()
+        }),
+    );
+    assert_eq!(said.confidence, Confidence::Certain);
+    assert!(said.replaces.is_none(), "{said:?}");
+}
+
+#[test]
+fn keeping_both_says_what_the_arriving_one_ended_up_called() {
+    // The client asked for a rename; what it needs back is the name, because that is what
+    // it will show and what somebody will look for on the disk.
+    let world = World::new();
+    world.volume("Bleach", "Tome 1.cbz", "Bleach", 1.0);
+    world.scan();
+    let series: String = world
+        .db
+        .read(|cx| cx.query_one("SELECT id FROM edition", [], |r| r.get::<_, String>(0)))
+        .unwrap()
+        .unwrap();
+
+    let filed = world
+        .file("Tome 1.cbz", &series, Some(OnCollision::Rename))
+        .expect("filed beside the other");
+    let said = format!("{filed:?}");
+    assert!(said.contains("Tome 1 (2).cbz"), "{said}");
+    assert!(said.contains("already there"), "{said}");
+}

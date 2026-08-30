@@ -532,3 +532,20 @@ fn asking_for_the_chapters_of_no_series_at_all_asks_the_database_nothing() {
     let repository = Repository::new(&library.db);
     assert!(repository.chapters_of_entries(&[]).unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn a_misspelled_search_held_to_a_filter_stays_held_to_it() {
+    // The approximate fallback reads what it compares rather than asking an index, so what
+    // it reads has to stay bounded — by the shelf, and by the filter when there is one.
+    let library = Library::new();
+    // Nothing matches exactly, so it falls through to the guess — with the filter still on.
+    let (status, body) = library
+        .get("/search?q=Blaech&medium=manga&kind=SERIES")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.is_array(), "{body}");
+
+    // And with a publisher instead, which narrows to a different set of editions.
+    let (status, body) = library.get("/search?q=Blaech&publisher=Kana").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}

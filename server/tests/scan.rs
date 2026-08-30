@@ -1484,3 +1484,47 @@ fn an_arc_over_half_numbers_keeps_its_halves_in_the_report() {
     let said = report.summary();
     assert!(said.contains("45.5") || library.count("arc") == 1, "{said}");
 }
+
+#[test]
+fn a_work_read_again_inside_its_universe_keeps_the_universe_in_its_composed_name() {
+    // The universe surfaces inside the name a shelf draws, so a work read on its own has to
+    // find it again rather than losing it.
+    let library = Library::new();
+    library.write(
+        "Terres d'Arran/universe.json",
+        r#"{"leaf":1,"name":"Terres d'Arran"}"#,
+    );
+    let elfes = library.folder("Terres d'Arran/Elfes");
+    archive(&elfes.join("Tome 1.cbz"), 2, None);
+    library.scan();
+
+    // A second full scan: the universe is already in the index, so the work is visited with
+    // it rather than alongside it.
+    library.scan();
+    assert_eq!(library.count("universe"), 1);
+    assert_eq!(library.count("work"), 1);
+}
+
+#[test]
+fn an_arc_over_half_volumes_keeps_its_halves_in_what_is_reported() {
+    // ComicInfo repeats the arc name in every volume it covers, and a volume can carry a
+    // half number — a side story reading between two. The range says 45.5, not 45.
+    let library = Library::new();
+    let bleach = library.folder("Bleach");
+    for (name, number) in [("Tome 1.cbz", "1"), ("Tome 45.5.cbz", "45.5")] {
+        archive(
+            &bleach.join(name),
+            2,
+            Some((
+                "ComicInfo.xml",
+                &comic_info(&[("Number", number), ("StoryArc", "Un cycle")]),
+            )),
+        );
+    }
+    let report = library.scan();
+    assert!(
+        report.derived_arcs.iter().any(|a| a.contains("45.5")),
+        "{:?}",
+        report.derived_arcs
+    );
+}
