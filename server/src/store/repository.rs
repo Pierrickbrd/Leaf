@@ -3,9 +3,8 @@
 //! A "series" in API terms is an edition — the level that carries chapters and progress.
 //! Work and universe are display groupings only; they surface inside the composed name.
 //!
-//! The SQL is ported from the Kotlin as it stands. It is the part of that server most worth
-//! keeping unchanged: it is where the model lives, it has cost tests behind it, and every
-//! shape in it was arrived at by fixing something.
+//! The SQL is written out rather than generated: it is where the model lives, it has cost
+//! tests behind it, and every shape in it was arrived at by fixing something.
 
 use anyhow::Result;
 use rusqlite::types::Value;

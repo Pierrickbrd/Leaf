@@ -401,7 +401,7 @@ def build(
     write_volumes(source, edition_dir, data, work_name, edition_name, dry_run)
 
 
-def main() -> int:
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("source", type=Path, help="the folder holding tomes.json")
     parser.add_argument("destination", type=Path, help="the Leaf library root")
@@ -418,7 +418,7 @@ def main() -> int:
         default="ongoing",
         help="whether the series is finished — not guessable from the prepared file",
     )
-    arguments = parser.parse_args()
+    arguments = parser.parse_args(argv)
 
     if not (arguments.source / "tomes.json").is_file():
         print(f"no tomes.json in {arguments.source}", file=sys.stderr)

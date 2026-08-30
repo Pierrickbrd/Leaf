@@ -131,10 +131,13 @@ pub fn describe() -> Format {
 /// The field names a sidecar serialises to, read off the type rather than typed out beside
 /// it. A field renamed in the struct is renamed here.
 fn fields_of<T: Serialize>(value: &T) -> Vec<String> {
-    match serde_json::to_value(value) {
-        Ok(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
-        _ => Vec::new(),
-    }
+    // Asked for as an object rather than matched against one: these types cannot serialise
+    // to anything else and cannot fail doing it, but the signature says otherwise on both
+    // counts, and enumerating a case that cannot happen reads as though it could.
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_object().map(|map| map.keys().cloned().collect()))
+        .unwrap_or_default()
 }
 
 /// One of each, with **every** field set.

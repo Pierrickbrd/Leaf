@@ -49,7 +49,7 @@ _PRODUCTION_INDEX = "/var/lib/leaf"
 # The two variants, in the order one round runs them.
 _VARIANTS = (("whole", False), ("no dimensions", True))
 
-# Systèmes de fichiers en mémoire : un index posé là ne touche aucun disque.
+# Filesystems that live in memory: an index put there touches no disk at all.
 _VOLATILE = ("tmpfs", "ramfs", "devtmpfs")
 
 

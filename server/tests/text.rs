@@ -1,4 +1,4 @@
-//! The pure functions, ported test for test from the Kotlin.
+//! The pure functions: folding a title for search, and finding the holes in a collection.
 //!
 //! SQLite folds nothing on its own, and a French library makes that a daily problem rather
 //! than an edge case.

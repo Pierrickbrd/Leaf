@@ -9,12 +9,11 @@ info:
 
     **What this file is for.** Three things, in order of how much they matter:
 
-    1. It is the **specification the Rust server is ported against**. Where this file and
-       the Kotlin implementation disagree, the implementation is right and this file is a
-       bug — until the port begins, at which point this file is right and both must be
-       fixed.
-    2. It is where both clients generate their models from, rather than transcribing them
-       by hand into Kotlin and into C++ and hoping the two stay in step.
+    1. It is the **specification the server answers to**. Where this file and the server
+       disagree, one of the two is a bug and both get fixed — `tools/conformance.py` is
+       what finds out which.
+    2. It is where the clients generate their models from, rather than transcribing them by
+       hand into two languages and hoping the two stay in step.
     3. It is the record of what a change would break. A field removed, a route renamed, a
        meaning changed — those are the three things that bump `api`.
 
@@ -189,10 +188,9 @@ paths:
         Writes the sidecar and rescans the work it belongs to — not the library, which
         would cost as much as the library is big. Requires the **import** right.
 
-        The Kotlin answered **200 with an error body** on an unknown id after a
-        successful patch — a wart this file recorded so the port would not reproduce it by
-        accident. The Rust answers 404 in both cases: the series was not there to patch, or
-        the rescan removed it. Both answer 404.
+        404 in both cases: the series was not there to patch, or the rescan removed it.
+        Answering **200 with an error body** is the easy mistake here — the patch did
+        succeed, after all — and it leaves a client with no way to tell the two apart.
       requestBody:
         required: true
         content:
@@ -1718,9 +1716,9 @@ components:
     Received:
       type: object
       description: |
-        The Kotlin spelled the byte count as text, because it built the response from a
-        Map<String, String>. Changed at the port: it is a number, like every other count
-        in this API.
+        The byte count is a number, like every other count in this API. Built from a map of
+        strings it would come back as text, which is an accident of the type rather than a
+        decision.
       properties:
         path: { type: string }
         received: { type: integer }

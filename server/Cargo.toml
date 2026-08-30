@@ -15,27 +15,27 @@ tower-http = { version = "0.6", features = ["trace"] }
 # than being buffered whole, which at 130 MB a volume is the difference that matters.
 http-body-util = "0.1"
 
-# SQLite, compiled in: no system library, so the container needs nothing installed —
-# the property the Kotlin build chose on purpose and this one keeps.
+# SQLite, compiled in: no system library, so there is nothing to install beside the binary.
 rusqlite = { version = "0.37", features = ["bundled"] }
 
 # A CBZ is a renamed zip. Entries are read by name over Read + Seek, which is the ZipFile
 # model rather than the sequential one.
 zip = { version = "6", default-features = false, features = ["deflate"] }
 # Decode JPEG, PNG, GIF, BMP, WebP; dimensions without decoding. AVIF and HEIC are not
-# supported here and were not supported by the Kotlin either — parity, not a regression.
+# supported: reading them would mean a C dependency, and the point of this list is that
+# there is none.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp"] }
-# SIMD resize. Measured on a real page: 1.9 ms against 31 for the scalar one, and against
-# 9.6 for Java's Graphics2D — the one place in this server where Rust is plainly faster.
+# SIMD resize. Measured on a real page: 1.9 ms against 31 ms for the scalar one in
+# `image` — sixteen times, on the one step of the path that was never the bottleneck.
 fast_image_resize = { version = "5", features = ["image"] }
 # Encoding, which is where a cold page actually spends its time — measured at 18.4 ms of the
 # 31 the whole path costs, against 7.9 for the decode. This one does it in 6.3, in Rust, with
-# SIMD: the same size out and the same fidelity, and no C to install in the container.
+# SIMD: the same size out and the same fidelity, and no C to install beside the binary.
 jpeg-encoder = { version = "0.7", features = ["simd"] }
 
 # ComicInfo.xml. Not a courtesy: the real library is 100 %% ComicInfo and 0 %% entry.json,
 # and this is the only reader for its 2 677 chapters. External entities are not resolved at
-# all, which is what the Kotlin had to ask for explicitly.
+# all, which is what a general-purpose XML parser has to be asked for explicitly.
 quick-xml = "0.38"
 
 # NFD, to strip an accent from any letter rather than from the ones a table remembered.
@@ -68,6 +68,10 @@ rustls-pemfile = "2.2.0"
 
 [dev-dependencies]
 tempfile = "3"
+# Only to hand a route a body that arrives in pieces, which is the shape the real one has.
+futures-util = "=0.3.31"
+# Only to send the binary the signal a unit file would: there is no portable Rust for it.
+libc = "0.2"
 zip = { version = "6", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 tower = { version = "0.5", features = ["util"] }

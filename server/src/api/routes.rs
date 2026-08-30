@@ -6,8 +6,8 @@
 //!
 //! The guard is an **extractor**, so it appears in the handler's signature: a route that
 //! reads takes a [`Reader`], one that writes takes an [`Importer`]. A handler missing one
-//! is a handler that reads as unguarded, which is the property the Kotlin got from spelling
-//! the check out on every route — without spelling anything out.
+//! is a handler that reads as unguarded — the property a check spelled out on every route
+//! would buy, without spelling anything out.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -218,7 +218,13 @@ fn allowed(parts: &Parts, state: &AppState, permission: Permission) -> Result<()
         return Err(Refused::TooMany(wait.as_secs().max(1)));
     }
 
-    let offered = parts.headers.get(HEADER).and_then(|v| v.to_str().ok());
+    // The bytes, decoded as UTF-8. `to_str` admits visible ASCII and nothing else, so a
+    // secret with an accent in it would be configurable — `Keys::parse` measures it in
+    // characters — and then never recognised at the door.
+    let offered = parts
+        .headers
+        .get(HEADER)
+        .and_then(|v| std::str::from_utf8(v.as_bytes()).ok());
     let Some(key) = state.keys.recognise(offered) else {
         state.throttle.record_failure(&address);
         return Err(Refused::Forbidden("unknown key".into()));
@@ -808,7 +814,10 @@ async fn receive_entry(
 ) -> Result<Json<Proposal>, Failure> {
     let Some(name) = headers
         .get("X-Leaf-Name")
-        .and_then(|v| v.to_str().ok())
+        // The bytes, decoded as UTF-8, not `to_str`: that admits visible ASCII only, and
+        // reported "Tome 1 — Été.cbz" as no header at all rather than as a name it could
+        // not read. A library in French is mostly accented file names.
+        .and_then(|v| std::str::from_utf8(v.as_bytes()).ok())
         .map(str::to_string)
     else {
         return Err(Failure::Unhandled(crate::api::invalid(
@@ -967,10 +976,8 @@ async fn receive_import_file(
     };
 
     let received = stream_to(body, target, from, ceiling).await?;
-    // A number, like every other count in this API. The Kotlin spelled it as text because
-    // it built the response from a Map<String, String>, which was an accident of the type
-    // rather than a decision — wart 2, decided at the port while there is no client to
-    // break.
+    // A number, like every other count in this API. Built from a map of strings it would
+    // come back as text, which is an accident of the type rather than a decision.
     Ok(Json(serde_json::json!({ "path": path, "received": received })).into_response())
 }
 

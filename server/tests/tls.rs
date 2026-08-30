@@ -7,8 +7,22 @@
 
 use leaf_server::net::tls::Tls;
 
+/// The server's own logging, on: without a subscriber every `tracing!` short-circuits
+/// before it evaluates its arguments, so the line that announces a generated certificate
+/// never runs.
+fn logging() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::DEBUG)
+            .try_init();
+    });
+}
+
 #[tokio::test]
 async fn a_pair_is_generated_once_and_then_kept() {
+    logging();
     let dir = tempfile::tempdir().unwrap();
     let certificate = dir.path().join("tls/leaf.crt");
     let key = dir.path().join("tls/leaf.key");

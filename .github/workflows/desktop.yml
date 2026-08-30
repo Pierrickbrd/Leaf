@@ -1,7 +1,7 @@
 name: desktop
 
-# Filtered by path, like every other block: touching the server, the contract or the Kotlin
-# must not rebuild the client. One workflow per block, and they never meet.
+# Filtered by path, like every other block: touching the server or the tools must not
+# rebuild the client. One workflow per block, and they never meet.
 on:
   push:
     paths:

@@ -1,7 +1,7 @@
-//! The store, ported test for test from the Kotlin.
+//! The store: what a transaction is, and what a write that meets one is worth.
 //!
-//! These are the oracle. The Rust server is not "done" when it compiles, it is done when
-//! it answers the same way — and the answers are what these describe.
+//! These are the oracle. The server is not "done" when it compiles, it is done when it
+//! answers the way these describe.
 
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
@@ -155,10 +155,10 @@ fn data_survives_the_migration() {
 
 /// What happens when a request arrives while a scan is running.
 ///
-/// The Kotlin needed a bug and a redesign to answer these correctly — one shared JDBC
-/// connection put the edit inside the scan's transaction, so a rollback took it along,
-/// silently, after the request had already answered 200. Here the transaction is a value
-/// handed to a closure, so there is nothing for an edit to fall into by accident.
+/// One shared connection would put the edit inside the scan's transaction, so a rollback
+/// would take it along — silently, after the request had already answered 200. Here the
+/// transaction is a value handed to a closure, so there is nothing for an edit to fall into
+/// by accident.
 #[test]
 fn a_write_during_a_long_transaction_survives_that_transaction_failing() {
     let dir = temp();
@@ -460,4 +460,112 @@ fn dropping_the_unused_column_and_indexing_the_arcs_reaches_an_old_database() {
         })
         .unwrap();
     assert!(indices.iter().any(|i| i == "ix_arc_edition"), "{indices:?}");
+}
+
+#[test]
+fn the_connection_underneath_is_reachable_for_the_rare_thing_the_wrapper_does_not_do() {
+    // It is not counted, which is the reason to keep reaching for it rare — but a backup or
+    // a pragma nothing else needs has to be able to get at it.
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(&dir.path().join("index.sqlite")).unwrap();
+    let version: i64 = db
+        .read(|cx| {
+            let raw = cx.raw();
+            Ok(Some(
+                raw.query_row("PRAGMA user_version", [], |r| r.get(0))?,
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert!(version >= 0);
+}
+
+#[test]
+fn a_search_index_of_the_old_shape_is_thrown_away_and_made_again() {
+    // It used to be an ordinary table. Recreating it costs nothing — the next scan rebuilds
+    // it — so the shape is checked rather than migrated.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.sqlite");
+    {
+        let db = Db::open(&path).unwrap();
+        db.write(|cx| {
+            cx.run("DROP TABLE IF EXISTS search")?;
+            cx.run("CREATE TABLE search (id TEXT, label TEXT)")?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    let db = Db::open(&path).unwrap();
+    let sql: Option<String> = db
+        .read(|cx| {
+            cx.query_one(
+                "SELECT sql FROM sqlite_master WHERE name = 'search'",
+                [],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .map(Option::flatten)
+        })
+        .unwrap();
+    assert!(
+        sql.unwrap_or_default().to_lowercase().contains("fts5"),
+        "the old shape must be replaced, not kept"
+    );
+}
+
+#[test]
+fn a_migration_that_fails_for_a_real_reason_stops_the_start() {
+    // Swallowing it is the danger: a migration that failed for a genuine reason looks
+    // exactly like one that had already run, and the server would come up on a half-migrated
+    // schema without a word.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.sqlite");
+    {
+        let db = Db::open(&path).unwrap();
+        db.write(|cx| {
+            // One entry, so the step that updates every one of them has something to touch.
+            cx.execute(
+                "INSERT INTO work (id, name, path) VALUES ('w','Essai','/w')",
+                [],
+            )?;
+            cx.execute(
+                "INSERT INTO edition (id, work_id, path, implicit) VALUES ('e','w','/w/e',1)",
+                [],
+            )?;
+            cx.execute(
+                "INSERT INTO entry (id, edition_id, type, file, size, modified_at, page_count)
+                 VALUES ('v1','e','VOLUME','/w/e/Tome 1.cbz',1,1700000000000,1)",
+                [],
+            )?;
+            cx.run(
+                "CREATE TRIGGER refuse BEFORE UPDATE ON entry
+                 BEGIN SELECT RAISE(ABORT, 'not on my watch'); END",
+            )?;
+            // Back to before the step that updates every entry.
+            cx.run("PRAGMA user_version = 3")?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    let said = match Db::open(&path) {
+        Ok(_) => panic!("a failing migration must stop the start"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(said.contains("migration 5 failed"), "{said}");
+    assert!(said.contains("not on my watch"), "{said}");
+}
+
+#[test]
+fn a_column_a_migration_adds_twice_is_not_a_failure() {
+    // The other half of the same rule: "already there" is what a re-run looks like, and it
+    // is the one error worth swallowing.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.sqlite");
+    {
+        let db = Db::open(&path).unwrap();
+        db.write(|cx| cx.run("PRAGMA user_version = 0")).unwrap();
+    }
+    // Every ALTER TABLE ADD COLUMN now meets a column that is already there.
+    Db::open(&path).expect("a second start must not be a failure");
 }

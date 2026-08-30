@@ -1,8 +1,7 @@
 //! The read side: what a filter means, what a shelf costs, and what crosses the wire.
 //!
-//! Seeded directly rather than by scanning folders. The Kotlin tests built their fixtures
-//! with the scanner because it was there; a repository test that needs a scanner to run is
-//! a repository test that fails for two reasons, and only one of them is its own.
+//! Seeded directly rather than by scanning folders: a repository test that needs a scanner
+//! to run is a repository test that fails for two reasons, and only one of them is its own.
 
 use std::sync::Arc;
 
@@ -470,8 +469,8 @@ async fn a_default_never_crosses_the_wire() {
     let (_, body) = library.get("/series").await;
     let first = &body["items"][0];
 
-    // Verified against the Kotlin server, which ran with encodeDefaults = false: an unread
-    // series omits readStatus entirely, because "UNREAD" is the default.
+    // A default does not cross the wire: an unread series omits readStatus entirely,
+    // because "UNREAD" is the default.
     assert!(
         first.get("readStatus").is_none(),
         "readStatus must be absent when UNREAD"
@@ -523,4 +522,30 @@ async fn a_read_route_needs_a_key_and_health_does_not() {
     let (status, body) = library.get_with("/health", None).await;
     assert_eq!(StatusCode::OK, status);
     assert_eq!(3, body["library"]);
+}
+
+#[test]
+fn asking_for_the_chapters_of_no_series_at_all_asks_the_database_nothing() {
+    // The shelf hands the repository whatever it drew. An empty page must not become a
+    // query with an empty IN list, which SQLite answers slowly and pointlessly.
+    let library = Library::new();
+    let repository = Repository::new(&library.db);
+    assert!(repository.chapters_of_entries(&[]).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_misspelled_search_held_to_a_filter_stays_held_to_it() {
+    // The approximate fallback reads what it compares rather than asking an index, so what
+    // it reads has to stay bounded — by the shelf, and by the filter when there is one.
+    let library = Library::new();
+    // Nothing matches exactly, so it falls through to the guess — with the filter still on.
+    let (status, body) = library
+        .get("/search?q=Blaech&medium=manga&kind=SERIES")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.is_array(), "{body}");
+
+    // And with a publisher instead, which narrows to a different set of editions.
+    let (status, body) = library.get("/search?q=Blaech&publisher=Kana").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }

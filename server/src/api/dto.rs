@@ -6,12 +6,11 @@
 //!
 //! # Defaults do not cross the wire
 //!
-//! kotlinx.serialization ran with `encodeDefaults = false`, so a field left at its default
-//! was simply absent. That is not a quirk to tidy up in the port: it is the wire format two
-//! clients will be written against, and it keeps a shelf of two hundred tiles from carrying
-//! two hundred `"missingVolumes": []`.
+//! A field left at its default is simply absent. That is not a quirk to tidy up: it is the
+//! wire format both clients are written against, and it keeps a shelf of two hundred tiles
+//! from carrying two hundred `"missingVolumes": []`.
 //!
-//! Verified against the running Kotlin server rather than assumed — an unread series omits
+//! Verified against a running server rather than assumed — an unread series omits
 //! `readStatus` entirely, because "UNREAD" *is* the default.
 
 use serde::Serialize;

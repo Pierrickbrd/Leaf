@@ -1,7 +1,7 @@
 //! Turning what a file says into what a reader sees.
 //!
-//! Ported from the Kotlin, including the shapes a real library turned out to contain — the
-//! ones nobody would have thought to design for.
+//! Including the shapes a real library turned out to contain — the ones nobody would have
+//! thought to design for.
 
 use leaf_server::metadata::label::{compose, parse};
 

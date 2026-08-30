@@ -1,7 +1,7 @@
 name: server
 
-# Filtered by path, like every other block: touching the Kotlin, the QML or the contract
-# must not rebuild the Rust. One workflow per block, and they never meet.
+# Filtered by path, like every other block: touching the QML or the client must not
+# rebuild the Rust. One workflow per block, and they never meet.
 on:
   push:
     paths:

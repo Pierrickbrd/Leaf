@@ -8,8 +8,8 @@
 //! (Chapitre 686.5 declares `<Number>75</Number>`) and repeats the arc inside every volume,
 //! which makes a mid-volume boundary impossible to express. Both reasons to leave it.
 //!
-//! quick-xml does not resolve external entities at all, so the secure-processing settings
-//! the Kotlin had to ask for explicitly are the default here.
+//! quick-xml does not resolve external entities at all, so the secure-processing settings a
+//! general-purpose parser has to be asked for are the default here.
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -36,7 +36,7 @@ pub const ENTRY_NAME: &str = "ComicInfo.xml";
 ///
 /// Nothing else is resolved, and nothing external is fetched — a document that declares its
 /// own entities gets them back verbatim rather than expanded, which is the safe half of what
-/// the Kotlin had to ask `DocumentBuilderFactory` for explicitly.
+/// a general-purpose XML parser has to be asked for explicitly.
 fn resolve(name: &str) -> String {
     match name {
         "amp" => "&".into(),

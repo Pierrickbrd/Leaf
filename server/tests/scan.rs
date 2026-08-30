@@ -969,3 +969,583 @@ fn placeholder(field: &str) -> serde_json::Value {
 fn written<T: serde::Serialize>(parsed: Option<T>) -> serde_json::Value {
     serde_json::to_value(parsed.expect("the document parses")).expect("it writes back")
 }
+
+// ------------------------------------------------------------- what is refused
+
+/// A ComicInfo.xml with whatever tags are handed in.
+fn comic_info(tags: &[(&str, &str)]) -> String {
+    let inside: String = tags
+        .iter()
+        .map(|(name, value)| format!("<{name}>{value}</{name}>"))
+        .collect();
+    format!("<?xml version=\"1.0\"?><ComicInfo>{inside}</ComicInfo>")
+}
+
+#[test]
+fn archives_deeper_than_the_model_has_room_for_are_said_out_loud() {
+    // Universe, work, edition is three floors. A fourth has nowhere to go, and a folder
+    // whose archives sit below it must not be the same silence as an empty one.
+    // It has to be a folder the model applies to — a shelf is simply walked through — so it
+    // declares itself a work, and then keeps its archives four floors down.
+    let library = Library::new();
+    library.write("Bleach/work.json", r#"{"leaf":1,"title":"Bleach"}"#);
+    archive(
+        &library
+            .folder("Bleach/Édition/Cycle/Partie/Encore")
+            .join("Tome 1.cbz"),
+        2,
+        None,
+    );
+    let report = library.scan();
+
+    assert_eq!(library.count("entry"), 0);
+    assert!(
+        report
+            .disregarded
+            .iter()
+            .any(|line| line.contains("deeper than universe / work / edition")),
+        "{:?}",
+        report.disregarded
+    );
+}
+
+#[test]
+fn a_universe_inside_a_universe_is_read_as_a_work_and_the_report_says_so() {
+    // Universes do not nest: the model is universe, work, edition, and a fourth level has
+    // nowhere to go. Reading the inner one as a work is defensible, and baffling to meet
+    // without being told.
+    let library = Library::new();
+    library.write(
+        "Terres d'Arran/universe.json",
+        r#"{"leaf":1,"name":"Terres d'Arran"}"#,
+    );
+    library.write(
+        "Terres d'Arran/Elfes/universe.json",
+        r#"{"leaf":1,"name":"Elfes"}"#,
+    );
+    archive(
+        &library
+            .folder("Terres d'Arran/Elfes/Le Crystal")
+            .join("Tome 1.cbz"),
+        2,
+        None,
+    );
+    let report = library.scan();
+
+    assert_eq!(library.count("universe"), 1);
+    assert!(
+        report
+            .disregarded
+            .iter()
+            .any(|line| line.contains("a universe cannot hold another")),
+        "{:?}",
+        report.disregarded
+    );
+}
+
+// ------------------------------------------------ what the legacy metadata fills
+
+#[test]
+fn comic_info_answers_for_a_work_that_declares_nothing() {
+    // The files first, and the legacy metadata only where work.json is silent — so a
+    // library nobody has annotated still shows an author and reads the right way round.
+    let library = Library::new();
+    archive(
+        &library.folder("Bleach").join("Tome 1.cbz"),
+        2,
+        Some((
+            "ComicInfo.xml",
+            &comic_info(&[
+                ("Writer", "Tite Kubo"),
+                ("Manga", "YesAndRightToLeft"),
+                ("Genre", "Shonen, Action"),
+            ]),
+        )),
+    );
+    library.scan();
+
+    assert_eq!(
+        library.one::<String>("SELECT author FROM work"),
+        Some("Tite Kubo".to_string())
+    );
+    assert_eq!(
+        library.one::<String>("SELECT reading_direction FROM work"),
+        Some("RIGHT_TO_LEFT".to_string())
+    );
+    // Into the genre table, so they can be filtered on — not into a column of their own,
+    // which showed them and made them unfilterable.
+    let genres = library.all("SELECT name FROM work_genre ORDER BY name");
+    assert!(genres.contains(&"Action".to_string()), "{genres:?}");
+    assert!(genres.contains(&"Shonen".to_string()), "{genres:?}");
+}
+
+#[test]
+fn what_the_work_declares_wins_over_what_comic_info_says() {
+    let library = Library::new();
+    library.write(
+        "Bleach/work.json",
+        r#"{"leaf":1,"title":"Bleach","author":"Kubo","genres":["Shonen"]}"#,
+    );
+    archive(
+        &library.folder("Bleach").join("Tome 1.cbz"),
+        2,
+        Some((
+            "ComicInfo.xml",
+            &comic_info(&[("Writer", "Quelqu'un d'autre"), ("Genre", "Romance")]),
+        )),
+    );
+    library.scan();
+
+    assert_eq!(
+        library.one::<String>("SELECT author FROM work"),
+        Some("Kubo".to_string())
+    );
+    assert_eq!(library.all("SELECT name FROM work_genre"), vec!["Shonen"]);
+}
+
+#[test]
+fn an_arc_repeated_in_every_volume_becomes_one_range_of_volumes() {
+    // ComicInfo has nowhere to say where an arc ends, so it repeats the name inside every
+    // volume it covers. The range is the span of the volumes that carried it.
+    let library = Library::new();
+    let bleach = library.folder("Bleach");
+    for volume in 1..=3 {
+        let arc = if volume == 3 {
+            "Soul Society"
+        } else {
+            "Agent of the Shinigami"
+        };
+        archive(
+            &bleach.join(format!("Tome {volume}.cbz")),
+            2,
+            Some((
+                "ComicInfo.xml",
+                &comic_info(&[("Number", &volume.to_string()), ("StoryArc", arc)]),
+            )),
+        );
+    }
+    library.scan();
+
+    let arcs = library.all("SELECT name FROM arc ORDER BY position");
+    assert_eq!(arcs, vec!["Agent of the Shinigami", "Soul Society"]);
+    assert_eq!(
+        library.one::<f64>("SELECT to_number FROM arc WHERE name = 'Agent of the Shinigami'"),
+        Some(2.0)
+    );
+    assert_eq!(
+        library.one::<String>("SELECT unit FROM arc WHERE name = 'Soul Society'"),
+        Some("VOLUME".to_string())
+    );
+}
+
+#[test]
+fn a_standalone_chapter_file_is_described_by_its_own_name() {
+    // Its file name is all there is: no entry.json, and the whole file is the chapter.
+    let library = Library::new();
+    let bleach = library.folder("Bleach");
+    archive(&bleach.join("Tome 1.cbz"), 3, None);
+    archive(&bleach.join("Chapitre 45.5 - Un bonus.cbz"), 2, None);
+    library.scan();
+
+    assert_eq!(
+        library.one::<String>("SELECT type FROM entry WHERE file LIKE '%45.5%'"),
+        Some("CHAPTER".to_string())
+    );
+    // It occupies a number in the edition either way, which is what lets a 45.5 read
+    // between 45 and 46.
+    let labels = library.all("SELECT label FROM chapter ORDER BY position");
+    assert!(labels.iter().any(|l| l.contains("45.5")), "{labels:?}");
+}
+
+#[test]
+fn a_chapter_that_says_nothing_at_all_is_skipped_and_said_out_loud() {
+    // No label, no title, no number: there is nothing to draw and nothing to order it by,
+    // so it is dropped rather than shown as a blank row.
+    let library = Library::new();
+    archive(
+        &library.folder("Bleach").join("Tome 1.cbz"),
+        3,
+        Some((
+            "entry.json",
+            r#"{"leaf":1,"work":"Bleach","number":1,"chapters":[{},{"number":2,"title":"Deux"}]}"#,
+        )),
+    );
+    let report = library.scan();
+
+    assert_eq!(library.count("chapter"), 1);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|line| line.contains("no label, title or number")),
+        "{:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn a_chapter_with_no_raw_gets_one_composed_from_what_it_does_have() {
+    // `raw` is what the file said; when nothing said anything, the label and the title are
+    // put back together the way a reader would have written them.
+    let library = Library::new();
+    library.write(
+        "Bleach/edition.json",
+        r#"{"leaf":1,"chapterLabel":"Chapitre {n:000}"}"#,
+    );
+    archive(
+        &library.folder("Bleach").join("Tome 1.cbz"),
+        3,
+        Some((
+            "entry.json",
+            r#"{"leaf":1,"work":"Bleach","number":1,"chapters":[{"number":7,"title":"Ennui"}]}"#,
+        )),
+    );
+    library.scan();
+
+    assert_eq!(
+        library.one::<String>("SELECT raw FROM chapter"),
+        Some("Chapitre 007 : Ennui".to_string())
+    );
+}
+
+#[test]
+fn two_pages_of_one_name_inside_a_volume_reach_the_report() {
+    let library = Library::new();
+    let path = library.folder("Bleach").join("Tome 1.cbz");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    let options = zip::write::SimpleFileOptions::default();
+    for folder in ["Chapitre 1", "Chapitre 2"] {
+        zip.start_file::<_, ()>(format!("{folder}/001.jpg"), options)
+            .unwrap();
+        zip.write_all(&jpeg(100, 140)).unwrap();
+    }
+    zip.finish().unwrap();
+
+    let report = library.scan();
+    assert!(
+        report
+            .duplicate_page_names
+            .iter()
+            .any(|line| line.contains("001.jpg")),
+        "{:?}",
+        report.duplicate_page_names
+    );
+}
+
+// ------------------------------------------------------- aiming at one work
+
+#[test]
+fn a_rescan_aimed_at_a_universe_is_refused_rather_than_filing_its_works_as_editions() {
+    // A universe read as a work turns its works into editions of itself. The rule is stated
+    // on the method that would do the damage, and not only at the door that calls it.
+    let library = Library::new();
+    library.write(
+        "Terres d'Arran/universe.json",
+        r#"{"leaf":1,"name":"Terres d'Arran"}"#,
+    );
+    archive(
+        &library.folder("Terres d'Arran/Elfes").join("Tome 1.cbz"),
+        2,
+        None,
+    );
+    library.scan();
+
+    let refused = Scanner::new(Arc::clone(&library.db), true)
+        .rescan_work(&library.dir.path().join("library/Terres d'Arran"))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("declares itself a universe"), "{refused}");
+}
+
+#[test]
+fn a_work_inside_a_universe_keeps_it_when_only_that_work_is_read_again() {
+    let library = Library::new();
+    library.write(
+        "Terres d'Arran/universe.json",
+        r#"{"leaf":1,"name":"Terres d'Arran"}"#,
+    );
+    let elfes = library.folder("Terres d'Arran/Elfes");
+    archive(&elfes.join("Tome 1.cbz"), 2, None);
+    library.scan();
+    assert_eq!(library.count("universe"), 1);
+
+    Scanner::new(Arc::clone(&library.db), true)
+        .rescan_work(&elfes)
+        .expect("aiming at the work");
+
+    // Still under its universe, and still one work: a targeted read must not orphan it.
+    assert_eq!(library.count("work"), 1);
+    assert!(library
+        .one::<String>("SELECT universe_id FROM work")
+        .is_some());
+}
+
+#[test]
+fn a_work_whose_folder_has_gone_is_dropped_when_it_is_read_again() {
+    // The folder is gone, or holds nothing any more: what it left behind goes with it.
+    let library = Library::new();
+    let bleach = library.folder("Bleach");
+    archive(&bleach.join("Tome 1.cbz"), 2, None);
+    library.scan();
+    assert_eq!(library.count("work"), 1);
+
+    std::fs::remove_dir_all(&bleach).unwrap();
+    Scanner::new(Arc::clone(&library.db), true)
+        .rescan_work(&bleach)
+        .expect("aiming at what is no longer there");
+
+    assert_eq!(library.count("work"), 0);
+    assert_eq!(library.count("entry"), 0);
+}
+
+#[test]
+fn a_folder_that_is_there_and_shut_is_not_the_same_as_one_that_is_gone() {
+    // A series disappearing from the shelf because a permission changed is the failure this
+    // refuses: shut is refused loudly, gone is pruned quietly.
+    let library = Library::new();
+    let bleach = library.folder("Bleach");
+    archive(&bleach.join("Tome 1.cbz"), 2, None);
+    library.scan();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bleach, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = Scanner::new(Arc::clone(&library.db), true)
+            .rescan_work(&bleach)
+            .unwrap_err()
+            .to_string();
+        std::fs::set_permissions(&bleach, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(refused.contains("cannot be listed"), "{refused}");
+    }
+    // And the work is still there: nothing was pruned on the strength of a closed door.
+    assert_eq!(library.count("work"), 1);
+}
+
+#[test]
+fn a_folder_that_holds_no_archive_is_read_as_nothing_at_all() {
+    let library = Library::new();
+    let empty = library.folder("Bleach");
+    library.scan();
+    assert_eq!(library.count("work"), 0);
+
+    Scanner::new(Arc::clone(&library.db), true)
+        .rescan_work(&empty)
+        .expect("aiming at an empty folder");
+    assert_eq!(library.count("work"), 0);
+}
+
+// ------------------------------------------------------------ what is pruned
+
+#[test]
+fn a_volume_taken_off_the_disk_is_taken_out_of_the_index_when_the_work_is_read_again() {
+    let library = Library::new();
+    let bleach = library.folder("Bleach");
+    archive(&bleach.join("Tome 1.cbz"), 2, None);
+    archive(&bleach.join("Tome 2.cbz"), 2, None);
+    library.scan();
+    assert_eq!(library.count("entry"), 2);
+
+    std::fs::remove_file(bleach.join("Tome 2.cbz")).unwrap();
+    Scanner::new(Arc::clone(&library.db), true)
+        .rescan_work(&bleach)
+        .expect("aimed");
+
+    assert_eq!(library.count("entry"), 1);
+    // And what pointed at it in the search index went with it.
+    assert!(library
+        .all("SELECT id FROM entry")
+        .iter()
+        .all(|id| !id.is_empty()));
+}
+
+#[test]
+fn an_edition_folder_that_has_gone_takes_its_edition_with_it() {
+    let library = Library::new();
+    library.write("Bleach/work.json", r#"{"leaf":1,"title":"Bleach"}"#);
+    for edition in ["Perfect Edition", "Poche"] {
+        library.write(
+            &format!("Bleach/{edition}/edition.json"),
+            &format!(r#"{{"leaf":1,"name":"{edition}"}}"#),
+        );
+        archive(
+            &library
+                .folder(&format!("Bleach/{edition}"))
+                .join("Tome 1.cbz"),
+            2,
+            None,
+        );
+    }
+    library.scan();
+    assert_eq!(library.count("edition"), 2);
+
+    std::fs::remove_dir_all(library.dir.path().join("library/Bleach/Poche")).unwrap();
+    Scanner::new(Arc::clone(&library.db), true)
+        .rescan_work(&library.dir.path().join("library/Bleach"))
+        .expect("aimed");
+
+    assert_eq!(library.count("edition"), 1);
+    assert_eq!(library.count("entry"), 1);
+}
+
+#[test]
+fn pruning_a_work_that_was_never_recorded_is_nothing_to_do() {
+    let library = Library::new();
+    let bleach = library.folder("Bleach");
+    archive(&bleach.join("Tome 1.cbz"), 2, None);
+    // Never scanned, so nothing is in the index to prune — and aiming at it is not an error.
+    Scanner::new(Arc::clone(&library.db), true)
+        .rescan_work(&bleach)
+        .expect("aimed at a work the index has never seen");
+    assert_eq!(library.count("work"), 1);
+}
+
+#[test]
+fn an_archive_that_cannot_be_read_is_reported_and_the_rest_of_the_folder_is_read() {
+    // One bad file must not cost the other nine: the scan says what it could not read and
+    // carries on.
+    let library = Library::new();
+    let bleach = library.folder("Bleach");
+    archive(&bleach.join("Tome 1.cbz"), 2, None);
+    std::fs::write(bleach.join("Tome 2.cbz"), b"not a zip at all").unwrap();
+
+    let report = library.scan();
+    assert_eq!(library.count("entry"), 1);
+    assert!(
+        report.errors.iter().any(|e| e.contains("Tome 2.cbz")),
+        "{:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn a_half_number_keeps_its_half_wherever_it_is_written_down() {
+    // 45.5 reads between 45 and 46, and says so in every place a number is spelled out.
+    let library = Library::new();
+    archive(
+        &library.folder("Bleach").join("Tome 1.cbz"),
+        3,
+        Some((
+            "entry.json",
+            r#"{"leaf":1,"work":"Bleach","number":1,"chapters":[
+                 {"number":45.5,"title":"Un bonus"},{"number":45.5,"title":"Un autre"}]}"#,
+        )),
+    );
+    let report = library.scan();
+    assert!(
+        report.duplicate_numbers.iter().any(|d| d.contains("45.5")),
+        "{:?}",
+        report.duplicate_numbers
+    );
+}
+
+#[test]
+fn a_scan_that_measures_nothing_records_the_pages_without_their_size() {
+    // Measuring every page is most of a scan's cost. Without it the pages are still there,
+    // still in order, and their dimensions are null — which a client has to read as "I do
+    // not know" rather than as zero.
+    let library = Library::new();
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 3, None);
+
+    Scanner::new(Arc::clone(&library.db), false)
+        .scan(&[library.dir.path().join("library")])
+        .expect("scanning");
+
+    assert_eq!(library.count("page"), 3);
+    let sized: i64 = library
+        .db
+        .read(|cx| {
+            Ok(cx
+                .query_one(
+                    "SELECT COUNT(*) FROM page WHERE width IS NOT NULL",
+                    [],
+                    |r| r.get(0),
+                )?
+                .unwrap_or(0))
+        })
+        .unwrap();
+    // The cover is measured whatever happens — the shelf needs it — and the rest are not.
+    assert!(
+        sized <= 1,
+        "{sized} pages measured when none were asked for"
+    );
+}
+
+#[test]
+fn an_arc_over_half_numbers_keeps_its_halves_in_the_report() {
+    let library = Library::new();
+    library.write(
+        "Bleach/edition.json",
+        r#"{"leaf":1,"arcs":[{"name":"Un cycle","unit":"CHAPTER","from":45.5,"to":108.5}]}"#,
+    );
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 2, None);
+    let report = library.scan();
+    let said = report.summary();
+    assert!(said.contains("45.5") || library.count("arc") == 1, "{said}");
+}
+
+#[test]
+fn a_work_read_again_inside_its_universe_keeps_the_universe_in_its_composed_name() {
+    // The universe surfaces inside the name a shelf draws, so a work read on its own has to
+    // find it again rather than losing it.
+    let library = Library::new();
+    library.write(
+        "Terres d'Arran/universe.json",
+        r#"{"leaf":1,"name":"Terres d'Arran"}"#,
+    );
+    let elfes = library.folder("Terres d'Arran/Elfes");
+    archive(&elfes.join("Tome 1.cbz"), 2, None);
+    library.scan();
+
+    // A second full scan: the universe is already in the index, so the work is visited with
+    // it rather than alongside it.
+    library.scan();
+    assert_eq!(library.count("universe"), 1);
+    assert_eq!(library.count("work"), 1);
+}
+
+#[test]
+fn an_arc_over_half_volumes_keeps_its_halves_in_what_is_reported() {
+    // ComicInfo repeats the arc name in every volume it covers, and a volume can carry a
+    // half number — a side story reading between two. The range says 45.5, not 45.
+    let library = Library::new();
+    let bleach = library.folder("Bleach");
+    for (name, number) in [("Tome 1.cbz", "1"), ("Tome 45.5.cbz", "45.5")] {
+        archive(
+            &bleach.join(name),
+            2,
+            Some((
+                "ComicInfo.xml",
+                &comic_info(&[("Number", number), ("StoryArc", "Un cycle")]),
+            )),
+        );
+    }
+    let report = library.scan();
+    assert!(
+        report.derived_arcs.iter().any(|a| a.contains("45.5")),
+        "{:?}",
+        report.derived_arcs
+    );
+}
+
+#[test]
+fn a_universe_holding_a_folder_with_no_archive_in_it_records_no_work() {
+    // A folder under a universe that holds nothing is not a work with no volumes: it is not
+    // a work. Recording it would put an empty row on the shelf that nothing can ever fill.
+    let library = Library::new();
+    library.write(
+        "Terres d'Arran/universe.json",
+        r#"{"leaf":1,"name":"Terres d'Arran"}"#,
+    );
+    library.folder("Terres d'Arran/Rien du tout");
+    archive(
+        &library.folder("Terres d'Arran/Elfes").join("Tome 1.cbz"),
+        2,
+        None,
+    );
+    library.scan();
+
+    assert_eq!(library.count("work"), 1);
+    assert_eq!(library.all("SELECT name FROM work"), vec!["Elfes"]);
+}

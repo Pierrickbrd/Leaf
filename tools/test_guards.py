@@ -9,6 +9,7 @@ guard read as 91 lines nobody exercises.
 
 import contextlib
 import io
+import json
 import pathlib
 import tempfile
 import unittest
@@ -57,6 +58,16 @@ class RefusesLatin1(unittest.TestCase):
         suffixes = {p.suffix for p in bytes_stay_utf8.files_to_read()}
         self.assertTrue(suffixes)
         self.assertTrue(suffixes <= {".h", ".cpp", ".qml"}, suffixes)
+
+    def test_a_place_that_is_not_there_is_walked_past(self):
+        # The client's three folders are named ahead of time; a checkout without one of them
+        # is not an error, it is simply nothing to read.
+        was = bytes_stay_utf8.LOOKED_AT
+        try:
+            bytes_stay_utf8.LOOKED_AT = [pathlib.Path("/no/such/folder/anywhere")]
+            self.assertEqual(list(bytes_stay_utf8.files_to_read()), [])
+        finally:
+            bytes_stay_utf8.LOOKED_AT = was
 
     def test_the_client_as_it_stands_has_none(self):
         said = io.StringIO()
@@ -121,6 +132,64 @@ Read<Page> page(const QJsonObject &from)
         for _, (depth, functions) in contract.WATCHED.items():
             self.assertIn(depth, ("whole", "part"))
             self.assertTrue(functions)
+
+    def against(self, source: str, schemas: dict, watched: dict):
+        """`main`, reading a contract and a client written for the occasion."""
+        with tempfile.TemporaryDirectory() as folder:
+            folder = pathlib.Path(folder)
+            (folder / "openapi.yaml").write_text(
+                json.dumps({"components": {"schemas": schemas}}), encoding="utf-8"
+            )
+            (folder / "Api.cpp").write_text(source, encoding="utf-8")
+            was = (contract.CONTRACT, contract.SOURCE, contract.WATCHED)
+            try:
+                contract.CONTRACT = folder / "openapi.yaml"
+                contract.SOURCE = folder / "Api.cpp"
+                contract.WATCHED = watched
+                said = io.StringIO()
+                with contextlib.redirect_stdout(said):
+                    return contract.main(), said.getvalue()
+            finally:
+                contract.CONTRACT, contract.SOURCE, contract.WATCHED = was
+
+    def test_a_guard_that_reads_no_field_says_so_about_itself(self):
+        # The one failure that must never be reported as the client's. A rename of how
+        # Api.cpp names a field once left this matching nothing, and every schema looked
+        # perfectly read.
+        code, said = self.against(
+            'Read<Series> series(const QJsonObject &from)\n{\n    nothing_here();\n}\n',
+            {"Series": {"properties": {"id": {}}}},
+            {"Series": ("whole", ["series"])},
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("this guard is broken, not the client", said)
+
+    def test_a_schema_the_contract_no_longer_has(self):
+        code, said = self.against(
+            self.SOURCE, {"Page": {"properties": {"total": {}}}},
+            {"Series": ("whole", ["series"]), "Page": ("whole", ["page"])},
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("the contract no longer has this schema", said)
+        self.assertIn("The contract moved and the client did not", said)
+
+    def test_a_field_declared_and_never_read(self):
+        code, said = self.against(
+            self.SOURCE,
+            {"Series": {"properties": {"id": {}, "work": {}, "universe": {}}}},
+            {"Series": ("whole", ["series"])},
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("declared but never read: universe", said)
+
+    def test_a_schema_read_in_part_says_what_it_left(self):
+        code, said = self.against(
+            self.SOURCE,
+            {"Series": {"properties": {"id": {}, "work": {}, "universe": {}}}},
+            {"Series": ("part", ["series"])},
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("2/3 read on purpose, left: universe", said)
 
     def test_the_client_as_it_stands_knows_it(self):
         said = io.StringIO()

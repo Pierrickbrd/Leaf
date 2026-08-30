@@ -159,7 +159,7 @@ fn a_sidecar_carries_what_was_said_and_nothing_else() {
         .expect("patching");
 
     // These files are read and edited by hand. One touched field must not write out
-    // fourteen nulls beside it — which is what `encodeDefaults = false` gave the Kotlin.
+    // fourteen nulls beside it, which is what writing every field at its default would do.
     let written = std::fs::read_to_string(world.library().join("Bleach/work.json")).unwrap();
     assert!(
         !written.contains("null"),
@@ -1503,4 +1503,325 @@ fn a_changed_file_of_the_same_size_is_asked_for_when_a_checksum_says_so() {
         .open(&manifest(&[("Nains 01.cbz", 6)], Scope::Addition))
         .expect("opening");
     assert!(opened.to_send.is_empty());
+}
+
+// ------------------------------------------------------- the corners of a sweep
+
+/// A bulk import against a library of its own, so the sweep has a whole tree to itself.
+fn a_bulk() -> (tempfile::TempDir, leaf_server::api::bulk_import::BulkImport) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("library")).unwrap();
+    std::fs::create_dir_all(dir.path().join("inbox")).unwrap();
+    let bulk = leaf_server::api::bulk_import::BulkImport::new(
+        &dir.path().join("inbox"),
+        &dir.path().join("library"),
+    );
+    (dir, bulk)
+}
+
+#[test]
+fn a_manifest_path_that_walks_upwards_lands_inside_the_root_anyway() {
+    use leaf_server::api::bulk_import::{ImportRequest, ManifestFile, Scope};
+
+    let (dir, bulk) = a_bulk();
+    let opened = bulk
+        .open(&ImportRequest {
+            root: "Bleach".into(),
+            scope: Scope::Addition,
+            files: vec![ManifestFile {
+                path: "../../evade.cbz".into(),
+                size: 2,
+                checksum: None,
+            }],
+        })
+        .expect("opened");
+
+    // Refused outright rather than quietly flattened: a manifest that names a path outside
+    // its own root is a manifest nobody should be acting on, whatever it would resolve to.
+    let refused = bulk
+        .writing_at(&opened.id, "../../evade.cbz", 0, 1024)
+        .unwrap_err();
+    assert!(
+        format!("{refused:?}").contains("outside its root"),
+        "{refused:?}"
+    );
+    assert!(!dir.path().parent().unwrap().join("evade.cbz").exists());
+}
+
+#[test]
+fn a_write_starting_past_the_ceiling_is_refused_even_though_it_is_a_resume() {
+    use leaf_server::api::bulk_import::{ImportRequest, ManifestFile, Scope};
+
+    // Counted from the offset, so resuming at 95 % of a huge file is not mistaken for a
+    // fresh one of that size — and is still refused when the offset alone is over.
+    let (_dir, bulk) = a_bulk();
+    let opened = bulk
+        .open(&ImportRequest {
+            root: "Bleach".into(),
+            scope: Scope::Addition,
+            files: vec![ManifestFile {
+                path: "Tome 1.cbz".into(),
+                size: 9_000_000_000,
+                checksum: None,
+            }],
+        })
+        .expect("opened");
+
+    // Five bytes are already there, so the offset is the right one — and it is over a
+    // ceiling of four.
+    let target = bulk
+        .writing_at(&opened.id, "Tome 1.cbz", 0, 1_000_000)
+        .expect("a target");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, b"12345").unwrap();
+
+    let refused = bulk.writing_at(&opened.id, "Tome 1.cbz", 5, 4).unwrap_err();
+    assert!(
+        format!("{refused:?}").contains("larger than"),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn a_session_with_no_manifest_is_no_session() {
+    let (dir, bulk) = a_bulk();
+    // A folder under the inbox that is not an import is not an error: it is not ours.
+    std::fs::create_dir_all(dir.path().join("inbox/imp_deadbeef")).unwrap();
+    assert!(bulk.state("imp_deadbeef").unwrap().is_none());
+    assert!(bulk.waiting().unwrap().is_empty());
+}
+
+#[test]
+fn a_file_already_home_is_done_rather_than_missing() {
+    use leaf_server::api::bulk_import::{ImportRequest, ManifestFile, Scope};
+
+    // A commit that installed part of a manifest keeps the session for the rest, so a second
+    // one meets files that are already home.
+    let (dir, bulk) = a_bulk();
+    let library = dir.path().join("library/Bleach");
+    std::fs::create_dir_all(&library).unwrap();
+    std::fs::write(library.join("Tome 1.cbz"), b"pk").unwrap();
+
+    let opened = bulk
+        .open(&ImportRequest {
+            root: "Bleach".into(),
+            scope: Scope::Addition,
+            files: vec![ManifestFile {
+                path: "Tome 1.cbz".into(),
+                size: 2,
+                checksum: None,
+            }],
+        })
+        .expect("opened");
+
+    let state = bulk.state(&opened.id).unwrap().expect("a state");
+    assert_eq!(state.missing.len(), 0, "{state:?}");
+    // Nothing left to send: it is there, at the right length.
+    let result = bulk.commit(&opened.id).expect("committed");
+    assert!(result.pending.is_empty(), "{result:?}");
+}
+
+#[test]
+fn a_manifest_that_covers_the_whole_series_reports_what_it_does_not_mention() {
+    use leaf_server::api::bulk_import::{ImportRequest, ManifestFile, Scope};
+
+    // "Here is the whole series": whatever is not in it is reported as an orphan — named,
+    // never removed, because deciding a file is unwanted is not the server's call.
+    let (dir, bulk) = a_bulk();
+    let target = dir.path().join("library/Bleach");
+    std::fs::create_dir_all(target.join("Extras")).unwrap();
+    std::fs::write(target.join("Tome 1.cbz"), b"pk").unwrap();
+    std::fs::write(target.join("Extras/Bonus.cbz"), b"pk").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, target.join("retour")).unwrap();
+
+    let opened = bulk
+        .open(&ImportRequest {
+            root: "Bleach".into(),
+            scope: Scope::Complete,
+            files: vec![ManifestFile {
+                path: "Tome 1.cbz".into(),
+                size: 2,
+                checksum: None,
+            }],
+        })
+        .expect("opened");
+
+    let result = bulk.commit(&opened.id).expect("committed");
+    assert_eq!(result.orphans, vec!["Extras/Bonus.cbz".to_string()]);
+    // A symlink is a leaf and never a way back up: the sweep does not descend into it, so
+    // a link to the folder it sits in is not an infinite tree of orphans.
+    assert!(
+        target.join("Extras/Bonus.cbz").is_file(),
+        "nothing is removed"
+    );
+}
+
+#[test]
+fn a_tree_deeper_than_the_sweep_follows_stops_rather_than_walking_for_ever() {
+    use leaf_server::api::bulk_import::{ImportRequest, Scope};
+
+    let (dir, bulk) = a_bulk();
+    let mut deep = dir.path().join("library/Bleach");
+    for n in 0..12 {
+        deep = deep.join(format!("{n}"));
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(deep.join("Trop loin.cbz"), b"pk").unwrap();
+
+    let opened = bulk
+        .open(&ImportRequest {
+            root: "Bleach".into(),
+            scope: Scope::Complete,
+            files: Vec::new(),
+        })
+        .expect("opened");
+
+    let result = bulk.commit(&opened.id).expect("committed");
+    assert!(
+        !result.orphans.iter().any(|o| o.contains("Trop loin")),
+        "past the ceiling nothing is swept: {:?}",
+        result.orphans
+    );
+}
+
+#[test]
+fn a_target_that_cannot_be_read_sweeps_to_nothing_rather_than_failing() {
+    use leaf_server::api::bulk_import::{ImportRequest, Scope};
+
+    let (dir, bulk) = a_bulk();
+    let target = dir.path().join("library/Bleach");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("Tome 1.cbz"), b"pk").unwrap();
+
+    let opened = bulk
+        .open(&ImportRequest {
+            root: "Bleach".into(),
+            scope: Scope::Complete,
+            files: Vec::new(),
+        })
+        .expect("opened");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = bulk.commit(&opened.id).expect("committed");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.orphans.is_empty(), "{result:?}");
+    }
+}
+
+#[test]
+fn what_is_waiting_in_an_inbox_that_is_not_there_is_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let bulk = leaf_server::api::bulk_import::BulkImport::new(
+        &dir.path().join("no-such-inbox"),
+        &dir.path().join("library"),
+    );
+    assert!(bulk.waiting().unwrap().is_empty());
+}
+
+#[test]
+fn a_file_that_cannot_be_read_to_check_its_checksum_is_dropped_like_a_wrong_one() {
+    use leaf_server::api::bulk_import::{ImportRequest, ManifestFile, Scope};
+
+    // A checksum that is sent and never compared is worse than none, because it reads like
+    // a guarantee. When the comparison itself cannot happen, the bytes are no more trusted
+    // than bytes known to be wrong.
+    let (dir, bulk) = a_bulk();
+    let opened = bulk
+        .open(&ImportRequest {
+            root: "Bleach".into(),
+            scope: Scope::Addition,
+            files: vec![ManifestFile {
+                path: "Tome 1.cbz".into(),
+                size: 2,
+                checksum: Some("0".repeat(64)),
+            }],
+        })
+        .expect("opened");
+
+    let target = bulk
+        .writing_at(&opened.id, "Tome 1.cbz", 0, 1_000_000)
+        .expect("a target");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, b"pk").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+
+    let result = bulk.commit(&opened.id).expect("committed");
+    assert_eq!(result.corrupt, vec!["Tome 1.cbz".to_string()], "{result:?}");
+    assert_eq!(result.installed, 0);
+    let _ = std::fs::remove_file(&target);
+    let _ = dir;
+}
+
+#[test]
+fn a_manifest_path_with_a_dot_in_the_middle_is_the_same_path_without_it() {
+    use leaf_server::api::bulk_import::{ImportRequest, ManifestFile, Scope};
+
+    let (_dir, bulk) = a_bulk();
+    let opened = bulk
+        .open(&ImportRequest {
+            root: "Bleach".into(),
+            scope: Scope::Addition,
+            files: vec![ManifestFile {
+                path: "Extras/./Bonus.cbz".into(),
+                size: 2,
+                checksum: None,
+            }],
+        })
+        .expect("opened");
+
+    let target = bulk
+        .writing_at(&opened.id, "Extras/./Bonus.cbz", 0, 1_000_000)
+        .expect("a target");
+    assert!(target.ends_with("Extras/Bonus.cbz"), "{}", target.display());
+}
+
+#[test]
+fn a_folder_under_the_inbox_that_is_not_an_import_is_walked_past() {
+    let (dir, bulk) = a_bulk();
+    std::fs::create_dir_all(dir.path().join("inbox/quelque-chose-d-autre")).unwrap();
+    std::fs::write(dir.path().join("inbox/un-fichier"), b"x").unwrap();
+    assert!(bulk.waiting().unwrap().is_empty());
+}
+
+#[test]
+fn a_file_already_home_is_counted_as_done_in_what_is_waiting() {
+    use leaf_server::api::bulk_import::{ImportRequest, ManifestFile, Scope};
+
+    // A commit that installed part of a manifest keeps the session for the rest, so the
+    // listing meets files that are already there. They are done, not missing.
+    let (dir, bulk) = a_bulk();
+    let library = dir.path().join("library/Bleach");
+    std::fs::create_dir_all(&library).unwrap();
+    std::fs::write(library.join("Tome 1.cbz"), b"pk").unwrap();
+
+    bulk.open(&ImportRequest {
+        root: "Bleach".into(),
+        scope: Scope::Addition,
+        files: vec![
+            ManifestFile {
+                path: "Tome 1.cbz".into(),
+                size: 2,
+                checksum: None,
+            },
+            ManifestFile {
+                path: "Tome 2.cbz".into(),
+                size: 2,
+                checksum: None,
+            },
+        ],
+    })
+    .expect("opened");
+
+    let waiting = bulk.waiting().unwrap();
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0].of, 2);
+    assert_eq!(waiting[0].complete, 1, "the one already home is done");
 }

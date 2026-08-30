@@ -10,9 +10,8 @@
 //! printed below rather than trusting a public authority. That is a stronger bond than a
 //! public certificate, not a weaker one — it names exactly one server.
 //!
-//! **The keystore became two PEM files.** The Kotlin kept a JKS, which is a Java format and
-//! nothing else reads it, and protected it with a password that guarded the file rather than
-//! the wire. On Unix a private key is guarded by its mode, so the key is written `0600` and
+//! **Two PEM files, and no keystore.** A keystore is a format one ecosystem reads, protected
+//! by a password that guards the file rather than the wire. On Unix a private key is guarded by its mode, so the key is written `0600` and
 //! there is no password to configure, lose, or leave in an environment variable.
 
 use std::path::{Path, PathBuf};

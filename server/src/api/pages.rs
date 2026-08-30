@@ -410,11 +410,7 @@ impl Pages {
                     // page marked in flight for ever — so it was never prepared again, and
                     // the same page stuttered on every read.
                     let _claim = Claim(&pages, &task.key);
-                    let prepared = match task.number {
-                        Some(number) => pages.page(&task.id, number, Some(task.width)),
-                        None => pages.series_cover(&task.id, Some(task.width)),
-                    };
-                    if let Err(e) = prepared {
+                    if let Err(e) = pages.page(&task.id, task.number, Some(task.width)) {
                         tracing::debug!(key = %task.key, error = %e, "could not warm");
                     }
                 })
@@ -444,18 +440,17 @@ impl Pages {
             let task = Warm {
                 key: key.clone(),
                 id: entry_id.to_string(),
-                number: Some(next),
+                number: next,
                 width,
             };
             // A full queue means we are behind the reader. What is dropped is the newest
             // request — the page furthest ahead — because the oldest is the one about to be
             // turned to.
             //
-            // And a dropped task has to give its claim back. In Kotlin that needed a custom
-            // rejection handler, because the stock policies drop in silence and the page
-            // stayed marked in flight for ever: one stutter, at the same page, every time
-            // it was read. Here the value comes back in the error, so releasing it is the
-            // only thing there is to do with it.
+            // And a dropped task has to give its claim back. A queue that drops in silence
+            // would leave the page marked in flight for ever: one stutter, at the same page,
+            // every time it is read. Here the value comes back in the error, so releasing it
+            // is the only thing there is to do with it.
             if sender.try_send(task).is_err() {
                 self.release(&key);
             }
@@ -583,10 +578,8 @@ impl Drop for Claim<'_> {
 
 pub struct Warm {
     key: String,
-    /// An entry for a page, an edition for a shelf tile.
     id: String,
-    /// `None` for a series cover: there is no page number to speak of.
-    number: Option<i64>,
+    number: i64,
     width: u32,
 }
 
@@ -609,15 +602,14 @@ struct Plan {
 /// downscaled page has already lost the detail a lossless format would protect.
 ///
 /// The scaling itself is SIMD and fast — 1.9 ms on a real page, against 31 ms for the
-/// scalar implementation in `image` and 9.6 ms for Java's Graphics2D.
+/// scalar implementation in `image`.
 ///
-/// **And the whole path is still four times slower than the Kotlin's**: 116 ms against
-/// 31 ms per page, measured through both servers on the same archive. The reason is not
-/// the resize, it is the decode. Thumbnailator asks libjpeg to decode at a *reduced* scale
-/// — the DCT can produce a half- or quarter-size image for a fraction of the work — so the
-/// JVM never materialises the full bitmap it is about to shrink. Neither `image` nor
-/// `zune-jpeg` exposes that, so this decodes 1936×1400 in full and then throws most of it
-/// away.
+/// **And the whole path still costs 116 ms per page**, measured on a real archive. The
+/// reason is not the resize, it is the decode. libjpeg can be asked to decode at a
+/// *reduced* scale — the DCT can produce a half- or quarter-size image for a fraction of
+/// the work — so a decoder that exposes it never materialises the full bitmap it is about
+/// to shrink. Neither `image` nor `zune-jpeg` does, so this decodes 1936×1400 in full and
+/// then throws most of it away.
 ///
 /// Recorded rather than papered over. It only bites on a cache miss, and the warm path is
 /// the one that runs: 9 ms against 12. Closing it would mean `mozjpeg` or `turbojpeg`,

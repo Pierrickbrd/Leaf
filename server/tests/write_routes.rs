@@ -4,153 +4,15 @@
 //! be refused, an upload must reach the disk without being held whole in memory, and a
 //! broken transfer must be told exactly where to resume.
 
-use std::io::Write;
 use std::path::Path;
-use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
-use leaf_server::api::keys::Keys;
-use leaf_server::api::routes::{can_be_aimed_at, router, AppState};
-use leaf_server::metadata::sidecars::{self, EntryJson};
-use leaf_server::scan::scanner::Scanner;
-use leaf_server::store::Db;
-use tower::ServiceExt;
+use leaf_server::api::routes::{can_be_aimed_at, AppState};
+use leaf_server::metadata::sidecars::EntryJson;
 
-const READ_ONLY: &str = "1111111111111111";
-const IMPORTER: &str = "8f3a92c1d4e5b6a7";
-
-fn keys() -> Keys {
-    Keys::parse(Some(
-        "phone:1111111111111111:read  desktop:8f3a92c1d4e5b6a7:read,import",
-    ))
-    .expect("keys")
-}
-
-fn jpeg() -> Vec<u8> {
-    let mut buffer = image::RgbImage::new(60, 90);
-    for (x, y, pixel) in buffer.enumerate_pixels_mut() {
-        *pixel = image::Rgb([(x % 256) as u8, (y % 256) as u8, 128]);
-    }
-    let mut out = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgb8(buffer)
-        .write_to(&mut out, image::ImageFormat::Jpeg)
-        .unwrap();
-    out.into_inner()
-}
-
-fn archive_bytes(entry: Option<&EntryJson>) -> Vec<u8> {
-    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    let options = zip::write::SimpleFileOptions::default();
-    zip.start_file::<_, ()>("000.jpg", options).unwrap();
-    zip.write_all(&jpeg()).unwrap();
-    if let Some(entry) = entry {
-        zip.start_file::<_, ()>("entry.json", options).unwrap();
-        zip.write_all(&sidecars::write(entry).unwrap()).unwrap();
-    }
-    zip.finish().unwrap().into_inner()
-}
-
-struct Server {
-    dir: tempfile::TempDir,
-    db: Arc<Db>,
-    drop: Option<std::path::PathBuf>,
-    trust_proxy: bool,
-}
-
-impl Server {
-    fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("library")).unwrap();
-        std::fs::create_dir_all(dir.path().join("inbox")).unwrap();
-        let db = Arc::new(Db::open(&dir.path().join("index.sqlite")).unwrap());
-        Server {
-            dir,
-            db,
-            drop: None,
-            trust_proxy: false,
-        }
-    }
-
-    fn library(&self) -> std::path::PathBuf {
-        self.dir.path().join("library")
-    }
-
-    fn state(&self) -> AppState {
-        AppState::new(Arc::clone(&self.db), keys())
-            .with_library(vec![self.library()], true)
-            .trusting_proxy(self.trust_proxy)
-            .with_import(
-                &self.dir.path().join("inbox"),
-                &self.library(),
-                self.drop.clone(),
-                4 * 1024,
-            )
-    }
-
-    fn scan(&self) {
-        Scanner::new(Arc::clone(&self.db), true)
-            .scan(&[self.library()])
-            .expect("scanning");
-    }
-
-    fn series(&self) -> String {
-        self.db
-            .read(|cx| cx.query_one("SELECT id FROM edition", [], |r| r.get::<_, String>(0)))
-            .unwrap()
-            .expect("a series")
-    }
-
-    async fn send(&self, request: Request<Body>) -> (StatusCode, serde_json::Value) {
-        self.send_to(self.state(), request).await
-    }
-
-    /// Through one router, so that state a test wants to survive between calls — the
-    /// throttle, which counts — actually does.
-    async fn send_to(
-        &self,
-        state: AppState,
-        request: Request<Body>,
-    ) -> (StatusCode, serde_json::Value) {
-        let response = router(state).oneshot(request).await.expect("a response");
-        let status = response.status();
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let json = if bytes.is_empty() {
-            serde_json::Value::Null
-        } else {
-            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
-        };
-        (status, json)
-    }
-}
-
-fn request(method: &str, uri: &str, key: &str) -> axum::http::request::Builder {
-    Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("X-Leaf-Key", key)
-}
-
-fn json_body(value: serde_json::Value) -> Body {
-    Body::from(serde_json::to_vec(&value).unwrap())
-}
-
-fn a_volume(server: &Server) {
-    let folder = server.library().join("Bleach");
-    std::fs::create_dir_all(&folder).unwrap();
-    std::fs::write(
-        folder.join("Tome 1.cbz"),
-        archive_bytes(Some(&EntryJson {
-            leaf: Some(1),
-            work: Some("Bleach".into()),
-            number: Some(1.0),
-            ..Default::default()
-        })),
-    )
-    .unwrap();
-    server.scan();
-}
+mod common;
+use common::{a_volume, archive_bytes, json_body, request, Server, IMPORTER, READ_ONLY};
 
 // -------------------------------------------------------------------- guards
 
@@ -343,7 +205,7 @@ async fn a_transfer_resumes_where_the_server_says_it_stopped() {
         )
         .await;
     assert_eq!(StatusCode::OK, status);
-    // A number, like every other count in this API. The Kotlin spelled it as text.
+    // A number, like every other count in this API.
     assert_eq!(4, sent["received"]);
 
     let (status, state) = server
@@ -506,7 +368,7 @@ async fn health_says_whether_the_short_path_exists() {
                 .unwrap(),
         )
         .await;
-    // Skipped at its default, as kotlinx.serialization did with encodeDefaults = false.
+    // Skipped at its default: a default does not cross the wire.
     assert!(body.get("localDrop").is_none());
 
     let folder = server.dir.path().join("drop");

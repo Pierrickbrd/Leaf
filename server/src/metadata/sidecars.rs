@@ -4,9 +4,8 @@
 //! reads: the folder names carry the structure, and everything below is what the files add
 //! when they are there.
 //!
-//! `serde` is asked to be lenient about what it does not know, the way kotlinx.serialization
-//! was: a sidecar written by a later version of Leaf must not stop this one from reading a
-//! library.
+//! `serde` is asked to be lenient about what it does not know: a sidecar written by a later
+//! version of Leaf must not stop this one from reading a library.
 
 use serde::{Deserialize, Serialize};
 

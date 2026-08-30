@@ -323,3 +323,67 @@ fn a_number_disagreeing_with_the_file_name_is_worth_a_word() {
 fn a_file_that_declares_nothing_contradicts_nothing() {
     assert!(coherence("Tome 1.cbz", None, "VOLUME", 20, Some(7.0)).is_empty());
 }
+
+#[test]
+fn a_work_that_declares_itself_and_says_nothing_is_named_field_by_field() {
+    use leaf_server::metadata::sidecars::WorkJson;
+    let empty = WorkJson {
+        leaf: Some(1),
+        ..Default::default()
+    };
+    let said = leaf_server::scan::checks::work("Bleach", Some(&empty));
+    let all = said.join(" ");
+    for field in ["title", "medium", "status", "readingDirection"] {
+        assert!(all.contains(field), "{field} missing from: {all}");
+    }
+}
+
+#[test]
+fn an_edition_with_a_folder_and_no_name_is_named_as_missing_one() {
+    use leaf_server::metadata::sidecars::EditionJson;
+    // An edition that has a folder of its own has a name to declare in it; an implicit one
+    // has neither, and its fields live in the work's file instead.
+    let empty = EditionJson {
+        leaf: Some(1),
+        ..Default::default()
+    };
+    let said = leaf_server::scan::checks::edition("Bleach/Perfect", Some(&empty), false, None);
+    assert!(said.join(" ").contains("name"), "{said:?}");
+}
+
+#[test]
+fn an_entry_with_no_type_is_named_as_missing_one() {
+    use leaf_server::metadata::sidecars::EntryJson;
+    let declared = EntryJson {
+        leaf: Some(1),
+        work: Some("Bleach".into()),
+        number: Some(1.0),
+        kind: "   ".into(),
+        ..Default::default()
+    };
+    let said = leaf_server::scan::checks::entry("Tome 1.cbz", Some(&declared), "VOLUME", false);
+    assert!(said.join(" ").contains("type"), "{said:?}");
+}
+
+#[test]
+fn an_entry_claiming_an_edition_it_does_not_sit_in_is_said_out_loud() {
+    use leaf_server::metadata::sidecars::EntryJson;
+    let declared = EntryJson {
+        leaf: Some(1),
+        work: Some("Bleach".into()),
+        edition: Some("Perfect Edition".into()),
+        number: Some(1.0),
+        kind: "VOLUME".into(),
+        ..Default::default()
+    };
+    let said = leaf_server::scan::checks::identity(
+        "Tome 1.cbz",
+        Some(&declared),
+        "Bleach",
+        None,
+        Some("Édition Originale"),
+    );
+    let all = said.join(" ");
+    assert!(all.contains("Perfect Edition"), "{all}");
+    assert!(all.contains("Édition Originale"), "{all}");
+}
