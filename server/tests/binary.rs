@@ -178,3 +178,86 @@ fn stop(server: &mut std::process::Child) {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+#[test]
+fn serve_scans_behind_itself_unless_it_is_told_not_to() {
+    // The server answers from its first second rather than after the whole library has been
+    // read. A scan lost to a restart costs nothing: the index is rebuildable.
+    let dir = a_library();
+    let port = a_free_port();
+    let mut server = leaf(&dir)
+        .arg("serve")
+        .env_remove("LEAF_NO_SCAN")
+        .env("LEAF_DROP", dir.path().join("drop"))
+        .env("LEAF_HOST", "127.0.0.1")
+        .env("LEAF_PORT", port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    // The shelf fills in behind the reader, so what is waited on is the entry appearing.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let found = loop {
+        if let Some(said) = ask(port, "/series") {
+            if said.contains("\"total\":1") {
+                break true;
+            }
+        }
+        if Instant::now() > deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    stop(&mut server);
+    assert!(found, "the startup scan never reached the shelf");
+    // And the drop folder was made on the way past.
+    assert!(dir.path().join("drop").is_dir());
+}
+
+#[test]
+fn serve_over_tls_generates_its_own_certificate_and_answers_on_it() {
+    // The recommended path is a reverse proxy holding a certificate a browser already
+    // trusts. This is the port opened with nothing in front of it, which would otherwise
+    // send the key in clear on every request.
+    let dir = a_library();
+    let port = a_free_port();
+    let certificate = dir.path().join("tls/leaf.crt");
+    let mut server = leaf(&dir)
+        .arg("serve")
+        .env("LEAF_HOST", "127.0.0.1")
+        .env("LEAF_PORT", port.to_string())
+        .env("LEAF_TLS_CERT", &certificate)
+        .env("LEAF_TLS_HOSTS", "127.0.0.1,leaf.maison")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let listening = loop {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break true;
+        }
+        if Instant::now() > deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    stop(&mut server);
+    assert!(listening, "nothing ever listened on the TLS port");
+    assert!(certificate.is_file(), "the pair is generated on first start");
+    assert!(certificate.with_extension("key").is_file());
+}
+
+/// One request over plain HTTP, or nothing when the port is not answering yet.
+fn ask(port: u16, path: &str) -> Option<String> {
+    use std::io::Read;
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+    stream
+        .write_all(format!("GET {path} HTTP/1.1\r\nHost: leaf\r\nConnection: close\r\n\r\n").as_bytes())
+        .ok()?;
+    let mut said = String::new();
+    stream.read_to_string(&mut said).ok()?;
+    Some(said)
+}
