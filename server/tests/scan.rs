@@ -1528,3 +1528,24 @@ fn an_arc_over_half_volumes_keeps_its_halves_in_what_is_reported() {
         report.derived_arcs
     );
 }
+
+#[test]
+fn a_universe_holding_a_folder_with_no_archive_in_it_records_no_work() {
+    // A folder under a universe that holds nothing is not a work with no volumes: it is not
+    // a work. Recording it would put an empty row on the shelf that nothing can ever fill.
+    let library = Library::new();
+    library.write(
+        "Terres d'Arran/universe.json",
+        r#"{"leaf":1,"name":"Terres d'Arran"}"#,
+    );
+    library.folder("Terres d'Arran/Rien du tout");
+    archive(
+        &library.folder("Terres d'Arran/Elfes").join("Tome 1.cbz"),
+        2,
+        None,
+    );
+    library.scan();
+
+    assert_eq!(library.count("work"), 1);
+    assert_eq!(library.all("SELECT name FROM work"), vec!["Elfes"]);
+}

@@ -420,7 +420,7 @@ fn a_volume_with_one_marker_and_no_start_page_answers_that_marker() {
     // every page of it. Treating the missing start page as zero used to answer "chapter 1"
     // confidently and wrongly.
     assert_eq!(
-        chapter_at_page(&[one.clone()], 0).map(|c| c.id),
+        chapter_at_page(std::slice::from_ref(&one), 0).map(|c| c.id),
         Some("c1".into())
     );
     assert_eq!(chapter_at_page(&[one], 40).map(|c| c.id), Some("c1".into()));

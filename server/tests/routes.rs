@@ -1148,3 +1148,94 @@ async fn a_volume_whose_archive_is_corrupt_answers_internal_error_and_says_no_mo
     // Nothing else: no path, no query, no fragment of the schema.
     assert_eq!(body.as_object().map(|o| o.len()), Some(1), "{body}");
 }
+
+#[tokio::test]
+async fn a_chunk_offered_at_the_wrong_offset_is_told_where_to_resume() {
+    // A broken transfer must be told exactly where to start again, not asked to send nine
+    // gigabytes a second time.
+    let (server, _, _) = a_library().await;
+    let (_, opened) = server
+        .send(
+            request("POST", "/import", IMPORTER)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "root": "Essai",
+                        "files": [{"path": "Tome 1.cbz", "size": 10}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    let id = opened["id"].as_str().expect("an id").to_string();
+
+    // Nothing has been received, so a range starting at five is not where this file is.
+    // The offset is a Content-Range, the way a resumable upload spells it.
+    let (status, body) = server
+        .send(
+            request(
+                "PUT",
+                &format!("/import/{id}/file?path=Tome+1.cbz"),
+                IMPORTER,
+            )
+            .header("Content-Type", "application/octet-stream")
+            .header("Content-Range", "bytes 5-6/10")
+            .body(Body::from(vec![0u8; 2]))
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["received"], 0, "{body}");
+
+    // "bytes */10" declares no start at all, so it is read as the beginning.
+    let (status, body) = server
+        .send(
+            request(
+                "PUT",
+                &format!("/import/{id}/file?path=Tome+1.cbz"),
+                IMPORTER,
+            )
+            .header("Content-Type", "application/octet-stream")
+            .header("Content-Range", "bytes */10")
+            .body(Body::from(vec![0u8; 2]))
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["received"], 2, "{body}");
+}
+
+#[tokio::test]
+async fn a_chunk_for_a_file_the_manifest_never_mentioned_is_refused() {
+    let (server, _, _) = a_library().await;
+    let (_, opened) = server
+        .send(
+            request("POST", "/import", IMPORTER)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "root": "Essai",
+                        "files": [{"path": "Tome 1.cbz", "size": 2}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    let id = opened["id"].as_str().expect("an id").to_string();
+
+    let (status, body) = server
+        .send(
+            request(
+                "PUT",
+                &format!("/import/{id}/file?path=../evade.cbz"),
+                IMPORTER,
+            )
+            .header("Content-Type", "application/octet-stream")
+            .body(Body::from(vec![0u8; 2]))
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
