@@ -487,7 +487,10 @@ fn the_shelf_covers_are_prepared_behind_the_reader() {
 
     // One request teaches it a width. The cache is then emptied, so what appears next can
     // only have come from the sweep.
-    pages.series_cover("e", Some(300)).unwrap().expect("a cover");
+    pages
+        .series_cover("e", Some(300))
+        .unwrap()
+        .expect("a cover");
     std::fs::remove_dir_all(f.dir.path().join("cache")).unwrap();
     pages.prepare();
     assert_eq!(f.cache_files(), 0);
@@ -522,7 +525,10 @@ fn a_page_whose_bytes_no_codec_reads_comes_back_as_it_is() {
 
     let db = Db::open(&dir.path().join("index.sqlite")).unwrap();
     db.write(|cx| {
-        cx.execute("INSERT INTO work (id, name, path) VALUES ('w','Essai','/w')", [])?;
+        cx.execute(
+            "INSERT INTO work (id, name, path) VALUES ('w','Essai','/w')",
+            [],
+        )?;
         cx.execute(
             "INSERT INTO edition (id, work_id, path, implicit) VALUES ('e','w','/w/e',1)",
             [],
@@ -625,4 +631,72 @@ fn a_page_whose_size_the_index_does_not_know_is_resized_anyway() {
     let pages = f.pages();
     let served = pages.page("v1", 0, Some(300)).unwrap().expect("a page");
     assert!(!served.bytes.is_empty());
+}
+
+#[test]
+fn the_second_ask_for_one_page_at_one_width_comes_out_of_the_cache() {
+    // The whole point of the cache: a page is resized once, and read many times.
+    let f = Fixture::new();
+    let pages = f.pages();
+    let first = pages.page("v1", 0, Some(400)).unwrap().expect("a page");
+    let files = f.cache_files();
+    let second = pages.page("v1", 0, Some(400)).unwrap().expect("a page");
+
+    assert_eq!(first.bytes, second.bytes);
+    assert_eq!(first.tag, second.tag);
+    assert_eq!(f.cache_files(), files, "nothing new was written");
+}
+
+#[test]
+fn the_warming_queue_is_set_up_once_and_a_second_time_changes_nothing() {
+    // Everything it does is an optimisation, and the server answers correctly without it —
+    // so asking twice is a no-op rather than a second set of threads.
+    let f = Fixture::new();
+    let pages = Arc::new(f.pages());
+    pages.start_warming(1, 2);
+    pages.start_warming(1, 2);
+    assert_eq!(pages.pending(), 0);
+}
+
+#[test]
+fn nothing_is_read_ahead_when_no_queue_was_ever_started() {
+    let f = Fixture::new();
+    let pages = f.pages();
+    // Without a queue there is nowhere to put the work, and asking is not an error.
+    pages.warm_ahead("v1", 0, 400);
+    pages.warm_opening("v1", Some(400));
+    // And without a width there is nothing to prepare: serving the source costs nothing.
+    pages.warm_opening("v1", None);
+    assert_eq!(pages.pending(), 0);
+}
+
+#[test]
+fn a_cache_that_cannot_be_made_is_said_and_the_pages_still_serve() {
+    // The cache is an optimisation. A server that cannot write one still answers, it just
+    // resizes the same page every time.
+    let dir = tempfile::tempdir().expect("a directory");
+    let closed = dir.path().join("closed");
+    std::fs::create_dir(&closed).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+
+    let f = Fixture::new();
+    let pages = Pages::new(
+        Arc::clone(&f.db),
+        closed.join("cache"),
+        85,
+        64 * 1024 * 1024,
+    );
+    pages.prepare();
+    let served = pages.page("v1", 0, Some(300)).unwrap().expect("a page");
+    assert!(!served.bytes.is_empty());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }

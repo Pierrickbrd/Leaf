@@ -58,7 +58,11 @@ fn a_free_port() -> u16 {
 fn scan_analyses_and_exits_with_a_report() {
     let dir = a_library();
     let done = leaf(&dir).arg("scan").output().unwrap();
-    assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
 
     let said = String::from_utf8_lossy(&done.stdout);
     // The counters the bench parses, and the shape it parses them out of.
@@ -74,11 +78,7 @@ fn scan_takes_the_roots_it_is_given_rather_than_the_configured_one() {
     let elsewhere = dir.path().join("elsewhere");
     std::fs::create_dir_all(&elsewhere).unwrap();
 
-    let done = leaf(&dir)
-        .arg("scan")
-        .arg(&elsewhere)
-        .output()
-        .unwrap();
+    let done = leaf(&dir).arg("scan").arg(&elsewhere).output().unwrap();
     assert!(done.status.success());
     // An empty root, so nothing is found — which is how we know it looked there and not at
     // the library it was configured with.
@@ -92,7 +92,11 @@ fn no_dimensions_is_read_as_an_option_and_never_as_a_root() {
         .args(["scan", "--no-dimensions"])
         .output()
         .unwrap();
-    assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
     assert!(String::from_utf8_lossy(&done.stdout).contains("1 entry(ies)"));
 }
 
@@ -246,7 +250,10 @@ fn serve_over_tls_generates_its_own_certificate_and_answers_on_it() {
     };
     stop(&mut server);
     assert!(listening, "nothing ever listened on the TLS port");
-    assert!(certificate.is_file(), "the pair is generated on first start");
+    assert!(
+        certificate.is_file(),
+        "the pair is generated on first start"
+    );
     assert!(certificate.with_extension("key").is_file());
 }
 
@@ -255,7 +262,9 @@ fn ask(port: u16, path: &str) -> Option<String> {
     use std::io::Read;
     let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
     stream
-        .write_all(format!("GET {path} HTTP/1.1\r\nHost: leaf\r\nConnection: close\r\n\r\n").as_bytes())
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: leaf\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
         .ok()?;
     let mut said = String::new();
     stream.read_to_string(&mut said).ok()?;

@@ -410,11 +410,7 @@ impl Pages {
                     // page marked in flight for ever — so it was never prepared again, and
                     // the same page stuttered on every read.
                     let _claim = Claim(&pages, &task.key);
-                    let prepared = match task.number {
-                        Some(number) => pages.page(&task.id, number, Some(task.width)),
-                        None => pages.series_cover(&task.id, Some(task.width)),
-                    };
-                    if let Err(e) = prepared {
+                    if let Err(e) = pages.page(&task.id, task.number, Some(task.width)) {
                         tracing::debug!(key = %task.key, error = %e, "could not warm");
                     }
                 })
@@ -444,7 +440,7 @@ impl Pages {
             let task = Warm {
                 key: key.clone(),
                 id: entry_id.to_string(),
-                number: Some(next),
+                number: next,
                 width,
             };
             // A full queue means we are behind the reader. What is dropped is the newest
@@ -582,10 +578,8 @@ impl Drop for Claim<'_> {
 
 pub struct Warm {
     key: String,
-    /// An entry for a page, an edition for a shelf tile.
     id: String,
-    /// `None` for a series cover: there is no page number to speak of.
-    number: Option<i64>,
+    number: i64,
     width: u32,
 }
 

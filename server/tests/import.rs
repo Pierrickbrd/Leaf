@@ -1505,7 +1505,6 @@ fn a_changed_file_of_the_same_size_is_asked_for_when_a_checksum_says_so() {
     assert!(opened.to_send.is_empty());
 }
 
-
 // ------------------------------------------------------- the corners of a sweep
 
 /// A bulk import against a library of its own, so the sweep has a whole tree to itself.
@@ -1542,7 +1541,10 @@ fn a_manifest_path_that_walks_upwards_lands_inside_the_root_anyway() {
     let refused = bulk
         .writing_at(&opened.id, "../../evade.cbz", 0, 1024)
         .unwrap_err();
-    assert!(format!("{refused:?}").contains("outside its root"), "{refused:?}");
+    assert!(
+        format!("{refused:?}").contains("outside its root"),
+        "{refused:?}"
+    );
     assert!(!dir.path().parent().unwrap().join("evade.cbz").exists());
 }
 
@@ -1574,7 +1576,10 @@ fn a_write_starting_past_the_ceiling_is_refused_even_though_it_is_a_resume() {
     std::fs::write(&target, b"12345").unwrap();
 
     let refused = bulk.writing_at(&opened.id, "Tome 1.cbz", 5, 4).unwrap_err();
-    assert!(format!("{refused:?}").contains("larger than"), "{refused:?}");
+    assert!(
+        format!("{refused:?}").contains("larger than"),
+        "{refused:?}"
+    );
 }
 
 #[test]

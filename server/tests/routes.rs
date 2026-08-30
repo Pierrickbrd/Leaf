@@ -13,11 +13,7 @@ use common::{a_named_edition, a_volume, archive_bytes, request, Server, IMPORTER
 
 async fn get(server: &Server, uri: &str) -> (StatusCode, serde_json::Value) {
     server
-        .send(
-            request("GET", uri, READ_ONLY)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .send(request("GET", uri, READ_ONLY).body(Body::empty()).unwrap())
         .await
 }
 
@@ -106,7 +102,10 @@ async fn a_series_that_is_not_there_is_a_404_and_not_an_empty_one() {
     let (server, _, _) = a_library().await;
     let (status, body) = get(&server, "/series/nope").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert!(body["error"].is_string() || body["message"].is_string(), "{body}");
+    assert!(
+        body["error"].is_string() || body["message"].is_string(),
+        "{body}"
+    );
 }
 
 // ----------------------------------------------------------------- the entries
@@ -176,8 +175,14 @@ async fn a_cover_is_served_for_an_entry_and_for_a_series() {
 #[tokio::test]
 async fn a_cover_for_something_that_is_not_there_is_a_404() {
     let (server, _, _) = a_library().await;
-    assert_eq!(get(&server, "/entries/nope/cover").await.0, StatusCode::NOT_FOUND);
-    assert_eq!(get(&server, "/series/nope/cover").await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        get(&server, "/entries/nope/cover").await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(&server, "/series/nope/cover").await.0,
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
@@ -185,7 +190,10 @@ async fn the_original_file_comes_back_stamped_with_its_identity() {
     let (server, _, entry) = a_library().await;
     let (status, _) = get(&server, &format!("/entries/{entry}/file")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(get(&server, "/entries/nope/file").await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        get(&server, "/entries/nope/file").await.0,
+        StatusCode::NOT_FOUND
+    );
 }
 
 // ------------------------------------------------------------------- searching
@@ -599,10 +607,14 @@ async fn a_file_sent_against_an_import_nobody_opened_is_a_404() {
     let (server, _, _) = a_library().await;
     let (status, body) = server
         .send(
-            request("PUT", "/import/imp_deadbeef/file?path=Tome+1.cbz&offset=0", IMPORTER)
-                .header("Content-Type", "application/octet-stream")
-                .body(Body::from(vec![0u8; 4]))
-                .unwrap(),
+            request(
+                "PUT",
+                "/import/imp_deadbeef/file?path=Tome+1.cbz&offset=0",
+                IMPORTER,
+            )
+            .header("Content-Type", "application/octet-stream")
+            .body(Body::from(vec![0u8; 4]))
+            .unwrap(),
         )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
@@ -652,10 +664,9 @@ async fn an_edition_with_a_folder_of_its_own_takes_its_edit_in_its_own_file() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
-    let written = std::fs::read_to_string(
-        server.library().join("Bleach/Perfect Edition/edition.json"),
-    )
-    .unwrap();
+    let written =
+        std::fs::read_to_string(server.library().join("Bleach/Perfect Edition/edition.json"))
+            .unwrap();
     assert!(written.contains("Kana"), "{written}");
     // And the work's own file is left alone: it says nothing about a printing.
     let work = std::fs::read_to_string(server.library().join("Bleach/work.json")).unwrap();
@@ -676,10 +687,9 @@ async fn the_arcs_of_a_named_edition_are_written_beside_it() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
-    let written = std::fs::read_to_string(
-        server.library().join("Bleach/Perfect Edition/edition.json"),
-    )
-    .unwrap();
+    let written =
+        std::fs::read_to_string(server.library().join("Bleach/Perfect Edition/edition.json"))
+            .unwrap();
     assert!(written.contains("Soul Society"), "{written}");
 }
 
@@ -699,7 +709,10 @@ async fn a_file_bigger_than_the_ceiling_is_refused_before_it_reaches_the_disk() 
     // sets the ceiling at four kilobytes.
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(
-        body["error"].as_str().unwrap_or_default().contains("larger than"),
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("larger than"),
         "{body}"
     );
 }
@@ -774,7 +787,9 @@ async fn a_name_already_taken_comes_back_as_a_conflict_with_both_sides_of_it() {
         .send(
             request("POST", &format!("/intake/{id}/file"), IMPORTER)
                 .header("Content-Type", "application/json")
-                .body(Body::from(serde_json::json!({"seriesId": series}).to_string()))
+                .body(Body::from(
+                    serde_json::json!({"seriesId": series}).to_string(),
+                ))
                 .unwrap(),
         )
         .await;
@@ -833,7 +848,9 @@ async fn a_second_scan_asked_for_while_one_is_running_does_not_start_another() {
     let (status, body) = server
         .send_to(
             state,
-            request("GET", "/scan", READ_ONLY).body(Body::empty()).unwrap(),
+            request("GET", "/scan", READ_ONLY)
+                .body(Body::empty())
+                .unwrap(),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");

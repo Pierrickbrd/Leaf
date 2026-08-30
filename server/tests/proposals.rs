@@ -154,12 +154,15 @@ fn two_editions_of_one_name_leave_the_choice_to_the_client() {
             format!(r#"{{"leaf":1,"name":"{edition}"}}"#).into_bytes(),
         )
         .unwrap();
-        std::fs::write(at.join("Tome 1.cbz"), archive_bytes(Some(&EntryJson {
-            leaf: Some(1),
-            work: Some("Bleach".into()),
-            number: Some(1.0),
-            ..Default::default()
-        })))
+        std::fs::write(
+            at.join("Tome 1.cbz"),
+            archive_bytes(Some(&EntryJson {
+                leaf: Some(1),
+                work: Some("Bleach".into()),
+                number: Some(1.0),
+                ..Default::default()
+            })),
+        )
         .unwrap();
     }
     world.scan();
@@ -206,7 +209,11 @@ fn a_file_nothing_in_the_library_matches_is_said_to_be_unknown() {
         }),
     );
     assert_eq!(said.confidence, Confidence::Unknown);
-    assert!(said.reason.contains("no series is named"), "{}", said.reason);
+    assert!(
+        said.reason.contains("no series is named"),
+        "{}",
+        said.reason
+    );
     // And the shelf is offered anyway: "I do not know" is more useful with a list beside
     // it than alone, and the client is the one that can choose.
     assert_eq!(said.candidates.len(), 1);
@@ -231,7 +238,9 @@ fn what_the_file_says_about_itself_that_does_not_hold_together_comes_back_with_i
         }),
     );
     assert!(
-        said.concerns.iter().any(|c| c.contains("neither VOLUME nor CHAPTER")),
+        said.concerns
+            .iter()
+            .any(|c| c.contains("neither VOLUME nor CHAPTER")),
         "{:?}",
         said.concerns
     );
@@ -247,7 +256,9 @@ fn a_file_over_the_ceiling_never_reaches_the_inbox() {
         .to_string();
     assert!(refused.contains("larger than"), "{refused}");
     assert_eq!(
-        std::fs::read_dir(world.dir.path().join("inbox")).unwrap().count(),
+        std::fs::read_dir(world.dir.path().join("inbox"))
+            .unwrap()
+            .count(),
         0,
         "nothing may be left behind"
     );
@@ -280,7 +291,6 @@ fn a_staging_that_is_never_kept_clears_itself() {
     }
     assert!(intake.waiting().unwrap().is_empty());
 }
-
 
 // -------------------------------------------------------------- filing the file
 
@@ -321,7 +331,9 @@ fn a_name_already_in_the_series_is_refused_until_somebody_says_which_one_wins() 
 
     let refused = world.file("Tome 1.cbz", &series, None).unwrap_err();
     assert!(
-        refused.downcast_ref::<leaf_server::api::intake::Collision>().is_some(),
+        refused
+            .downcast_ref::<leaf_server::api::intake::Collision>()
+            .is_some(),
         "{refused}"
     );
     // And nothing was written over.
@@ -389,6 +401,9 @@ fn an_id_that_is_not_one_is_refused_before_anything_is_looked_up() {
             )
             .unwrap_err()
             .to_string();
-        assert!(refused.contains("invalid id") || refused.contains("unknown"), "{id}: {refused}");
+        assert!(
+            refused.contains("invalid id") || refused.contains("unknown"),
+            "{id}: {refused}"
+        );
     }
 }

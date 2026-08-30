@@ -1024,7 +1024,9 @@ fn a_universe_inside_a_universe_is_read_as_a_work_and_the_report_says_so() {
         r#"{"leaf":1,"name":"Elfes"}"#,
     );
     archive(
-        &library.folder("Terres d'Arran/Elfes/Le Crystal").join("Tome 1.cbz"),
+        &library
+            .folder("Terres d'Arran/Elfes/Le Crystal")
+            .join("Tome 1.cbz"),
         2,
         None,
     );
@@ -1108,7 +1110,11 @@ fn an_arc_repeated_in_every_volume_becomes_one_range_of_volumes() {
     let library = Library::new();
     let bleach = library.folder("Bleach");
     for volume in 1..=3 {
-        let arc = if volume == 3 { "Soul Society" } else { "Agent of the Shinigami" };
+        let arc = if volume == 3 {
+            "Soul Society"
+        } else {
+            "Agent of the Shinigami"
+        };
         archive(
             &bleach.join(format!("Tome {volume}.cbz")),
             2,

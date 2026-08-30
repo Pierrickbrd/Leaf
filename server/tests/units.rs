@@ -350,9 +350,11 @@ fn a_report_with_more_than_sixteen_of_one_thing_says_how_many_more() {
     use leaf_server::scan::report::ScanReport;
     // A scan of a real library finds hundreds. A report nobody can read to the end is a
     // report nobody reads at all.
-    let mut report = ScanReport::default();
-    report.errors = (1..=20).map(|n| format!("erreur {n}")).collect();
-    report.chapters_without_start_page = vec!["Tome 1 → Chapitre 1".into()];
+    let report = ScanReport {
+        errors: (1..=20).map(|n| format!("erreur {n}")).collect(),
+        chapters_without_start_page: vec!["Tome 1 → Chapitre 1".into()],
+        ..Default::default()
+    };
 
     let said = report.summary();
     assert!(said.contains("Errors (20)"), "{said}");
@@ -384,7 +386,7 @@ fn a_cache_already_under_its_ceiling_keeps_everything() {
 }
 
 #[test]
-fn a_cache_that_cannot_be_read_is_said_and_left(){
+fn a_cache_that_cannot_be_read_is_said_and_left() {
     use leaf_server::api::cache_budget::enforce;
     let dir = tempfile::tempdir().unwrap();
     let cache = dir.path().join("cache");

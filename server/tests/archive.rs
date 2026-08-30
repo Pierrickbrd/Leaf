@@ -26,8 +26,8 @@ fn jpeg(width: u32, height: u32) -> Vec<u8> {
 fn archive(path: &Path, members: &[(&str, Vec<u8>)]) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     for (name, bytes) in members {
         zip.start_file::<_, ()>(*name, options).unwrap();
         zip.write_all(bytes).unwrap();
@@ -42,8 +42,10 @@ fn a_sidecar_bigger_than_the_head_is_read_a_second_time_and_read_whole() {
     // there being a second pass at all.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("Tome 1.cbz");
-    let long = format!("<?xml version=\"1.0\"?><ComicInfo><Notes>{}</Notes></ComicInfo>",
-                       "é".repeat(8000));
+    let long = format!(
+        "<?xml version=\"1.0\"?><ComicInfo><Notes>{}</Notes></ComicInfo>",
+        "é".repeat(8000)
+    );
     archive(
         &path,
         &[
@@ -86,7 +88,8 @@ fn a_folder_entry_is_not_a_member() {
     let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
     let options = zip::write::SimpleFileOptions::default();
     zip.add_directory::<_, ()>("Chapitre 1/", options).unwrap();
-    zip.start_file::<_, ()>("Chapitre 1/000.jpg", options).unwrap();
+    zip.start_file::<_, ()>("Chapitre 1/000.jpg", options)
+        .unwrap();
     zip.write_all(&jpeg(60, 90)).unwrap();
     zip.finish().unwrap();
 
@@ -123,7 +126,10 @@ fn the_dimensions_are_left_unmeasured_when_they_are_not_asked_for() {
     let path = dir.path().join("Tome 1.cbz");
     archive(&path, &[("000.jpg", jpeg(60, 90))]);
 
-    assert_eq!(cbz::read(&path, true).unwrap().pages[0].dimension, Some((60, 90)));
+    assert_eq!(
+        cbz::read(&path, true).unwrap().pages[0].dimension,
+        Some((60, 90))
+    );
     assert_eq!(cbz::read(&path, false).unwrap().pages[0].dimension, None);
 }
 
@@ -158,7 +164,10 @@ fn every_stream_opened_is_counted() {
     // a seek is what a scan of a large library is actually made of.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("Tome 1.cbz");
-    archive(&path, &[("000.jpg", jpeg(60, 90)), ("001.jpg", jpeg(60, 90))]);
+    archive(
+        &path,
+        &[("000.jpg", jpeg(60, 90)), ("001.jpg", jpeg(60, 90))],
+    );
 
     let before = cbz::streams_opened();
     cbz::read(&path, true).unwrap();
