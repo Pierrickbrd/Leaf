@@ -183,3 +183,61 @@ fn writable(path: &Path) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
+
+// ------------------------------------------------------------------ the throttle
+
+#[test]
+fn ten_wrong_keys_from_one_address_close_the_door_for_a_while() {
+    use leaf_server::api::throttle::Throttle;
+    use std::time::Duration;
+
+    let throttle = Throttle::new(3, Duration::from_secs(300), Duration::from_secs(900));
+    assert!(throttle.blocked_for("10.0.0.1").is_none());
+
+    for _ in 0..3 {
+        throttle.record_failure("10.0.0.1");
+    }
+    let left = throttle.blocked_for("10.0.0.1").expect("refused");
+    assert!(left.as_secs() > 800, "{left:?}");
+    // And only that address: one device getting it wrong must not lock out the household.
+    assert!(throttle.blocked_for("10.0.0.2").is_none());
+}
+
+#[test]
+fn a_key_that_works_clears_the_slate() {
+    use leaf_server::api::throttle::Throttle;
+    use std::time::Duration;
+
+    let throttle = Throttle::new(3, Duration::from_secs(300), Duration::from_secs(900));
+    throttle.record_failure("10.0.0.1");
+    throttle.record_failure("10.0.0.1");
+    throttle.record_success("10.0.0.1");
+    // Two more would have been three without the clearing.
+    throttle.record_failure("10.0.0.1");
+    throttle.record_failure("10.0.0.1");
+    assert!(throttle.blocked_for("10.0.0.1").is_none());
+}
+
+#[test]
+fn too_many_addresses_presenting_wrong_keys_and_the_oldest_are_forgotten() {
+    // The table is bounded: an attacker rotating source addresses must not be able to make
+    // this server hold one record per address it has ever seen.
+    use leaf_server::api::throttle::Throttle;
+    use std::time::Duration;
+
+    let throttle = Throttle::new(2, Duration::from_secs(300), Duration::from_secs(900));
+    // One that is actually blocked, put in first so it is the oldest of all.
+    throttle.record_failure("10.0.0.1");
+    throttle.record_failure("10.0.0.1");
+    assert!(throttle.blocked_for("10.0.0.1").is_some());
+
+    for n in 0..1200u32 {
+        throttle.record_failure(&format!("192.168.{}.{}", n / 256, n % 256));
+    }
+
+    // Bounded, whatever arrives.
+    assert!(throttle.remembered() <= 1024, "{}", throttle.remembered());
+    // And a block is the thing actually being enforced, so it outlives a bare count: the
+    // address that was refused is still refused.
+    assert!(throttle.blocked_for("10.0.0.1").is_some());
+}

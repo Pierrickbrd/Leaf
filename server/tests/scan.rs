@@ -1226,3 +1226,106 @@ fn two_pages_of_one_name_inside_a_volume_reach_the_report() {
         report.duplicate_page_names
     );
 }
+
+// ------------------------------------------------------- aiming at one work
+
+#[test]
+fn a_rescan_aimed_at_a_universe_is_refused_rather_than_filing_its_works_as_editions() {
+    // A universe read as a work turns its works into editions of itself. The rule is stated
+    // on the method that would do the damage, and not only at the door that calls it.
+    let library = Library::new();
+    library.write(
+        "Terres d'Arran/universe.json",
+        r#"{"leaf":1,"name":"Terres d'Arran"}"#,
+    );
+    archive(
+        &library.folder("Terres d'Arran/Elfes").join("Tome 1.cbz"),
+        2,
+        None,
+    );
+    library.scan();
+
+    let refused = Scanner::new(Arc::clone(&library.db), true)
+        .rescan_work(&library.dir.path().join("library/Terres d'Arran"))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("declares itself a universe"), "{refused}");
+}
+
+#[test]
+fn a_work_inside_a_universe_keeps_it_when_only_that_work_is_read_again() {
+    let library = Library::new();
+    library.write(
+        "Terres d'Arran/universe.json",
+        r#"{"leaf":1,"name":"Terres d'Arran"}"#,
+    );
+    let elfes = library.folder("Terres d'Arran/Elfes");
+    archive(&elfes.join("Tome 1.cbz"), 2, None);
+    library.scan();
+    assert_eq!(library.count("universe"), 1);
+
+    Scanner::new(Arc::clone(&library.db), true)
+        .rescan_work(&elfes)
+        .expect("aiming at the work");
+
+    // Still under its universe, and still one work: a targeted read must not orphan it.
+    assert_eq!(library.count("work"), 1);
+    assert!(library
+        .one::<String>("SELECT universe_id FROM work")
+        .is_some());
+}
+
+#[test]
+fn a_work_whose_folder_has_gone_is_dropped_when_it_is_read_again() {
+    // The folder is gone, or holds nothing any more: what it left behind goes with it.
+    let library = Library::new();
+    let bleach = library.folder("Bleach");
+    archive(&bleach.join("Tome 1.cbz"), 2, None);
+    library.scan();
+    assert_eq!(library.count("work"), 1);
+
+    std::fs::remove_dir_all(&bleach).unwrap();
+    Scanner::new(Arc::clone(&library.db), true)
+        .rescan_work(&bleach)
+        .expect("aiming at what is no longer there");
+
+    assert_eq!(library.count("work"), 0);
+    assert_eq!(library.count("entry"), 0);
+}
+
+#[test]
+fn a_folder_that_is_there_and_shut_is_not_the_same_as_one_that_is_gone() {
+    // A series disappearing from the shelf because a permission changed is the failure this
+    // refuses: shut is refused loudly, gone is pruned quietly.
+    let library = Library::new();
+    let bleach = library.folder("Bleach");
+    archive(&bleach.join("Tome 1.cbz"), 2, None);
+    library.scan();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bleach, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = Scanner::new(Arc::clone(&library.db), true)
+            .rescan_work(&bleach)
+            .unwrap_err()
+            .to_string();
+        std::fs::set_permissions(&bleach, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(refused.contains("cannot be listed"), "{refused}");
+    }
+    // And the work is still there: nothing was pruned on the strength of a closed door.
+    assert_eq!(library.count("work"), 1);
+}
+
+#[test]
+fn a_folder_that_holds_no_archive_is_read_as_nothing_at_all() {
+    let library = Library::new();
+    let empty = library.folder("Bleach");
+    library.scan();
+    assert_eq!(library.count("work"), 0);
+
+    Scanner::new(Arc::clone(&library.db), true)
+        .rescan_work(&empty)
+        .expect("aiming at an empty folder");
+    assert_eq!(library.count("work"), 0);
+}
