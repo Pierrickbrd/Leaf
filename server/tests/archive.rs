@@ -176,3 +176,47 @@ fn every_stream_opened_is_counted() {
         "two members, so at least two streams"
     );
 }
+
+/// A JPEG whose dimensions sit past the first four kilobytes.
+///
+/// A real one: a scanner writes an EXIF thumbnail into an APP1 segment before the frame
+/// header, so the size of the page is not in the bytes the reader took to recognise it.
+fn jpeg_with_a_fat_header(width: u32, height: u32) -> Vec<u8> {
+    let plain = jpeg(width, height);
+    let mut out = plain[..2].to_vec(); // SOI
+    let payload = vec![0x20u8; 6000];
+    out.extend_from_slice(&[0xff, 0xe1]); // APP1
+    out.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&payload);
+    out.extend_from_slice(&plain[2..]);
+    out
+}
+
+#[test]
+fn a_page_the_head_could_not_measure_is_read_again_and_measured() {
+    // The head settles most pages. The ones it does not are worth a second seek rather than
+    // a page of unknown size in the index — which is what a client sizes its layout on.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Tome 1.cbz");
+    let fat = jpeg_with_a_fat_header(600, 900);
+    assert!(fat.len() > 4096);
+    archive(&path, &[("000.jpg", fat), ("001.jpg", jpeg(60, 90))]);
+
+    let content = cbz::read(&path, true).unwrap();
+    assert_eq!(content.pages.len(), 2);
+    assert_eq!(content.pages[0].dimension, Some((600, 900)));
+    assert_eq!(content.pages[1].dimension, Some((60, 90)));
+}
+
+#[test]
+fn a_page_nobody_asked_to_measure_is_not_read_a_second_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Tome 1.cbz");
+    archive(&path, &[("000.jpg", jpeg_with_a_fat_header(600, 900))]);
+
+    let before = cbz::streams_opened();
+    let content = cbz::read(&path, false).unwrap();
+    assert_eq!(content.pages[0].dimension, None);
+    // One member, one stream: the second look only happens for a measurement somebody wants.
+    assert_eq!(cbz::streams_opened() - before, 1);
+}

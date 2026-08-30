@@ -855,3 +855,57 @@ async fn a_second_scan_asked_for_while_one_is_running_does_not_start_another() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }
+
+#[tokio::test]
+async fn a_name_that_is_not_a_name_never_reaches_the_drop() {
+    // The drop is a folder shared with an application on the same machine. What it takes is
+    // a name: the path is taken off it first, and what is left has to still be one.
+    let server = Server::new();
+    a_volume(&server);
+    let folder = server.dir.path().join("drop");
+    std::fs::create_dir_all(&folder).unwrap();
+    let mut server = server;
+    server.drop = Some(folder);
+
+    for name in ["", "   ", "..", "a/..", "..evade.cbz"] {
+        let (status, body) = server
+            .send(
+                request("POST", "/drop", IMPORTER)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::json!({"name": name}).to_string()))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn a_name_that_is_a_name_but_names_nothing_is_a_404() {
+    let server = Server::new();
+    a_volume(&server);
+    let folder = server.dir.path().join("drop");
+    std::fs::create_dir_all(&folder).unwrap();
+    let mut server = server;
+    server.drop = Some(folder);
+
+    let (status, _) = server
+        .send(
+            request("POST", "/drop", IMPORTER)
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"name":"Tome 9.cbz"}"#))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_search_can_be_held_to_one_series() {
+    // The hits are series, entries and chapters. Scoping them to one edition is what a
+    // search inside a series is: the same index, a narrower question.
+    let (server, series, _) = a_library().await;
+    let (status, body) = get(&server, &format!("/search?q=a&series={series}")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.is_array(), "{body}");
+}
