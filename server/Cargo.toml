@@ -1,0 +1,87 @@
+[package]
+name = "leaf-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "A reading server for a comics library."
+
+[dependencies]
+# HTTP. axum for the routing, tokio for the runtime — and the database deliberately
+# outside both, see store::db.
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs", "io-util"] }
+tower-http = { version = "0.6", features = ["trace"] }
+# Reading a request body frame by frame: an upload goes to the disk as it arrives rather
+# than being buffered whole, which at 130 MB a volume is the difference that matters.
+http-body-util = "0.1"
+
+# SQLite, compiled in: no system library, so there is nothing to install beside the binary.
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+# A CBZ is a renamed zip. Entries are read by name over Read + Seek, which is the ZipFile
+# model rather than the sequential one.
+zip = { version = "6", default-features = false, features = ["deflate"] }
+# Decode JPEG, PNG, GIF, BMP, WebP; dimensions without decoding. AVIF and HEIC are not
+# supported: reading them would mean a C dependency, and the point of this list is that
+# there is none.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp"] }
+# SIMD resize. Measured on a real page: 1.9 ms against 31 ms for the scalar one in
+# `image` — sixteen times, on the one step of the path that was never the bottleneck.
+fast_image_resize = { version = "5", features = ["image"] }
+# Encoding, which is where a cold page actually spends its time — measured at 18.4 ms of the
+# 31 the whole path costs, against 7.9 for the decode. This one does it in 6.3, in Rust, with
+# SIMD: the same size out and the same fidelity, and no C to install beside the binary.
+jpeg-encoder = { version = "0.7", features = ["simd"] }
+
+# ComicInfo.xml. Not a courtesy: the real library is 100 %% ComicInfo and 0 %% entry.json,
+# and this is the only reader for its 2 677 chapters. External entities are not resolved at
+# all, which is what a general-purpose XML parser has to be asked for explicitly.
+quick-xml = "0.38"
+
+# NFD, to strip an accent from any letter rather than from the ones a table remembered.
+# "Haikyū" folded to "haiky" with a hand-written table, which is the kind of bug that
+# quietly returns nothing.
+unicode-normalization = "0.1"
+
+# Repeated query parameters — ?author=a&author=b — which serde_urlencoded cannot express
+# as a Vec, and which is the whole mechanism of the filters.
+form_urlencoded = "1"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
+
+# One hash for the whole server: identities derived from a path, cache file names, the
+# constant-time key comparison, and the checksum an import is verified against. SHA-1 was
+# here for the first two until nothing in the index depended on it yet — which was the last
+# moment it could be changed for free.
+sha2 = "0.10"
+
+thiserror = "2"
+anyhow = "1"
+axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rcgen = { version = "0.14.9", default-features = false, features = ["pem", "ring"] }
+rustls-pemfile = "2.2.0"
+
+[dev-dependencies]
+tempfile = "3"
+# Only to hand a route a body that arrives in pieces, which is the shape the real one has.
+futures-util = "=0.3.31"
+# Only to send the binary the signal a unit file would: there is no portable Rust for it.
+libc = "0.2"
+zip = { version = "6", default-features = false, features = ["deflate"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+tower = { version = "0.5", features = ["util"] }
+
+# Line tables instead of full DWARF. A backtrace still names the file and the line, which
+# is all a panic here is ever read for, and the debug tree drops from 2.9 GB to a third of
+# that — it is the largest thing on this disk by an order of magnitude.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

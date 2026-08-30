@@ -1,0 +1,106 @@
+name: sonar
+
+# The one workflow that is deliberately NOT filtered by path.
+#
+# Every other workflow here is scoped to its block, so that touching the QML never runs the
+# Rust tests. This one looks at every block at once, which is the whole point of it: a single
+# analysis across the server, the client and the tools, with one quality gate for all three.
+# Filtering it by path would mean analysing a repository half of which was not read.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  scan:
+    # Pinned, like the desktop workflow: the C++ below is built against this
+    # distribution's Qt packages, and "latest" moving would change what is measured.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Sonar assigns findings to commits and computes "new code" from history.
+          # A shallow clone leaves it guessing at both.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+
+      # Clippy already runs with warnings as errors in the server workflow. Here it runs
+      # only to be written down: the analyser imports these findings instead of arriving at
+      # its own, weaker, version of them. `|| true` because a lint that fails the build is
+      # the server workflow's business to report, not this one's — and an empty report would
+      # tell Sonar less than a report of the failure.
+      - name: clippy, written down
+        working-directory: server
+        run: cargo clippy --all-targets --message-format=json > ../clippy.json || true
+
+      - uses: taiki-e/install-action@v2.87.1
+        with:
+          tool: cargo-llvm-cov
+
+      # Which lines the tests actually reach. The percentage itself says little; what is
+      # worth knowing is which branches are never visited — in a codebase whose tests each
+      # exist because something in them was once wrong, a path nobody exercises any more is
+      # the same kind of fact as a path that is dead.
+      - name: coverage, Rust
+        working-directory: server
+        run: cargo llvm-cov --workspace --lcov --output-path ../lcov.info
+
+      - name: coverage, Python
+        run: |
+          python3 -m pip install --quiet coverage
+          python3 -m coverage run --source=tools -m unittest discover -s tools -p 'test_*.py'
+          python3 -m coverage xml -o coverage.xml
+
+      - name: install Qt 6 and the QML modules
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build gcovr qt6-base-dev qt6-declarative-dev libqt6svg6-dev \
+            qml6-module-qtquick qml6-module-qtquick-controls \
+            qml6-module-qtquick-layouts qml6-module-qtquick-templates \
+            qml6-module-qtqml-workerscript qtkeychain-qt6-dev
+          pip install --quiet pyyaml
+
+      # The client's own tests already walk this code — the analyser was simply not being
+      # told. Without an instrumented build it counted all 384 lines as reached by nothing,
+      # which is not the same fact as a client nobody tests, and read like it.
+      #
+      # A build of its own, beside the one the desktop workflow makes: `--coverage` changes
+      # the object files, and a coverage build is not what anybody should be shipping.
+      - name: coverage, C++
+        run: |
+          cmake -S desktop -B desktop/coverage -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="--coverage -O0" -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+          cmake --build desktop/coverage
+          ctest --test-dir desktop/coverage --output-on-failure
+
+      # From inside the build tree, because that is where gcov may write its intermediates.
+      # `--fail-under-line` is not a coverage target — the quality gate is that. It is a
+      # tripwire on the measurement itself: `--gcov-ignore-errors` lets a broken run report
+      # an empty file rather than fail, and an empty report reads exactly like a client
+      # nobody tests. This is what would say so.
+      #
+      # Five points under what is actually measured, not twenty. A tripwire with a quarter
+      # of the report's worth of slack in it is a tripwire the report can collapse through:
+      # the point is to notice the measurement breaking, and a broken one rarely comes back
+      # a little smaller.
+      - name: coverage, C++, written down
+        working-directory: desktop/coverage
+        run: |
+          gcovr --root "$GITHUB_WORKSPACE" \
+                --filter "$GITHUB_WORKSPACE/desktop/src/" \
+                --gcov-ignore-errors=no_working_dir_found \
+                --sonarqube "$GITHUB_WORKSPACE/coverage-cpp.xml" \
+                --print-summary --fail-under-line 85 .
+
+      - uses: SonarSource/sonarqube-scan-action@v8.2.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

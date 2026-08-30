@@ -1,0 +1,12 @@
+# What the measurement is told not to count, and why.
+#
+# `if __name__ == "__main__":` is the two lines that hand a module's `main` to the shell.
+# Nothing that imports the module can reach them, so counting them as uncovered says only
+# that the tests are tests. Every line of `main` itself is still counted — the guard is
+# excluded, the entry point is not.
+[report]
+exclude_also =
+    if __name__ == .__main__.:
+
+[run]
+branch = false

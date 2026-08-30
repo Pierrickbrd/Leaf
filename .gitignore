@@ -1,0 +1,38 @@
+# Build — each block builds with its own tool, none of them share a root.
+.gradle/
+build/
+target/          # cargo
+.cargo/
+cmake-build-*/   # qt / cmake
+compile_commands.json
+
+# The index is rebuildable by rescanning: the files are the truth.
+data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Keys never belong in a repository.
+.env
+
+.idea/
+
+# Python bytecode and coverage data from the tools.
+__pycache__/
+*.pyc
+.coverage
+
+# Qt et CMake — chaque bloc construit avec son outil.
+desktop/build/
+
+# Working documents kept beside the code and never published: planning, the
+# decisions behind it, assistant instructions, deployment notes written for one
+# particular machine. The rule is here before the files are, so that no
+# `git add -A` can ever catch them on their way in.
+/CLAUDE.md
+/AGENTS.md
+/docs/
+/deploy/
+/.superpowers/
+/notes/
