@@ -88,7 +88,7 @@ private slots:
         QCOMPARE(one.readingDirection,
                  std::optional<Api::ReadingDirection>(Api::ReadingDirection::RightToLeft));
         QCOMPARE(one.run, std::optional<Api::Run>(Api::Run::Completed));
-        QCOMPARE(one.holding.readStatus, Api::ReadStatus::InProgress);
+        QCOMPARE(one.holding.readStatus, std::optional<Api::ReadStatus>(Api::ReadStatus::InProgress));
         QCOMPARE(one.genres, QList<QString>({u"Action"_s, u"Comédie"_s}));
         QCOMPARE(one.holding.missingChapters, QList<double>({3.5}));
         QVERIFY(one.holding.missingVolumes.isEmpty());
@@ -138,6 +138,24 @@ private slots:
         const Api::Read<Api::Series> got = Api::series(odd);
         QVERIFY2(got.ok(), qPrintable(got.trouble));
         QCOMPARE(got.value->medium, std::optional<Api::Medium>(Api::Medium::Other));
+        QCOMPARE(got.value->name, u"Assassination Classroom"_s);
+    }
+
+    /// `medium` has a bucket for what this client has not been taught — `Other` — and these
+    /// two have none. A word outside the three became Unread, and a word outside the two
+    /// became Ongoing: a series that had stopped, shown as still running, and a collection
+    /// read to the end, shown as untouched. Nothing is a fact this client can hold; a wrong
+    /// value is not.
+    void a_word_the_client_never_heard_is_absent_and_never_the_wrong_one()
+    {
+        QJsonObject odd = aSeries();
+        odd[u"status"_s] = u"hiatus"_s;
+        odd[u"readStatus"_s] = u"ARCHIVED"_s;
+
+        const Api::Read<Api::Series> got = Api::series(odd);
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        QCOMPARE(got.value->run, std::optional<Api::Run>());
+        QCOMPARE(got.value->holding.readStatus, std::optional<Api::ReadStatus>());
         QCOMPARE(got.value->name, u"Assassination Classroom"_s);
     }
 
@@ -271,8 +289,14 @@ private slots:
                                     u"webtoon"_s, u"artbook"_s, u"other"_s})
             QCOMPARE(Api::spell(Api::medium(word)), word);
 
-        for (const QString &word : {u"UNREAD"_s, u"IN_PROGRESS"_s, u"READ"_s})
-            QCOMPARE(Api::spell(Api::readStatus(word)), word);
+        // Asked before it is opened: a rename in `Api.cpp` that stopped one of these being
+        // recognised would make this a dereference of an empty optional, and ctest would
+        // report a segfault where it should report which word came back as nothing.
+        for (const QString &word : {u"UNREAD"_s, u"IN_PROGRESS"_s, u"READ"_s}) {
+            const std::optional<Api::ReadStatus> read = Api::readStatus(word);
+            QVERIFY2(read.has_value(), qPrintable(word));
+            QCOMPARE(Api::spell(*read), word);
+        }
     }
 };
 

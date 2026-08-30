@@ -32,7 +32,10 @@ enum class ReadStatus { Unread, InProgress, Read };
 /// printing on somebody else's shelf carries the same name, the same author and the same
 /// volume count, and none of these: they are facts about a collection, not about a work.
 struct Holding {
-    ReadStatus readStatus = ReadStatus::Unread;
+    /// Absent when the server used a word this client has not been taught. UNREAD is one of
+    /// the three answers, not the answer to give when there is none — see the note above on
+    /// vocabulary.
+    std::optional<ReadStatus> readStatus;
     int ownedVolumes = 0;
     QList<double> missingVolumes;
     QList<double> missingChapters;
@@ -140,7 +143,7 @@ Read<UpNext> upNext(const QJsonObject &from);
 /// The contract's spellings, so that a test can walk them rather than trust a switch.
 Medium medium(const QString &word);
 QString spell(Medium value);
-ReadStatus readStatus(const QString &word);
+std::optional<ReadStatus> readStatus(const QString &word);
 QString spell(ReadStatus value);
 
 } // namespace Api
