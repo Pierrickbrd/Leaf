@@ -1128,3 +1128,23 @@ async fn an_upload_sent_in_pieces_is_written_as_it_arrives() {
     assert_eq!(status, StatusCode::OK, "{said}");
     assert_eq!(said["received"], 6);
 }
+
+#[tokio::test]
+async fn a_volume_whose_archive_is_corrupt_answers_internal_error_and_says_no_more() {
+    // The index says the page is there; the archive says otherwise. An error message can
+    // carry a path, a query, a piece of the schema, so what crosses the wire is three words
+    // and the rest goes to the log.
+    let (server, _, entry) = a_library().await;
+    let file: String = server
+        .db
+        .read(|cx| cx.query_one("SELECT file FROM entry", [], |r| r.get::<_, String>(0)))
+        .unwrap()
+        .expect("a file");
+    std::fs::write(&file, b"not a zip at all, not any more").unwrap();
+
+    let (status, body) = get(&server, &format!("/entries/{entry}/pages/0")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["error"], "internal error");
+    // Nothing else: no path, no query, no fragment of the schema.
+    assert_eq!(body.as_object().map(|o| o.len()), Some(1), "{body}");
+}
