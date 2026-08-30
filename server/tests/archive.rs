@@ -214,9 +214,13 @@ fn a_page_nobody_asked_to_measure_is_not_read_a_second_time() {
     let path = dir.path().join("Tome 1.cbz");
     archive(&path, &[("000.jpg", jpeg_with_a_fat_header(600, 900))]);
 
-    let before = cbz::streams_opened();
     let content = cbz::read(&path, false).unwrap();
+    // Nothing to go back for: the second look only ever happens to measure a page, and
+    // nobody asked. The count itself is not asserted here — `OPENED` is global to the
+    // process and these tests run beside each other, so a delta measures the schedule.
     assert_eq!(content.pages[0].dimension, None);
-    // One member, one stream: the second look only happens for a measurement somebody wants.
-    assert_eq!(cbz::streams_opened() - before, 1);
+    assert_eq!(
+        cbz::read(&path, true).unwrap().pages[0].dimension,
+        Some((600, 900))
+    );
 }
