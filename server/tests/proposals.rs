@@ -407,3 +407,81 @@ fn an_id_that_is_not_one_is_refused_before_anything_is_looked_up() {
         );
     }
 }
+
+#[test]
+fn what_is_waiting_skips_a_folder_that_is_not_ours_and_one_that_holds_nothing() {
+    let world = World::new();
+    let inbox = world.dir.path().join("inbox");
+    let received = inbox.join("received");
+    std::fs::create_dir_all(&received).unwrap();
+    // Something else's folder, and one of ours that never received its file.
+    std::fs::create_dir_all(received.join("autre-chose")).unwrap();
+    std::fs::create_dir_all(received.join("rcv_deadbeef")).unwrap();
+
+    assert!(world.intake().waiting().unwrap().is_empty());
+}
+
+#[test]
+fn a_collision_says_what_the_two_files_agree_on() {
+    // The question put to a person is about the volumes, not the file names — so it names
+    // what the two have in common and lets the difference speak.
+    use leaf_server::metadata::sidecars::{ChapterJson, EntryJson};
+
+    let both = EntryJson {
+        leaf: Some(1),
+        work: Some("Bleach".into()),
+        edition: Some("Perfect Edition".into()),
+        number: Some(45.5),
+        kind: "CHAPTER".into(),
+        title: Some("Un bonus".into()),
+        chapters: vec![ChapterJson {
+            number: Some(45.5),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let world = World::new();
+    let at = world.library().join("Bleach/Perfect Edition");
+    std::fs::create_dir_all(&at).unwrap();
+    std::fs::write(
+        world.library().join("Bleach/work.json"),
+        br#"{"leaf":1,"title":"Bleach"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        at.join("edition.json"),
+        br#"{"leaf":1,"name":"Perfect Edition"}"#,
+    )
+    .unwrap();
+    std::fs::write(at.join("Chapitre 45.5.cbz"), archive_bytes(Some(&both))).unwrap();
+    world.scan();
+
+    let series: String = world
+        .db
+        .read(|cx| cx.query_one("SELECT id FROM edition", [], |r| r.get::<_, String>(0)))
+        .unwrap()
+        .unwrap();
+
+    let said = world.offer("Chapitre 45.5.cbz", Some(&both));
+    let refused = world
+        .intake()
+        .file(
+            &said.received,
+            &FileRequest {
+                series_id: series,
+                replaces_entry_id: None,
+                on_collision: None,
+            },
+        )
+        .unwrap_err();
+    let collision = refused
+        .downcast_ref::<leaf_server::api::intake::Collision>()
+        .expect("a collision");
+    let described = format!("{collision:?}");
+    // Everything they agree on, including the half number written as it reads.
+    for word in ["work", "edition", "type", "number", "title", "chapterCount"] {
+        assert!(described.contains(word), "{word} missing from {described}");
+    }
+    assert!(described.contains("45.5"), "{described}");
+}
