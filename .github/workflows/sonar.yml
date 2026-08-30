@@ -87,6 +87,11 @@ jobs:
       # tripwire on the measurement itself: `--gcov-ignore-errors` lets a broken run report
       # an empty file rather than fail, and an empty report reads exactly like a client
       # nobody tests. This is what would say so.
+      #
+      # Five points under what is actually measured, not twenty. A tripwire with a quarter
+      # of the report's worth of slack in it is a tripwire the report can collapse through:
+      # the point is to notice the measurement breaking, and a broken one rarely comes back
+      # a little smaller.
       - name: coverage, C++, written down
         working-directory: desktop/coverage
         run: |
@@ -94,7 +99,7 @@ jobs:
                 --filter "$GITHUB_WORKSPACE/desktop/src/" \
                 --gcov-ignore-errors=no_working_dir_found \
                 --sonarqube "$GITHUB_WORKSPACE/coverage-cpp.xml" \
-                --print-summary --fail-under-line 70 .
+                --print-summary --fail-under-line 85 .
 
       - uses: SonarSource/sonarqube-scan-action@v8.2.1
         env:
