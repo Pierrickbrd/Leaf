@@ -624,5 +624,5 @@ fn a_page_whose_size_the_index_does_not_know_is_resized_anyway() {
 
     let pages = f.pages();
     let served = pages.page("v1", 0, Some(300)).unwrap().expect("a page");
-    assert!(served.bytes.len() > 0);
+    assert!(!served.bytes.is_empty());
 }
