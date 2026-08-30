@@ -547,3 +547,53 @@ fn a_scan_asked_for_twice_only_starts_once() {
     assert!(!runner.start("Encore", || Ok(Default::default())));
     let _ = gate.send(());
 }
+
+// -------------------------------------------------------- is it the same volume
+
+#[test]
+fn two_files_carrying_one_id_are_the_same_volume_whatever_else_they_say() {
+    use leaf_server::api::intake::same_volume;
+    use leaf_server::metadata::sidecars::EntryJson;
+
+    let stamped = |id: &str, title: &str| EntryJson {
+        leaf: Some(1),
+        id: Some(id.into()),
+        work: Some("Bleach".into()),
+        title: Some(title.into()),
+        ..Default::default()
+    };
+    // The stamp is the identity: it is put there so a file that leaves can find its way
+    // home, and a title edited on the way out changes nothing about which volume it is.
+    assert!(same_volume(
+        Some(&stamped("v1", "Tome 1")),
+        Some(&stamped("v1", "Autre"))
+    ));
+    assert!(!same_volume(
+        Some(&stamped("v1", "Tome 1")),
+        Some(&stamped("v2", "Tome 1"))
+    ));
+}
+
+#[test]
+fn a_file_that_names_no_work_cannot_be_shown_to_be_the_same_as_anything() {
+    use leaf_server::api::intake::same_volume;
+    use leaf_server::metadata::sidecars::EntryJson;
+
+    // Silence is never a match. The answer to "I cannot tell" is to keep both, not to write
+    // one over the other and find out afterwards.
+    let quiet = EntryJson {
+        leaf: Some(1),
+        number: Some(1.0),
+        ..Default::default()
+    };
+    let named = EntryJson {
+        leaf: Some(1),
+        work: Some("Bleach".into()),
+        number: Some(1.0),
+        ..Default::default()
+    };
+    assert!(!same_volume(Some(&quiet), Some(&named)));
+    assert!(!same_volume(Some(&quiet), Some(&quiet)));
+    assert!(!same_volume(None, Some(&named)));
+    assert!(!same_volume(Some(&named), None));
+}

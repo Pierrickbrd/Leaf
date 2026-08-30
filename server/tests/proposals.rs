@@ -485,3 +485,45 @@ fn a_collision_says_what_the_two_files_agree_on() {
     }
     assert!(described.contains("45.5"), "{described}");
 }
+
+#[test]
+fn a_collision_says_whether_the_two_files_are_byte_for_byte_the_same() {
+    // The size settles almost every case for nothing; the contents only when the sizes
+    // match. Two full reads of a volume is a second on an SSD, spent at the one moment
+    // somebody is about to be asked a question — which is a good moment to spend it.
+    let world = World::new();
+    world.volume("Bleach", "Tome 1.cbz", "Bleach", 1.0);
+    world.scan();
+    let series: String = world
+        .db
+        .read(|cx| cx.query_one("SELECT id FROM edition", [], |r| r.get::<_, String>(0)))
+        .unwrap()
+        .unwrap();
+
+    // The same bytes, offered again.
+    let same = EntryJson {
+        leaf: Some(1),
+        work: Some("Bleach".into()),
+        number: Some(1.0),
+        ..Default::default()
+    };
+    let said = world.offer("Tome 1.cbz", Some(&same));
+    let refused = world
+        .intake()
+        .file(
+            &said.received,
+            &FileRequest {
+                series_id: series,
+                replaces_entry_id: None,
+                on_collision: None,
+            },
+        )
+        .unwrap_err();
+    let collision = refused
+        .downcast_ref::<leaf_server::api::intake::Collision>()
+        .expect("a collision");
+    let described = format!("{collision:?}");
+    assert!(described.contains("identical: true"), "{described}");
+    // And it names what it would be called if both were kept.
+    assert!(described.contains("Tome 1 (2).cbz"), "{described}");
+}
