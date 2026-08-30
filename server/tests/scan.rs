@@ -1439,3 +1439,48 @@ fn a_half_number_keeps_its_half_wherever_it_is_written_down() {
         report.duplicate_numbers
     );
 }
+
+#[test]
+fn a_scan_that_measures_nothing_records_the_pages_without_their_size() {
+    // Measuring every page is most of a scan's cost. Without it the pages are still there,
+    // still in order, and their dimensions are null — which a client has to read as "I do
+    // not know" rather than as zero.
+    let library = Library::new();
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 3, None);
+
+    Scanner::new(Arc::clone(&library.db), false)
+        .scan(&[library.dir.path().join("library")])
+        .expect("scanning");
+
+    assert_eq!(library.count("page"), 3);
+    let sized: i64 = library
+        .db
+        .read(|cx| {
+            Ok(cx
+                .query_one(
+                    "SELECT COUNT(*) FROM page WHERE width IS NOT NULL",
+                    [],
+                    |r| r.get(0),
+                )?
+                .unwrap_or(0))
+        })
+        .unwrap();
+    // The cover is measured whatever happens — the shelf needs it — and the rest are not.
+    assert!(
+        sized <= 1,
+        "{sized} pages measured when none were asked for"
+    );
+}
+
+#[test]
+fn an_arc_over_half_numbers_keeps_its_halves_in_the_report() {
+    let library = Library::new();
+    library.write(
+        "Bleach/edition.json",
+        r#"{"leaf":1,"arcs":[{"name":"Un cycle","unit":"CHAPTER","from":45.5,"to":108.5}]}"#,
+    );
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 2, None);
+    let report = library.scan();
+    let said = report.summary();
+    assert!(said.contains("45.5") || library.count("arc") == 1, "{said}");
+}

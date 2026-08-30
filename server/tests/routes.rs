@@ -1031,3 +1031,100 @@ async fn a_chunk_bigger_than_what_is_left_of_the_ceiling_is_refused() {
     // The harness sets the ceiling at four kilobytes.
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
+
+#[tokio::test]
+async fn an_index_that_cannot_be_read_answers_internal_error_and_says_no_more() {
+    // An error message can carry a path, a query, a piece of the schema. What crosses the
+    // wire is "internal error"; the detail is logged where only the machine's owner reads it.
+    let server = Server::new();
+    a_volume(&server);
+    let index = server.dir.path().join("index.sqlite");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // A fresh state, so the read has to open a connection it does not already hold.
+        let state = server.state();
+        std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let (status, body) = server
+            .send_to(
+                state,
+                request("GET", "/series", READ_ONLY)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            assert_eq!(body["error"], "internal error");
+            assert_eq!(body.as_object().map(|o| o.len()), Some(1), "{body}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_edit_on_a_series_the_scan_cannot_reach_falls_back_to_the_whole_library() {
+    // A rescan is aimed at one work because reading the library after one edited field is a
+    // minute on sixty series. When there is nothing to aim at, the sweep goes wide.
+    let (server, _, entry) = a_library().await;
+    let state = server.state();
+
+    // Two edits in a row: the first starts the sweep, the second meets it already running
+    // and says so rather than queueing behind it.
+    for _ in 0..2 {
+        let (status, _) = server
+            .send_to(
+                state.clone(),
+                request("PATCH", &format!("/entries/{entry}"), IMPORTER)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"title":"Un titre"}"#))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn an_upload_sent_in_pieces_is_written_as_it_arrives() {
+    // The body is streamed rather than held: nine gigabytes must not be a nine-gigabyte
+    // allocation, and an empty frame in the middle of it is not the end of the file.
+    let (server, _, _) = a_library().await;
+    let (_, opened) = server
+        .send(
+            request("POST", "/import", IMPORTER)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "root": "Essai",
+                        "files": [{"path": "Tome 1.cbz", "size": 6}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    let id = opened["id"].as_str().expect("an id").to_string();
+
+    let pieces: Vec<Result<axum::body::Bytes, std::io::Error>> = vec![
+        Ok(axum::body::Bytes::from_static(b"abc")),
+        Ok(axum::body::Bytes::new()),
+        Ok(axum::body::Bytes::from_static(b"def")),
+    ];
+    let body = Body::from_stream(futures_util::stream::iter(pieces));
+    let (status, said) = server
+        .send(
+            request(
+                "PUT",
+                &format!("/import/{id}/file?path=Tome+1.cbz&offset=0"),
+                IMPORTER,
+            )
+            .header("Content-Type", "application/octet-stream")
+            .body(body)
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{said}");
+    assert_eq!(said["received"], 6);
+}

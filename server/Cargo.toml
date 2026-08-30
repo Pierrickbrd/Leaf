@@ -68,6 +68,8 @@ rustls-pemfile = "2.2.0"
 
 [dev-dependencies]
 tempfile = "3"
+# Only to hand a route a body that arrives in pieces, which is the shape the real one has.
+futures-util = "=0.3.31"
 # Only to send the binary the signal a unit file would: there is no portable Rust for it.
 libc = "0.2"
 zip = { version = "6", default-features = false, features = ["deflate"] }
