@@ -523,3 +523,12 @@ async fn a_read_route_needs_a_key_and_health_does_not() {
     assert_eq!(StatusCode::OK, status);
     assert_eq!(3, body["library"]);
 }
+
+#[test]
+fn asking_for_the_chapters_of_no_series_at_all_asks_the_database_nothing() {
+    // The shelf hands the repository whatever it drew. An empty page must not become a
+    // query with an empty IN list, which SQLite answers slowly and pointlessly.
+    let library = Library::new();
+    let repository = Repository::new(&library.db);
+    assert!(repository.chapters_of_entries(&[]).unwrap().is_empty());
+}

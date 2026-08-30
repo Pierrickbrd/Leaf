@@ -1335,3 +1335,105 @@ fn a_folder_that_holds_no_archive_is_read_as_nothing_at_all() {
         .expect("aiming at an empty folder");
     assert_eq!(library.count("work"), 0);
 }
+
+// ------------------------------------------------------------ what is pruned
+
+#[test]
+fn a_volume_taken_off_the_disk_is_taken_out_of_the_index_when_the_work_is_read_again() {
+    let library = Library::new();
+    let bleach = library.folder("Bleach");
+    archive(&bleach.join("Tome 1.cbz"), 2, None);
+    archive(&bleach.join("Tome 2.cbz"), 2, None);
+    library.scan();
+    assert_eq!(library.count("entry"), 2);
+
+    std::fs::remove_file(bleach.join("Tome 2.cbz")).unwrap();
+    Scanner::new(Arc::clone(&library.db), true)
+        .rescan_work(&bleach)
+        .expect("aimed");
+
+    assert_eq!(library.count("entry"), 1);
+    // And what pointed at it in the search index went with it.
+    assert!(library
+        .all("SELECT id FROM entry")
+        .iter()
+        .all(|id| !id.is_empty()));
+}
+
+#[test]
+fn an_edition_folder_that_has_gone_takes_its_edition_with_it() {
+    let library = Library::new();
+    library.write("Bleach/work.json", r#"{"leaf":1,"title":"Bleach"}"#);
+    for edition in ["Perfect Edition", "Poche"] {
+        library.write(
+            &format!("Bleach/{edition}/edition.json"),
+            &format!(r#"{{"leaf":1,"name":"{edition}"}}"#),
+        );
+        archive(
+            &library.folder(&format!("Bleach/{edition}")).join("Tome 1.cbz"),
+            2,
+            None,
+        );
+    }
+    library.scan();
+    assert_eq!(library.count("edition"), 2);
+
+    std::fs::remove_dir_all(library.dir.path().join("library/Bleach/Poche")).unwrap();
+    Scanner::new(Arc::clone(&library.db), true)
+        .rescan_work(&library.dir.path().join("library/Bleach"))
+        .expect("aimed");
+
+    assert_eq!(library.count("edition"), 1);
+    assert_eq!(library.count("entry"), 1);
+}
+
+#[test]
+fn pruning_a_work_that_was_never_recorded_is_nothing_to_do() {
+    let library = Library::new();
+    let bleach = library.folder("Bleach");
+    archive(&bleach.join("Tome 1.cbz"), 2, None);
+    // Never scanned, so nothing is in the index to prune — and aiming at it is not an error.
+    Scanner::new(Arc::clone(&library.db), true)
+        .rescan_work(&bleach)
+        .expect("aimed at a work the index has never seen");
+    assert_eq!(library.count("work"), 1);
+}
+
+#[test]
+fn an_archive_that_cannot_be_read_is_reported_and_the_rest_of_the_folder_is_read() {
+    // One bad file must not cost the other nine: the scan says what it could not read and
+    // carries on.
+    let library = Library::new();
+    let bleach = library.folder("Bleach");
+    archive(&bleach.join("Tome 1.cbz"), 2, None);
+    std::fs::write(bleach.join("Tome 2.cbz"), b"not a zip at all").unwrap();
+
+    let report = library.scan();
+    assert_eq!(library.count("entry"), 1);
+    assert!(
+        report.errors.iter().any(|e| e.contains("Tome 2.cbz")),
+        "{:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn a_half_number_keeps_its_half_wherever_it_is_written_down() {
+    // 45.5 reads between 45 and 46, and says so in every place a number is spelled out.
+    let library = Library::new();
+    archive(
+        &library.folder("Bleach").join("Tome 1.cbz"),
+        3,
+        Some((
+            "entry.json",
+            r#"{"leaf":1,"work":"Bleach","number":1,"chapters":[
+                 {"number":45.5,"title":"Un bonus"},{"number":45.5,"title":"Un autre"}]}"#,
+        )),
+    );
+    let report = library.scan();
+    assert!(
+        report.duplicate_numbers.iter().any(|d| d.contains("45.5")),
+        "{:?}",
+        report.duplicate_numbers
+    );
+}

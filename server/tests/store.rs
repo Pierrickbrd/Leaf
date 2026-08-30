@@ -461,3 +461,52 @@ fn dropping_the_unused_column_and_indexing_the_arcs_reaches_an_old_database() {
         .unwrap();
     assert!(indices.iter().any(|i| i == "ix_arc_edition"), "{indices:?}");
 }
+
+#[test]
+fn the_connection_underneath_is_reachable_for_the_rare_thing_the_wrapper_does_not_do() {
+    // It is not counted, which is the reason to keep reaching for it rare — but a backup or
+    // a pragma nothing else needs has to be able to get at it.
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(&dir.path().join("index.sqlite")).unwrap();
+    let version: i64 = db
+        .read(|cx| {
+            let raw = cx.raw();
+            Ok(Some(raw.query_row("PRAGMA user_version", [], |r| r.get(0))?))
+        })
+        .unwrap()
+        .unwrap();
+    assert!(version >= 0);
+}
+
+#[test]
+fn a_search_index_of_the_old_shape_is_thrown_away_and_made_again() {
+    // It used to be an ordinary table. Recreating it costs nothing — the next scan rebuilds
+    // it — so the shape is checked rather than migrated.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.sqlite");
+    {
+        let db = Db::open(&path).unwrap();
+        db.write(|cx| {
+            cx.run("DROP TABLE IF EXISTS search")?;
+            cx.run("CREATE TABLE search (id TEXT, label TEXT)")?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    let db = Db::open(&path).unwrap();
+    let sql: Option<String> = db
+        .read(|cx| {
+            cx.query_one(
+                "SELECT sql FROM sqlite_master WHERE name = 'search'",
+                [],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .map(Option::flatten)
+        })
+        .unwrap();
+    assert!(
+        sql.unwrap_or_default().to_lowercase().contains("fts5"),
+        "the old shape must be replaced, not kept"
+    );
+}
