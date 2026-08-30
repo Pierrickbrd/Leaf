@@ -20,7 +20,7 @@ use crate::metadata::sidecars::EntryJson;
 use crate::store::Db;
 
 /// How sure the server is about the file just handed to it.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub enum Confidence {
     /// One series matches and the number is free.
     #[serde(rename = "CERTAIN")]
