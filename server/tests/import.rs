@@ -1620,3 +1620,104 @@ fn a_file_already_home_is_done_rather_than_missing() {
     let result = bulk.commit(&opened.id).expect("committed");
     assert!(result.pending.is_empty(), "{result:?}");
 }
+
+#[test]
+fn a_manifest_that_covers_the_whole_series_reports_what_it_does_not_mention() {
+    use leaf_server::api::bulk_import::{ImportRequest, ManifestFile, Scope};
+
+    // "Here is the whole series": whatever is not in it is reported as an orphan — named,
+    // never removed, because deciding a file is unwanted is not the server's call.
+    let (dir, bulk) = a_bulk();
+    let target = dir.path().join("library/Bleach");
+    std::fs::create_dir_all(target.join("Extras")).unwrap();
+    std::fs::write(target.join("Tome 1.cbz"), b"pk").unwrap();
+    std::fs::write(target.join("Extras/Bonus.cbz"), b"pk").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, target.join("retour")).unwrap();
+
+    let opened = bulk
+        .open(&ImportRequest {
+            root: "Bleach".into(),
+            scope: Scope::Complete,
+            files: vec![ManifestFile {
+                path: "Tome 1.cbz".into(),
+                size: 2,
+                checksum: None,
+            }],
+        })
+        .expect("opened");
+
+    let result = bulk.commit(&opened.id).expect("committed");
+    assert_eq!(result.orphans, vec!["Extras/Bonus.cbz".to_string()]);
+    // A symlink is a leaf and never a way back up: the sweep does not descend into it, so
+    // a link to the folder it sits in is not an infinite tree of orphans.
+    assert!(
+        target.join("Extras/Bonus.cbz").is_file(),
+        "nothing is removed"
+    );
+}
+
+#[test]
+fn a_tree_deeper_than_the_sweep_follows_stops_rather_than_walking_for_ever() {
+    use leaf_server::api::bulk_import::{ImportRequest, Scope};
+
+    let (dir, bulk) = a_bulk();
+    let mut deep = dir.path().join("library/Bleach");
+    for n in 0..12 {
+        deep = deep.join(format!("{n}"));
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(deep.join("Trop loin.cbz"), b"pk").unwrap();
+
+    let opened = bulk
+        .open(&ImportRequest {
+            root: "Bleach".into(),
+            scope: Scope::Complete,
+            files: Vec::new(),
+        })
+        .expect("opened");
+
+    let result = bulk.commit(&opened.id).expect("committed");
+    assert!(
+        !result.orphans.iter().any(|o| o.contains("Trop loin")),
+        "past the ceiling nothing is swept: {:?}",
+        result.orphans
+    );
+}
+
+#[test]
+fn a_target_that_cannot_be_read_sweeps_to_nothing_rather_than_failing() {
+    use leaf_server::api::bulk_import::{ImportRequest, Scope};
+
+    let (dir, bulk) = a_bulk();
+    let target = dir.path().join("library/Bleach");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("Tome 1.cbz"), b"pk").unwrap();
+
+    let opened = bulk
+        .open(&ImportRequest {
+            root: "Bleach".into(),
+            scope: Scope::Complete,
+            files: Vec::new(),
+        })
+        .expect("opened");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = bulk.commit(&opened.id).expect("committed");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.orphans.is_empty(), "{result:?}");
+    }
+}
+
+#[test]
+fn what_is_waiting_in_an_inbox_that_is_not_there_is_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let bulk = leaf_server::api::bulk_import::BulkImport::new(
+        &dir.path().join("no-such-inbox"),
+        &dir.path().join("library"),
+    );
+    assert!(bulk.waiting().unwrap().is_empty());
+}

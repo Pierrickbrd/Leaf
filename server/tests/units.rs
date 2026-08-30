@@ -597,3 +597,66 @@ fn a_file_that_names_no_work_cannot_be_shown_to_be_the_same_as_anything() {
     assert!(!same_volume(None, Some(&named)));
     assert!(!same_volume(Some(&named), None));
 }
+
+// ---------------------------------------------------------------- odds and ends
+
+#[test]
+fn a_universe_whose_name_is_only_punctuation_hides_nothing() {
+    use leaf_server::store::text::composed_name;
+    // The needle folds to nothing. An empty needle would match every title rather than
+    // none, so a universe called "···" must not swallow the whole shelf.
+    assert_eq!(composed_name(Some("···"), "Bleach", None), "··· · Bleach");
+    assert_eq!(
+        composed_name(Some("Terres d'Arran"), "Elfes", None),
+        "Terres d'Arran · Elfes"
+    );
+    // The universe is dropped when the work already repeats it.
+    assert_eq!(
+        composed_name(Some("Bleach"), "Bleach", Some("Poche")),
+        "Bleach · Poche"
+    );
+}
+
+#[test]
+fn a_document_that_is_not_xml_at_all_is_nothing() {
+    use leaf_server::metadata::legacy_comic_info::read;
+    // Not "half a document": a prefix that parses and then stops is exactly what a sidecar
+    // being written by an edit looks like from a scan reading it at the same moment.
+    assert!(read(b"<ComicInfo><Title>Bleach</Title></Comic Info>").is_none());
+    assert!(read(b"<<<>>>").is_none());
+    assert!(read(b"<ComicInfo attr=unquoted></ComicInfo>").is_none());
+}
+
+#[test]
+fn an_archive_that_cannot_be_opened_says_which_archive_and_which_member() {
+    use leaf_server::archive::cbz::extract;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Tome 1.cbz");
+    // A zip whose directory is corrupt: not "the member is not there", which is an answer,
+    // but "this is not an archive", which is a failure worth naming.
+    std::fs::write(&path, b"PK\x03\x04 and then nothing that follows").unwrap();
+    let refused = extract(&path, "entry.json").unwrap_err().to_string();
+    assert!(refused.contains("Tome 1.cbz"), "{refused}");
+}
+
+#[test]
+fn a_cache_folder_that_cannot_be_walked_is_said_and_left_alone() {
+    use leaf_server::api::cache_budget::enforce;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    std::fs::create_dir(&cache).unwrap();
+    std::fs::write(cache.join("a"), vec![0u8; 4096]).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // It exists and cannot be read: said out loud rather than treated as empty, which
+        // would look exactly like a cache that already fits.
+        enforce(&cache, 1);
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert!(
+        cache.join("a").is_file(),
+        "nothing may be deleted on a guess"
+    );
+}

@@ -700,3 +700,58 @@ fn a_cache_that_cannot_be_made_is_said_and_the_pages_still_serve() {
         std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
+
+#[test]
+fn a_page_the_index_thinks_is_wider_than_it_is_comes_back_untouched() {
+    // The plan is made from what the index recorded. When that is stale — a volume replaced
+    // by a smaller scan, say — the resize finds nothing to shrink and the original goes
+    // back rather than a blurred enlargement.
+    let f = Fixture::new();
+    f.db.write(|cx| {
+        cx.execute(
+            "UPDATE page SET width = 4000, height = 6000 WHERE number = 2",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let pages = f.pages();
+    // 002.jpg is really 300 wide. Asking for 900 looks worth doing and turns out not to be.
+    let served = pages.page("v1", 2, Some(900)).unwrap().expect("a page");
+    assert_eq!(served.bytes, {
+        let plain = pages.page("v1", 2, None).unwrap().expect("a page");
+        plain.bytes
+    });
+}
+
+#[test]
+fn a_cover_file_that_cannot_be_read_is_nothing_rather_than_an_error() {
+    // It is there and shut. A tile that does not draw, not a shelf that fails.
+    let f = Fixture::new();
+    let closed = f.dir.path().join("closed");
+    std::fs::create_dir(&closed).unwrap();
+    let beside = closed.join("cover.jpg");
+    std::fs::write(&beside, jpeg(300, 400)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&beside, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    f.db.write(|cx| {
+        cx.execute(
+            "UPDATE entry SET cover_file = ?1 WHERE id = 'v1'",
+            [beside.to_string_lossy().to_string()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let pages = f.pages();
+    assert!(pages.cover("v1", Some(300)).unwrap().is_none());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&beside, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+}

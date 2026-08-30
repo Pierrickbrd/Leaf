@@ -947,3 +947,87 @@ async fn a_search_for_something_that_folds_to_nothing_finds_nothing() {
         assert_eq!(body.as_array().map(Vec::len), Some(0), "{q}: {body}");
     }
 }
+
+#[tokio::test]
+async fn a_series_takes_its_genres_whole_rather_than_one_at_a_time() {
+    // A list replaces a list: adding "Action" and losing "Shonen" because the patch carried
+    // one of them is the kind of edit nobody notices until the filter is wrong.
+    let (server, series, _) = a_library().await;
+    let (status, body) = patch(
+        &server,
+        &format!("/series/{series}"),
+        serde_json::json!({"genres": ["Shonen", "Action"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (_, listed) = get(&server, &format!("/series/{series}")).await;
+    let genres: Vec<String> = listed["genres"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|g| g.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(genres.contains(&"Action".to_string()), "{listed}");
+    assert!(genres.contains(&"Shonen".to_string()), "{listed}");
+}
+
+#[tokio::test]
+async fn an_edit_on_a_series_whose_folder_has_gone_is_a_404() {
+    // The index still says where it is; the disk no longer agrees. What must not happen is
+    // an edit written into a folder that is not there any more.
+    let (server, series, entry) = a_library().await;
+    std::fs::remove_dir_all(server.library().join("Bleach")).unwrap();
+
+    for (uri, body) in [
+        (
+            format!("/series/{series}"),
+            serde_json::json!({"summary": "…"}),
+        ),
+        (
+            format!("/entries/{entry}"),
+            serde_json::json!({"title": "…"}),
+        ),
+        (format!("/series/{series}/arcs"), serde_json::json!([])),
+    ] {
+        let (status, said) = patch(&server, &uri, body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {said}");
+    }
+}
+
+#[tokio::test]
+async fn a_chunk_bigger_than_what_is_left_of_the_ceiling_is_refused() {
+    let (server, _, _) = a_library().await;
+    let (_, opened) = server
+        .send(
+            request("POST", "/import", IMPORTER)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "root": "Essai",
+                        "files": [{"path": "Tome 1.cbz", "size": 99_999_999}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    let id = opened["id"].as_str().expect("an id").to_string();
+
+    let (status, body) = server
+        .send(
+            request(
+                "PUT",
+                &format!("/import/{id}/file?path=Tome+1.cbz&offset=0"),
+                IMPORTER,
+            )
+            .header("Content-Type", "application/octet-stream")
+            .body(Body::from(vec![0u8; 8 * 1024]))
+            .unwrap(),
+        )
+        .await;
+    // The harness sets the ceiling at four kilobytes.
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
