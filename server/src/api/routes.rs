@@ -218,7 +218,13 @@ fn allowed(parts: &Parts, state: &AppState, permission: Permission) -> Result<()
         return Err(Refused::TooMany(wait.as_secs().max(1)));
     }
 
-    let offered = parts.headers.get(HEADER).and_then(|v| v.to_str().ok());
+    // The bytes, decoded as UTF-8. `to_str` admits visible ASCII and nothing else, so a
+    // secret with an accent in it would be configurable — `Keys::parse` measures it in
+    // characters — and then never recognised at the door.
+    let offered = parts
+        .headers
+        .get(HEADER)
+        .and_then(|v| std::str::from_utf8(v.as_bytes()).ok());
     let Some(key) = state.keys.recognise(offered) else {
         state.throttle.record_failure(&address);
         return Err(Refused::Forbidden("unknown key".into()));
@@ -808,7 +814,10 @@ async fn receive_entry(
 ) -> Result<Json<Proposal>, Failure> {
     let Some(name) = headers
         .get("X-Leaf-Name")
-        .and_then(|v| v.to_str().ok())
+        // The bytes, decoded as UTF-8, not `to_str`: that admits visible ASCII only, and
+        // reported "Tome 1 — Été.cbz" as no header at all rather than as a name it could
+        // not read. A library in French is mostly accented file names.
+        .and_then(|v| std::str::from_utf8(v.as_bytes()).ok())
         .map(str::to_string)
     else {
         return Err(Failure::Unhandled(crate::api::invalid(

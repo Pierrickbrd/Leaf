@@ -136,6 +136,34 @@ pub fn json_body(value: serde_json::Value) -> Body {
     Body::from(serde_json::to_vec(&value).unwrap())
 }
 
+/// A work whose edition has a folder and a file of its own — the other half of the model,
+/// where the edition is declared rather than implied by the volumes sitting beside work.json.
+pub fn a_named_edition(server: &Server) {
+    let folder = server.library().join("Bleach/Perfect Edition");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        server.library().join("Bleach/work.json"),
+        br#"{"leaf":1,"title":"Bleach"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        folder.join("edition.json"),
+        br#"{"leaf":1,"name":"Perfect Edition"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        folder.join("Tome 1.cbz"),
+        archive_bytes(Some(&EntryJson {
+            leaf: Some(1),
+            work: Some("Bleach".into()),
+            number: Some(1.0),
+            ..Default::default()
+        })),
+    )
+    .unwrap();
+    server.scan();
+}
+
 pub fn a_volume(server: &Server) {
     let folder = server.library().join("Bleach");
     std::fs::create_dir_all(&folder).unwrap();

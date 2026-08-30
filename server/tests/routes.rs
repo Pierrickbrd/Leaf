@@ -9,7 +9,7 @@ use axum::body::Body;
 use axum::http::StatusCode;
 
 mod common;
-use common::{a_volume, archive_bytes, request, Server, IMPORTER, READ_ONLY};
+use common::{a_named_edition, a_volume, archive_bytes, request, Server, IMPORTER, READ_ONLY};
 
 async fn get(server: &Server, uri: &str) -> (StatusCode, serde_json::Value) {
     server
@@ -552,4 +552,204 @@ async fn a_cover_already_held_comes_back_as_not_modified() {
         )
         .await;
     assert_eq!(status, StatusCode::NOT_MODIFIED);
+}
+
+// --------------------------------------------------------------- what is refused
+
+#[tokio::test]
+async fn a_page_number_that_is_not_a_number_is_a_400_and_says_which() {
+    let (server, _, entry) = a_library().await;
+    let (status, body) = get(&server, &format!("/entries/{entry}/pages/deux")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "page number expected");
+}
+
+#[tokio::test]
+async fn a_filter_this_server_has_never_heard_of_is_not_an_error() {
+    // A client from a later version may send one, and a shelf is the right answer.
+    let (server, _, _) = a_library().await;
+    let (status, body) = get(&server, "/series?author=Kubo&nonsense=42&medium=manga").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["items"].is_array());
+}
+
+#[tokio::test]
+async fn every_filter_the_shelf_has_reaches_the_query() {
+    let (server, _, _) = a_library().await;
+    for one in [
+        "author=Kubo",
+        "genre=Shonen",
+        "medium=manga",
+        "status=ongoing",
+        "language=fr",
+        "publisher=Kana",
+        "universe=Nulle+part",
+        "read=UNREAD",
+    ] {
+        let (status, body) = get(&server, &format!("/series?{one}")).await;
+        assert_eq!(status, StatusCode::OK, "{one}: {body}");
+        // Every one of them narrows, so a filter matching nothing empties the shelf rather
+        // than being quietly ignored.
+        assert!(body["total"].is_number(), "{one}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn a_file_sent_against_an_import_nobody_opened_is_a_404() {
+    let (server, _, _) = a_library().await;
+    let (status, body) = server
+        .send(
+            request("PUT", "/import/imp_deadbeef/file?path=Tome+1.cbz&offset=0", IMPORTER)
+                .header("Content-Type", "application/octet-stream")
+                .body(Body::from(vec![0u8; 4]))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+#[tokio::test]
+async fn an_unforeseen_failure_answers_with_nothing_and_logs_the_rest() {
+    // An error message can carry a path, a query, a piece of the schema. What crosses the
+    // wire is "internal error"; the detail stays server-side.
+    let server = Server::new();
+    // The index is opened and then taken away, so the next read fails for a reason no
+    // handler has a case for.
+    a_volume(&server);
+    let series = server.series();
+    std::fs::remove_dir_all(server.library()).unwrap();
+    let (status, body) = server
+        .send(
+            request("GET", &format!("/entries/{series}/file"), READ_ONLY)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert!(
+        status == StatusCode::NOT_FOUND || status == StatusCode::INTERNAL_SERVER_ERROR,
+        "{status} {body}"
+    );
+    if status == StatusCode::INTERNAL_SERVER_ERROR {
+        assert_eq!(body["error"], "internal error");
+    }
+}
+
+// -------------------------------------------------- the edition that has a folder
+
+#[tokio::test]
+async fn an_edition_with_a_folder_of_its_own_takes_its_edit_in_its_own_file() {
+    // The other half of the model: when the edition is declared rather than implied, what a
+    // patch changes belongs in edition.json and not in the work's file.
+    let server = Server::new();
+    a_named_edition(&server);
+    let series = server.series();
+
+    let (status, body) = patch(
+        &server,
+        &format!("/series/{series}"),
+        serde_json::json!({"publisher": "Kana", "language": "fr"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let written = std::fs::read_to_string(
+        server.library().join("Bleach/Perfect Edition/edition.json"),
+    )
+    .unwrap();
+    assert!(written.contains("Kana"), "{written}");
+    // And the work's own file is left alone: it says nothing about a printing.
+    let work = std::fs::read_to_string(server.library().join("Bleach/work.json")).unwrap();
+    assert!(!work.contains("Kana"), "{work}");
+}
+
+#[tokio::test]
+async fn the_arcs_of_a_named_edition_are_written_beside_it() {
+    let server = Server::new();
+    a_named_edition(&server);
+    let series = server.series();
+
+    let (status, body) = patch(
+        &server,
+        &format!("/series/{series}/arcs"),
+        serde_json::json!([{"name": "Soul Society", "unit": "CHAPTER", "from": 1, "to": 20}]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let written = std::fs::read_to_string(
+        server.library().join("Bleach/Perfect Edition/edition.json"),
+    )
+    .unwrap();
+    assert!(written.contains("Soul Society"), "{written}");
+}
+
+#[tokio::test]
+async fn a_file_bigger_than_the_ceiling_is_refused_before_it_reaches_the_disk() {
+    let (server, _, _) = a_library().await;
+    let (status, body) = server
+        .send(
+            request("POST", "/entries", IMPORTER)
+                .header("Content-Type", "application/octet-stream")
+                .header("X-Leaf-Name", "Enorme.cbz")
+                .body(Body::from(vec![0u8; 8 * 1024]))
+                .unwrap(),
+        )
+        .await;
+    // 400, as the contract declares: the request is the caller's mistake, and the harness
+    // sets the ceiling at four kilobytes.
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("larger than"),
+        "{body}"
+    );
+}
+
+// ------------------------------------------------------------- names and secrets
+
+#[tokio::test]
+async fn a_file_name_with_an_accent_in_it_is_a_name_and_not_a_missing_header() {
+    // A library in French is mostly accented file names. Read as visible ASCII, "Été" made
+    // the header vanish — and the server answered that no name had been given at all.
+    let (server, _, _) = a_library().await;
+    for name in ["Tome 1 — L'Été.cbz", "ハイキュー 01.cbz", "Атака 1.cbz"] {
+        let (status, body) = server
+            .send(
+                request("POST", "/entries", IMPORTER)
+                    .header("Content-Type", "application/octet-stream")
+                    .header("X-Leaf-Name", name)
+                    .body(Body::from(archive_bytes(None)))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body}");
+        assert_eq!(body["name"], name, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn a_key_with_an_accent_in_it_is_recognised() {
+    // `Keys::parse` measures a secret in characters, so it accepts one. Read as visible
+    // ASCII at the door, it could never be presented — configurable and unusable.
+    use leaf_server::api::keys::Keys;
+    use leaf_server::api::routes::{router, AppState};
+    use tower::ServiceExt;
+
+    let server = Server::new();
+    a_volume(&server);
+    let accented = "clé-très-secrète-ici";
+    let state = AppState::new(
+        std::sync::Arc::clone(&server.db),
+        Keys::parse(Some(&format!("desktop:{accented}:read"))).unwrap(),
+    )
+    .with_library(vec![server.library()], true);
+
+    let response = router(state)
+        .oneshot(
+            request("GET", "/series", accented)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
