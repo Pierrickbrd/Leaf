@@ -241,3 +241,44 @@ fn too_many_addresses_presenting_wrong_keys_and_the_oldest_are_forgotten() {
     // address that was refused is still refused.
     assert!(throttle.blocked_for("10.0.0.1").is_some());
 }
+
+#[test]
+fn failures_age_out_so_a_device_that_gets_it_wrong_once_a_week_never_accumulates() {
+    use leaf_server::api::throttle::Throttle;
+    use std::time::Duration;
+
+    // A window of milliseconds rather than minutes: the rule is the same one, and the test
+    // waits for it rather than for five minutes.
+    let throttle = Throttle::new(3, Duration::from_millis(60), Duration::from_secs(900));
+    throttle.record_failure("10.0.0.1");
+    throttle.record_failure("10.0.0.1");
+    std::thread::sleep(Duration::from_millis(120));
+
+    // Two more. Four failures in all, and still not refused: the first two fell out of the
+    // window before the last two arrived.
+    throttle.record_failure("10.0.0.1");
+    throttle.record_failure("10.0.0.1");
+    assert!(throttle.blocked_for("10.0.0.1").is_none());
+}
+
+#[test]
+fn a_table_full_of_addresses_nothing_is_held_against_empties_itself() {
+    // The cheap half of making room: everything in there had aged out, so forgetting the
+    // oldest by hand is not needed.
+    use leaf_server::api::throttle::Throttle;
+    use std::time::Duration;
+
+    let throttle = Throttle::new(10, Duration::from_millis(40), Duration::from_secs(1));
+    for n in 0..1024u32 {
+        throttle.record_failure(&format!("192.168.{}.{}", n / 256, n % 256));
+    }
+    assert_eq!(throttle.remembered(), 1024);
+
+    std::thread::sleep(Duration::from_millis(80));
+    throttle.record_failure("10.0.0.9");
+    assert!(
+        throttle.remembered() < 100,
+        "everything that aged out should be gone, not just the oldest half: {}",
+        throttle.remembered()
+    );
+}

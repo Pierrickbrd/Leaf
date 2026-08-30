@@ -485,15 +485,18 @@ fn the_shelf_covers_are_prepared_behind_the_reader() {
     pages.warm_covers();
     assert_eq!(f.cache_files(), 0);
 
-    // One request teaches it a width, and then the sweep has something to do.
+    // One request teaches it a width. The cache is then emptied, so what appears next can
+    // only have come from the sweep.
     pages.series_cover("e", Some(300)).unwrap().expect("a cover");
-    let after_one = f.cache_files();
+    std::fs::remove_dir_all(f.dir.path().join("cache")).unwrap();
+    pages.prepare();
+    assert_eq!(f.cache_files(), 0);
     pages.warm_covers();
 
     // A deadline rather than a count of naps: what is waited on is a real decode, resize
     // and encode, on a machine that may be busy with other things.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while f.cache_files() < after_one {
+    while f.cache_files() == 0 {
         assert!(
             std::time::Instant::now() < deadline,
             "the shelf covers were never prepared"
@@ -546,4 +549,80 @@ fn a_page_whose_bytes_no_codec_reads_comes_back_as_it_is() {
         served.bytes.starts_with(b"\xff\xd8\xff"),
         "the original bytes, untouched"
     );
+}
+
+#[test]
+fn a_cover_chosen_on_disk_is_served_at_the_width_that_was_asked_for() {
+    // The file beside the archive is a file, not a page: it goes through its own path, and
+    // that path has to honour the width the shelf asked for like any other.
+    let f = Fixture::new();
+    let beside = f.dir.path().join("cover.jpg");
+    std::fs::write(&beside, jpeg(1200, 1700)).unwrap();
+    f.db.write(|cx| {
+        cx.execute(
+            "UPDATE entry SET cover_file = ?1 WHERE id = 'v1'",
+            [beside.to_string_lossy().to_string()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let pages = f.pages();
+    let wide = pages.cover("v1", Some(600)).unwrap().expect("a cover");
+    let narrow = pages.cover("v1", Some(200)).unwrap().expect("a cover");
+    assert!(narrow.bytes.len() < wide.bytes.len());
+}
+
+#[test]
+fn a_cover_whose_file_has_gone_is_nothing_rather_than_an_error() {
+    // The index says where it is; the disk is the one that answers. A file removed between
+    // the two is a tile that does not draw, not a shelf that fails.
+    let f = Fixture::new();
+    f.db.write(|cx| {
+        cx.execute(
+            "UPDATE entry SET cover_file = '/no/such/cover.jpg' WHERE id = 'v1'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let pages = f.pages();
+    assert!(pages.cover("v1", Some(300)).unwrap().is_none());
+    assert!(pages.cover("v1", None).unwrap().is_none());
+}
+
+#[test]
+fn a_page_the_index_names_and_the_archive_does_not_hold_is_nothing() {
+    let f = Fixture::new();
+    f.db.write(|cx| {
+        cx.execute(
+            "INSERT INTO page (entry_id, number, entry_name, media_type, width, height, size)
+             VALUES ('v1', 9, 'jamais.jpg', 'image/jpeg', 100, 100, 10)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let pages = f.pages();
+    assert!(pages.page("v1", 9, Some(300)).unwrap().is_none());
+    // And without a width either: the two go down different paths.
+    assert!(pages.page("v1", 9, None).unwrap().is_none());
+}
+
+#[test]
+fn a_page_whose_size_the_index_does_not_know_is_resized_anyway() {
+    // Worth resizing is decided against the source width. With none recorded the answer is
+    // yes: better a resize that saved nothing than a full page sent to a phone.
+    let f = Fixture::new();
+    f.db.write(|cx| {
+        cx.execute("UPDATE page SET width = NULL WHERE number = 0", [])?;
+        Ok(())
+    })
+    .unwrap();
+
+    let pages = f.pages();
+    let served = pages.page("v1", 0, Some(300)).unwrap().expect("a page");
+    assert!(served.bytes.len() > 0);
 }
