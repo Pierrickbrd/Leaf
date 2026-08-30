@@ -130,11 +130,14 @@ pub fn compose(pattern: Option<&str>, number: Option<f64>) -> Option<String> {
     let mut out = String::with_capacity(pattern.len() + plain.len());
     let mut rest = pattern;
     while let Some(start) = rest.find("{n") {
-        out.push_str(&rest[..start]);
         let after = &rest[start..];
+        // An opening with no closing. Nothing is written here, so `rest` is still the whole
+        // of what is left and the line below writes it out once — writing the part before
+        // the placeholder first put it in the label twice.
         let Some(close) = after.find('}') else {
             break;
         };
+        out.push_str(&rest[..start]);
         let inside = &after[2..close]; // "" or ":000"
         let padding = inside.strip_prefix(':').map(str::len).unwrap_or(0);
         let valid = inside.is_empty()

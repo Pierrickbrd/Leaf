@@ -59,8 +59,24 @@ pub struct Server {
     pub trust_proxy: bool,
 }
 
+/// Turns the server's own logging on, once per test binary.
+///
+/// Without a subscriber every `tracing::warn!` short-circuits before it evaluates its
+/// arguments, so the lines that say what went wrong are never run — and the one thing a
+/// test of an error path should be sure of is that the report of it works.
+pub fn logging() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::DEBUG)
+            .try_init();
+    });
+}
+
 impl Server {
     pub fn new() -> Self {
+        logging();
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("library")).unwrap();
         std::fs::create_dir_all(dir.path().join("inbox")).unwrap();
