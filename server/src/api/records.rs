@@ -59,6 +59,109 @@ impl SeriesPatch {
     }
 }
 
+/// The three enum fields of a patch, checked against the contract's vocabulary.
+///
+/// Together rather than as three loose `Option<String>` because at a call site they are one
+/// interchangeable type: a medium handed to the parameter meant for a status compiles, and
+/// writes a medium into the status of a sidecar. Named fields cost nothing and that mistake
+/// cannot be made.
+struct Spelled {
+    medium: Option<String>,
+    status: Option<String>,
+    reading_direction: Option<String>,
+}
+
+impl Spelled {
+    /// Refused in the caller's own answer, rather than written down and met again by the
+    /// scanner — which is what `set_arcs` does for units, and what this route did not do for
+    /// the three enums beside them. See [`sidecars::medium`] for what a word the contract has
+    /// not got costs once it is on the disk. Read before anything is written, so a patch
+    /// carrying a good field and a bad one does not land half of itself.
+    fn of(patch: &SeriesPatch) -> Result<Self> {
+        Ok(Spelled {
+            medium: spelled(
+                &patch.medium,
+                sidecars::medium,
+                "a medium",
+                &sidecars::MEDIA,
+            )?,
+            status: spelled(
+                &patch.status,
+                sidecars::status,
+                "a status",
+                &sidecars::STATUSES,
+            )?,
+            reading_direction: spelled(
+                &patch.reading_direction,
+                sidecars::reading_direction,
+                "a reading direction",
+                &sidecars::READING_DIRECTIONS,
+            )?,
+        })
+    }
+}
+
+/// What `work.json` is to become, or `None` when nothing in the patch reaches it.
+///
+/// Built and returned rather than written, so that [`Records::patch_series`] stays the one
+/// place that decides the order the disk is touched in.
+fn work_document(
+    file: &Path,
+    patch: &SeriesPatch,
+    words: &Spelled,
+    gets_the_edition: bool,
+) -> Result<Option<WorkJson>> {
+    if !patch.touches_work() && !gets_the_edition {
+        return Ok(None);
+    }
+    let mut it: WorkJson = current(file)?;
+    it.leaf = Some(FORMAT_VERSION);
+    if patch.touches_work() {
+        it.title = patch.title.clone().or(it.title);
+        it.medium = words.medium.clone().or(it.medium);
+        it.author = patch.author.clone().or(it.author);
+        it.status = words.status.clone().or(it.status);
+        it.reading_direction = words.reading_direction.clone().or(it.reading_direction);
+        if let Some(genres) = &patch.genres {
+            it.genres = genres.clone();
+        }
+        it.summary = patch.summary.clone().or(it.summary);
+    }
+    // An implicit edition has no folder of its own: its fields go down into work.json.
+    // Dropping an edition.json there would flip how the folder is classified — it would stop
+    // being a work and become an edition.
+    if gets_the_edition {
+        it.publisher = patch.publisher.clone().or(it.publisher);
+        it.volume_count = patch.volume_count.or(it.volume_count);
+        it.format = patch.format.clone().or(it.format);
+        it.language = patch.language.clone().or(it.language);
+        it.status = words.status.clone().or(it.status);
+    }
+    Ok(Some(it))
+}
+
+/// What `edition.json` is to become, or `None` when the patch does not reach it — including
+/// the implicit edition, which has no folder to keep one in.
+fn edition_document(
+    file: &Path,
+    patch: &SeriesPatch,
+    words: &Spelled,
+    implicit: bool,
+) -> Result<Option<EditionJson>> {
+    if implicit || !patch.touches_edition() {
+        return Ok(None);
+    }
+    let mut it: EditionJson = current(file)?;
+    it.leaf = Some(FORMAT_VERSION);
+    it.name = patch.name.clone().or(it.name);
+    it.publisher = patch.publisher.clone().or(it.publisher);
+    it.status = words.status.clone().or(it.status);
+    it.volume_count = patch.volume_count.or(it.volume_count);
+    it.format = patch.format.clone().or(it.format);
+    it.language = patch.language.clone().or(it.language);
+    Ok(Some(it))
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct EntryPatch {
@@ -107,34 +210,8 @@ impl<'a> Records<'a> {
             ));
         }
 
-        // Refused in the caller's own answer, rather than written down and met again by the
-        // scanner — which is what `set_arcs` does for units, and what this route did not do
-        // for the three enums beside them. See [`sidecars::medium`] for what a word the
-        // contract has not got costs once it is on the disk. Here too: before anything is
-        // written, so a patch carrying a good field and a bad one does not land half of
-        // itself.
-        let medium = spelled(
-            &patch.medium,
-            sidecars::medium,
-            "a medium",
-            &sidecars::MEDIA,
-        )?;
-        let status = spelled(
-            &patch.status,
-            sidecars::status,
-            "a status",
-            &sidecars::STATUSES,
-        )?;
-        let reading_direction = spelled(
-            &patch.reading_direction,
-            sidecars::reading_direction,
-            "a reading direction",
-            &sidecars::READING_DIRECTIONS,
-        )?;
+        let words = Spelled::of(patch)?;
 
-        // An implicit edition has no folder of its own: its fields go down into work.json.
-        // Dropping an edition.json there would flip how the folder is classified — it would
-        // stop being a work and become an edition.
         let work_file = where_.work.join(layout::WORK_FILE);
         let edition_file = where_.edition.join(layout::EDITION_FILE);
         let work_gets_the_edition = where_.implicit && patch.touches_edition();
@@ -150,45 +227,8 @@ impl<'a> Records<'a> {
         // *between* the two writes below splits the patch. What this closes is the far
         // likelier half: every way the request can be refused now happens with the disk
         // untouched.
-        let work = if patch.touches_work() || work_gets_the_edition {
-            let mut it: WorkJson = current(&work_file)?;
-            it.leaf = Some(FORMAT_VERSION);
-            if patch.touches_work() {
-                it.title = patch.title.clone().or(it.title);
-                it.medium = medium.clone().or(it.medium);
-                it.author = patch.author.clone().or(it.author);
-                it.status = status.clone().or(it.status);
-                it.reading_direction = reading_direction.clone().or(it.reading_direction);
-                if let Some(genres) = &patch.genres {
-                    it.genres = genres.clone();
-                }
-                it.summary = patch.summary.clone().or(it.summary);
-            }
-            if work_gets_the_edition {
-                it.publisher = patch.publisher.clone().or(it.publisher);
-                it.volume_count = patch.volume_count.or(it.volume_count);
-                it.format = patch.format.clone().or(it.format);
-                it.language = patch.language.clone().or(it.language);
-                it.status = status.clone().or(it.status);
-            }
-            Some(it)
-        } else {
-            None
-        };
-
-        let edition = if patch.touches_edition() && !where_.implicit {
-            let mut it: EditionJson = current(&edition_file)?;
-            it.leaf = Some(FORMAT_VERSION);
-            it.name = patch.name.clone().or(it.name);
-            it.publisher = patch.publisher.clone().or(it.publisher);
-            it.status = status.clone().or(it.status);
-            it.volume_count = patch.volume_count.or(it.volume_count);
-            it.format = patch.format.clone().or(it.format);
-            it.language = patch.language.clone().or(it.language);
-            Some(it)
-        } else {
-            None
-        };
+        let work = work_document(&work_file, patch, &words, work_gets_the_edition)?;
+        let edition = edition_document(&edition_file, patch, &words, where_.implicit)?;
 
         if let Some(work) = work {
             put(&work_file, &work)?;

@@ -37,7 +37,7 @@ Server::Server(Settings *settings, QObject *parent) : QObject(parent), m_setting
             if (!one.caller) {
                 continue;
             }
-            get(one.path, one.query, one.caller, one.then);
+            get(one.path, QUrlQuery(one.encodedQuery), one.caller, one.then);
         }
     });
 }
@@ -99,7 +99,10 @@ void Server::get(const QString &path, const QUrlQuery &query, const QObject *cal
                   tr("Too many requests are already waiting for Leaf to open your library.")});
             return;
         }
-        m_waiting.append({path, query, alive, std::move(then)});
+        // Encoded here and parsed back on the way out — see `Waiting::encodedQuery` for why
+        // it is not the `QUrlQuery` itself. `FullyEncoded` is the only form that survives the
+        // round trip: a `PrettyDecoded` query hands its own ampersands back to the parser.
+        m_waiting.append({path, query.toString(QUrl::FullyEncoded), alive, std::move(then)});
         return;
     }
 

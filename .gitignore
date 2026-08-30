@@ -36,3 +36,8 @@ desktop/build/
 /deploy/
 /.superpowers/
 /notes/
+
+# Le graphe de connaissance est dérivé du dépôt et se reconstruit d'une commande :
+# 5 Mo de JSON et de HTML qui décrivent le code plutôt que d'en faire partie. Ignoré
+# ici, avant qu'il existe, pour la même raison que ce qui précède — `git add -A`.
+/graphify-out/
