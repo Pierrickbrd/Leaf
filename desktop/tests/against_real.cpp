@@ -38,7 +38,7 @@ private:
     Server::Answer ask(const QString &path)
     {
         Server::Answer got; bool done = false;
-        m_server->get(path, [&](const Server::Answer &a) { got = a; done = true; });
+        m_server->get(path, this, [&](const Server::Answer &a) { got = a; done = true; });
         for (int i = 0; i < 200 && !done; ++i) QTest::qWait(20);
         return got;
     }

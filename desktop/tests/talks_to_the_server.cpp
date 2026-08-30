@@ -9,6 +9,7 @@
 
 #include <QCoreApplication>
 #include <QJsonObject>
+#include <QtGlobal>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTcpServer>
@@ -64,7 +65,7 @@ private:
     {
         Server::Answer got;
         bool done = false;
-        m_server->get(path, query, [&](const Server::Answer &answer) {
+        m_server->get(path, query, this, [&](const Server::Answer &answer) {
             got = answer;
             done = true;
         });
@@ -79,6 +80,15 @@ private slots:
     void init()
     {
         QStandardPaths::setTestModeEnabled(true);
+        // Cleared before any `Settings` is built. `load()` reads the environment first and,
+        // finding either of these, sets `loaded` on the spot and never asks the keyring at
+        // all — so on the machine the README tells people to run on, the test below asserting
+        // the keyring cannot have answered yet failed outright, and every other test here
+        // quietly exercised a branch it was not written for. The same reason `init` forces
+        // test mode on `QStandardPaths`: what a run happens to have around must not decide
+        // what is being tested.
+        qunsetenv("LEAF_ADDRESS");
+        qunsetenv("LEAF_KEY");
         m_pretend = new Pretend;
         QVERIFY(m_pretend->listen(QHostAddress::LocalHost));
         m_settings = new Settings;
@@ -258,6 +268,108 @@ private slots:
         QVERIFY(!got.went());
         // The words come from Settings, which knows where the address is meant to go.
         QVERIFY2(got.trouble.contains(QStringLiteral("LEAF_ADDRESS")), qPrintable(got.trouble));
+    }
+
+    /// A keyring is a service, not a file, so there are a few milliseconds at startup where
+    /// the settings are not open yet — and `missing()` deliberately says nothing during them,
+    /// so that no screen shows a complaint about a key that is on its way.
+    ///
+    /// Both ways of answering during those milliseconds are wrong. Saying nothing is the
+    /// shape of an answer that went: the caller reads a null document as a shelf and shows an
+    /// empty library. Saying "Leaf is still looking" is final in the other direction —
+    /// nothing re-issued the request, so a screen that asked in its constructor kept that
+    /// sentence for the rest of the session, about a state that ended half a second later.
+    ///
+    /// So the request is held and sent when the settings open. Which they always do:
+    /// `Settings` sets `loaded` and emits `changed` however the keyring went, refused
+    /// included.
+    void a_request_made_before_the_settings_are_open_waits_and_is_then_sent()
+    {
+        // Nothing is known yet: no address, and a keyring still being asked. This is the
+        // state a screen constructed at startup asks in.
+        Settings opening;
+        QVERIFY2(!opening.loaded(), "the keyring cannot have answered yet");
+        QVERIFY(opening.address().isEmpty());
+        Server server(&opening);
+
+        int answered = 0;
+        Server::Answer got;
+        server.get(QStringLiteral("/series"), this, [&](const Server::Answer &answer) {
+            got = answer;
+            ++answered;
+        });
+        // Not a document and not a sentence: both would be a decision taken on nothing.
+        QCOMPARE(answered, 0);
+        QVERIFY2(m_pretend->heard.isEmpty(), m_pretend->heard.constData());
+
+        // And then the settings open, the way they do a few milliseconds into every run.
+        opening.setAddress(
+            QStringLiteral("http://127.0.0.1:%1").arg(m_pretend->serverPort()));
+        opening.setKey(QStringLiteral("8f3a92c1d4e5b6a7"));
+
+        for (int i = 0; i < 250 && answered == 0; ++i) {
+            QTest::qWait(20);
+        }
+        QCOMPARE(answered, 1);
+        QVERIFY2(got.went(), qPrintable(got.trouble));
+        QVERIFY2(m_pretend->heard.startsWith("GET /series "), m_pretend->heard.constData());
+    }
+
+    /// And a screen that is gone by then is told nothing at all.
+    ///
+    /// Holding a request holds the `std::function` that answers it, and that function is a
+    /// screen's `this`. A shelf built at startup, asked for, and closed before the keyring
+    /// answered would have been written into half a second later. Nothing bound the held
+    /// request to the life of whoever made it, because before there was a queue nothing had
+    /// to: an unloaded client answered on the spot, and no request outlived the call.
+    void a_request_whose_caller_is_gone_is_dropped_rather_than_answered()
+    {
+        Settings opening;
+        QVERIFY2(!opening.loaded(), "the keyring cannot have answered yet");
+        Server server(&opening);
+
+        int answered = 0;
+        auto *screen = new QObject;
+        server.get(QStringLiteral("/series"), screen,
+                   [&](const Server::Answer &) { ++answered; });
+        delete screen;
+
+        opening.setAddress(
+            QStringLiteral("http://127.0.0.1:%1").arg(m_pretend->serverPort()));
+        opening.setKey(QStringLiteral("8f3a92c1d4e5b6a7"));
+
+        for (int i = 0; i < 25; ++i) {
+            QTest::qWait(20);
+        }
+        QCOMPARE(answered, 0);
+        // And nothing was sent on its behalf either: an answer nobody can be given is not
+        // worth a request.
+        QVERIFY2(m_pretend->heard.isEmpty(), m_pretend->heard.constData());
+    }
+
+    /// The queue has a ceiling, and reaching it is said rather than absorbed.
+    ///
+    /// A caller that retries on a timer while `loaded()` is false appends every time and
+    /// nothing ever leaves — an unbounded list of requests, every one of them replayed at
+    /// once the moment the keyring answers.
+    void more_requests_than_can_be_held_are_refused_rather_than_kept()
+    {
+        Settings opening;
+        QVERIFY2(!opening.loaded(), "the keyring cannot have answered yet");
+        Server server(&opening);
+
+        int answered = 0;
+        QString trouble;
+        // What is asserted is that a ceiling exists and that it speaks, not what it is: the
+        // number is the client's own business and lives in one place.
+        for (int i = 0; i < 500 && answered == 0; ++i) {
+            server.get(QStringLiteral("/series"), this, [&](const Server::Answer &a) {
+                ++answered;
+                trouble = a.trouble;
+            });
+        }
+        QCOMPARE(answered, 1);
+        QVERIFY2(!trouble.isEmpty(), "a request that will not be held has to say so");
     }
 };
 

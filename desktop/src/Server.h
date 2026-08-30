@@ -9,7 +9,9 @@
 
 #include <QDateTime>
 #include <QJsonDocument>
+#include <QList>
 #include <QNetworkAccessManager>
+#include <QPointer>
 #include <QUrlQuery>
 #include <QObject>
 #include <QString>
@@ -44,9 +46,16 @@ public:
     ///
     /// Which is why a `?` in `path` is refused rather than passed on: the one shape that
     /// cannot be encoded correctly is the one nobody should be able to reach for.
-    void get(const QString &path, const QUrlQuery &query,
+    ///
+    /// `caller` is whoever the answer belongs to, and its life is what the answer waits on: a
+    /// screen destroyed while its request is out is not told anything, because there is
+    /// nobody left to tell. Nothing about it is advisory — `then` almost always captures a
+    /// `this`, and calling it afterwards reads freed memory. A null `caller` binds the answer
+    /// to this client instead, which is as long as an answer can possibly be held.
+    void get(const QString &path, const QUrlQuery &query, const QObject *caller,
              std::function<void(const Answer &)> then);
-    void get(const QString &path, std::function<void(const Answer &)> then);
+    void get(const QString &path, const QObject *caller,
+             std::function<void(const Answer &)> then);
 
     /// Whether anything more will be sent.
     ///
@@ -67,9 +76,33 @@ public:
 private:
     Answer read(class QNetworkReply *reply) const;
 
+    /// A request made before `Settings` had finished loading, kept until it can be sent.
+    ///
+    /// A keyring is a service: for the first moments of a run there is no address, and no
+    /// answer worth giving either. Held here rather than refused, because a refusal is
+    /// final — a screen told "Leaf is still looking" had nothing to tell it the looking had
+    /// ended half a second later, and stayed on that sentence for the rest of the session.
+    ///
+    /// It is emptied on the next `Settings::changed`, which `Settings` emits however the
+    /// keyring went — refused included — so nothing is held for ever.
+    ///
+    /// Bounded, and watched. A request held here is one nobody has answered yet, so the two
+    /// things a queue can do wrong are both open: a caller that retries on a timer while
+    /// `loaded()` is false appends every time and nothing ever leaves, and a caller destroyed
+    /// while its request waits is a `std::function` holding a `this` that the drain would
+    /// call. Before this branch neither could happen, because an unloaded client answered on
+    /// the spot and no request outlived the call that made it.
+    struct Waiting {
+        QString path;
+        QUrlQuery query;
+        QPointer<const QObject> caller;
+        std::function<void(const Answer &)> then;
+    };
+
     Settings *m_settings;
     QNetworkAccessManager m_network;
     /// Empty while it will still send. Set by a refusal, cleared when the key changes.
     QString m_stopped;
     QDateTime m_notBefore;
+    QList<Waiting> m_waiting;
 };

@@ -194,7 +194,7 @@ QString spell(Medium value)
     return QStringLiteral("other");
 }
 
-ReadStatus readStatus(const QString &word)
+std::optional<ReadStatus> readStatus(const QString &word)
 {
     using enum ReadStatus;
 
@@ -202,7 +202,11 @@ ReadStatus readStatus(const QString &word)
         return InProgress;
     if (word == u"READ"_s)
         return Read;
-    return Unread;
+    if (word == u"UNREAD"_s)
+        return Unread;
+    // A fourth word is not one of the three. Reported as Unread it became a claim about a
+    // collection — a series read to the end, shown as untouched — where nothing was known.
+    return std::nullopt;
 }
 
 QString spell(ReadStatus value)
@@ -263,8 +267,16 @@ Read<Series> series(const QJsonObject &from)
         else if (*word == u"LEFT_TO_RIGHT"_s)
             one.readingDirection = LeftToRight;
     }
-    if (const auto word = field.maybeText(u"status"_s))
-        one.run = (*word == u"completed"_s) ? Run::Completed : Run::Ongoing;
+    if (const auto word = field.maybeText(u"status"_s)) {
+        // Two words today; a third — hiatus, cancelled — is a thing the server may learn
+        // first. Everything that was not "completed" used to come out as Ongoing, so a
+        // series that had stopped was shown as still running. Left absent instead, like the
+        // reading direction two lines up.
+        if (*word == u"completed"_s)
+            one.run = Run::Completed;
+        else if (*word == u"ongoing"_s)
+            one.run = Run::Ongoing;
+    }
     if (const auto word = field.maybeText(u"readStatus"_s))
         one.holding.readStatus = readStatus(*word);
 
