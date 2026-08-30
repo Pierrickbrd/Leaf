@@ -474,6 +474,82 @@ fn a_sidecar_that_cannot_be_rewritten_leaves_the_archive_as_it_was() {
     );
 }
 
+/// Two writers, one target, and the file they both write beside.
+///
+/// A temporary named only after its target is shared by everything writing that target at
+/// once: they interleave their bytes into the one file and then each renames it over the
+/// original. On a sidecar that costs a record; on a volume — `GET /entries/{id}/file` stamps
+/// the archive before it hands it over, so two readers downloading the same volume is all it
+/// takes — it costs the volume.
+#[test]
+fn two_writers_of_one_file_do_not_share_a_temporary() {
+    use leaf_server::store::files::beside;
+    let target = Path::new("/library/Bleach/Tome 1.cbz");
+
+    let mine = beside(target, "leaf-tmp");
+    let theirs = std::thread::spawn(move || beside(target, "leaf-tmp"))
+        .join()
+        .unwrap();
+
+    assert_ne!(mine, theirs);
+    // In the same folder, both of them: a rename is only atomic within one directory.
+    assert_eq!(target.parent(), mine.parent());
+    assert_eq!(target.parent(), theirs.parent());
+}
+
+/// The same thing at full speed, on the operation that actually does it.
+#[test]
+fn a_volume_stamped_by_four_threads_at_once_is_still_a_volume() {
+    use leaf_server::archive::cbz_writer::replace_sidecar;
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Tome 1.cbz");
+
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    zip.start_file::<_, ()>("000.jpg", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(&[7u8; 64 * 1024]).unwrap();
+    zip.finish().unwrap();
+
+    let start = std::sync::Arc::new(std::sync::Barrier::new(4));
+    let mut threads = Vec::new();
+    for n in 0..4 {
+        let path = path.clone();
+        let start = std::sync::Arc::clone(&start);
+        threads.push(std::thread::spawn(move || {
+            start.wait();
+            for round in 0..5 {
+                let said = format!("{{\"leaf\":1,\"id\":\"{n}-{round}\"}}");
+                replace_sidecar(&path, "entry.json", said.as_bytes()).unwrap();
+            }
+        }));
+    }
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    // Whoever wrote last, the archive still opens, the sidecar is one of the twenty that
+    // were written, and the 64 KB beside it came through untouched. A shared temporary
+    // leaves a truncated zip that fails all three.
+    let read = leaf_server::archive::cbz::read(&path, false).expect("the archive still opens");
+    let said = read.sidecar("entry.json").expect("the sidecar is there");
+    assert!(
+        std::str::from_utf8(said)
+            .unwrap()
+            .starts_with("{\"leaf\":1"),
+        "one whole sidecar, not two halves: {}",
+        String::from_utf8_lossy(said)
+    );
+    let page = leaf_server::archive::cbz::extract(&path, "000.jpg")
+        .expect("reading the page")
+        .expect("the page is still in the volume");
+    assert_eq!(
+        vec![7u8; 64 * 1024],
+        page,
+        "the page came through untouched"
+    );
+}
+
 #[test]
 fn an_inbox_on_another_filesystem_copies_instead_of_renaming() {
     // Committing an import is a rename, instant and atomic. Across two volumes it becomes a

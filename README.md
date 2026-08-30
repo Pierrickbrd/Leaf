@@ -109,8 +109,8 @@ in, so there is no runtime and no system library to install.
 | `LEAF_HOST` · `LEAF_PORT` | `127.0.0.1` · `8081` | |
 | `LEAF_DROP` | none | a folder shared with an application on the same machine |
 | `LEAF_MAX_UPLOAD_MB` | `2048` | ceiling on a single file, both upload paths |
-| `LEAF_TRUST_PROXY` | off | read `X-Forwarded-For` — only behind a proxy that sets it |
-| `LEAF_TLS_KEYSTORE` · `_PASSWORD` · `_HOSTS` | none | serve HTTPS directly |
+| `LEAF_TRUST_PROXY` | off | read `X-Forwarded-For` — only behind **exactly one** proxy that sets it |
+| `LEAF_TLS_CERT` · `_KEY` · `_HOSTS` | none | serve HTTPS directly — two PEM files, generated if the certificate is not there |
 | `LEAF_JPEG_QUALITY` | `0.85` | |
 | `LEAF_MAX_CACHE_MB` | `4096` | ceiling on resized pages, oldest read go first |
 | `LEAF_NO_SCAN` | | skip the scan on start |
@@ -135,9 +135,13 @@ configured — a port open with no key is not a risky setting, it is an open lib
 
 **TLS, if nothing else provides it.** A reverse proxy is the better answer: it holds a
 certificate browsers already trust. But a port opened without one would send the key in clear
-on every request, so the server can do it itself: set `LEAF_TLS_KEYSTORE` and it generates a
+on every request, so the server can do it itself: set `LEAF_TLS_CERT` and it generates a
 self-signed certificate on first start and prints its fingerprint. Pin that in the
-applications rather than trusting an authority — it names exactly one server.
+applications rather than trusting an authority — it names exactly one server. Two PEM files
+and no keystore: the key sits beside the certificate unless `LEAF_TLS_KEY` names it
+elsewhere, and it is guarded by its mode — checked on every start, and closed to everybody
+but its owner when it is not — rather than by a password to configure, lose, or leave in an
+environment variable.
 
 **Uploads have a ceiling**, malformed input answers `400` rather than `500`, and an
 unforeseen failure answers `internal error` with the detail logged server-side — an exception

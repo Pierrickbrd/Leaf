@@ -66,6 +66,22 @@ async fn the_shelf_is_a_page_that_says_how_many_match() {
     assert_eq!(body["items"][0]["name"], "Bleach");
 }
 
+/// Both numbers come off the query string, and the offset is their product.
+///
+/// It overflowed: a panic in a debug build, taking the handler's task and the connection
+/// with it, and in a release build a wrap to a negative offset that the repository clamped
+/// back to zero — so a request for a page nothing could hold was answered, politely, with
+/// the first one.
+#[tokio::test]
+async fn a_page_number_nothing_could_hold_is_an_empty_page_and_not_a_panic() {
+    let (server, _, _) = a_library().await;
+    let (status, body) = get(&server, "/series?page=9223372036854775807&size=500").await;
+
+    assert_eq!(StatusCode::OK, status);
+    assert_eq!(0, body["items"].as_array().expect("a list").len(), "{body}");
+    assert_eq!(1, body["total"], "and it still says how many there are");
+}
+
 #[tokio::test]
 async fn the_filters_are_the_values_worth_offering() {
     let (server, _, _) = a_library().await;
@@ -194,6 +210,125 @@ async fn the_original_file_comes_back_stamped_with_its_identity() {
         get(&server, "/entries/nope/file").await.0,
         StatusCode::NOT_FOUND
     );
+}
+
+/// A row naming something that is not a file.
+///
+/// Opening a folder succeeds on Linux; reading one does not. Read whole, that failed before a
+/// byte left and came back as a clean 500. Streamed, the answer had already gone out 200 with
+/// the folder's own size as `Content-Length`, and the first read returned EISDIR — a
+/// truncated download with no error document, which is the one shape a client cannot tell
+/// from a connection that dropped.
+#[tokio::test]
+async fn an_entry_naming_a_folder_fails_before_it_answers_rather_than_mid_stream() {
+    let server = Server::new();
+    let folder = server.library().join("Bleach");
+    std::fs::create_dir_all(&folder).unwrap();
+    let file = folder.join("Tome 1.cbz");
+    std::fs::write(&file, archive_bytes(None)).unwrap();
+    server.scan();
+    let entry = server.entry();
+
+    // A volume unpacked in place, or a path a move rewrote. The row still names it.
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+
+    let (status, body) = get(&server, &format!("/entries/{entry}/file")).await;
+    assert_eq!(StatusCode::INTERNAL_SERVER_ERROR, status, "{body}");
+    assert_eq!(body["error"], "internal error");
+}
+
+/// And a row naming nothing at all, which is a different thing.
+///
+/// A volume taken off the disk between two scans is a thing that is not there — exactly what
+/// the line above it in the same handler answers 404 for when the index has never heard of
+/// the id. It came back as `internal error` instead: a client that says "the server is
+/// broken" about a library that had merely moved a file, and an error-level line in the log
+/// for something entirely routine.
+#[tokio::test]
+async fn an_entry_whose_file_has_gone_is_a_404_and_not_a_server_failure() {
+    let server = Server::new();
+    let folder = server.library().join("Bleach");
+    std::fs::create_dir_all(&folder).unwrap();
+    let file = folder.join("Tome 1.cbz");
+    std::fs::write(&file, archive_bytes(None)).unwrap();
+    server.scan();
+    let entry = server.entry();
+
+    // Deleted after the scan, so the index still holds the row that names it.
+    std::fs::remove_file(&file).unwrap();
+
+    let (status, body) = get(&server, &format!("/entries/{entry}/file")).await;
+    assert_eq!(StatusCode::NOT_FOUND, status, "{body}");
+    assert_ne!(body["error"], "internal error", "{body}");
+}
+
+/// The name of the file is the one thing about a download that a person sees afterwards.
+///
+/// An HTTP header value is Latin-1, so the UTF-8 of "Tome 1 — Été.cbz" written straight into
+/// `filename="…"` is saved as "Tome 1 â€” Ã‰tÃ©.cbz"; a `"` in a name closes the quoted string
+/// early and truncates the rest; a control byte makes the value unbuildable and turns the
+/// download into a 500. A library in French is mostly accented file names.
+#[tokio::test]
+async fn a_downloaded_file_keeps_its_name_across_a_header_that_cannot_hold_it() {
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let server = Server::new();
+    let folder = server.library().join("Bleach");
+    std::fs::create_dir_all(&folder).unwrap();
+    let file = folder.join("Tome 1 — L'\"Été\".cbz");
+    std::fs::write(&file, archive_bytes(None)).unwrap();
+    server.scan();
+    let entry = server.entry();
+
+    let response = leaf_server::api::routes::router(server.state())
+        .oneshot(
+            request("GET", &format!("/entries/{entry}/file"), READ_ONLY)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("a response");
+    assert_eq!(StatusCode::OK, response.status());
+
+    let said = response
+        .headers()
+        .get(axum::http::header::CONTENT_DISPOSITION)
+        .expect("a disposition")
+        .to_str()
+        .expect("a header a client can read")
+        .to_string();
+    let length: u64 = response
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .expect("a length, or nothing can show how far along it is")
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    // The whole name, percent-encoded, which is what every browser reads first.
+    assert!(
+        said.contains("filename*=UTF-8''Tome%201%20%E2%80%94%20L%27%22%C3%89t%C3%A9%22.cbz"),
+        "{said}"
+    );
+    // And a plain one behind it for whatever does not: nothing outside ASCII, and no quote
+    // to end the string early.
+    let plain = said
+        .split("filename=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("a plain name too");
+    assert!(plain.is_ascii(), "{plain}");
+    assert_eq!("Tome 1 _ L___t__.cbz", plain);
+
+    // And the bytes themselves, streamed rather than held: what came back is the file, and
+    // it said how big it was before it started.
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let on_disk = std::fs::read(&file).unwrap();
+    assert_eq!(on_disk.len() as u64, length);
+    assert_eq!(on_disk, bytes);
 }
 
 // ------------------------------------------------------------------- searching
@@ -397,6 +532,49 @@ async fn the_arcs_of_a_series_are_replaced_whole() {
     assert_eq!(listed[0]["unit"], "CHAPTER");
 }
 
+/// The contract says CHAPTER or VOLUME and the index has a CHECK constraint saying the same.
+/// Nothing between the two looked, so `"unit": "tome"` was written into edition.json with a
+/// 200 — and from then on every scan of that shelf died on the insert, inside the
+/// transaction that holds the whole shelf. The shelf stopped being indexed, and an
+/// incomplete scan prunes nothing, so deletions anywhere else in the library went unseen.
+#[tokio::test]
+async fn an_arc_counted_in_something_that_is_not_a_unit_is_refused() {
+    let (server, series, _) = a_library().await;
+    let (status, body) = patch(
+        &server,
+        &format!("/series/{series}/arcs"),
+        serde_json::json!([{"name": "Un cycle", "unit": "tome", "from": 1, "to": 2}]),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("tome"),
+        "the answer names the word it could not read: {body}"
+    );
+
+    // And nothing was written: the sidecar still holds no arc at all.
+    let (status, listed) = get(&server, &format!("/series/{series}/arcs")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(0, listed.as_array().expect("a list").len(), "{listed}");
+}
+
+/// Case is not vocabulary, and the file ends up saying what the format says.
+#[tokio::test]
+async fn a_unit_spelled_by_a_person_is_the_same_unit() {
+    let (server, series, _) = a_library().await;
+    let (status, body) = patch(
+        &server,
+        &format!("/series/{series}/arcs"),
+        serde_json::json!([{"name": "Un cycle", "unit": "volume", "from": 1, "to": 2}]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (_, listed) = get(&server, &format!("/series/{series}/arcs")).await;
+    assert_eq!(listed[0]["unit"], "VOLUME");
+}
+
 #[tokio::test]
 async fn editing_something_that_is_not_there_is_a_404_on_every_route_that_takes_an_id() {
     let (server, _, _) = a_library().await;
@@ -404,6 +582,18 @@ async fn editing_something_that_is_not_there_is_a_404_on_every_route_that_takes_
         ("/series/nope", serde_json::json!({"summary": "…"})),
         ("/entries/nope", serde_json::json!({"title": "…"})),
         ("/series/nope/arcs", serde_json::json!([])),
+        // With a body the route would refuse on its own merits. The id is what the answer
+        // is about: reading the units first told a caller its shape had been read before its
+        // id, which is a 400 where every other route here says 404 — and this loop only
+        // passed because every body above happens to be one the route accepts.
+        (
+            "/series/nope/arcs",
+            serde_json::json!([{"name": "Soul Society", "unit": "tome", "from": 1, "to": 20}]),
+        ),
+        (
+            "/series/nope",
+            serde_json::json!({"name": "Édition Deluxe"}),
+        ),
     ] {
         let (status, _) = patch(&server, uri, body).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
@@ -671,6 +861,96 @@ async fn an_edition_with_a_folder_of_its_own_takes_its_edit_in_its_own_file() {
     // And the work's own file is left alone: it says nothing about a printing.
     let work = std::fs::read_to_string(server.library().join("Bleach/work.json")).unwrap();
     assert!(!work.contains("Kana"), "{work}");
+}
+
+/// A patch that reaches two files reaches both or neither.
+///
+/// `title` belongs to the work and `publisher` to the edition, and they were written in that
+/// order: when reading the second failed — a mode, a symlink loop, a device error, the class
+/// `merge` was taught to refuse rather than swallow — the first had already been rewritten.
+/// A 500, the title on disk, the publisher not, and nothing in the answer saying which half
+/// had landed. The guard on naming an implicit edition is the same rule for the one case that
+/// had it.
+#[tokio::test]
+#[cfg(unix)]
+async fn a_patch_that_cannot_finish_writes_nothing_at_all() {
+    let server = Server::new();
+    a_named_edition(&server);
+    let series = server.series();
+
+    let edition = server.library().join("Bleach/Perfect Edition/edition.json");
+    std::fs::remove_file(&edition).unwrap();
+    // A link to itself: the kernel answers ELOOP, which is neither "there" nor "not there".
+    std::os::unix::fs::symlink("edition.json", &edition).unwrap();
+
+    let (status, _) = patch(
+        &server,
+        &format!("/series/{series}"),
+        serde_json::json!({"title": "Bleach — édition revue", "publisher": "Kana"}),
+    )
+    .await;
+    assert_eq!(StatusCode::INTERNAL_SERVER_ERROR, status);
+
+    let work = std::fs::read_to_string(server.library().join("Bleach/work.json")).unwrap();
+    assert!(
+        !work.contains("édition revue"),
+        "the half that could be written must not have been: {work}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&edition).unwrap().is_symlink(),
+        "and the file that could not be read is still there, untouched"
+    );
+}
+
+/// An edition that is implied by its volumes has no file of its own to hold a name.
+///
+/// It was accepted anyway: `name` counts as touching the edition, so the implicit branch
+/// ran, and that branch writes publisher, volume count, format, language and status — every
+/// edition field except the one that was asked for. 200, the series unchanged, and nothing
+/// saying the field had gone nowhere.
+#[tokio::test]
+async fn naming_an_edition_that_has_no_folder_is_refused_rather_than_ignored() {
+    let (server, series, _) = a_library().await;
+    let (status, body) = patch(
+        &server,
+        &format!("/series/{series}"),
+        serde_json::json!({"name": "Édition Deluxe"}),
+    )
+    .await;
+
+    assert_eq!(StatusCode::BAD_REQUEST, status, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no folder of its own"),
+        "{body}"
+    );
+    assert!(
+        !server.library().join("Bleach/work.json").exists(),
+        "and nothing was written on the way to refusing"
+    );
+}
+
+/// The other half: an edition that does have a folder takes the name in its own file.
+#[tokio::test]
+async fn naming_an_edition_that_has_a_folder_writes_it_there() {
+    let server = Server::new();
+    a_named_edition(&server);
+    let series = server.series();
+
+    let (status, body) = patch(
+        &server,
+        &format!("/series/{series}"),
+        serde_json::json!({"name": "Édition Deluxe"}),
+    )
+    .await;
+    assert_eq!(StatusCode::OK, status, "{body}");
+
+    let written =
+        std::fs::read_to_string(server.library().join("Bleach/Perfect Edition/edition.json"))
+            .unwrap();
+    assert!(written.contains("Édition Deluxe"), "{written}");
 }
 
 #[tokio::test]

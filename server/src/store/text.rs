@@ -109,6 +109,22 @@ fn is_combining_mark(ch: char) -> bool {
     )
 }
 
+/// Nothing has ten thousand volumes; a file does have a name.
+///
+/// The range walked here comes from two things a person writes: `volumeCount` in a
+/// work.json, and a volume number read off a file name, where `label` takes any run of
+/// digits it finds. `"volumeCount": 2000000000`, or one file called `Tome 999999999.cbz`,
+/// and this built a list of every number in between — a billion of them, in a blocking task,
+/// on every GET /series that included the row. Past this, the collection is not sparse and
+/// the number is wrong.
+///
+/// **What is discarded is the number, not the answer.** Returning nothing looked like
+/// caution and was not: an empty list is dropped from the response by `dto`, and an absent
+/// `missingVolumes` is what a *complete* collection sends. So the shelf said "nothing to
+/// find here" on the strength of a number it had just decided was nonsense. The volumes
+/// actually on disk are still known, and the gaps between them are still true.
+const MOST_VOLUMES: i64 = 10_000;
+
 /// The gaps in the collection: what is declared published and you do not have.
 ///
 /// With no declared count we only report internal gaps — between the lowest and highest
@@ -134,10 +150,30 @@ pub fn gaps(owned: &[f64], declared: Option<i32>, claimed: &[f64]) -> Vec<f64> {
     let mut held = whole.clone();
     held.extend(claimed.iter().filter(|v| is_whole(**v)).map(|v| *v as i64));
 
-    let ceiling = match declared {
-        Some(n) => n as i64,
-        None => *held.iter().next_back().expect("held is not empty"),
-    };
+    // A declared count outside this range is disregarded, and what stands in its place is
+    // what stands when nothing is declared at all: the highest volume actually held. The doc
+    // above already calls that the honest answer — beyond it we know nothing — so an unusable
+    // number lands us exactly where an absent one does.
+    //
+    // **Both ends, and the low one is not the harmless one.** A ceiling was refused for being
+    // too high and taken for anything else: `volumeCount: 0`, or a negative, gave `(1..=0)`,
+    // an empty list — which `dto` drops, and an absent `missingVolumes` is what a *complete*
+    // collection sends. The number the function had just decided was nonsense came out as
+    // "nothing to find here", which is the one answer it was rewritten not to give.
+    //
+    // The same bound is then applied to the held volumes themselves, because the second way
+    // in is a file name: `Tome 999999999.cbz` is a number misread, not a volume owned, and it
+    // has no business setting a ceiling for the twenty volumes it sits beside.
+    let reachable = lowest.saturating_add(MOST_VOLUMES);
+    let ceiling = declared
+        .map(i64::from)
+        .filter(|n| (lowest..=reachable).contains(n))
+        // Not a third case: `lowest` is itself in `held` and is never past `reachable`, so
+        // the highest held volume within the bound is always there to be found. Written as a
+        // fallback only because `next_back` has no way of being told the range it was handed
+        // cannot be empty.
+        .or_else(|| held.range(..=reachable).next_back().copied())
+        .unwrap_or(lowest);
 
     (lowest..=ceiling)
         .filter(|n| !held.contains(n))

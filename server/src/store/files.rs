@@ -24,8 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// sit in the same directory, and they do.
 pub fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    // Named for the process and thread, so two writers do not share a temporary.
-    let beside = path.with_extension(format!("{}.{:x}.part", std::process::id(), thread_number()));
+    let beside = beside(path, "part");
     let outcome = (|| {
         let mut file = std::fs::File::create(&beside)?;
         file.write_all(bytes)?;
@@ -38,6 +37,27 @@ pub fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&beside, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&beside);
     })
+}
+
+/// A name for a file being written beside `path`, in the same directory as it.
+///
+/// Named for the process **and the thread**, because two writers that share a temporary do
+/// not queue: they interleave their bytes into the one file and then both rename it over
+/// the target. On a sidecar that means a truncated record; on a 150 MB volume rewritten by
+/// `archive::cbz_writer`, it means the volume.
+///
+/// The extension is kept in the middle of the name rather than replaced, so a leftover
+/// still says which file it was going to become.
+pub fn beside(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let kept = path
+        .extension()
+        .map(|e| format!("{}.", e.to_string_lossy()))
+        .unwrap_or_default();
+    path.with_extension(format!(
+        "{kept}{}.{:x}.{suffix}",
+        std::process::id(),
+        thread_number()
+    ))
 }
 
 /// Something stable and distinct per thread. `ThreadId` has no stable numeric form on

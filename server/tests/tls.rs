@@ -63,6 +63,101 @@ async fn the_key_is_readable_by_its_owner_and_nobody_else() {
     assert_eq!(0o600, mode & 0o777, "the key must not be world-readable");
 }
 
+/// And a key that is already there is closed too.
+///
+/// `OpenOptions::mode` is honoured only when the file is created, so rewriting a key left at
+/// 0644 by an earlier version, restored from a backup or made by hand kept it at 0644 — and
+/// this module's whole argument for having no password is that the mode does the guarding.
+/// Generation is reached whenever the certificate is missing, which is exactly when a key
+/// can already be sitting there.
+#[tokio::test]
+#[cfg(unix)]
+async fn a_key_left_open_by_something_else_is_closed_when_it_is_rewritten() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let certificate = dir.path().join("leaf.crt");
+    let key = dir.path().join("leaf.key");
+    std::fs::write(&key, b"whatever was here before").unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    Tls::of(&certificate, &key, &["leaf.local".to_string()])
+        .await
+        .expect("generating");
+
+    let mode = std::fs::metadata(&key).unwrap().permissions().mode();
+    assert_eq!(0o600, mode & 0o777, "the key must not be world-readable");
+}
+
+/// And the far commoner case: a key sitting beside a certificate that is already there.
+///
+/// The repair above only ran on the path that generates, and generating happens once. Every
+/// start after it takes the branch that reads the pair straight through, so a key left at
+/// 0644 stayed at 0644 for the life of the deployment — and the module's whole argument for
+/// having no password is that the mode does the guarding. It was true on first boot and
+/// nowhere else.
+#[tokio::test]
+#[cfg(unix)]
+async fn a_key_left_open_beside_a_certificate_that_exists_is_closed_on_the_way_in() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let certificate = dir.path().join("leaf.crt");
+    let key = dir.path().join("leaf.key");
+    let first = Tls::of(&certificate, &key, &["leaf.local".to_string()])
+        .await
+        .expect("generating");
+
+    // What an earlier version left, or a restore, or a copy by hand. Both files are now
+    // exactly where the server expects them, so nothing below generates anything.
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let again = Tls::of(&certificate, &key, &["leaf.local".to_string()])
+        .await
+        .expect("restart");
+
+    let mode = std::fs::metadata(&key).unwrap().permissions().mode();
+    assert_eq!(0o600, mode & 0o777, "the key must not be world-readable");
+    // And it is still the same pair: closing a key must never be a way of quietly issuing a
+    // new one, which would lock out every client that had pinned the old fingerprint.
+    assert_eq!(first.fingerprint, again.fingerprint);
+}
+
+/// A key closed tighter than this server writes is not a key that was left open.
+///
+/// The check asked whether the mode *was* 0600, which is not what the sentence above it
+/// promises: what it promises is that nobody but the owner can reach the file. A key an
+/// operator had deliberately made read-only failed that equality, so the server announced
+/// that it had been readable by the machine at large — told somebody to issue a new one and
+/// re-pin every client over nothing — and then chmod'ed it back to 0600, which on a 0400 key
+/// hands back the write bit. A false alarm and a real loosening, from one comparison.
+#[tokio::test]
+#[cfg(unix)]
+async fn a_key_shut_tighter_than_this_server_writes_is_left_exactly_as_it_is() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let certificate = dir.path().join("leaf.crt");
+    let key = dir.path().join("leaf.key");
+    let first = Tls::of(&certificate, &key, &["leaf.local".to_string()])
+        .await
+        .expect("generating");
+
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+    let again = Tls::of(&certificate, &key, &["leaf.local".to_string()])
+        .await
+        .expect("restart");
+
+    let mode = std::fs::metadata(&key).unwrap().permissions().mode();
+    assert_eq!(
+        0o400,
+        mode & 0o777,
+        "stricter than 0600 is not a mode to repair"
+    );
+    assert_eq!(first.fingerprint, again.fingerprint);
+}
+
 #[tokio::test]
 async fn a_certificate_that_does_not_match_its_key_is_refused_at_startup() {
     let dir = tempfile::tempdir().unwrap();

@@ -203,6 +203,14 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Series" }
+        "400":
+          description: |
+            A `name` for an edition that has no folder of its own. Its fields live in the
+            work's file and a name is the one that cannot: giving it one means giving it a
+            folder. Refused rather than accepted and dropped.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "404": { $ref: "#/components/responses/NotFound" }
         "403": { $ref: "#/components/responses/Forbidden" }
       x-leaf-permission: import
@@ -272,6 +280,14 @@ paths:
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Arc" } }
+        "400":
+          description: |
+            A `unit` that is neither CHAPTER nor VOLUME. Case is not vocabulary — `volume` is
+            taken and written back as `VOLUME` — but a word outside the two is refused here
+            rather than written into a sidecar the scanner then cannot index.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "404": { $ref: "#/components/responses/NotFound" }
       x-leaf-permission: import
 
@@ -447,7 +463,16 @@ paths:
           headers:
             Content-Disposition:
               schema: { type: string }
-              description: attachment, with the file's own name.
+              description: |
+                `attachment`, with the file's own name twice: `filename*=UTF-8''…` from
+                RFC 8187, which is the one to read, and a plain `filename="…"` behind it
+                carrying only what a quoted ASCII string can hold. A header value has no
+                room for `Été` and none at all for a quote.
+            Content-Length:
+              schema: { type: integer }
+              description: |
+                The size of the archive. The bytes are streamed rather than held whole, and
+                this is what lets a client show how far along it is.
           content:
             application/octet-stream:
               schema: { type: string, format: binary }
@@ -1397,11 +1422,16 @@ components:
 
     SeriesPatch:
       type: object
-      description: Every field optional; absent means unchanged.
+      description: |
+        Every field optional; absent means unchanged. What may be written here is what may be
+        served back: a word outside one of these lists is refused with a 400 naming the list,
+        rather than written into a sidecar the server would then serve against its own schema.
       properties:
         name: { type: string }
         title: { type: string }
-        medium: { type: string }
+        medium:
+          type: string
+          enum: [manga, bd, comics, manhwa, manhua, webtoon, artbook, other]
         author: { type: string }
         status: { type: string, enum: [ongoing, completed] }
         readingDirection: { type: string, enum: [LEFT_TO_RIGHT, RIGHT_TO_LEFT, VERTICAL] }

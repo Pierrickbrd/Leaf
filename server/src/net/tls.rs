@@ -45,6 +45,13 @@ impl Tls {
             generate(certificate, key, hosts)?;
         }
 
+        // On every start, not only the one that generates. Generating is the rare path: the
+        // usual one is a pair already on disk — left at 0644 by an earlier version, restored
+        // from a backup, or copied by hand — and it never reached `write_private` at all. A
+        // mode offered in place of a keystore's password, kept only on first boot, is not
+        // kept.
+        close_private(key)?;
+
         let certificate_pem = std::fs::read(certificate)
             .with_context(|| format!("reading {}", certificate.display()))?;
         let key_pem = std::fs::read(key).with_context(|| format!("reading {}", key.display()))?;
@@ -91,6 +98,12 @@ fn generate(certificate: &Path, key: &Path, hosts: &[String]) -> Result<()> {
 
 /// The key is readable by its owner and by nobody else, which is what replaced the
 /// keystore's password.
+///
+/// `mode` on the open is honoured **only when the file is created**, so a key rewritten in
+/// place kept whatever mode it already had — 0644 left by an earlier version, restored from
+/// a backup, or made by hand, and the one sentence this module offers in place of a password
+/// was quietly untrue. Set on the handle instead, before a single byte of key is in it: the
+/// window where the file exists at the wrong mode is a window where it is still empty.
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
@@ -103,7 +116,61 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = options
         .open(path)
         .with_context(|| format!("writing {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("closing {} to everybody else", path.display()))?;
+    }
     file.write_all(bytes)?;
+    Ok(())
+}
+
+/// The same rule as [`write_private`], for the key this server did not write.
+///
+/// Loud, because it is not a repair anybody asked for: a key that was readable by the rest
+/// of the machine has to be assumed read, and closing it now does not unread it. The line in
+/// the log is what tells somebody to issue a new one.
+#[cfg(unix)]
+fn close_private(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    // Absent is not this function's business: the read just below says so, with the path in
+    // it, and says it once.
+    let Ok(facts) = std::fs::metadata(path) else {
+        return Ok(());
+    };
+    let mode = facts.permissions().mode() & 0o777;
+    // What is asked is that nobody *but* the owner can reach it — not that the mode is the
+    // one this server happens to write. `mode != 0o600` failed a key deliberately hardened
+    // to `0400`: it printed the sentence below about a file nothing could read, told an
+    // operator to re-issue a key and re-pin every client over it, and then chmod'ed the file
+    // to 0600 — which on that key *adds* the write bit. The bits that matter are the other
+    // six.
+    if mode & 0o077 == 0 {
+        return Ok(());
+    }
+    tracing::warn!(
+        path = %path.display(),
+        mode = format!("{mode:04o}"),
+        "the private key was readable by more than its owner — closing it, and issue a new one"
+    );
+    // Said and carried on, never refused. The sentence above is what this function is for;
+    // the chmod is the part that may not be ours to do. A key handed over by a secrets
+    // manager or by a unit's `LoadCredential` is owned by root and group-readable by the
+    // service user, so `set_permissions` returns EPERM — and a `?` here turned "issue a new
+    // one" into a server that does not boot at all, on a deployment that served yesterday.
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "and it could not be closed either — chmod 600 it by hand"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn close_private(_: &Path) -> Result<()> {
     Ok(())
 }
 

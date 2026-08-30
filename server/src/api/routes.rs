@@ -245,21 +245,47 @@ fn allowed(parts: &Parts, state: &AppState, permission: Permission) -> Result<()
 
 /// Who the throttle counts a request against.
 ///
-/// The socket, unless a proxy is trusted — in which case the leftmost `X-Forwarded-For`
-/// entry, which is the one the proxy wrote about its own client. Reading it untrusted would
-/// let any caller claim any address and walk past the throttle, so it is opt-in and the
-/// socket is what stands otherwise.
+/// The socket, unless a proxy is trusted — in which case the **rightmost entry of the last**
+/// `X-Forwarded-For` header, and both halves of that are the whole point of the function.
+///
+/// The header is a list a caller starts and every hop appends to: sending
+/// `X-Forwarded-For: 1.2.3.4` makes the proxy write `1.2.3.4, <the real address>`, so the
+/// leftmost entry is whatever the caller cared to type. Counting wrong keys against it meant
+/// a fresh made-up address per guess, ten of them never landing on one key, and the throttle
+/// never firing at all. The rightmost is the one the trusted hop wrote itself, about the
+/// connection it actually accepted.
+///
+/// And the *last* header, because a header may arrive more than once. Some proxies append to
+/// the list already there, others add a second `X-Forwarded-For:` line of their own, and
+/// `HeaderMap::get` returns only the first — which, against a caller who sent one, is the
+/// caller's. That reopened the same hole from the other side: the rightmost entry of a line
+/// the attacker wrote is still a value the attacker chose. The trusted hop writes last.
+///
+/// **Exactly one proxy in front**, which is what `trust_proxy` says and all it says. Behind
+/// two hops — a CDN in front of a reverse proxy — the last entry is the proxy's view of the
+/// CDN, identical for every reader, and one device guessing keys would shut out the whole
+/// deployment. Reading any of it untrusted would hand the forgery to everybody, so it is
+/// opt-in and the socket is what stands otherwise.
 fn caller(parts: &Parts, trust_proxy: bool) -> String {
     if trust_proxy {
-        if let Some(claimed) = parts
+        if let Some(written) = parts
             .headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(',').next())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
+            .get_all("x-forwarded-for")
+            .into_iter()
+            .next_back()
+            // Cut out of the bytes, and only then read as text. `to_str` refuses a header
+            // value holding anything in 0x80–0xFF, which hyper accepts and passes on — and
+            // with a proxy that appends to the list, the caller's own bytes are in that same
+            // value. So `X-Forwarded-For: 1.2.3.\xff` threw away the entry the *proxy* had
+            // written and dropped the whole deployment onto the socket address, the one key
+            // every request without the header already lands on. The last entry is the
+            // trusted hop's, whatever the caller put before the comma.
+            .and_then(|v| v.as_bytes().rsplit(|b| *b == b',').next())
+            .map(<[u8]>::trim_ascii)
+            .filter(|v| !v.is_empty() && v.is_ascii())
+            .and_then(|v| std::str::from_utf8(v).ok())
         {
-            return claimed.to_string();
+            return written.to_string();
         }
     }
     parts
@@ -330,11 +356,17 @@ async fn list_series(
     // rest. size=0 asks for everything on purpose.
     let size = query.size.unwrap_or(DEFAULT_PAGE).clamp(0, MAX_PAGE);
     let page = query.page.unwrap_or(0).max(0);
+    // Both of these come off the query string, and `page * size` overflowed on the way in:
+    // `?page=9223372036854775807&size=500` panicked the handler's task in a debug build and
+    // wrapped to a negative offset in a release one, which the repository then clamped back
+    // to zero — a request for the last page of the shelf quietly answered with the first.
+    // Past the end is an empty page, and that is what an offset nothing can reach gives.
+    let offset = page.checked_mul(size).unwrap_or(i64::MAX);
 
     let page_dto = blocking(move || {
         let repository = Repository::new(&state.db);
         Ok(SeriesPageDto {
-            items: repository.series(&filter, sort, size, page * size)?,
+            items: repository.series(&filter, sort, size, offset)?,
             total: repository.count_series(&filter)?,
             page,
             size,
@@ -567,24 +599,101 @@ async fn download_entry_file(
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "volume.cbz".to_string());
-    let bytes = tokio::fs::read(&path)
+
+    // Opened and handed to the wire frame by frame. Read whole first, one download of a
+    // 130 MB volume held 130 MB before a byte left, three at once held four hundred, and a
+    // volume larger than what is free took the server down. `receive_import_file` streams
+    // the other way for exactly this reason.
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(it) => it,
+        // A volume taken off the disk between two scans is a thing that is not there, which
+        // is exactly what the line above answers for an entry the index has never heard of.
+        // As a 500 it read as "the server is broken" for a library that had merely moved a
+        // file, and it put an error-level line in the log for a condition that is routine.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Failure::Missing("this entry's file is not there any more"));
+        }
+        Err(e) => return Err(Failure::Unhandled(e.into())),
+    };
+    let facts = file
+        .metadata()
         .await
         .map_err(|e| Failure::Unhandled(e.into()))?;
+    // Opening a folder succeeds on Linux; reading one does not. Whole, the failure came back
+    // as a 500 before a byte left. Streamed, the answer had already gone out 200 with the
+    // folder's own size as `Content-Length` and died on the first read — a truncated file and
+    // no error document, which is the one shape a client cannot tell from a short download.
+    if !facts.is_file() {
+        return Err(Failure::Unhandled(anyhow::anyhow!(
+            "{path} is not a file — the entry points at something else"
+        )));
+    }
 
-    Ok((
-        [
-            (
-                axum::http::header::CONTENT_TYPE,
-                "application/octet-stream".to_string(),
-            ),
-            (
-                axum::http::header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{name}\""),
-            ),
-        ],
-        bytes,
-    )
-        .into_response())
+    let answer = Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+        .header(axum::http::header::CONTENT_DISPOSITION, attachment(&name))
+        // Streamed, so nothing counts the bytes on the way out: without this the answer is
+        // chunked and no client can say how far along it is.
+        .header(axum::http::header::CONTENT_LENGTH, facts.len());
+    answer
+        // 64 KiB, not the 4 KiB `new` defaults to: a 130 MB volume is thirty-two thousand
+        // chunks at the default, each one an allocation and a trip through the body stream,
+        // for the exact case the comment above is about.
+        .body(Body::from_stream(
+            tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024),
+        ))
+        .map_err(|e| Failure::Unhandled(e.into()))
+}
+
+/// `Content-Disposition` for a file name, in both of the spellings that exist.
+///
+/// A header value is bytes, and `filename="…"` is read as Latin-1: "Tome 1 — Été.cbz" put
+/// there whole is saved as "Tome 1 â€” Ã‰tÃ©.cbz", a `"` in a name closes the string early
+/// and truncates what follows, and a control byte makes the value unbuildable — a download
+/// turned into a 500 by the name of the file it was for. A library in French is mostly
+/// accented file names.
+///
+/// So `filename*=UTF-8''…` from RFC 8187, which every browser prefers when both are there,
+/// and the plain one left behind for whatever does not — carrying only what a quoted string
+/// can hold, and an underscore everywhere else.
+fn attachment(name: &str) -> String {
+    let plain: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || " .-_()[]".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut encoded = String::new();
+    for byte in name.as_bytes() {
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'!'
+            | b'#'
+            | b'$'
+            | b'&'
+            | b'+'
+            | b'-'
+            | b'.'
+            | b'^'
+            | b'_'
+            | b'`'
+            | b'|'
+            | b'~' => encoded.push(char::from(*byte)),
+            // Written into the buffer rather than through a `format!` per byte: an accented
+            // name escapes a dozen of them, and this runs on every download.
+            other => {
+                use std::fmt::Write;
+                let _ = write!(encoded, "%{other:02X}");
+            }
+        }
+    }
+    format!("attachment; filename=\"{plain}\"; filename*=UTF-8''{encoded}")
 }
 
 /// The tag carries the file's modification time, so a cached page can be trusted for as

@@ -6,6 +6,10 @@
 //!
 //! The new archive is written beside the old one and then replaces it in one move: a power
 //! cut halfway through leaves the volume intact, not half rewritten.
+//!
+//! Beside, under a name of its own: two downloads of the same volume stamp it at the same
+//! moment, and a temporary named only after its target would have both of them writing into
+//! one file and then both renaming it over the volume. See `store::files::beside`.
 
 use std::fs::File;
 use std::io::Write;
@@ -14,12 +18,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 pub fn replace_sidecar(path: &Path, entry_name: &str, content: &[u8]) -> Result<()> {
-    let temporary = path.with_extension(format!(
-        "{}.leaf-tmp",
-        path.extension()
-            .map(|e| e.to_string_lossy().to_string())
-            .unwrap_or_default()
-    ));
+    let temporary = crate::store::files::beside(path, "leaf-tmp");
 
     let outcome = (|| -> Result<()> {
         let source = File::open(path).with_context(|| format!("opening {}", path.display()))?;

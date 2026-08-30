@@ -160,19 +160,52 @@ fn serve_listens_answers_health_and_stops_when_it_is_asked_to() {
     assert!(answered.starts_with("HTTP/1.1 200"), "{answered}");
     assert!(answered.contains("\"status\":\"ok\""), "{answered}");
 
-    stop(&mut server);
+    // What a unit file sends. `systemctl stop` is SIGTERM, and it went unanswered here for
+    // as long as the server only listened for the Ctrl-C a terminal sends.
+    stop(&mut server, Ask::Terminate);
 }
 
-/// The signal `systemctl stop` sends, and then the wait the server promises to honour.
-fn stop(server: &mut std::process::Child) {
+/// One of the two signals that ask a server to stop.
+///
+/// Named rather than handed over as a `libc` constant, which is the only reason the
+/// accommodation in [`stop`] is worth anything: with `libc::SIGINT` written at four call
+/// sites, the `#[cfg(not(unix))]` arm there guarded a function nothing off Unix could reach
+/// anyway. The word for the signal belongs to the test; the number belongs to the one block
+/// that is allowed to know it.
+enum Ask {
+    /// What `systemctl stop` sends.
+    Terminate,
+    /// What a terminal sends on Ctrl-C.
+    Interrupt,
+}
+
+/// Sends one of the two signals that ask a server to stop, and waits for the exit it
+/// promises.
+///
+/// The exit has to be a **clean** one. A process with no handler for the signal is killed by
+/// its default disposition, which leaves no exit code at all — and that is exactly what
+/// `SIGTERM` did here for as long as `shutdown` only listened for `SIGINT`, while this
+/// assertion, written to tolerate a missing code, called it a pass.
+fn stop(server: &mut std::process::Child, ask: Ask) {
     #[cfg(unix)]
     unsafe {
-        libc::kill(server.id() as i32, libc::SIGINT);
+        libc::kill(
+            server.id() as i32,
+            match ask {
+                Ask::Terminate => libc::SIGTERM,
+                Ask::Interrupt => libc::SIGINT,
+            },
+        );
     }
+    #[cfg(not(unix))]
+    let _ = ask;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(status) = server.try_wait().unwrap() {
-            assert!(status.success() || status.code().is_none(), "{status}");
+            assert!(
+                status.success(),
+                "the server was killed rather than stopping when it was asked to: {status}"
+            );
             return;
         }
         if Instant::now() > deadline {
@@ -213,10 +246,68 @@ fn serve_scans_behind_itself_unless_it_is_told_not_to() {
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    stop(&mut server);
+    stop(&mut server, Ask::Interrupt);
     assert!(found, "the startup scan never reached the shelf");
     // And the drop folder was made on the way past.
     assert!(dir.path().join("drop").is_dir());
+}
+
+/// `systemctl stop` during the slowest part of a start.
+///
+/// A handler starts listening when its future is first polled, not when it is built, and on
+/// the TLS path that poll happened inside a `tokio::spawn` issued *after* the certificate had
+/// been generated, signed and written — the longest stretch of the whole start, on the one
+/// boot where those files do not exist yet. A SIGTERM in it met the default disposition and
+/// killed the process where it stood: the fix for the missing handler had a hole of its own,
+/// on the slowest path.
+///
+/// **Read as an order rather than raced against.** Sending a signal into the window and
+/// watching for a clean exit is a race only one way round — a signal that arrives late finds
+/// a server armed either way, so it passes on a broken build as often as not, and a check
+/// that can quietly see nothing is worth no more than no check. What the fix actually says is
+/// that the handlers are registered before the certificate work begins, and the log says that
+/// in two lines whose order is the whole property. `Stopping::armed` prints the first one
+/// itself, so the two cannot drift apart.
+#[test]
+fn a_tls_server_listens_for_a_stop_before_it_starts_generating() {
+    let dir = a_library();
+    let log = dir.path().join("said.log");
+    let mut server = leaf(&dir)
+        .arg("serve")
+        .env("LEAF_HOST", "127.0.0.1")
+        .env("LEAF_PORT", a_free_port().to_string())
+        .env("LEAF_TLS_CERT", dir.path().join("tls/leaf.crt"))
+        .env("LEAF_TLS_HOSTS", "127.0.0.1")
+        // The log subscriber writes to stdout; stderr is where `main` puts the one error it
+        // returns. Into a file rather than a pipe, so nothing has to drain it to keep the
+        // server from blocking on a full one.
+        .stdout(Stdio::from(std::fs::File::create(&log).unwrap()))
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let said = loop {
+        let said = std::fs::read_to_string(&log).unwrap_or_default();
+        if said.contains("Stopping on SIGINT") && said.contains("generating a self-signed one") {
+            break said;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the server never said both of these: {said}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+
+    assert!(
+        said.find("Stopping on SIGINT").unwrap()
+            < said.find("generating a self-signed one").unwrap(),
+        "the signals must be armed before the slowest thing a start does: {said}"
+    );
+
+    // And the stop itself still works on this path. `stop` requires a clean exit code, which
+    // is exactly what a process killed by its default disposition does not leave.
+    stop(&mut server, Ask::Terminate);
 }
 
 #[test]
@@ -248,7 +339,7 @@ fn serve_over_tls_generates_its_own_certificate_and_answers_on_it() {
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    stop(&mut server);
+    stop(&mut server, Ask::Interrupt);
     assert!(listening, "nothing ever listened on the TLS port");
     assert!(
         certificate.is_file(),
@@ -321,6 +412,6 @@ fn serve_warns_when_the_inbox_and_the_library_are_not_on_one_filesystem() {
         assert!(Instant::now() < deadline, "nothing ever listened");
         std::thread::sleep(Duration::from_millis(50));
     }
-    stop(&mut server);
+    stop(&mut server, Ask::Interrupt);
     let _ = std::fs::remove_dir_all(&inbox);
 }
