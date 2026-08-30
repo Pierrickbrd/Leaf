@@ -23,7 +23,7 @@ use crate::archive::cbz;
 use crate::metadata::label;
 use crate::metadata::legacy_comic_info::{self as comic_info, LegacyRead};
 use crate::metadata::sidecars::{
-    ArcJson, ChapterJson, EditionJson, EntryJson, UniverseJson, WorkJson,
+    self, ArcJson, ChapterJson, EditionJson, EntryJson, UniverseJson, WorkJson,
 };
 use crate::scan::checks;
 use crate::scan::covers;
@@ -651,7 +651,21 @@ impl Scanner {
         } else {
             self.write_chapters(cx, &id, &entries, report)?;
         }
-        self.write_arcs(cx, &id, meta.as_ref(), &defaults.arcs, &entries, report)?;
+        // The edition's own arcs, or the work's when it declares none: chosen here, so that
+        // `write_arcs` is handed one list **and the file it came from**.
+        //
+        // The name travelled apart from the list and was the edition's either way, which is
+        // the one thing it must not be: a `tome` typed in the work.json of Terres d'Arran was
+        // reported against `Elfes`, then against `Mages` — twice, and each time naming an
+        // edition.json that has no `arcs` in it at all. A report that sends somebody to the
+        // wrong file is worse than one that says nothing.
+        let edition_name = name_of(folder);
+        let (declared, where_): (&[ArcJson], &str) = match meta.as_ref().map(|m| m.arcs.as_slice())
+        {
+            Some(arcs) if !arcs.is_empty() => (arcs, &edition_name),
+            _ => (&defaults.arcs, &defaults.work_name),
+        };
+        self.write_arcs(cx, &id, where_, declared, &entries, report)?;
 
         Ok(entries
             .iter()
@@ -1117,32 +1131,59 @@ impl Scanner {
         &self,
         cx: &Cx<'_>,
         edition_id: &str,
-        meta: Option<&EditionJson>,
-        work_arcs: &[ArcJson],
+        where_: &str,
+        declared: &[ArcJson],
         entries: &[ReadEntry],
         report: &mut ScanReport,
     ) -> Result<()> {
         cx.execute("DELETE FROM arc WHERE edition_id = ?1", [edition_id])?;
 
-        let declared: &[ArcJson] = match meta.map(|m| m.arcs.as_slice()) {
-            Some(arcs) if !arcs.is_empty() => arcs,
-            _ => work_arcs,
-        };
         if !declared.is_empty() {
-            for (i, arc) in declared.iter().enumerate() {
+            // Counted on the way in, not read off `enumerate`. A disregarded arc consumed its
+            // index too: three declared with the first left out gave positions 1 and 2 and
+            // ids ending `-arc-1` and `-arc-2`, with 0 belonging to nothing. The order still
+            // came out right, which is why it went unnoticed — but the column stopped meaning
+            // "the nth arc of this edition", and a count taken from the highest one is short
+            // by however many were left out.
+            let mut kept = 0usize;
+            for arc in declared {
+                // A unit the index refuses used to be handed to it anyway: the insert failed,
+                // and it failed inside the transaction that holds this whole shelf. One word
+                // in one file stopped two hundred series from being indexed, and a scan that
+                // is not complete prunes nothing, so a deletion anywhere else went unseen too.
+                //
+                // Read rather than obeyed, and said out loud rather than guessed at: "tome"
+                // is somebody meaning VOLUME, but a scan that invents the value it wanted is
+                // how a file stops describing what is on the disk.
+                let Some(unit) = sidecars::arc_unit(&arc.unit) else {
+                    let said = format!(
+                        "{where_}: arc \"{}\" is counted in \"{}\", which is not a unit — \
+                         CHAPTER or VOLUME, so this arc was left out",
+                        arc.name, arc.unit
+                    );
+                    // Once for the file, not once per edition reading it. A work's arcs come
+                    // down to every edition that declares none of its own, so one word in one
+                    // work.json produced the same sentence for each of them — which reads as
+                    // several problems in several files.
+                    if !report.disregarded.contains(&said) {
+                        report.disregarded.push(said);
+                    }
+                    continue;
+                };
                 cx.execute(
                     "INSERT INTO arc (id, edition_id, name, unit, from_number, to_number, position)
                      VALUES (?1,?2,?3,?4,?5,?6,?7)",
                     rusqlite::params![
-                        format!("{edition_id}-arc-{i}"),
+                        format!("{edition_id}-arc-{kept}"),
                         edition_id,
                         arc.name,
-                        arc.unit.to_uppercase(),
+                        unit,
                         arc.from,
                         arc.to,
-                        i as i64,
+                        kept as i64,
                     ],
                 )?;
+                kept += 1;
             }
             return Ok(());
         }

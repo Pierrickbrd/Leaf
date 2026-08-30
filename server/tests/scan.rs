@@ -981,6 +981,101 @@ fn comic_info(tags: &[(&str, &str)]) -> String {
     format!("<?xml version=\"1.0\"?><ComicInfo>{inside}</ComicInfo>")
 }
 
+/// A unit the index refuses used to reach it anyway, from inside the transaction that holds
+/// a whole shelf: the insert failed, the shelf was rolled back and never indexed again, and
+/// a scan that is not complete prunes nothing — so a deletion three shelves away went unseen
+/// too. One word, in one file, written by hand.
+#[test]
+fn an_arc_counted_in_something_that_is_not_a_unit_leaves_the_shelf_standing() {
+    let library = Library::new();
+    let bleach = library.folder("Bleach");
+    archive(&bleach.join("Tome 1.cbz"), 2, None);
+    library.write(
+        "Bleach/work.json",
+        r#"{"leaf":1,"title":"Bleach","arcs":[
+             {"name":"Soul Society","unit":"tome","from":1,"to":2},
+             {"name":"Arrancar","unit":"volume","from":3,"to":4}]}"#,
+    );
+
+    let report = library.scan();
+
+    // The shelf is indexed, the volume is there, and the arc that could be read is too.
+    assert_eq!(1, library.count("work"));
+    assert_eq!(1, library.count("entry"));
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(
+        vec!["Arrancar".to_string()],
+        library.all("SELECT name FROM arc")
+    );
+    // The one it could not read is said out loud rather than guessed at: "tome" is somebody
+    // meaning VOLUME, and a scan that invents that value is a scan that stops describing the
+    // disk.
+    assert!(
+        report
+            .disregarded
+            .iter()
+            .any(|said| said.contains("Soul Society") && said.contains("tome")),
+        "{:?}",
+        report.disregarded
+    );
+
+    // And the arc that was kept takes the place the one before it did not. `enumerate` handed
+    // out an index per arc *declared*, so a disregarded one left position 0 and the id ending
+    // `-arc-0` belonging to nothing. The order still came out right, which is why this went
+    // unseen — but the column stopped meaning "the nth arc of this edition", and a count read
+    // off the highest position is short by however many were left out.
+    assert_eq!(Some(0), library.one::<i64>("SELECT position FROM arc"));
+    assert!(
+        library.all("SELECT id FROM arc")[0].ends_with("-arc-0"),
+        "{:?}",
+        library.all("SELECT id FROM arc")
+    );
+}
+
+/// And the report names the file the arcs were actually read from, once.
+///
+/// The list and the name travelled apart: `declared` fell back to the work's when the edition
+/// declared none, and `where_` was the edition folder either way. A `tome` typed in a work's
+/// work.json was reported against one edition folder and then the other — twice, each time
+/// naming an edition.json with no `arcs` in it at all. A report that sends somebody to the
+/// wrong file is worse than one that says nothing.
+#[test]
+fn an_arc_a_work_declares_is_reported_against_the_work_and_said_once() {
+    let library = Library::new();
+    library.write(
+        "Bleach/work.json",
+        r#"{"leaf":1,"title":"Bleach","arcs":[
+             {"name":"Soul Society","unit":"tome","from":1,"to":2}]}"#,
+    );
+    archive(
+        &library.folder("Bleach/Perfect Edition").join("Tome 1.cbz"),
+        2,
+        None,
+    );
+    archive(
+        &library
+            .folder("Bleach/Édition originale")
+            .join("Tome 1.cbz"),
+        2,
+        None,
+    );
+
+    let report = library.scan();
+    assert_eq!(2, library.count("edition"));
+
+    let said: Vec<&String> = report
+        .disregarded
+        .iter()
+        .filter(|line| line.contains("Soul Society"))
+        .collect();
+    assert_eq!(1, said.len(), "{:?}", report.disregarded);
+    assert!(
+        said[0].starts_with("Bleach:"),
+        "the file to open is the one the arcs are in: {}",
+        said[0]
+    );
+}
+
 #[test]
 fn archives_deeper_than_the_model_has_room_for_are_said_out_loud() {
     // Universe, work, edition is three floors. A fourth has nowhere to go, and a folder

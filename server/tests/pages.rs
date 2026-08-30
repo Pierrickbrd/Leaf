@@ -274,6 +274,273 @@ fn walk(dir: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// A page taller than a JPEG can be.
+///
+/// 65 535 rows is the format's own ceiling and a PNG has no such thing, so a stitched
+/// webtoon strip goes past it as a matter of course. The encoder is told its dimensions as
+/// `u16`: cast rather than checked, it was handed the whole bitmap and told it was
+/// 13 107 rows tall, and what went into the cache — and out to the reader for a year behind
+/// `max-age=31536000` — was the top sixth of the page.
+#[test]
+fn a_page_too_tall_for_a_jpeg_comes_back_whole_rather_than_cut() {
+    let dir = tempfile::tempdir().expect("a directory");
+    let cbz = dir.path().join("Tome 1.cbz");
+
+    // 20 × 131 072: shrunk to twelve wide it is 78 643 rows, which is past what a JPEG can
+    // say. Narrow on purpose — it is the height that has to be big, and this is 7.8 MB
+    // rather than the gigabyte a realistic width would cost.
+    let mut strip = image::RgbImage::new(20, 131_072);
+    for (x, y, pixel) in strip.enumerate_pixels_mut() {
+        *pixel = image::Rgb([(x * 7 % 256) as u8, (y % 256) as u8, ((x ^ y) % 256) as u8]);
+    }
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(strip)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .expect("encoding");
+    let png = png.into_inner();
+
+    let file = std::fs::File::create(&cbz).expect("creating the archive");
+    let mut zip = zip::ZipWriter::new(file);
+    zip.start_file::<_, ()>("000.png", zip::write::SimpleFileOptions::default())
+        .expect("an entry");
+    zip.write_all(&png).expect("writing");
+    zip.finish().expect("closing");
+
+    let db = Db::open(&dir.path().join("index.sqlite")).expect("opening");
+    db.write(|cx| {
+        cx.execute(
+            "INSERT INTO work (id, name, path) VALUES ('w', 'Essai', '/w')",
+            [],
+        )?;
+        cx.execute(
+            "INSERT INTO edition (id, work_id, path, implicit) VALUES ('e', 'w', '/w/e', 1)",
+            [],
+        )?;
+        cx.execute(
+            "INSERT INTO entry (id, edition_id, type, file, size, modified_at, added_at,
+                                volume_number, sort_key, page_count)
+             VALUES ('v1', 'e', 'VOLUME', ?1, 1, 1700000000000, 1, 1.0, 1.0, 1)",
+            [cbz.to_string_lossy().to_string()],
+        )?;
+        cx.execute(
+            "INSERT INTO page (entry_id, number, entry_name, media_type, width, height, size)
+             VALUES ('v1', 0, '000.png', 'image/png', 20, 131072, 1000)",
+            [],
+        )?;
+        Ok(())
+    })
+    .expect("seeding");
+
+    let pages = Pages::new(Arc::new(db), dir.path().join("cache"), 85, 64 * 1024 * 1024);
+    pages.prepare();
+    let served = pages
+        .page("v1", 0, Some(12))
+        .expect("serving")
+        .expect("a page");
+
+    // The original, whole, rather than a JPEG holding the top of it.
+    assert_eq!("image/png", served.media_type);
+    assert_eq!(png, served.bytes);
+
+    // And it cost nothing to know: the index held 131 072 rows before the archive was
+    // touched. Asked three times over, because the shape of the waste is that this path
+    // stores nothing — so every reader used to pay the whole 7.8 MB decode again.
+    for _ in 0..3 {
+        assert_eq!(png, pages.page("v1", 0, Some(12)).unwrap().unwrap().bytes);
+    }
+    assert_eq!(
+        0,
+        pages.decodes(),
+        "a strip no JPEG can hold is never decoded"
+    );
+}
+
+/// A width of nought is not a width, and the clamp made it into one.
+///
+/// `?width=0` doubles to nought on a spread and is then clamped up to one, which reads as
+/// "shrink this page to a single column" — and a JPEG one pixel wide is smaller than the
+/// source, which was the only test standing between it and the cache. It went in under the
+/// ETag for the width that was asked for and came back out behind `max-age=31536000` for a
+/// year. The ceiling had a guard; the floor was a `clamp` inventing a value nobody sent.
+#[test]
+fn a_width_of_nothing_gives_the_page_back_rather_than_one_pixel_of_it() {
+    let f = Fixture::new();
+    let pages = f.pages();
+
+    // Page 1 is the spread, which is where the doubling happens.
+    let whole = pages.page("v1", 1, None).expect("serving").expect("a page");
+    let served = pages
+        .page("v1", 1, Some(0))
+        .expect("serving")
+        .expect("a page");
+
+    assert_eq!(
+        whole.bytes, served.bytes,
+        "the page itself, not one pixel of it"
+    );
+    assert_eq!(
+        0,
+        f.cache_files(),
+        "and nothing nobody asked for was kept for a year"
+    );
+
+    // A width that means something is still honoured, so this is not a way of refusing to
+    // work.
+    let smaller = pages.page("v1", 1, Some(600)).unwrap().unwrap();
+    assert!(smaller.bytes.len() < whole.bytes.len());
+}
+
+/// The same nought, at the door a shelf actually knocks on.
+///
+/// `plan` refuses to shrink a page to no columns, which is right and is not enough: the cover
+/// routes ask for `width.unwrap_or(COVER_WIDTH)`, and `unwrap_or` cannot tell `?width=0` from
+/// no width at all. So the nought survived the floor, `plan` declined to resize it, and the
+/// tile came back as the whole scan — a grid of five hundred of them fetching five hundred
+/// full-resolution pages, none of it cached, every time the shelf was looked at.
+#[test]
+fn a_cover_asked_for_at_no_width_is_a_tile_and_not_the_whole_page() {
+    let f = Fixture::new();
+    let pages = f.pages();
+
+    let tile = pages.cover("v1", None).unwrap().expect("a cover");
+    let nought = pages.cover("v1", Some(0)).unwrap().expect("a cover");
+    let whole = pages.page("v1", 0, None).unwrap().expect("a page");
+
+    // The same answer, down to the tag: a cover asked for at no width is a cover.
+    assert_eq!(tile.tag, nought.tag);
+    assert_eq!(tile.bytes.len(), nought.bytes.len());
+    assert!(
+        nought.bytes.len() < whole.bytes.len() / 2,
+        "a tile is {} bytes against a page of {}",
+        nought.bytes.len(),
+        whole.bytes.len()
+    );
+}
+
+/// And a nought is not a width worth remembering for the sweep.
+///
+/// `seen_widths` holds two, so a nought counted as a width evicts a real one — and
+/// `warm_covers` then walks every edition in the library, reads every cover in full, decides
+/// each one is not worth resizing, stores nothing and reports itself done. A full pass over
+/// the library to leave the shelf exactly as cold as it was.
+#[test]
+fn a_nought_does_not_take_a_real_width_s_place_in_the_sweep() {
+    let f = Fixture::new();
+    let pages = Arc::new(f.pages());
+
+    pages.series_cover("e", Some(300)).unwrap().expect("a tile");
+    pages.series_cover("e", Some(600)).unwrap().expect("a tile");
+    pages.series_cover("e", Some(0)).unwrap().expect("a tile");
+    pages.series_cover("e", Some(0)).unwrap().expect("a tile");
+
+    // Emptied, so that what appears below can only have come from the sweep.
+    std::fs::remove_dir_all(f.dir.path().join("cache")).unwrap();
+    pages.prepare();
+    assert_eq!(0, f.cache_files());
+
+    pages.warm_covers();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while f.cache_files() < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the sweep prepared {} of the two widths a client asked for",
+            f.cache_files()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// And nothing is read ahead at a width nothing is stored under.
+///
+/// Reading a volume with `?width=0` queued the four pages after each one, and each of those
+/// opened the archive, read the member and stored nothing — four extractions per page turn,
+/// for ever, because that path has nothing to cache.
+#[test]
+fn no_pages_are_prepared_ahead_at_a_width_of_nothing() {
+    let f = Fixture::new();
+    let pages = Arc::new(f.pages());
+    pages.start_warming(2, 8);
+
+    pages.warm_ahead("v1", 0, 0);
+    // Read at once, and not after a sleep: a claim is taken in this thread before the task is
+    // sent, and given back once a worker is done with it — so waiting is waiting for the
+    // evidence to be tidied away.
+    assert_eq!(
+        0,
+        pages.pending(),
+        "four pages were queued to be prepared at nothing"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert_eq!(0, f.cache_files(), "and nothing came of them, as ever");
+}
+
+/// The other end of the same arithmetic, which costs a decode rather than a wrong picture.
+///
+/// A page far wider than tall shrinks to no rows at all: 120 rows of a 4000-wide panorama,
+/// asked for two columns, round to none. The scaler refuses that, so what came back was
+/// always the page — but only after the member had been decoded in full on the blocking
+/// pool, and `shrink` stores nothing on that path, so every reader paid the decode again on
+/// every request. Both numbers are in the index, and `plan` now answers from them.
+///
+/// Nothing observable moves between the two, which is what makes this the kind of defect
+/// that survives a suite. So the count is the assertion, the way `Cx` counts queries.
+#[test]
+fn a_width_that_leaves_no_rows_at_all_is_decided_before_the_decode() {
+    let dir = tempfile::tempdir().expect("a directory");
+    let cbz = dir.path().join("Tome 1.cbz");
+    archive(&cbz, &[("000.jpg", 4000, 120)]);
+
+    let db = Db::open(&dir.path().join("index.sqlite")).expect("opening");
+    db.write(|cx| {
+        cx.execute(
+            "INSERT INTO work (id, name, path) VALUES ('w', 'Essai', '/w')",
+            [],
+        )?;
+        cx.execute(
+            "INSERT INTO edition (id, work_id, path, implicit) VALUES ('e', 'w', '/w/e', 1)",
+            [],
+        )?;
+        cx.execute(
+            "INSERT INTO entry (id, edition_id, type, file, size, modified_at, added_at,
+                                volume_number, sort_key, page_count)
+             VALUES ('v1', 'e', 'VOLUME', ?1, 1, 1700000000000, 1, 1.0, 1.0, 1)",
+            [cbz.to_string_lossy().to_string()],
+        )?;
+        cx.execute(
+            "INSERT INTO page (entry_id, number, entry_name, media_type, width, height, size)
+             VALUES ('v1', 0, '000.jpg', 'image/jpeg', 4000, 120, 1000)",
+            [],
+        )?;
+        Ok(())
+    })
+    .expect("seeding");
+
+    let cache = dir.path().join("cache");
+    let pages = Pages::new(Arc::new(db), cache.clone(), 85, 64 * 1024 * 1024);
+    pages.prepare();
+    let whole = pages.page("v1", 0, None).unwrap().unwrap();
+
+    let before = pages.decodes();
+    for _ in 0..3 {
+        let served = pages.page("v1", 0, Some(1)).unwrap().unwrap();
+        assert_eq!(whole.bytes, served.bytes);
+    }
+    assert_eq!(
+        before,
+        pages.decodes(),
+        "three readers, three full decodes of a page that was never going to shrink"
+    );
+    assert!(!cache.join("v1").exists(), "and nothing was kept");
+
+    // A width this page has the rows for still resizes, so the decision is about this page
+    // rather than about giving up on narrow ones — and it costs the one decode it should.
+    let smaller = pages.page("v1", 0, Some(1000)).unwrap().unwrap();
+    assert!(smaller.bytes.len() < whole.bytes.len());
+    assert_eq!(before + 1, pages.decodes());
+}
+
 #[test]
 fn an_unknown_page_or_entry_is_nothing_rather_than_an_error() {
     let f = Fixture::new();

@@ -88,6 +88,37 @@ fn without_a_declared_count_it_only_knows_the_inside() {
     assert_eq!(vec![3.0], gaps(&[1.0, 2.0, 4.0], None, &[]));
 }
 
+/// Both ends of this range are written by a person: a `volumeCount` in a work.json, and a
+/// volume number read off a file name — `label` takes any run of digits it finds. A typo at
+/// either end used to build every number in between, in a blocking task, on every GET
+/// /series that included the row.
+///
+/// And then refusing to answer at all was its own wrong answer: an empty list does not
+/// reach the client as "we cannot say", it is dropped by `dto` and arrives as the absent
+/// field a *complete* collection sends. What the typo costs is the typo, not the volumes.
+#[test]
+fn a_count_nothing_could_have_published_is_disregarded_and_the_collection_still_answers() {
+    // Volume 2 is missing whatever the work.json claims was published.
+    assert_eq!(vec![2.0], gaps(&[1.0, 3.0], Some(2_000_000_000), &[]));
+    // The same from the other end: one file whose name reads as volume 999999999 does not
+    // get to set a ceiling for the three volumes it sits beside.
+    assert_eq!(vec![2.0, 3.0], gaps(&[1.0, 4.0, 999_999_999.0], None, &[]));
+    // A collection anybody could actually own still answers, either side of the edge.
+    assert_eq!(vec![2.0], gaps(&[1.0, 3.0], Some(3), &[]));
+    assert_eq!(9_999, gaps(&[1.0], Some(10_000), &[]).len());
+    // Past it, the count is dropped and only what is held speaks — here, nothing missing.
+    assert!(gaps(&[1.0], Some(10_002), &[]).is_empty());
+
+    // And the low end, which looked harmless and was the worse of the two: a count below the
+    // volumes actually held gave an empty range, `dto` drops an empty list, and an absent
+    // `missingVolumes` is what a *complete* collection sends. So a nonsense number came back
+    // as "nothing to find here" — the one answer this function must never give — while the
+    // gaps between the volumes on the disk were sitting right there.
+    assert_eq!(vec![2.0], gaps(&[1.0, 3.0], Some(0), &[]));
+    assert_eq!(vec![2.0], gaps(&[1.0, 3.0], Some(-4), &[]));
+    assert_eq!(vec![6.0], gaps(&[5.0, 7.0], Some(3), &[]));
+}
+
 #[test]
 fn an_empty_collection_has_no_gaps() {
     assert!(gaps(&[], Some(47), &[]).is_empty());

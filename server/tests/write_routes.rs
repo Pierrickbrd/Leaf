@@ -105,7 +105,89 @@ async fn patching_something_that_is_not_there_is_a_404() {
     assert_eq!(StatusCode::NOT_FOUND, status);
 }
 
+/// A word the contract has not got is refused here, and not met again by the scanner.
+///
+/// `set_arcs` learned this for units and this route kept doing the other thing for the three
+/// enums beside them: `{"status": "hiatus"}` was answered 200, written into work.json, and
+/// served straight back out of `GET /series` against an enum of two words. `intake` then read
+/// it as "not ongoing" and filed an extra volume as though the series were finished, and a
+/// client that maps a word it does not know to nothing showed the field empty — an edit that
+/// looked like it had done nothing at all.
+#[tokio::test]
+async fn a_word_the_contract_has_not_got_is_refused_rather_than_written_down() {
+    let server = Server::new();
+    a_volume(&server);
+    let series = server.series();
+
+    let patch = |body: serde_json::Value| {
+        request("PATCH", &format!("/series/{series}"), IMPORTER)
+            .header("content-type", "application/json")
+            .body(json_body(body))
+            .unwrap()
+    };
+
+    for (field, word) in [
+        ("status", "hiatus"),
+        ("medium", "graphic-novel"),
+        ("readingDirection", "SIDEWAYS"),
+    ] {
+        let (status, body) = server.send(patch(serde_json::json!({field: word}))).await;
+        assert_eq!(StatusCode::BAD_REQUEST, status, "{field}: {body}");
+        // And the refusal names the vocabulary: a caller told only that its word was wrong
+        // has to go and find the contract.
+        let said = body["error"].as_str().unwrap_or_default();
+        assert!(said.contains(word), "{field}: {said}");
+    }
+
+    // Nothing of any of it reached the disk.
+    let work = server.library().join("Bleach/work.json");
+    let written = std::fs::read_to_string(&work).unwrap_or_default();
+    assert!(!written.contains("hiatus"), "{written}");
+
+    // And the same field, spelled the way somebody would actually type it, still goes
+    // through — in the contract's spelling, because the file says what the format says.
+    let (status, body) = server
+        .send(patch(serde_json::json!({"status": "Ongoing"})))
+        .await;
+    assert_eq!(StatusCode::OK, status, "{body}");
+    let written = std::fs::read_to_string(&work).expect("a work.json");
+    assert!(written.contains("\"status\": \"ongoing\""), "{written}");
+}
+
 // -------------------------------------------------------------------- intake
+
+/// A sidecar that cannot be read is not a sidecar that is not there.
+///
+/// `fs::read(..).ok()` said the same thing about both, so a patch carrying one field started
+/// from a default and wrote it over a work.json holding a title, an author, genres and arcs.
+/// A file that cannot be read is still a file, and it is the one about to be replaced.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_sidecar_that_cannot_be_read_is_refused_rather_than_replaced() {
+    let server = Server::new();
+    a_volume(&server);
+    let series = server.series();
+
+    // A link to itself: the kernel answers ELOOP, which is neither "there" nor "not there".
+    // The same shape as a permission or a device error, and reachable without either.
+    let sidecar = server.library().join("Bleach/work.json");
+    std::os::unix::fs::symlink("work.json", &sidecar).unwrap();
+
+    let (status, _) = server
+        .send(
+            request("PATCH", &format!("/series/{series}"), IMPORTER)
+                .header("content-type", "application/json")
+                .body(json_body(serde_json::json!({"summary": "deux mots"})))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(StatusCode::INTERNAL_SERVER_ERROR, status);
+    assert!(
+        std::fs::symlink_metadata(&sidecar).unwrap().is_symlink(),
+        "the file that could not be read must still be there, untouched"
+    );
+}
 
 #[tokio::test]
 async fn an_upload_without_a_name_is_the_callers_fault_not_the_servers() {
@@ -325,6 +407,40 @@ async fn an_id_that_is_not_an_id_is_a_bad_request() {
         )
         .await;
     assert_eq!(StatusCode::BAD_REQUEST, status);
+}
+
+/// An id is bytes until something has looked at it.
+///
+/// The check for a staged file's prefix sliced four **bytes** off the id, which lands in the
+/// middle of a `€` and panics — and it ran before the line that refuses anything not ASCII,
+/// so the guard never got its turn. The handler's task died and the connection was dropped,
+/// on a route anybody holding a key can call.
+#[tokio::test]
+async fn an_id_that_is_not_ascii_is_refused_rather_than_fatal() {
+    let server = Server::new();
+    a_volume(&server);
+    let series = server.series();
+
+    let (status, _) = server
+        .send(
+            request("DELETE", "/intake/%C3%A9%E2%82%AC", IMPORTER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::BAD_REQUEST, status, "abandoning it");
+
+    // The other door to the same check, and the one that carries a body: filing a staged
+    // file under an id nobody could have been given.
+    let (status, _) = server
+        .send(
+            request("POST", "/intake/%C3%A9%E2%82%AC/file", IMPORTER)
+                .header("content-type", "application/json")
+                .body(json_body(serde_json::json!({"seriesId": series})))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::BAD_REQUEST, status, "filing it");
 }
 
 #[tokio::test]
@@ -591,14 +707,30 @@ async fn a_trusted_proxy_throttles_the_device_and_not_the_household() {
     assert_eq!(StatusCode::OK, status);
 }
 
+/// The entry to believe is the last one, because it is the only one the proxy wrote.
+///
+/// `X-Forwarded-For` is a list the caller starts and every hop appends to. Counted from the
+/// left, a caller sending a made-up address got a fresh identity on every request: ten wrong
+/// keys never landed on one key, `blocked_for` never fired, and the throttle a key sits
+/// behind was one header away from doing nothing at all.
 #[tokio::test]
-async fn the_leftmost_forwarded_address_is_the_client() {
+async fn a_caller_cannot_hand_itself_a_new_address_on_every_guess() {
     let mut server = Server::new();
     server.trust_proxy = true;
     let state = server.state();
 
-    // "client, proxy1, proxy2" — the client is the one the first proxy wrote down.
-    wrong_keys(&server, &state, Some("10.0.0.99, 172.17.0.1"), 12).await;
+    // What the proxy in front produces when the caller sends "1.2.3.4" itself: its own claim,
+    // then the address the proxy actually accepted the connection from. A different claim
+    // every time, and the same machine behind all of them.
+    for guess in 0..12 {
+        wrong_keys(
+            &server,
+            &state,
+            Some(&format!("1.2.3.{guess}, 10.0.0.99")),
+            1,
+        )
+        .await;
+    }
 
     let (blocked, _) = server
         .send_to(
@@ -606,7 +738,7 @@ async fn the_leftmost_forwarded_address_is_the_client() {
             Request::builder()
                 .uri("/series")
                 .header("X-Leaf-Key", "0000000000000000")
-                .header("X-Forwarded-For", "10.0.0.99, 172.17.0.5")
+                .header("X-Forwarded-For", "5.6.7.8, 10.0.0.99")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -614,7 +746,127 @@ async fn the_leftmost_forwarded_address_is_the_client() {
     assert_eq!(
         StatusCode::TOO_MANY_REQUESTS,
         blocked,
-        "the same client through a different proxy is still that client"
+        "twelve guesses from one machine are twelve guesses, whatever it called itself"
+    );
+
+    // And the device beside it, behind the same proxy, is still not paying for them.
+    let (allowed, _) = server
+        .send_to(
+            state.clone(),
+            Request::builder()
+                .uri("/series")
+                .header("X-Leaf-Key", IMPORTER)
+                .header("X-Forwarded-For", "1.2.3.4, 10.0.0.42")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::OK, allowed);
+}
+
+/// A byte no text can hold, in the half of the line the caller wrote.
+///
+/// hyper passes 0x80–0xFF through in a header value and `to_str` refuses the whole line for
+/// them — and with a proxy that appends, the caller's own bytes are *in* that line. So one
+/// byte anywhere before the last comma threw away the entry the proxy had written, and the
+/// guess was counted against the proxy's socket address: the shared key every request
+/// arriving without the header already lands on, health checks included. Read out of the
+/// bytes, the trusted hop's entry stands whatever precedes it.
+#[tokio::test]
+async fn a_byte_no_text_can_hold_does_not_hand_the_guesses_to_the_household() {
+    let mut server = Server::new();
+    server.trust_proxy = true;
+    let state = server.state();
+
+    let unreadable = || {
+        Request::builder()
+            .uri("/series")
+            .header("X-Leaf-Key", "0000000000000000")
+            .header(
+                "X-Forwarded-For",
+                axum::http::HeaderValue::from_bytes(b"1.2.3.\xff, 10.0.0.99").unwrap(),
+            )
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    for _ in 0..12 {
+        server.send_to(state.clone(), unreadable()).await;
+    }
+
+    // Twelve guesses from 10.0.0.99, whatever the caller wrote in front of it.
+    let (blocked, _) = server
+        .send_to(
+            state.clone(),
+            Request::builder()
+                .uri("/series")
+                .header("X-Leaf-Key", "0000000000000000")
+                .header("X-Forwarded-For", "9.9.9.9, 10.0.0.99")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::TOO_MANY_REQUESTS, blocked);
+
+    // And the device beside it is not paying for them.
+    let (allowed, _) = server
+        .send_to(
+            state.clone(),
+            Request::builder()
+                .uri("/series")
+                .header("X-Leaf-Key", IMPORTER)
+                .header("X-Forwarded-For", "1.2.3.4, 10.0.0.42")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::OK, allowed);
+}
+
+/// And the last *header*, not merely the last entry of the first one.
+///
+/// A header may arrive more than once. Some proxies append to the list already there, others
+/// add a second `X-Forwarded-For:` line of their own — and `HeaderMap::get` hands back the
+/// first only, which against a caller who sent one itself is the caller's line. The rightmost
+/// entry of a line the attacker wrote is still a value the attacker chose, so the guess the
+/// test above closes was open again on every deployment whose proxy adds rather than appends.
+#[tokio::test]
+async fn a_line_the_caller_wrote_does_not_speak_over_the_one_the_proxy_added() {
+    let mut server = Server::new();
+    server.trust_proxy = true;
+    let state = server.state();
+
+    // Two header lines: the caller's own, with a fresh address per guess, and the proxy's
+    // after it, naming the connection it actually accepted.
+    let two_lines = |claimed: String, key: &'static str| {
+        Request::builder()
+            .uri("/series")
+            .header("X-Leaf-Key", key)
+            .header("X-Forwarded-For", claimed)
+            .header("X-Forwarded-For", "10.0.0.99")
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    for guess in 0..12 {
+        server
+            .send_to(
+                state.clone(),
+                two_lines(format!("1.2.3.{guess}"), "0000000000000000"),
+            )
+            .await;
+    }
+
+    let (blocked, _) = server
+        .send_to(
+            state.clone(),
+            two_lines("5.6.7.8".to_string(), "0000000000000000"),
+        )
+        .await;
+    assert_eq!(
+        StatusCode::TOO_MANY_REQUESTS,
+        blocked,
+        "the proxy writes last, and a caller does not get to write after it"
     );
 }
 

@@ -103,6 +103,66 @@ fn is_chapter(unit: &str) -> bool {
     unit == "CHAPTER"
 }
 
+/// The two units an arc can be counted in, and nothing else.
+///
+/// The index has the last word — `CHECK (unit IN ('CHAPTER','VOLUME'))` — and it is a bad
+/// place to find out: the insert fails inside the transaction that holds a whole shelf, so
+/// one word in one edition.json stopped that shelf from ever being indexed again, and with
+/// it the prune that only runs after a complete sweep. Asked here instead, where a file
+/// saying something else can be reported rather than obeyed.
+///
+/// Case is not vocabulary: `volume` is the same unit as `VOLUME`, spelled by a person.
+pub fn arc_unit(spelled: &str) -> Option<&'static str> {
+    match spelled.trim().to_uppercase().as_str() {
+        "CHAPTER" => Some("CHAPTER"),
+        "VOLUME" => Some("VOLUME"),
+        _ => None,
+    }
+}
+
+/// The words the contract has for a medium, a status and a reading direction.
+///
+/// Public so that a refusal can name them: a caller told only that its word was wrong has to
+/// go and find the contract, and a message that lists the vocabulary is the contract at the
+/// one moment it is being read.
+pub const MEDIA: [&str; 8] = [
+    "manga", "bd", "comics", "manhwa", "manhua", "webtoon", "artbook", "other",
+];
+pub const STATUSES: [&str; 2] = ["ongoing", "completed"];
+pub const READING_DIRECTIONS: [&str; 3] = ["LEFT_TO_RIGHT", "RIGHT_TO_LEFT", "VERTICAL"];
+
+/// The same rule as [`arc_unit`], for the three enums beside it: **what may be written is
+/// what may be served.**
+///
+/// A patch wrote these three straight into a sidecar, and the scanner then indexed whatever
+/// word it found. `{"status": "hiatus"}` was answered 200, went into work.json, and came
+/// back out of `GET /series` against an enum of two words — with `intake` reading it as "not
+/// ongoing" and filing an extra volume as though the series were finished, and a client that
+/// maps a word it does not know to nothing showing the field empty, which reads as an edit
+/// that did nothing at all.
+///
+/// Case is not vocabulary, as above: `Manga` is somebody meaning `manga`, and what goes into
+/// the file is the contract's spelling either way.
+pub fn medium(spelled: &str) -> Option<&'static str> {
+    one_of(spelled, &MEDIA)
+}
+
+pub fn status(spelled: &str) -> Option<&'static str> {
+    one_of(spelled, &STATUSES)
+}
+
+pub fn reading_direction(spelled: &str) -> Option<&'static str> {
+    one_of(spelled, &READING_DIRECTIONS)
+}
+
+fn one_of(spelled: &str, vocabulary: &[&'static str]) -> Option<&'static str> {
+    let spelled = spelled.trim();
+    vocabulary
+        .iter()
+        .copied()
+        .find(|word| word.eq_ignore_ascii_case(spelled))
+}
+
 /// Inside the CBZ, in place of ComicInfo.xml. One file name for both materialisations: a
 /// volume and a loose chapter are the same kind of thing to a reader, and the type field is
 /// what tells them apart.

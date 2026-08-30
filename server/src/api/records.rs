@@ -92,61 +92,140 @@ impl<'a> Records<'a> {
             return Ok(false);
         };
 
-        if patch.touches_work() {
-            merge::<WorkJson>(&where_.work.join(layout::WORK_FILE), |mut current| {
-                current.leaf = Some(FORMAT_VERSION);
-                current.title = patch.title.clone().or(current.title);
-                current.medium = patch.medium.clone().or(current.medium);
-                current.author = patch.author.clone().or(current.author);
-                current.status = patch.status.clone().or(current.status);
-                current.reading_direction = patch
-                    .reading_direction
-                    .clone()
-                    .or(current.reading_direction);
+        // An edition with no folder of its own has nowhere to keep a name, and used to be
+        // told so by nobody: `touches_edition` counts `name`, so the implicit branch below
+        // ran — and that branch writes every edition field except that one. The request was
+        // answered 200 with the series unchanged, which is the shape of an afternoon spent
+        // renaming something that never renamed.
+        //
+        // Before anything is written, not inside the branch: a patch carrying a title as
+        // well would otherwise have had half of it applied.
+        if where_.implicit && patch.name.is_some() {
+            return Err(crate::api::invalid(
+                "this edition has no folder of its own, so it has no name to hold — give it \
+                 one by putting its volumes in a folder with an edition.json in it",
+            ));
+        }
+
+        // Refused in the caller's own answer, rather than written down and met again by the
+        // scanner — which is what `set_arcs` does for units, and what this route did not do
+        // for the three enums beside them. See [`sidecars::medium`] for what a word the
+        // contract has not got costs once it is on the disk. Here too: before anything is
+        // written, so a patch carrying a good field and a bad one does not land half of
+        // itself.
+        let medium = spelled(
+            &patch.medium,
+            sidecars::medium,
+            "a medium",
+            &sidecars::MEDIA,
+        )?;
+        let status = spelled(
+            &patch.status,
+            sidecars::status,
+            "a status",
+            &sidecars::STATUSES,
+        )?;
+        let reading_direction = spelled(
+            &patch.reading_direction,
+            sidecars::reading_direction,
+            "a reading direction",
+            &sidecars::READING_DIRECTIONS,
+        )?;
+
+        // An implicit edition has no folder of its own: its fields go down into work.json.
+        // Dropping an edition.json there would flip how the folder is classified — it would
+        // stop being a work and become an edition.
+        let work_file = where_.work.join(layout::WORK_FILE);
+        let edition_file = where_.edition.join(layout::EDITION_FILE);
+        let work_gets_the_edition = where_.implicit && patch.touches_edition();
+
+        // **Both files are read, and both documents built, before either is written.** The
+        // guard above is the same rule for the one case that had it: a patch touching the
+        // work and the edition at once used to write work.json first, and if reading
+        // edition.json then failed — a mode, a symlink loop, a device error, exactly the
+        // class `merge` was taught to refuse rather than swallow — the answer was a 500 with
+        // half the patch on disk and nothing saying which half.
+        //
+        // Two files still cannot be written atomically without a journal, so a failure
+        // *between* the two writes below splits the patch. What this closes is the far
+        // likelier half: every way the request can be refused now happens with the disk
+        // untouched.
+        let work = if patch.touches_work() || work_gets_the_edition {
+            let mut it: WorkJson = current(&work_file)?;
+            it.leaf = Some(FORMAT_VERSION);
+            if patch.touches_work() {
+                it.title = patch.title.clone().or(it.title);
+                it.medium = medium.clone().or(it.medium);
+                it.author = patch.author.clone().or(it.author);
+                it.status = status.clone().or(it.status);
+                it.reading_direction = reading_direction.clone().or(it.reading_direction);
                 if let Some(genres) = &patch.genres {
-                    current.genres = genres.clone();
+                    it.genres = genres.clone();
                 }
-                current.summary = patch.summary.clone().or(current.summary);
-                current
-            })?;
-        }
-
-        if !patch.touches_edition() {
-            return Ok(true);
-        }
-
-        if where_.implicit {
-            // An implicit edition has no folder of its own: its fields go down into
-            // work.json. Dropping an edition.json there would flip how the folder is
-            // classified — it would stop being a work and become an edition.
-            merge::<WorkJson>(&where_.work.join(layout::WORK_FILE), |mut current| {
-                current.leaf = Some(FORMAT_VERSION);
-                current.publisher = patch.publisher.clone().or(current.publisher);
-                current.volume_count = patch.volume_count.or(current.volume_count);
-                current.format = patch.format.clone().or(current.format);
-                current.language = patch.language.clone().or(current.language);
-                current.status = patch.status.clone().or(current.status);
-                current
-            })?;
+                it.summary = patch.summary.clone().or(it.summary);
+            }
+            if work_gets_the_edition {
+                it.publisher = patch.publisher.clone().or(it.publisher);
+                it.volume_count = patch.volume_count.or(it.volume_count);
+                it.format = patch.format.clone().or(it.format);
+                it.language = patch.language.clone().or(it.language);
+                it.status = status.clone().or(it.status);
+            }
+            Some(it)
         } else {
-            merge::<EditionJson>(&where_.edition.join(layout::EDITION_FILE), |mut current| {
-                current.leaf = Some(FORMAT_VERSION);
-                current.name = patch.name.clone().or(current.name);
-                current.publisher = patch.publisher.clone().or(current.publisher);
-                current.status = patch.status.clone().or(current.status);
-                current.volume_count = patch.volume_count.or(current.volume_count);
-                current.format = patch.format.clone().or(current.format);
-                current.language = patch.language.clone().or(current.language);
-                current
-            })?;
+            None
+        };
+
+        let edition = if patch.touches_edition() && !where_.implicit {
+            let mut it: EditionJson = current(&edition_file)?;
+            it.leaf = Some(FORMAT_VERSION);
+            it.name = patch.name.clone().or(it.name);
+            it.publisher = patch.publisher.clone().or(it.publisher);
+            it.status = status.clone().or(it.status);
+            it.volume_count = patch.volume_count.or(it.volume_count);
+            it.format = patch.format.clone().or(it.format);
+            it.language = patch.language.clone().or(it.language);
+            Some(it)
+        } else {
+            None
+        };
+
+        if let Some(work) = work {
+            put(&work_file, &work)?;
+        }
+        if let Some(edition) = edition {
+            put(&edition_file, &edition)?;
         }
         Ok(true)
     }
 
     pub fn set_arcs(&self, edition_id: &str, arcs: Vec<ArcJson>) -> Result<bool> {
+        // The id first, and only then the body. Reading the units first answered a request
+        // naming an edition that does not exist with a 400 about its units — telling a caller
+        // its shape was read before its id, where every other route taking an id says 404.
+        // `patch_series` puts its own guard after this call for the same reason.
         let Some(where_) = self.places(edition_id)? else {
             return Ok(false);
         };
+
+        // Refused here, in the caller's own answer, rather than written down and met again
+        // by the scanner — which meets it inside the transaction holding a whole shelf.
+        let arcs = arcs
+            .into_iter()
+            .map(|mut arc| match sidecars::arc_unit(&arc.unit) {
+                Some(unit) => {
+                    // Written back in the contract's spelling, so the file says what the
+                    // format says even when the request said `volume`.
+                    arc.unit = unit.to_string();
+                    Ok(arc)
+                }
+                None => Err(crate::api::invalid(format!(
+                    "\"{}\" is not a unit an arc is counted in — CHAPTER or VOLUME",
+                    arc.unit
+                ))),
+            })
+            .collect::<Result<Vec<ArcJson>>>()?;
+
         if where_.implicit {
             merge::<WorkJson>(&where_.work.join(layout::WORK_FILE), |mut current| {
                 current.arcs = arcs.clone();
@@ -284,6 +363,27 @@ impl<'a> Records<'a> {
     }
 }
 
+/// One field of a patch, in the contract's spelling, or a refusal that names the vocabulary.
+///
+/// The words are in the message because a caller told only that its word was wrong has to go
+/// and find the contract; a refusal listing what was allowed *is* the contract, at the one
+/// moment somebody is reading it.
+fn spelled(
+    given: &Option<String>,
+    known: fn(&str) -> Option<&'static str>,
+    what: &str,
+    vocabulary: &[&str],
+) -> Result<Option<String>> {
+    let Some(word) = given else { return Ok(None) };
+    match known(word) {
+        Some(it) => Ok(Some(it.to_string())),
+        None => Err(crate::api::invalid(format!(
+            "\"{word}\" is not {what} — {}",
+            vocabulary.join(", ")
+        ))),
+    }
+}
+
 /// What a file says about itself: entry.json if it has one, ComicInfo otherwise.
 pub fn read_entry_json(file: &Path) -> Option<EntryJson> {
     let content = cbz::read(file, false).ok()?;
@@ -298,24 +398,46 @@ pub fn read_entry_json(file: &Path) -> Option<EntryJson> {
 
 /// Reads a sidecar, changes it, writes it back.
 ///
-/// A file that cannot be parsed is replaced rather than refused: the alternative is an edit
-/// that silently does nothing because of a stray comma somewhere in a file nobody is
+/// A file that cannot be **parsed** is replaced rather than refused: the alternative is an
+/// edit that silently does nothing because of a stray comma somewhere in a file nobody is
 /// looking at.
+///
+/// A file that cannot be **read** is a different thing, and used to be the same one. `.ok()`
+/// swallowed a permission error and a disk error exactly as it swallowed "there is no such
+/// file": the merge then started from a default, and a patch carrying one field replaced a
+/// work.json holding twelve. Absent is a reason to write a new one; unreadable is a reason
+/// to stop, because what cannot be read is still there and is about to be overwritten.
 fn merge<T>(file: &Path, transform: impl FnOnce(T) -> T) -> Result<()>
 where
     T: Default + serde::de::DeserializeOwned + serde::Serialize,
 {
-    let current: T = std::fs::read(file)
-        .ok()
-        .and_then(|bytes| sidecars::read(&bytes))
-        .unwrap_or_default();
+    put(file, &transform(current(file)?))
+}
+
+/// What the sidecar says now, or its default when there is none.
+///
+/// Split out of [`merge`] so a caller writing two files can read both first: an edit refused
+/// halfway leaves one of them changed, and that is not a shape any answer can describe. See
+/// `patch_series`.
+fn current<T>(file: &Path) -> Result<T>
+where
+    T: Default + serde::de::DeserializeOwned,
+{
+    match std::fs::read(file) {
+        Ok(bytes) => Ok(sidecars::read(&bytes).unwrap_or_default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        Err(e) => Err(anyhow::Error::new(e).context(format!("reading {}", file.display()))),
+    }
+}
+
+fn put<T: serde::Serialize>(file: &Path, value: &T) -> Result<()> {
     let parent = file
         .parent()
         .ok_or_else(|| anyhow!("{} has no folder", file.display()))?;
     std::fs::create_dir_all(parent)?;
     // Beside, then renamed: a scan reading this file mid-write would read a prefix,
     // fail to parse it, and report every field in it as missing.
-    crate::store::files::write_whole(file, &sidecars::write(&transform(current))?)?;
+    crate::store::files::write_whole(file, &sidecars::write(value)?)?;
     tracing::info!(file = %file.display(), "record written");
     Ok(())
 }

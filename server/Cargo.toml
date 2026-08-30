@@ -14,6 +14,10 @@ tower-http = { version = "0.6", features = ["trace"] }
 # Reading a request body frame by frame: an upload goes to the disk as it arrives rather
 # than being buffered whole, which at 130 MB a volume is the difference that matters.
 http-body-util = "0.1"
+# And the same sentence in the other direction. `ReaderStream` is the only thing taken from
+# it: a download that read the file whole first held a volume in memory per reader, which is
+# a server that falls over at three of them and cannot serve a large one at all.
+tokio-util = { version = "0.7", features = ["io"] }
 
 # SQLite, compiled in: no system library, so there is nothing to install beside the binary.
 rusqlite = { version = "0.37", features = ["bundled"] }

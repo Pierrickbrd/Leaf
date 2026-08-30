@@ -182,12 +182,18 @@ impl Origin {
         }
     }
 
+    /// `starts_with` and not `&id[..4]`: an id is bytes until something has looked at it, and
+    /// slicing four bytes off `é€` lands in the middle of a character and panics — before the
+    /// line that would have refused the id for not being ASCII ever runs. `DELETE /intake/é€`
+    /// took the handler's task down with it and dropped the connection.
     fn of(id: &str) -> Option<Origin> {
-        match &id[..id.len().min(4)] {
-            "rcv_" => Some(Origin::Upload),
-            "drp_" => Some(Origin::Drop),
-            _ => None,
+        if id.starts_with(Origin::Upload.prefix()) {
+            return Some(Origin::Upload);
         }
+        if id.starts_with(Origin::Drop.prefix()) {
+            return Some(Origin::Drop);
+        }
+        None
     }
 }
 

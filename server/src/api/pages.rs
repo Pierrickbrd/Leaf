@@ -68,6 +68,18 @@ pub struct Pages {
     /// Bounded on purpose: a client that sweeps through widths must not turn this into a
     /// list of everything it ever tried, and then warm all of it.
     seen_widths: Mutex<Vec<u32>>,
+    /// How many times a page has been decoded to be shrunk.
+    ///
+    /// The same reason `Cx` counts queries: the defects that hurt here do not fail anything.
+    /// A page the encoder will refuse comes back correct either way — as the original, which
+    /// is the right answer — and the only difference between deciding that from the index and
+    /// deciding it after decoding the whole strip is 116 ms of blocking pool per request,
+    /// repeated for ever because that path stores nothing. Nothing observable moves, so
+    /// nothing but a count can hold it still.
+    ///
+    /// On the instance and not in a `static`, unlike `cbz::OPENED`: tests in one binary share
+    /// a process, and a global count is one a test can only print. Each `Pages` has its own.
+    decoded: AtomicU64,
 }
 
 impl Pages {
@@ -89,7 +101,13 @@ impl Pages {
             written_since_check: AtomicU64::new(0),
             check_every,
             seen_widths: Mutex::new(Vec::new()),
+            decoded: AtomicU64::new(0),
         }
+    }
+
+    /// How many pages this instance has decoded in order to shrink them.
+    pub fn decodes(&self) -> u64 {
+        self.decoded.load(Ordering::Relaxed)
     }
 
     pub fn prepare(&self) {
@@ -140,11 +158,12 @@ impl Pages {
             )
             .map(Option::flatten)
         })?;
+        let requested = tile_width(width);
         if let Some(path) = chosen {
-            return self.serve_file(Path::new(&path), width.unwrap_or(COVER_WIDTH));
+            return self.serve_file(Path::new(&path), requested);
         }
         // Not a read: a cover is a tile on a shelf, and nobody has opened the volume.
-        self.page(entry_id, 0, Some(width.unwrap_or(COVER_WIDTH)))
+        self.page(entry_id, 0, Some(requested))
     }
 
     /// The tile of a grid: one request, not one to find the first entry and another for its
@@ -154,8 +173,15 @@ impl Pages {
         edition_id: &str,
         width: Option<u32>,
     ) -> Result<Option<ServedImage>> {
-        if let Some(width) = width {
-            self.remember_width(width);
+        let requested = tile_width(width);
+        // Remembered at the width it is served at, never at the one that was typed. A `0`
+        // remembered here is a width nothing is ever stored under: it pushed the two real
+        // widths out of the list — `WIDTHS_REMEMBERED` is two — and the sweep after the next
+        // scan then read every cover in the library, decided each one was not worth
+        // resizing, stored nothing, and reported itself done. A shelf as cold as before, and
+        // a full pass over the library to leave it that way.
+        if width.is_some() {
+            self.remember_width(requested);
         }
         let chosen: Option<String> = self.db.read(|cx| {
             cx.query_one(
@@ -166,7 +192,7 @@ impl Pages {
             .map(Option::flatten)
         })?;
         if let Some(path) = chosen {
-            return self.serve_file(Path::new(&path), width.unwrap_or(COVER_WIDTH));
+            return self.serve_file(Path::new(&path), requested);
         }
         let first: Option<String> = self.db.read(|cx| {
             cx.query_one(
@@ -176,7 +202,7 @@ impl Pages {
             )
         })?;
         match first {
-            Some(entry) => self.cover(&entry, width),
+            Some(entry) => self.cover(&entry, Some(requested)),
             None => Ok(None),
         }
     }
@@ -266,10 +292,20 @@ impl Pages {
         .clamp(1, MAX_WIDTH);
         Plan {
             target,
-            worth_resizing: match source_width {
-                None => true,
-                Some(w) => f64::from(target) < w as f64 * WORTH_RESIZING,
-            },
+            // A request for no columns at all is not a request for a width, and the clamp
+            // above made it into one: `?width=0` came out as "shrink this page to a single
+            // column", which on a spread is a JPEG one pixel wide. Being smaller than the
+            // source was the only test it had to pass, so it went into the cache under the
+            // ETag for the width that was asked for and came back out for a year behind
+            // `max-age=31536000`. The ceiling had a guard; the floor invented a value.
+            worth_resizing: requested > 0
+                && match source_width {
+                    None => true,
+                    Some(w) => {
+                        f64::from(target) < w as f64 * WORTH_RESIZING
+                            && fits_a_jpeg(target, w, source_height)
+                    }
+                },
         }
     }
 
@@ -302,6 +338,9 @@ impl Pages {
             return hit;
         }
 
+        // Counted here rather than inside `resize`, because this is the line that commits to
+        // the decode: everything above decided whether to reach it.
+        self.decoded.fetch_add(1, Ordering::Relaxed);
         let resized = match resize(&source, decided.target, self.quality) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -428,6 +467,13 @@ impl Pages {
     /// Only when a width was asked for, since serving the source costs nothing to begin
     /// with.
     pub fn warm_ahead(&self, entry_id: &str, number: i64, width: u32) {
+        // And never at a width nothing is stored under. `?width=0` is served as the page
+        // itself — `plan` refuses to shrink to no columns — so the four pages queued behind
+        // it were four archives opened and four members read to store nothing at all, on
+        // every page turn.
+        if width == 0 {
+            return;
+        }
         let Some(sender) = self.warm.get() else {
             return;
         };
@@ -597,6 +643,39 @@ struct Plan {
     worth_resizing: bool,
 }
 
+/// What a cover is asked for at, given what the query said.
+///
+/// `unwrap_or` cannot tell `?width=0` from no width at all, and kept the nought. `plan` then
+/// refuses to shrink to no columns — which is right — so the tile came back as the
+/// full-resolution scan, several megabytes of it, and nothing was cached because that path
+/// stores nothing: a grid of five hundred tiles fetched five hundred whole pages, every
+/// time it was looked at. The ceiling on a width was checked at the door; the floor was not.
+fn tile_width(width: Option<u32>) -> u32 {
+    width.filter(|w| *w > 0).unwrap_or(COVER_WIDTH)
+}
+
+/// Whether shrinking to this width can produce a JPEG at all, answered from the index.
+///
+/// `resize` refuses a page whose rows do not fit in sixteen bits, and refusing is right — but
+/// refusing *there* costs the decode first: the member's bytes are read into a full bitmap on
+/// the blocking pool, and only then is the answer no. The extraction would have happened
+/// anyway, since the original is what goes back; the decode is pure waste, and `shrink`
+/// stores nothing on that path, so the next reader pays it again. Ten readers on one webtoon
+/// strip is ten full decodes per page turn for a decision two columns of the index already
+/// hold.
+///
+/// True when the index does not know, because then only `resize` can say.
+fn fits_a_jpeg(target: u32, source_width: i64, source_height: Option<i64>) -> bool {
+    let Some(h) = source_height else {
+        return true;
+    };
+    if source_width <= 0 || h <= 0 {
+        return true;
+    }
+    let rows = (h as f64 * (f64::from(target) / source_width as f64)).round();
+    (1.0..=f64::from(u16::MAX)).contains(&rows)
+}
+
 /// Resize on width, aspect ratio preserved, never upscaled. The output is JPEG: it is the
 /// only format every reader and every browser writes and reads without a plugin, and a
 /// downscaled page has already lost the detail a lossless format would protect.
@@ -639,13 +718,37 @@ fn resize(source: &[u8], width: u32, quality: u8) -> Result<Vec<u8>> {
         .with_guessed_format()?
         .decode()?;
     let (w0, h0) = (decoded.width(), decoded.height());
-    let decoded = flattened(decoded);
     if width >= w0 {
         // Never upscaled: asking for 4000 on a 1500-wide scan gets the original back rather
-        // than a blurred enlargement.
+        // than a blurred enlargement. Before `flattened`, which walks every pixel of the
+        // source to lay transparency over white — work that was being done and then dropped
+        // on this line.
         anyhow::bail!("not worth resizing");
     }
     let height = ((h0 as f64) * (f64::from(width) / f64::from(w0))).round() as u32;
+
+    // A JPEG counts its rows and columns in sixteen bits, and the encoder is told them as
+    // `u16`. Cast rather than checked, a page 78 643 rows tall — a stitched webtoon strip is
+    // routinely past 65 535, and a PNG has no such ceiling — was handed the whole buffer and
+    // told it was 13 107 rows: a cache entry holding the top sixth of the page, served for a
+    // year behind `max-age=31536000`. Refusing here serves the original instead, which is
+    // what every other codec we cannot shrink already gets.
+    //
+    // **Nought is the same arithmetic from the other end**, and only the ceiling was checked.
+    // A page far wider than tall shrinks to no rows at all — 120 rows of a 4000-wide panorama
+    // asked for two columns round to none — and `u16::try_from(0)` is perfectly happy with
+    // that. It is the scaler that refuses further down, which is a right answer arrived at by
+    // accident: nothing here says an image of no pixels is not an image, so the day that
+    // library stops minding, a JPEG of nothing is smaller than the source and goes into the
+    // cache for a year like anything else.
+    //
+    // `plan` decides this from the index now, before the decode. This stays for the pages it
+    // cannot decide for: an index that never recorded the dimensions.
+    let usable = |n: u32| u16::try_from(n).ok().filter(|n| *n > 0);
+    let (Some(width16), Some(height16)) = (usable(width), usable(height)) else {
+        anyhow::bail!("a JPEG cannot be {width}×{height}");
+    };
+    let decoded = flattened(decoded);
 
     let from = FirImage::from_vec_u8(w0, h0, decoded.into_raw(), PixelType::U8x3)?;
     let mut into = FirImage::new(width, height, PixelType::U8x3);
@@ -669,8 +772,8 @@ fn resize(source: &[u8], width: u32, quality: u8) -> Result<Vec<u8>> {
     jpeg_encoder::Encoder::new(&mut out, quality)
         .encode(
             into.buffer(),
-            width as u16,
-            height as u16,
+            width16,
+            height16,
             jpeg_encoder::ColorType::Rgb,
         )
         .map_err(|e| anyhow::anyhow!("encoding a page: {e}"))?;

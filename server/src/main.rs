@@ -48,6 +48,12 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Here, at the top of the serve path, and not where it is waited on. Everything below
+    // takes time — generating a certificate on first start most of all — and a signal that
+    // arrives before the handler is registered is answered by the kernel's default
+    // disposition, which is the death this exists to prevent.
+    let stopping = Stopping::armed();
+
     std::fs::create_dir_all(&config.inbox).context("creating the inbox")?;
     if split_volumes(&config.library, &config.inbox) {
         tracing::warn!(
@@ -119,10 +125,10 @@ async fn main() -> Result<()> {
             // the process off mid-write while HTTP shut down politely — one behaviour for
             // one server, decided by which port it happened to be listening on.
             let handle = axum_server::Handle::new();
-            let stopping = handle.clone();
+            let asked_to_stop = handle.clone();
             tokio::spawn(async move {
-                shutdown().await;
-                stopping.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
+                stopping.wait().await;
+                asked_to_stop.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
             });
             axum_server::bind_rustls(address, tls.config)
                 .handle(handle)
@@ -136,15 +142,112 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("binding {address}"))?;
             tracing::info!("Listening on http://{address}");
             axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown())
+                .with_graceful_shutdown(stopping.wait())
                 .await
                 .context("serving")
         }
     }
 }
 
-/// Answers the signal `systemctl stop` sends, so the writer finishes what it holds.
-async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("Shutting down");
+/// Answers the two signals that ask a server to stop, so the writer finishes what it holds.
+///
+/// `ctrl_c` alone is `SIGINT`, which is what a terminal sends. `systemctl stop` sends
+/// `SIGTERM` — the signal this was documented as answering, and the one nothing was
+/// listening for: the default disposition killed the process where it stood, in the middle
+/// of the write this exists to protect, and `SIGKILL` followed at `TimeoutStopSec`.
+///
+/// **Registering and waiting are two steps on purpose.** `tokio`'s handlers start listening
+/// when their future is first polled, not when it is built, and on the TLS path that poll
+/// happened inside a `tokio::spawn` issued after the certificate had been generated, signed
+/// and written — the longest stretch of the whole start, on the one boot where those files
+/// do not exist yet. A `systemctl stop` in that window met the default disposition, so the
+/// fix for the missing handler had a hole of its own on the slowest path. [`Stopping::armed`]
+/// is called before any of it; only the waiting is deferred.
+///
+/// **A stretch before this is still open, deliberately.** From `exec` to the call there is
+/// the dynamic loader, the runtime, the configuration and `Db::open`, and a signal arriving
+/// in there still meets the default disposition. Three things about it:
+///
+/// It cannot be armed any earlier than it is. Above the `scan` branch, `tokio` would take
+/// the Ctrl-C that stops a scan and push it into a stream nobody polls — a scan of a large
+/// library runs for minutes and could then not be interrupted at all, which is a worse thing
+/// than the one being closed.
+///
+/// `Type=notify` does not close it either. `systemctl stop` on a unit that is still
+/// activating sends `SIGTERM` like any other; what `READY=1` governs is when the unit counts
+/// as started and when what depends on it may run.
+///
+/// And closing it properly means blocking both signals before the runtime has a thread to
+/// inherit the mask — `#[tokio::main]` unwound by hand, `libc` promoted out of the
+/// dev-dependencies it is in for the tests alone, and an unblock on each of the two paths —
+/// to protect a stretch where nothing is at stake: nothing has been written, no request is in
+/// flight, the scan has not started, and SQLite rolls back a migration killed halfway. The
+/// sentence at the top says what this is for, and it is the writer.
+struct Stopping {
+    #[cfg(unix)]
+    interrupted: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    terminated: Option<tokio::signal::unix::Signal>,
+}
+
+impl Stopping {
+    fn armed() -> Stopping {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let arm = |kind: SignalKind, name: &str| match signal(kind) {
+                Ok(it) => Some(it),
+                Err(e) => {
+                    tracing::warn!(error = %e, "cannot listen for {name}");
+                    None
+                }
+            };
+            let armed = Stopping {
+                interrupted: arm(SignalKind::interrupt(), "SIGINT"),
+                terminated: arm(SignalKind::terminate(), "SIGTERM"),
+            };
+            // Said by the registration itself, not by `main` on its behalf. `binary.rs` reads
+            // the log to check this line comes *before* the certificate is generated, which
+            // is the whole property; a line printed from somewhere else could be moved, or
+            // left behind, without the handlers moving with it.
+            //
+            // And only when one of them actually registered. Printed unconditionally, it was
+            // printed by a process where both `signal` calls had failed — fd exhaustion, a
+            // seccomp profile — whose `wait()` is then a `pending()` that never returns, so
+            // it never stops gracefully at all. The test greps for this sentence as its proof
+            // the handlers are armed, and would have found it there and passed. A guard that
+            // can see nothing is worth no more than no guard.
+            if armed.interrupted.is_some() || armed.terminated.is_some() {
+                tracing::info!("Stopping on SIGINT or SIGTERM when asked");
+            }
+            armed
+        }
+        #[cfg(not(unix))]
+        Stopping {}
+    }
+
+    async fn wait(self) {
+        #[cfg(unix)]
+        {
+            // Waiting on the other one rather than returning: a server that could not
+            // register a handler must not shut down as though it had been asked to.
+            async fn heard(it: Option<tokio::signal::unix::Signal>) {
+                match it {
+                    Some(mut it) => {
+                        it.recv().await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            }
+            tokio::select! {
+                _ = heard(self.interrupted) => {}
+                _ = heard(self.terminated) => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+        tracing::info!("Shutting down");
+    }
 }
