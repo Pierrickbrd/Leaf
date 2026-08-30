@@ -471,7 +471,9 @@ fn the_connection_underneath_is_reachable_for_the_rare_thing_the_wrapper_does_no
     let version: i64 = db
         .read(|cx| {
             let raw = cx.raw();
-            Ok(Some(raw.query_row("PRAGMA user_version", [], |r| r.get(0))?))
+            Ok(Some(
+                raw.query_row("PRAGMA user_version", [], |r| r.get(0))?,
+            ))
         })
         .unwrap()
         .unwrap();

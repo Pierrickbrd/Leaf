@@ -1370,7 +1370,9 @@ fn an_edition_folder_that_has_gone_takes_its_edition_with_it() {
             &format!(r#"{{"leaf":1,"name":"{edition}"}}"#),
         );
         archive(
-            &library.folder(&format!("Bleach/{edition}")).join("Tome 1.cbz"),
+            &library
+                .folder(&format!("Bleach/{edition}"))
+                .join("Tome 1.cbz"),
             2,
             None,
         );
