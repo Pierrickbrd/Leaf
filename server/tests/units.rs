@@ -501,3 +501,49 @@ fn an_inbox_on_another_filesystem_copies_instead_of_renaming() {
         "the original goes, as a rename would have taken it"
     );
 }
+
+// ------------------------------------------------------------------ the runner
+
+#[test]
+fn a_scan_that_fails_says_why_rather_than_only_writing_it_down() {
+    // A scan that quietly did nothing is worse than one that says why: the failure has to
+    // reach /scan, not only the log.
+    use leaf_server::scan::runner::ScanRunner;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let runner = Arc::new(ScanRunner::default());
+    assert!(runner.start("Essai", || {
+        Err(anyhow::anyhow!("the library is not there"))
+    }));
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = runner.status();
+        if status.state == "DONE" {
+            let said = status.summary.unwrap_or_default();
+            assert!(said.contains("failed:"), "{said}");
+            assert!(said.contains("the library is not there"), "{said}");
+            return;
+        }
+        assert!(Instant::now() < deadline, "the scan never finished");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_scan_asked_for_twice_only_starts_once() {
+    use leaf_server::scan::runner::ScanRunner;
+    use std::sync::Arc;
+
+    let runner = Arc::new(ScanRunner::default());
+    let (gate, wait) = std::sync::mpsc::channel::<()>();
+    let started = runner.start("Long", move || {
+        let _ = wait.recv();
+        Ok(Default::default())
+    });
+    assert!(started);
+    // While it runs, a second is refused rather than queued behind it.
+    assert!(!runner.start("Encore", || Ok(Default::default())));
+    let _ = gate.send(());
+}

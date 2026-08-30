@@ -270,3 +270,57 @@ fn ask(port: u16, path: &str) -> Option<String> {
     stream.read_to_string(&mut said).ok()?;
     Some(said)
 }
+
+#[test]
+fn an_inbox_on_another_volume_is_warned_about_at_startup() {
+    // Committing an import is a rename. Across two volumes it becomes a multi-gigabyte
+    // copy — which breaks nothing immediately and makes every import slow, so it is said
+    // once, loudly, at the moment somebody could still move it.
+    let shm = std::path::Path::new("/dev/shm");
+    if !shm.is_dir() {
+        return;
+    }
+    let dir = a_library();
+    let inbox = shm.join(format!("leaf-inbox-{}", std::process::id()));
+    let done = leaf(&dir)
+        .arg("scan")
+        .env("LEAF_INBOX", &inbox)
+        .env("LEAF_HOST", "127.0.0.1")
+        .env("LEAF_PORT", a_free_port().to_string())
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&inbox);
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+}
+
+#[test]
+fn serve_warns_when_the_inbox_and_the_library_are_not_on_one_filesystem() {
+    let shm = std::path::Path::new("/dev/shm");
+    if !shm.is_dir() {
+        return;
+    }
+    let dir = a_library();
+    let inbox = shm.join(format!("leaf-inbox-serve-{}", std::process::id()));
+    let port = a_free_port();
+    let mut server = leaf(&dir)
+        .arg("serve")
+        .env("LEAF_INBOX", &inbox)
+        .env("LEAF_HOST", "127.0.0.1")
+        .env("LEAF_PORT", port.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(Instant::now() < deadline, "nothing ever listened");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    stop(&mut server);
+    let _ = std::fs::remove_dir_all(&inbox);
+}
