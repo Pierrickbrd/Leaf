@@ -110,7 +110,9 @@ void Settings::load()
     auto owned = std::make_unique<QKeychain::ReadPasswordJob>(service());
     owned->setAutoDelete(true);
     owned->setKey(Entry);
-    auto *job = owned.get();
+    // A view, not a handle: everything that changes the job goes through `owned`, and this
+    // is only ever read from — by `connect`, and by the callback asking how it went.
+    const auto *job = owned.get();
     QPointer<Settings> alive(this);
     connect(job, &QKeychain::Job::finished, job, [this, job, alive] {
         if (!alive) {

@@ -12,7 +12,7 @@ use leaf_server::boot::{
 };
 
 fn asked(args: &[&str]) -> Invocation {
-    Invocation::of(args.iter().map(|a| a.to_string()))
+    Invocation::of(args.iter().copied().map(String::from))
 }
 
 #[test]
