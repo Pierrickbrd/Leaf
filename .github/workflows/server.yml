@@ -4,6 +4,8 @@ name: server
 # rebuild the Rust. One workflow per block, and they never meet.
 on:
   push:
+    # main only, the way sonar already does it — see the desktop workflow for the count.
+    branches: [main]
     paths:
       - 'server/**'
       - 'contract/openapi.yaml'

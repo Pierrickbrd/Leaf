@@ -4,6 +4,12 @@ name: desktop
 # rebuild the client. One workflow per block, and they never meet.
 on:
   push:
+    # main only, the way sonar already does it. A working branch runs everything below
+    # through `pull_request` anyway, so subscribing to both ran every job twice on every
+    # push — four duplicated jobs across this workflow and the server's. The
+    # `pull_request` run is the one worth keeping: it builds the merge into main, where
+    # this one builds the branch alone and would go on passing after main moved under it.
+    branches: [main]
     paths:
       - 'desktop/**'
       # The client's types are hand-written from this file, so a change to it can break the
