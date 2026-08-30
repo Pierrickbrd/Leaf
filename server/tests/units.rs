@@ -282,3 +282,116 @@ fn a_table_full_of_addresses_nothing_is_held_against_empties_itself() {
         throttle.remembered()
     );
 }
+
+// -------------------------------------------------------------- folding a title
+
+#[test]
+fn what_separates_and_what_joins_inside_a_search_key() {
+    use leaf_server::store::text::search_key;
+    // A separator writes one space, and only between two things — never before the first.
+    assert_eq!(search_key("  ---  Bleach  ---  "), "bleach");
+    assert_eq!(search_key("Death & Strawberry"), "death strawberry");
+    // The ligatures NFD does not take apart, because they are letters and not a mark.
+    assert_eq!(search_key("Ørsted"), "orsted");
+    assert_eq!(search_key("Cœur Æther Straße"), "coeur aether strasse");
+}
+
+#[test]
+fn a_collection_with_no_whole_number_in_it_has_no_gaps_to_report() {
+    use leaf_server::store::text::gaps;
+    // 45.5 and 108.5 are chapters between volumes, not volumes. With nothing whole to count
+    // from, "which volumes are missing" has no answer worth inventing.
+    assert!(gaps(&[45.5, 108.5], None, &[]).is_empty());
+    assert!(gaps(&[], Some(4), &[]).is_empty());
+}
+
+#[test]
+fn a_word_nobody_typed_is_near_nothing() {
+    use leaf_server::store::text::{nearest, tolerance};
+    // A term short enough to allow no mistakes at all: anything that is not a prefix of a
+    // candidate is simply not that candidate.
+    assert_eq!(tolerance("ab"), 0);
+    assert_eq!(nearest("ab", ["abricot", "zz"].into_iter()), Some(0));
+    assert_eq!(nearest("qq", ["abricot", "zz"].into_iter()), None);
+}
+
+// -------------------------------------------------------------------- the keys
+
+#[test]
+fn a_secret_too_short_to_be_one_stops_the_server_rather_than_being_ignored() {
+    use leaf_server::api::keys::Keys;
+    // A short secret is not a key, it is a password somebody will guess. The throttle slows
+    // an attacker down; it does not make this safe.
+    let refused = Keys::parse(Some("phone:a:read")).unwrap_err().to_string();
+    assert!(refused.contains("characters"), "{refused}");
+}
+
+#[test]
+fn a_key_with_no_right_anyone_recognises_gets_the_read_one() {
+    use leaf_server::api::keys::Keys;
+    let keys = Keys::parse(Some("phone:1111111111111111:écrire,tout")).unwrap();
+    let key = keys.recognise(Some("1111111111111111")).expect("the key");
+    assert_eq!(key.permissions.len(), 1);
+}
+
+#[test]
+fn no_secret_at_all_is_not_a_key() {
+    use leaf_server::api::keys::Keys;
+    let keys = Keys::parse(Some("phone:1111111111111111:read")).unwrap();
+    assert!(keys.recognise(None).is_none());
+    assert!(keys.recognise(Some("   ")).is_none());
+    assert!(keys.recognise(Some("2222222222222222")).is_none());
+}
+
+// ------------------------------------------------------------------ the report
+
+#[test]
+fn a_report_with_more_than_sixteen_of_one_thing_says_how_many_more() {
+    use leaf_server::scan::report::ScanReport;
+    // A scan of a real library finds hundreds. A report nobody can read to the end is a
+    // report nobody reads at all.
+    let mut report = ScanReport::default();
+    report.errors = (1..=20).map(|n| format!("erreur {n}")).collect();
+    report.chapters_without_start_page = vec!["Tome 1 → Chapitre 1".into()];
+
+    let said = report.summary();
+    assert!(said.contains("Errors (20)"), "{said}");
+    assert!(said.contains("… and 4 more"), "{said}");
+    assert!(said.contains("Chapters without a start page: 1"), "{said}");
+}
+
+// ------------------------------------------------------------------- the cache
+
+#[test]
+fn a_cache_with_no_budget_or_no_folder_is_left_alone() {
+    use leaf_server::api::cache_budget::enforce;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a"), vec![0u8; 1024]).unwrap();
+
+    enforce(dir.path(), 0);
+    enforce(Path::new("/no/such/cache"), 4096);
+    // Nothing was asked for, so nothing was taken.
+    assert!(dir.path().join("a").is_file());
+}
+
+#[test]
+fn a_cache_already_under_its_ceiling_keeps_everything() {
+    use leaf_server::api::cache_budget::enforce;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a"), vec![0u8; 100]).unwrap();
+    enforce(dir.path(), 1024 * 1024);
+    assert!(dir.path().join("a").is_file());
+}
+
+#[test]
+fn a_cache_that_cannot_be_read_is_said_and_left(){
+    use leaf_server::api::cache_budget::enforce;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    std::fs::create_dir(&cache).unwrap();
+    read_only(&cache);
+    // It exists and cannot be walked: said out loud rather than treated as empty, which
+    // would look exactly like a cache that fits.
+    enforce(&cache, 1);
+    writable(&cache);
+}
