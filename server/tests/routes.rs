@@ -909,3 +909,41 @@ async fn a_search_can_be_held_to_one_series() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.is_array(), "{body}");
 }
+
+#[tokio::test]
+async fn a_volume_nobody_has_opened_answers_no_content_rather_than_an_empty_object() {
+    // Never opened. Not an error, and not `{"page":0}` either, which a client would draw as
+    // "you are on page one".
+    let (server, _, entry) = a_library().await;
+    let response = server
+        .send(
+            request("GET", &format!("/entries/{entry}/progress"), READ_ONLY)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.0, StatusCode::NO_CONTENT);
+    assert_eq!(response.1, serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn a_misspelled_search_inside_one_series_is_still_held_to_that_series() {
+    // The approximate fallback reads what it compares, so what it reads has to stay bounded
+    // by the shelf — and by the filter, when there is one.
+    let (server, _, _) = a_library().await;
+    let (status, body) = get(&server, "/search?q=Blaech&medium=manga").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.is_array(), "{body}");
+}
+
+#[tokio::test]
+async fn a_search_for_something_that_folds_to_nothing_finds_nothing() {
+    // "!!!" is punctuation: it folds away entirely, and a needle that is empty matches
+    // every title rather than none unless it is stopped here.
+    let (server, _, _) = a_library().await;
+    for q in ["!!!", "···", "%20"] {
+        let (status, body) = get(&server, &format!("/search?q={q}")).await;
+        assert_eq!(status, StatusCode::OK, "{q}: {body}");
+        assert_eq!(body.as_array().map(Vec::len), Some(0), "{q}: {body}");
+    }
+}

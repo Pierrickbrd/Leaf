@@ -512,3 +512,60 @@ fn a_search_index_of_the_old_shape_is_thrown_away_and_made_again() {
         "the old shape must be replaced, not kept"
     );
 }
+
+#[test]
+fn a_migration_that_fails_for_a_real_reason_stops_the_start() {
+    // Swallowing it is the danger: a migration that failed for a genuine reason looks
+    // exactly like one that had already run, and the server would come up on a half-migrated
+    // schema without a word.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.sqlite");
+    {
+        let db = Db::open(&path).unwrap();
+        db.write(|cx| {
+            // One entry, so the step that updates every one of them has something to touch.
+            cx.execute(
+                "INSERT INTO work (id, name, path) VALUES ('w','Essai','/w')",
+                [],
+            )?;
+            cx.execute(
+                "INSERT INTO edition (id, work_id, path, implicit) VALUES ('e','w','/w/e',1)",
+                [],
+            )?;
+            cx.execute(
+                "INSERT INTO entry (id, edition_id, type, file, size, modified_at, page_count)
+                 VALUES ('v1','e','VOLUME','/w/e/Tome 1.cbz',1,1700000000000,1)",
+                [],
+            )?;
+            cx.run(
+                "CREATE TRIGGER refuse BEFORE UPDATE ON entry
+                 BEGIN SELECT RAISE(ABORT, 'not on my watch'); END",
+            )?;
+            // Back to before the step that updates every entry.
+            cx.run("PRAGMA user_version = 3")?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    let said = match Db::open(&path) {
+        Ok(_) => panic!("a failing migration must stop the start"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(said.contains("migration 5 failed"), "{said}");
+    assert!(said.contains("not on my watch"), "{said}");
+}
+
+#[test]
+fn a_column_a_migration_adds_twice_is_not_a_failure() {
+    // The other half of the same rule: "already there" is what a re-run looks like, and it
+    // is the one error worth swallowing.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.sqlite");
+    {
+        let db = Db::open(&path).unwrap();
+        db.write(|cx| cx.run("PRAGMA user_version = 0")).unwrap();
+    }
+    // Every ALTER TABLE ADD COLUMN now meets a column that is already there.
+    Db::open(&path).expect("a second start must not be a failure");
+}

@@ -397,3 +397,107 @@ fn a_cache_that_cannot_be_read_is_said_and_left() {
     enforce(&cache, 1);
     writable(&cache);
 }
+
+// ------------------------------------------------------------ which chapter
+
+#[test]
+fn a_volume_with_one_marker_and_no_start_page_answers_that_marker() {
+    use leaf_server::api::dto::ChapterDto;
+    use leaf_server::api::progress::chapter_at_page;
+
+    let one = ChapterDto {
+        id: "c1".into(),
+        raw: "Chapitre 45.5".into(),
+        label: "Chapitre 45.5".into(),
+        number: Some(45.5),
+        title: None,
+        kind: "CHAPTER".into(),
+        position: 1,
+        start_page: None,
+        entry_id: "v1".into(),
+    };
+    // A standalone chapter entry is one marker with no start page: it is the answer, on
+    // every page of it. Treating the missing start page as zero used to answer "chapter 1"
+    // confidently and wrongly.
+    assert_eq!(
+        chapter_at_page(&[one.clone()], 0).map(|c| c.id),
+        Some("c1".into())
+    );
+    assert_eq!(chapter_at_page(&[one], 40).map(|c| c.id), Some("c1".into()));
+    assert!(chapter_at_page(&[], 0).is_none());
+}
+
+// -------------------------------------------------------- when a write cannot land
+
+#[test]
+fn a_write_that_cannot_be_renamed_into_place_leaves_nothing_beside_it() {
+    // The bytes are written beside and then renamed, because a rename within a directory is
+    // atomic. When the rename cannot happen the temporary must go with it, or the folder
+    // fills with half-written files nobody will ever look at.
+    use leaf_server::store::files::write_whole;
+    let dir = tempfile::tempdir().unwrap();
+    // The target is an existing, non-empty directory: writing beside it works, renaming a
+    // file over it cannot.
+    let occupied = dir.path().join("work.json");
+    std::fs::create_dir(&occupied).unwrap();
+    std::fs::write(occupied.join("inside"), b"x").unwrap();
+
+    assert!(write_whole(&occupied, b"{}").is_err());
+    let left: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(left, vec!["work.json".to_string()], "no .part left behind");
+}
+
+#[test]
+fn a_sidecar_that_cannot_be_rewritten_leaves_the_archive_as_it_was() {
+    // The whole archive is rewritten beside the original and swapped in. A failure halfway
+    // through must take the half-written copy with it and leave the volume untouched.
+    use leaf_server::archive::cbz_writer::replace_sidecar;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Tome 1.cbz");
+    std::fs::write(&path, b"not a zip at all").unwrap();
+
+    assert!(replace_sidecar(&path, "entry.json", b"{\"leaf\":1}").is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"not a zip at all");
+    let left: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert_eq!(
+        left,
+        vec!["Tome 1.cbz".to_string()],
+        "no temporary left behind"
+    );
+}
+
+#[test]
+fn an_inbox_on_another_filesystem_copies_instead_of_renaming() {
+    // Committing an import is a rename, instant and atomic. Across two volumes it becomes a
+    // multi-gigabyte copy — which is why the server warns about it at startup, and why it
+    // still has to work when somebody sets it up that way anyway.
+    use leaf_server::api::intake::move_or_copy;
+
+    let shm = std::path::Path::new("/dev/shm");
+    if !shm.is_dir() {
+        return; // no second filesystem to hand: the rename path is covered elsewhere
+    }
+    let source = shm.join(format!("leaf-test-{}.cbz", std::process::id()));
+    std::fs::write(&source, b"nine gigabytes, in spirit").unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("Tome 1.cbz");
+    move_or_copy(&source, &target).expect("across two volumes");
+
+    assert_eq!(
+        std::fs::read(&target).unwrap(),
+        b"nine gigabytes, in spirit"
+    );
+    assert!(
+        !source.exists(),
+        "the original goes, as a rename would have taken it"
+    );
+}
