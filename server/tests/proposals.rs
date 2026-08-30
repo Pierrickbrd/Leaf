@@ -281,3 +281,114 @@ fn a_staging_that_is_never_kept_clears_itself() {
     assert!(intake.waiting().unwrap().is_empty());
 }
 
+
+// -------------------------------------------------------------- filing the file
+
+use leaf_server::api::intake::{FileRequest, OnCollision};
+
+impl World {
+    /// Offer a file, then file it into `series`, saying what to do about a name clash.
+    fn file(
+        &self,
+        name: &str,
+        series: &str,
+        on_collision: Option<OnCollision>,
+    ) -> Result<leaf_server::api::intake::Filed, anyhow::Error> {
+        let said = self.offer(name, None);
+        self.intake().file(
+            &said.received,
+            &FileRequest {
+                series_id: series.to_string(),
+                replaces_entry_id: None,
+                on_collision,
+            },
+        )
+    }
+}
+
+#[test]
+fn a_name_already_in_the_series_is_refused_until_somebody_says_which_one_wins() {
+    // The one thing that must never happen quietly is a volume being written over. A name is
+    // not an identity, so the question goes back with what each of the two says about itself.
+    let world = World::new();
+    world.volume("Bleach", "Tome 1.cbz", "Bleach", 1.0);
+    world.scan();
+    let series: String = world
+        .db
+        .read(|cx| cx.query_one("SELECT id FROM edition", [], |r| r.get::<_, String>(0)))
+        .unwrap()
+        .unwrap();
+
+    let refused = world.file("Tome 1.cbz", &series, None).unwrap_err();
+    assert!(
+        refused.downcast_ref::<leaf_server::api::intake::Collision>().is_some(),
+        "{refused}"
+    );
+    // And nothing was written over.
+    assert!(world.library().join("Bleach/Tome 1.cbz").is_file());
+}
+
+#[test]
+fn told_to_keep_both_it_files_the_arriving_one_under_a_free_name() {
+    let world = World::new();
+    world.volume("Bleach", "Tome 1.cbz", "Bleach", 1.0);
+    world.scan();
+    let series: String = world
+        .db
+        .read(|cx| cx.query_one("SELECT id FROM edition", [], |r| r.get::<_, String>(0)))
+        .unwrap()
+        .unwrap();
+
+    world
+        .file("Tome 1.cbz", &series, Some(OnCollision::Rename))
+        .expect("filed beside the other");
+    assert!(world.library().join("Bleach/Tome 1.cbz").is_file());
+    assert!(world.library().join("Bleach/Tome 1 (2).cbz").is_file());
+}
+
+#[test]
+fn told_to_replace_it_writes_over_the_one_that_was_there() {
+    let world = World::new();
+    world.volume("Bleach", "Tome 1.cbz", "Bleach", 1.0);
+    world.scan();
+    let series: String = world
+        .db
+        .read(|cx| cx.query_one("SELECT id FROM edition", [], |r| r.get::<_, String>(0)))
+        .unwrap()
+        .unwrap();
+    let before = std::fs::metadata(world.library().join("Bleach/Tome 1.cbz"))
+        .unwrap()
+        .len();
+
+    world
+        .file("Tome 1.cbz", &series, Some(OnCollision::Replace))
+        .expect("filed over the other");
+    // One file, not two.
+    assert!(!world.library().join("Bleach/Tome 1 (2).cbz").exists());
+    let after = std::fs::metadata(world.library().join("Bleach/Tome 1.cbz"))
+        .unwrap()
+        .len();
+    assert!(after > 0 && before > 0);
+}
+
+#[test]
+fn an_id_that_is_not_one_is_refused_before_anything_is_looked_up() {
+    // The id names a folder under the inbox. Anything that is not one of ours is refused by
+    // shape rather than by whether the folder happens to exist.
+    let world = World::new();
+    for id in ["../etc", "rcv_../..", "nothing", "rcv_a b"] {
+        let refused = world
+            .intake()
+            .file(
+                id,
+                &FileRequest {
+                    series_id: "e".into(),
+                    replaces_entry_id: None,
+                    on_collision: None,
+                },
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("invalid id") || refused.contains("unknown"), "{id}: {refused}");
+    }
+}

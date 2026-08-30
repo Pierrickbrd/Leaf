@@ -753,3 +753,88 @@ async fn a_key_with_an_accent_in_it_is_recognised() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+// ------------------------------------------------------------- the last corners
+
+#[tokio::test]
+async fn a_name_already_taken_comes_back_as_a_conflict_with_both_sides_of_it() {
+    let (server, series, _) = a_library().await;
+    let (_, offered) = server
+        .send(
+            request("POST", "/entries", IMPORTER)
+                .header("Content-Type", "application/octet-stream")
+                .header("X-Leaf-Name", "Tome 1.cbz")
+                .body(Body::from(archive_bytes(None)))
+                .unwrap(),
+        )
+        .await;
+    let id = offered["received"].as_str().expect("an id").to_string();
+
+    let (status, body) = server
+        .send(
+            request("POST", &format!("/intake/{id}/file"), IMPORTER)
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::json!({"seriesId": series}).to_string()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    // The question put to a person is about the volumes, not about the file names.
+    assert!(body.is_object(), "{body}");
+}
+
+#[tokio::test]
+async fn forgetting_progress_that_was_never_recorded_says_so_without_a_body() {
+    let (server, _, entry) = a_library().await;
+    let (status, _) = server
+        .send(
+            request("DELETE", &format!("/entries/{entry}/progress"), IMPORTER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn asking_for_a_page_at_a_width_prepares_the_next_one() {
+    // The reader is about to turn to it, and preparing it after the request is what makes
+    // the second page arrive as fast as the first.
+    let (server, _, entry) = a_library().await;
+    let (status, _) = get(&server, &format!("/entries/{entry}/pages/0?width=400")).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_second_scan_asked_for_while_one_is_running_does_not_start_another() {
+    // One router, so the runner a scan is registered with survives between the calls.
+    let (server, _, _) = a_library().await;
+    let state = server.state();
+    let mut answers = Vec::new();
+    for _ in 0..4 {
+        let (status, _) = server
+            .send_to(
+                state.clone(),
+                request("POST", "/scan", IMPORTER)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await;
+        answers.push(status);
+    }
+    // Said rather than swallowed: a client that asked twice is told the second one did not
+    // start, instead of being left to believe it did.
+    assert!(answers.iter().any(StatusCode::is_success), "{answers:?}");
+    assert!(
+        answers.contains(&StatusCode::CONFLICT),
+        "a scan asked for while one runs must say so: {answers:?}"
+    );
+    let (status, body) = server
+        .send_to(
+            state,
+            request("GET", "/scan", READ_ONLY).body(Body::empty()).unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
