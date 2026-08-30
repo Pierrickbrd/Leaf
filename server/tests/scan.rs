@@ -1131,3 +1131,98 @@ fn an_arc_repeated_in_every_volume_becomes_one_range_of_volumes() {
         Some("VOLUME".to_string())
     );
 }
+
+#[test]
+fn a_standalone_chapter_file_is_described_by_its_own_name() {
+    // Its file name is all there is: no entry.json, and the whole file is the chapter.
+    let library = Library::new();
+    let bleach = library.folder("Bleach");
+    archive(&bleach.join("Tome 1.cbz"), 3, None);
+    archive(&bleach.join("Chapitre 45.5 - Un bonus.cbz"), 2, None);
+    library.scan();
+
+    assert_eq!(
+        library.one::<String>("SELECT type FROM entry WHERE file LIKE '%45.5%'"),
+        Some("CHAPTER".to_string())
+    );
+    // It occupies a number in the edition either way, which is what lets a 45.5 read
+    // between 45 and 46.
+    let labels = library.all("SELECT label FROM chapter ORDER BY position");
+    assert!(labels.iter().any(|l| l.contains("45.5")), "{labels:?}");
+}
+
+#[test]
+fn a_chapter_that_says_nothing_at_all_is_skipped_and_said_out_loud() {
+    // No label, no title, no number: there is nothing to draw and nothing to order it by,
+    // so it is dropped rather than shown as a blank row.
+    let library = Library::new();
+    archive(
+        &library.folder("Bleach").join("Tome 1.cbz"),
+        3,
+        Some((
+            "entry.json",
+            r#"{"leaf":1,"work":"Bleach","number":1,"chapters":[{},{"number":2,"title":"Deux"}]}"#,
+        )),
+    );
+    let report = library.scan();
+
+    assert_eq!(library.count("chapter"), 1);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|line| line.contains("no label, title or number")),
+        "{:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn a_chapter_with_no_raw_gets_one_composed_from_what_it_does_have() {
+    // `raw` is what the file said; when nothing said anything, the label and the title are
+    // put back together the way a reader would have written them.
+    let library = Library::new();
+    library.write(
+        "Bleach/edition.json",
+        r#"{"leaf":1,"chapterLabel":"Chapitre {n:000}"}"#,
+    );
+    archive(
+        &library.folder("Bleach").join("Tome 1.cbz"),
+        3,
+        Some((
+            "entry.json",
+            r#"{"leaf":1,"work":"Bleach","number":1,"chapters":[{"number":7,"title":"Ennui"}]}"#,
+        )),
+    );
+    library.scan();
+
+    assert_eq!(
+        library.one::<String>("SELECT raw FROM chapter"),
+        Some("Chapitre 007 : Ennui".to_string())
+    );
+}
+
+#[test]
+fn two_pages_of_one_name_inside_a_volume_reach_the_report() {
+    let library = Library::new();
+    let path = library.folder("Bleach").join("Tome 1.cbz");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    let options = zip::write::SimpleFileOptions::default();
+    for folder in ["Chapitre 1", "Chapitre 2"] {
+        zip.start_file::<_, ()>(format!("{folder}/001.jpg"), options)
+            .unwrap();
+        zip.write_all(&jpeg(100, 140)).unwrap();
+    }
+    zip.finish().unwrap();
+
+    let report = library.scan();
+    assert!(
+        report
+            .duplicate_page_names
+            .iter()
+            .any(|line| line.contains("001.jpg")),
+        "{:?}",
+        report.duplicate_page_names
+    );
+}

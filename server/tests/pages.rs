@@ -472,3 +472,78 @@ fn a_page_being_cached_is_never_read_half_written() {
          a year of cache-control behind it"
     );
 }
+
+#[test]
+fn the_shelf_covers_are_prepared_behind_the_reader() {
+    // Sequential and slow on purpose: the library is already browsable, the tiles fill in
+    // behind you, and nothing a reader asks for is ever queued behind a shelf.
+    let f = Fixture::new();
+    let pages = Arc::new(f.pages());
+
+    // Never at a guessed width: a width nobody requests is a cache entry nobody reads. With
+    // none seen yet there is nothing to prepare, and the sweep is a no-op.
+    pages.warm_covers();
+    assert_eq!(f.cache_files(), 0);
+
+    // One request teaches it a width, and then the sweep has something to do.
+    pages.series_cover("e", Some(300)).unwrap().expect("a cover");
+    let after_one = f.cache_files();
+    pages.warm_covers();
+
+    // A deadline rather than a count of naps: what is waited on is a real decode, resize
+    // and encode, on a machine that may be busy with other things.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while f.cache_files() < after_one {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the shelf covers were never prepared"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(pages.series_cover("e", Some(300)).unwrap().is_some());
+}
+
+#[test]
+fn a_page_whose_bytes_no_codec_reads_comes_back_as_it_is() {
+    // A codec we cannot read is not a reason to fail: the original is always right, it is
+    // only bigger than it needed to be.
+    let dir = tempfile::tempdir().expect("a directory");
+    let cbz = dir.path().join("Tome 1.cbz");
+    let file = std::fs::File::create(&cbz).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    zip.start_file::<_, ()>("000.jpg", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(b"\xff\xd8\xff not a jpeg past the first three bytes")
+        .unwrap();
+    zip.finish().unwrap();
+
+    let db = Db::open(&dir.path().join("index.sqlite")).unwrap();
+    db.write(|cx| {
+        cx.execute("INSERT INTO work (id, name, path) VALUES ('w','Essai','/w')", [])?;
+        cx.execute(
+            "INSERT INTO edition (id, work_id, path, implicit) VALUES ('e','w','/w/e',1)",
+            [],
+        )?;
+        cx.execute(
+            "INSERT INTO entry (id, edition_id, type, file, size, modified_at, added_at,
+                                volume_number, sort_key, page_count)
+             VALUES ('v1','e','VOLUME',?1,1,1700000000000,1,1.0,1.0,1)",
+            [cbz.to_string_lossy().to_string()],
+        )?;
+        cx.execute(
+            "INSERT INTO page (entry_id, number, entry_name, media_type, width, height, size)
+             VALUES ('v1', 0, '000.jpg', 'image/jpeg', 1200, 1700, 1000)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let pages = Pages::new(Arc::new(db), dir.path().join("cache"), 85, 64 * 1024 * 1024);
+    pages.prepare();
+    let served = pages.page("v1", 0, Some(200)).unwrap().expect("a page");
+    assert!(
+        served.bytes.starts_with(b"\xff\xd8\xff"),
+        "the original bytes, untouched"
+    );
+}
