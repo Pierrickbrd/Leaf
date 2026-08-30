@@ -1721,3 +1721,107 @@ fn what_is_waiting_in_an_inbox_that_is_not_there_is_nothing() {
     );
     assert!(bulk.waiting().unwrap().is_empty());
 }
+
+#[test]
+fn a_file_that_cannot_be_read_to_check_its_checksum_is_dropped_like_a_wrong_one() {
+    use leaf_server::api::bulk_import::{ImportRequest, ManifestFile, Scope};
+
+    // A checksum that is sent and never compared is worse than none, because it reads like
+    // a guarantee. When the comparison itself cannot happen, the bytes are no more trusted
+    // than bytes known to be wrong.
+    let (dir, bulk) = a_bulk();
+    let opened = bulk
+        .open(&ImportRequest {
+            root: "Bleach".into(),
+            scope: Scope::Addition,
+            files: vec![ManifestFile {
+                path: "Tome 1.cbz".into(),
+                size: 2,
+                checksum: Some("0".repeat(64)),
+            }],
+        })
+        .expect("opened");
+
+    let target = bulk
+        .writing_at(&opened.id, "Tome 1.cbz", 0, 1_000_000)
+        .expect("a target");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, b"pk").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+    }
+
+    let result = bulk.commit(&opened.id).expect("committed");
+    assert_eq!(result.corrupt, vec!["Tome 1.cbz".to_string()], "{result:?}");
+    assert_eq!(result.installed, 0);
+    let _ = std::fs::remove_file(&target);
+    let _ = dir;
+}
+
+#[test]
+fn a_manifest_path_with_a_dot_in_the_middle_is_the_same_path_without_it() {
+    use leaf_server::api::bulk_import::{ImportRequest, ManifestFile, Scope};
+
+    let (_dir, bulk) = a_bulk();
+    let opened = bulk
+        .open(&ImportRequest {
+            root: "Bleach".into(),
+            scope: Scope::Addition,
+            files: vec![ManifestFile {
+                path: "Extras/./Bonus.cbz".into(),
+                size: 2,
+                checksum: None,
+            }],
+        })
+        .expect("opened");
+
+    let target = bulk
+        .writing_at(&opened.id, "Extras/./Bonus.cbz", 0, 1_000_000)
+        .expect("a target");
+    assert!(target.ends_with("Extras/Bonus.cbz"), "{}", target.display());
+}
+
+#[test]
+fn a_folder_under_the_inbox_that_is_not_an_import_is_walked_past() {
+    let (dir, bulk) = a_bulk();
+    std::fs::create_dir_all(dir.path().join("inbox/quelque-chose-d-autre")).unwrap();
+    std::fs::write(dir.path().join("inbox/un-fichier"), b"x").unwrap();
+    assert!(bulk.waiting().unwrap().is_empty());
+}
+
+#[test]
+fn a_file_already_home_is_counted_as_done_in_what_is_waiting() {
+    use leaf_server::api::bulk_import::{ImportRequest, ManifestFile, Scope};
+
+    // A commit that installed part of a manifest keeps the session for the rest, so the
+    // listing meets files that are already there. They are done, not missing.
+    let (dir, bulk) = a_bulk();
+    let library = dir.path().join("library/Bleach");
+    std::fs::create_dir_all(&library).unwrap();
+    std::fs::write(library.join("Tome 1.cbz"), b"pk").unwrap();
+
+    bulk.open(&ImportRequest {
+        root: "Bleach".into(),
+        scope: Scope::Addition,
+        files: vec![
+            ManifestFile {
+                path: "Tome 1.cbz".into(),
+                size: 2,
+                checksum: None,
+            },
+            ManifestFile {
+                path: "Tome 2.cbz".into(),
+                size: 2,
+                checksum: None,
+            },
+        ],
+    })
+    .expect("opened");
+
+    let waiting = bulk.waiting().unwrap();
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0].of, 2);
+    assert_eq!(waiting[0].complete, 1, "the one already home is done");
+}

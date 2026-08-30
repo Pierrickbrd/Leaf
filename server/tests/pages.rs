@@ -755,3 +755,43 @@ fn a_cover_file_that_cannot_be_read_is_nothing_rather_than_an_error() {
         std::fs::set_permissions(&beside, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 }
+
+#[test]
+fn a_shelf_tile_that_cannot_be_made_is_said_and_the_sweep_carries_on() {
+    // One edition whose file has gone, one whose file is there: the sweep must not stop at
+    // the first, or a single broken volume costs the whole shelf its tiles.
+    let f = Fixture::new();
+    f.db.write(|cx| {
+        cx.execute(
+            "INSERT INTO edition (id, work_id, path, implicit) VALUES ('e2','w','/w/e2',1)",
+            [],
+        )?;
+        cx.execute(
+            "INSERT INTO entry (id, edition_id, type, file, size, modified_at, added_at,
+                                volume_number, sort_key, page_count)
+             VALUES ('v2','e2','VOLUME','/no/such/Tome 1.cbz',1,1700000000000,1,1.0,1.0,1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let pages = Arc::new(f.pages());
+    pages
+        .series_cover("e", Some(300))
+        .unwrap()
+        .expect("a cover");
+    std::fs::remove_dir_all(f.dir.path().join("cache")).unwrap();
+    pages.prepare();
+    pages.warm_covers();
+
+    // The good one still gets made, whichever order they come in.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while f.cache_files() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the sweep stopped at the broken one"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
