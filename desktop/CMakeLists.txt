@@ -38,8 +38,16 @@ qt_add_executable(leaf-desktop
     src/Server.cpp
     src/Api.h
     src/Api.cpp
+    src/Theme.h
+    src/Theme.cpp
     src/Words.h
     src/Words.cpp
+    src/Fonts.h
+    src/Fonts.cpp
+    src/Widths.h
+    src/Widths.cpp
+    src/Navigation.h
+    src/Navigation.cpp
 )
 
 # Every QML file is addressed under the module by its path below `qml/`, so the tree on disk
@@ -48,6 +56,7 @@ qt_add_executable(leaf-desktop
 # repository leaking into every import.
 set(LEAF_QML
     qml/Main.qml
+    qml/FocusRing.qml
 )
 foreach(qml_file IN LISTS LEAF_QML)
     string(REGEX REPLACE "^qml/" "" alias "${qml_file}")
@@ -66,6 +75,19 @@ qt_add_qml_module(leaf-desktop
 
 # The QML type registration Qt generates includes the headers by their bare name.
 target_include_directories(leaf-desktop PRIVATE src)
+
+# The fonts live at the root of the repository, shared, and are not copied here: duplicating
+# font binaries to respect a build boundary would be paying dearly for a principle.
+set(LEAF_FONTS
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/fonts/BarlowCondensed-SemiBold.ttf
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/fonts/BarlowCondensed-Bold.ttf
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/fonts/Inter_18pt-Regular.ttf
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/fonts/Inter_18pt-Medium.ttf
+)
+qt_add_resources(leaf-desktop "leaf-fonts"
+    PREFIX "/fonts"
+    BASE "${CMAKE_CURRENT_SOURCE_DIR}/../assets/fonts"
+    FILES ${LEAF_FONTS})
 
 target_link_libraries(leaf-desktop PRIVATE
     Qt6::Core
@@ -101,11 +123,37 @@ target_link_libraries(reads-the-contract PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME reads-the-contract COMMAND reads-the-contract)
 
 qt_add_executable(writes-french tests/writes_french.cpp
-    src/Api.h src/Api.cpp src/Words.h src/Words.cpp)
+    src/Api.h src/Words.h src/Words.cpp)
 target_include_directories(writes-french PRIVATE src)
-target_link_libraries(writes-french PRIVATE Qt6::Core Qt6::Test)
+target_link_libraries(writes-french PRIVATE Qt6::Core Qt6::Qml Qt6::Test)
 add_test(NAME writes-french COMMAND writes-french)
 
+qt_add_executable(keeps-its-contrast tests/keeps_its_contrast.cpp
+    src/Theme.h src/Theme.cpp src/Fonts.h src/Fonts.cpp)
+target_include_directories(keeps-its-contrast PRIVATE src)
+target_link_libraries(keeps-its-contrast PRIVATE Qt6::Core Qt6::Gui Qt6::Qml Qt6::Test)
+add_test(NAME keeps-its-contrast COMMAND keeps-its-contrast)
+
+qt_add_executable(embeds-its-fonts tests/embeds_its_fonts.cpp src/Fonts.h src/Fonts.cpp)
+target_include_directories(embeds-its-fonts PRIVATE src)
+target_link_libraries(embeds-its-fonts PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
+qt_add_resources(embeds-its-fonts "test-fonts"
+    PREFIX "/fonts"
+    BASE "${CMAKE_CURRENT_SOURCE_DIR}/../assets/fonts"
+    FILES ${LEAF_FONTS})
+add_test(NAME embeds-its-fonts COMMAND embeds-its-fonts)
+
+qt_add_executable(knows-its-widths tests/knows_its_widths.cpp
+    src/Widths.h src/Widths.cpp src/Words.h src/Words.cpp src/Api.h)
+target_include_directories(knows-its-widths PRIVATE src)
+target_link_libraries(knows-its-widths PRIVATE Qt6::Core Qt6::Qml Qt6::Test)
+add_test(NAME knows-its-widths COMMAND knows-its-widths)
+
+qt_add_executable(finds-its-way-back tests/finds_its_way_back.cpp
+    src/Navigation.h src/Navigation.cpp src/Words.h src/Words.cpp src/Api.h)
+target_include_directories(finds-its-way-back PRIVATE src)
+target_link_libraries(finds-its-way-back PRIVATE Qt6::Core Qt6::Qml Qt6::Test)
+add_test(NAME finds-its-way-back COMMAND finds-its-way-back)
 
 qt_add_executable(against-the-real-server EXCLUDE_FROM_ALL
     tests/against_real.cpp
@@ -122,7 +170,7 @@ add_test(NAME knows-the-contract
 add_test(NAME bytes-stay-utf8
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/bytes_stay_utf8.py)
 
-set_tests_properties(keeps-the-key talks-to-the-server
+set_tests_properties(keeps-the-key talks-to-the-server keeps-its-contrast embeds-its-fonts
     PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 install(TARGETS leaf-desktop
