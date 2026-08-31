@@ -119,9 +119,45 @@ private slots:
             every << Words::medium(Api::Medium(i));
         for (int i = 0; i <= int(Api::ReadStatus::Read); ++i)
             every << Words::readStatus(Api::ReadStatus(i));
+        for (int i = 0; i <= int(Navigation::Destination::Settings); ++i)
+            every << Words::destination(Navigation::Destination(i));
+        for (int i = 0; i <= int(Widths::Band::Wide); ++i)
+            every << Words::band(Widths::Band(i));
 
         for (const QString &one : std::as_const(every))
             QVERIFY2(!one.contains(u'\''), qPrintable(u"straight apostrophe in: "_s + one));
+    }
+
+    /// The placeholder card's own name for each screen — the five strings first written
+    /// straight into `Main.qml`, where nothing tests them. `Navigation::label` returns exactly
+    /// this, so this is what a QML change to that property would actually be checked against.
+    void each_destination_names_itself()
+    {
+        QCOMPARE(Words::destination(Navigation::Destination::Shelf), u"Étagère"_s);
+        QCOMPARE(Words::destination(Navigation::Destination::Series), u"Série"_s);
+        QCOMPARE(Words::destination(Navigation::Destination::Reader), u"Lecteur"_s);
+        QCOMPARE(Words::destination(Navigation::Destination::Health), u"Santé"_s);
+        QCOMPARE(Words::destination(Navigation::Destination::Settings), u"Réglages"_s);
+    }
+
+    /// The card's second line — one label per band, the same three `Widths::bandFor` names.
+    void each_band_is_named_in_french()
+    {
+        QCOMPARE(Words::band(Widths::Band::Wide), u"Large"_s);
+        QCOMPARE(Words::band(Widths::Band::Medium), u"Moyenne"_s);
+        QCOMPARE(Words::band(Widths::Band::Narrow), u"Étroite"_s);
+    }
+
+    /// « Étagère » and « Étroite » are the two of these eight new words that open on an
+    /// accented capital. Nothing else here guards that: a straight "E" compiles, links, and
+    /// is wrong to nobody but a reader looking at the actual screen. Pinned to the code point
+    /// itself, not to another literal, since a copy-pasted "E" would match a wrong literal
+    /// just as happily as the right one.
+    void the_capitals_that_take_an_accent_keep_it()
+    {
+        QCOMPARE(Words::destination(Navigation::Destination::Shelf).at(0).unicode(),
+                 char16_t(0x00C9)); // É
+        QCOMPARE(Words::band(Widths::Band::Narrow).at(0).unicode(), char16_t(0x00C9)); // É
     }
 };
 

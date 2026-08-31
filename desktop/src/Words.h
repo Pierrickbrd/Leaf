@@ -14,6 +14,8 @@
 // never "Bd" — which is why this cannot be a `toUpper` on the first letter and nothing else.
 
 #include "Api.h"
+#include "Navigation.h"
+#include "Widths.h"
 
 #include <QString>
 
@@ -48,5 +50,14 @@ QString where(Api::UpNext::Kind kind, std::optional<double> number, std::optiona
 /// « aucun résultat dans manga · 3 sans les filtres » — the sentence under the field when a
 /// search finds nothing behind a lit pill. Without it the screen just looks broken.
 QString nothingHere(const QStringList &pills, int withoutThem);
+
+/// The screen's own name — « Étagère », « Série », « Lecteur », « Santé », « Réglages » —
+/// which is otherwise the one string this client would put in a `.qml` file and never test.
+QString destination(Navigation::Destination value);
+
+/// The band a window is in, said the way a person reads it — « Large », « Moyenne »,
+/// « Étroite » — for the same reason `destination` exists: so nothing switches on the enum
+/// from inside QML.
+QString band(Widths::Band value);
 
 } // namespace Words

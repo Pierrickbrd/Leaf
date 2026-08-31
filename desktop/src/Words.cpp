@@ -108,4 +108,38 @@ QString nothingHere(const QStringList &pills, int withoutThem)
         .arg(withoutThem);
 }
 
+QString destination(Navigation::Destination value)
+{
+    using enum Navigation::Destination;
+
+    switch (value) {
+    case Shelf:
+        return u"Étagère"_s;
+    case Series:
+        return u"Série"_s;
+    case Reader:
+        return u"Lecteur"_s;
+    case Health:
+        return u"Santé"_s;
+    case Settings:
+        return u"Réglages"_s;
+    }
+    return {};
+}
+
+QString band(Widths::Band value)
+{
+    using enum Widths::Band;
+
+    switch (value) {
+    case Wide:
+        return u"Large"_s;
+    case Medium:
+        return u"Moyenne"_s;
+    case Narrow:
+        return u"Étroite"_s;
+    }
+    return {};
+}
+
 } // namespace Words
