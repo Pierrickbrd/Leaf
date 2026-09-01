@@ -8,6 +8,9 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
+mod common;
+use common::writable;
+
 use leaf_server::api::bulk_import::{
     BulkImport, CleanupRequest, ImportRequest, ManifestFile, ReceiveError, Scope,
 };
@@ -1707,7 +1710,7 @@ fn a_target_that_cannot_be_read_sweeps_to_nothing_rather_than_failing() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
         let result = bulk.commit(&opened.id).expect("committed");
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        writable(&target);
         assert!(result.orphans.is_empty(), "{result:?}");
     }
 }

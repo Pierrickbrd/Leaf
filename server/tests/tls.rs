@@ -73,13 +73,25 @@ async fn the_key_is_readable_by_its_owner_and_nobody_else() {
 #[tokio::test]
 #[cfg(unix)]
 async fn a_key_left_open_by_something_else_is_closed_when_it_is_rewritten() {
+    use leaf_server::net::tls::reachable_by_others;
     use std::os::unix::fs::PermissionsExt;
 
     let dir = tempfile::tempdir().unwrap();
     let certificate = dir.path().join("leaf.crt");
     let key = dir.path().join("leaf.key");
     std::fs::write(&key, b"whatever was here before").unwrap();
-    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    // Not staged: the write above already leaves the key reachable by others under the
+    // umask this runs with (0664 under the usual 0002). But the mode a write lands at is the
+    // umask's choice, not this test's, and a restrictive umask (0077) would create the key
+    // already closed — the assertion below would then pass with `close_private` never
+    // having done anything, a test that is green for the wrong reason. Asserted rather than
+    // assumed, so that machine fails loudly instead.
+    let before = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
+    assert!(
+        reachable_by_others(before),
+        "the key must start reachable by others or this test proves nothing: {before:04o}"
+    );
 
     Tls::of(&certificate, &key, &["leaf.local".to_string()])
         .await
@@ -99,6 +111,7 @@ async fn a_key_left_open_by_something_else_is_closed_when_it_is_rewritten() {
 #[tokio::test]
 #[cfg(unix)]
 async fn a_key_left_open_beside_a_certificate_that_exists_is_closed_on_the_way_in() {
+    use leaf_server::net::tls::reachable_by_others;
     use std::os::unix::fs::PermissionsExt;
 
     let dir = tempfile::tempdir().unwrap();
@@ -108,9 +121,22 @@ async fn a_key_left_open_beside_a_certificate_that_exists_is_closed_on_the_way_i
         .await
         .expect("generating");
 
-    // What an earlier version left, or a restore, or a copy by hand. Both files are now
-    // exactly where the server expects them, so nothing below generates anything.
-    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+    // What an earlier version left, or a restore, or a copy by hand: the same key, at a mode
+    // this server did not choose. Not staged with a chmod: `write_private` already wrote
+    // this file once at its own fixed 0600, and a chmod on top would pass even under a
+    // umask that makes the write below land closed on its own, proving nothing about
+    // `close_private`. Removed and rewritten instead — `std::fs::write` on a path that
+    // already exists keeps that path's mode, the same "the open's mode is honoured only on
+    // creation" rule this module's own doc comment names, so only a fresh creation is
+    // actually subject to the umask.
+    let bytes = std::fs::read(&key).unwrap();
+    std::fs::remove_file(&key).unwrap();
+    std::fs::write(&key, &bytes).unwrap();
+    let before = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
+    assert!(
+        reachable_by_others(before),
+        "the key must start reachable by others or this test proves nothing: {before:04o}"
+    );
 
     let again = Tls::of(&certificate, &key, &["leaf.local".to_string()])
         .await
