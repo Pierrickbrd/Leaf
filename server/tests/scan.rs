@@ -7,6 +7,9 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
+mod common;
+use common::writable;
+
 use leaf_server::scan::scanner::Scanner;
 use leaf_server::store::Db;
 
@@ -444,7 +447,7 @@ fn an_unreadable_shelf_is_reported_and_the_rest_still_scans() {
     // Naruto becomes unreadable — a permission that changed, a mount that went away.
     std::fs::set_permissions(&naruto, std::fs::Permissions::from_mode(0o000)).unwrap();
     let report = library.scan();
-    std::fs::set_permissions(&naruto, std::fs::Permissions::from_mode(0o755)).unwrap();
+    writable(&naruto);
 
     // Bleach was still read...
     assert!(library
@@ -1411,9 +1414,9 @@ fn a_folder_that_is_there_and_shut_is_not_the_same_as_one_that_is_gone() {
             .rescan_work(&bleach)
             .unwrap_err()
             .to_string();
-        std::fs::set_permissions(&bleach, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(refused.contains("cannot be listed"), "{refused}");
     }
+    writable(&bleach);
     // And the work is still there: nothing was pruned on the strength of a closed door.
     assert_eq!(library.count("work"), 1);
 }

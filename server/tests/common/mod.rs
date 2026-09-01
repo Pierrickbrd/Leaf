@@ -152,6 +152,44 @@ pub fn json_body(value: serde_json::Value) -> Body {
     Body::from(serde_json::to_vec(&value).unwrap())
 }
 
+/// Closes `path` to writers, for a test that needs a folder or a file it cannot write to.
+///
+/// `Permissions::set_readonly` is the portable API: it is documented to clear the write bit
+/// for every class (`chmod a-w`) rather than replace the mode outright, so this cannot hand
+/// back a mode looser than the one already there — the mistake a literal `from_mode` risks
+/// the moment the starting mode is not the one somebody assumed.
+pub fn read_only(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+}
+
+/// The inverse of [`read_only`], and the only reason it exists: a directory closed by
+/// `read_only` is a directory its `TempDir` cannot walk to delete on drop, and this is what
+/// a test calls once its assertions are done so cleanup does not fail silently and leave the
+/// mess for the next run.
+///
+/// Not `set_readonly(false)`: clippy refuses that call outright, because on Unix it grants
+/// the write bit to every class rather than to the owner alone — a directory `read_only`
+/// left at 0555 would come back at 0777, world-writable, which is the exact shape of finding
+/// this whole rewrite exists to stop creating. Restoring the owner's three bits is both
+/// enough for this process to walk and delete a tree it owns and, for a directory `read_only`
+/// closed, an exact inverse: 0o555 or 0o000 both come back able to be read, written and
+/// entered by the owner and touched by nobody else.
+pub fn writable(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        let mode = permissions.mode() | 0o700;
+        permissions.set_mode(mode);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+}
+
 /// A work whose edition has a folder and a file of its own — the other half of the model,
 /// where the edition is declared rather than implied by the volumes sitting beside work.json.
 pub fn a_named_edition(server: &Server) {

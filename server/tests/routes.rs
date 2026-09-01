@@ -9,7 +9,9 @@ use axum::body::Body;
 use axum::http::StatusCode;
 
 mod common;
-use common::{a_named_edition, a_volume, archive_bytes, request, Server, IMPORTER, READ_ONLY};
+use common::{
+    a_named_edition, a_volume, archive_bytes, request, writable, Server, IMPORTER, READ_ONLY,
+};
 
 async fn get(server: &Server, uri: &str) -> (StatusCode, serde_json::Value) {
     server
@@ -1334,7 +1336,7 @@ async fn an_index_that_cannot_be_read_answers_internal_error_and_says_no_more() 
                     .unwrap(),
             )
             .await;
-        std::fs::set_permissions(&index, std::fs::Permissions::from_mode(0o644)).unwrap();
+        writable(&index);
 
         if status == StatusCode::INTERNAL_SERVER_ERROR {
             assert_eq!(body["error"], "internal error");

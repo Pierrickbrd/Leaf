@@ -4,6 +4,9 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
+mod common;
+use common::{read_only, writable};
+
 use leaf_server::api::pages::Pages;
 use leaf_server::store::Db;
 
@@ -944,11 +947,7 @@ fn a_cache_that_cannot_be_made_is_said_and_the_pages_still_serve() {
     let dir = tempfile::tempdir().expect("a directory");
     let closed = dir.path().join("closed");
     std::fs::create_dir(&closed).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o555)).unwrap();
-    }
+    read_only(&closed);
 
     let f = Fixture::new();
     let pages = Pages::new(
@@ -961,11 +960,7 @@ fn a_cache_that_cannot_be_made_is_said_and_the_pages_still_serve() {
     let served = pages.page("v1", 0, Some(300)).unwrap().expect("a page");
     assert!(!served.bytes.is_empty());
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    writable(&closed);
 }
 
 #[test]
@@ -1016,11 +1011,9 @@ fn a_cover_file_that_cannot_be_read_is_nothing_rather_than_an_error() {
 
     let pages = f.pages();
     assert!(pages.cover("v1", Some(300)).unwrap().is_none());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&beside, std::fs::Permissions::from_mode(0o644)).unwrap();
-    }
+    // Put back readable: this fixture's directory outlives the test, and a file left at 0
+    // would still be sitting there, wrongly, for whatever runs in it next.
+    writable(&beside);
 }
 
 #[test]

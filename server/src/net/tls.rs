@@ -126,6 +126,20 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Whether `mode` lets anyone but the file's owner reach it — a read, write or execute bit
+/// set in the group or the other triad.
+///
+/// Named out of [`close_private`] because what that function asks is that nobody *but* the
+/// owner can reach the key — not that the mode is the one this server happens to write.
+/// `mode != 0o600` failed a key deliberately hardened to `0400`: it printed the sentence
+/// below about a file nothing could read, told an operator to re-issue a key and re-pin every
+/// client over it, and then chmod'ed the file to 0600 — which on that key *adds* the write
+/// bit. The bits that matter are the other six, which is what this checks and nothing else.
+#[cfg(unix)]
+pub fn reachable_by_others(mode: u32) -> bool {
+    mode & 0o077 != 0
+}
+
 /// The same rule as [`write_private`], for the key this server did not write.
 ///
 /// Loud, because it is not a repair anybody asked for: a key that was readable by the rest
@@ -140,13 +154,7 @@ fn close_private(path: &Path) -> Result<()> {
         return Ok(());
     };
     let mode = facts.permissions().mode() & 0o777;
-    // What is asked is that nobody *but* the owner can reach it — not that the mode is the
-    // one this server happens to write. `mode != 0o600` failed a key deliberately hardened
-    // to `0400`: it printed the sentence below about a file nothing could read, told an
-    // operator to re-issue a key and re-pin every client over it, and then chmod'ed the file
-    // to 0600 — which on that key *adds* the write bit. The bits that matter are the other
-    // six.
-    if mode & 0o077 == 0 {
+    if !reachable_by_others(mode) {
         return Ok(());
     }
     tracing::warn!(

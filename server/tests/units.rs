@@ -6,6 +6,9 @@
 
 use std::path::Path;
 
+mod common;
+use common::{read_only, writable};
+
 use leaf_server::api::dto::SeriesSort;
 use leaf_server::archive::images::media_type;
 use leaf_server::metadata::label::{compose, parse};
@@ -166,22 +169,6 @@ fn a_write_that_cannot_start_leaves_nothing_behind() {
 
     writable(&closed);
     assert_eq!(std::fs::read_dir(&closed).unwrap().count(), 0);
-}
-
-fn read_only(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o555)).unwrap();
-    }
-}
-
-fn writable(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
 }
 
 // ------------------------------------------------------------------ the throttle
@@ -729,10 +716,36 @@ fn a_cache_folder_that_cannot_be_walked_is_said_and_left_alone() {
         // It exists and cannot be read: said out loud rather than treated as empty, which
         // would look exactly like a cache that already fits.
         enforce(&cache, 1);
-        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+    // However the folder was shut, put back to where `TempDir` can delete it.
+    writable(&cache);
     assert!(
         cache.join("a").is_file(),
         "nothing may be deleted on a guess"
     );
+}
+
+// -------------------------------------------------------------- the private key's mode
+
+#[test]
+#[cfg(unix)]
+fn only_0600_and_0400_shut_a_private_key_to_everyone_but_its_owner() {
+    use leaf_server::net::tls::reachable_by_others;
+
+    // A mode a key is actually written or hardened to (0600, the server's own; 0400, an
+    // operator's stricter one) against every neighbour that leaves one bit of group or
+    // other read, write or execute set — the cases `close_private` was rewritten once to
+    // tell apart, see its comment on `reachable_by_others`.
+    for closed in [0o600, 0o400] {
+        assert!(
+            !reachable_by_others(closed),
+            "{closed:04o} must shut out everyone but the owner"
+        );
+    }
+    for open in [0o644, 0o640, 0o604, 0o660, 0o606, 0o777] {
+        assert!(
+            reachable_by_others(open),
+            "{open:04o} must be reachable by others"
+        );
+    }
 }
