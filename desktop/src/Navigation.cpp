@@ -11,14 +11,16 @@ namespace {
 /// enumeration, an empty string for one that needs nothing, the field name otherwise.
 std::optional<QString> required(Navigation::Destination where)
 {
+    using enum Navigation::Destination;
+
     switch (where) {
-    case Navigation::Destination::Series:
+    case Series:
         return u"series"_s;
-    case Navigation::Destination::Reader:
+    case Reader:
         return u"entry"_s;
-    case Navigation::Destination::Shelf:
-    case Navigation::Destination::Health:
-    case Navigation::Destination::Settings:
+    case Shelf:
+    case Health:
+    case Settings:
         return QString();
     }
     // Not a default case: the switch above is exhaustive, so adding a destination breaks the

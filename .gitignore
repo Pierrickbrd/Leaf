@@ -26,6 +26,10 @@ __pycache__/
 # Qt et CMake — chaque bloc construit avec son outil.
 desktop/build/
 
+# The analyser's own instrumented build, rebuilt by one `cmake`/`ctest`/`gcovr` sequence — not
+# part of the tree any more than `desktop/build/` above is.
+desktop/coverage/
+
 # Working documents kept beside the code and never published: planning, the
 # decisions behind it, assistant instructions, deployment notes written for one
 # particular machine. The rule is here before the files are, so that no

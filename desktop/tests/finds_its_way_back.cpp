@@ -108,6 +108,15 @@ private slots:
         QCOMPARE(navigation.parameters(), parameters);
         QCOMPARE(navigation.canGoBack(), canGoBack);
     }
+
+    /// `with` arrives from QML, where a number is a `QVariant(double)`, not a `QString` — the
+    /// requirement is only ever "does this convert to something non-empty," never a type check.
+    void a_required_field_given_as_a_number_still_satisfies_it()
+    {
+        Navigation navigation;
+        QVERIFY(navigation.open(Navigation::Destination::Series, {{u"series"_s, 42}}));
+        QCOMPARE(navigation.parameters().value(u"series"_s).toString(), u"42"_s);
+    }
 };
 
 QTEST_APPLESS_MAIN(FindsItsWayBack)

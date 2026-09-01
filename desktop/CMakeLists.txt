@@ -32,6 +32,8 @@ qt_standard_project_setup(REQUIRES 6.4)
 
 qt_add_executable(leaf-desktop
     src/main.cpp
+    src/Boot.h
+    src/Boot.cpp
     src/Settings.h
     src/Settings.cpp
     src/Server.h
@@ -155,6 +157,42 @@ target_include_directories(finds-its-way-back PRIVATE src)
 target_link_libraries(finds-its-way-back PRIVATE Qt6::Core Qt6::Qml Qt6::Test)
 add_test(NAME finds-its-way-back COMMAND finds-its-way-back)
 
+# The only test that loads real QML through a real engine. The eight tests on Navigation and
+# the six on Widths all reach the C++ directly; `opens.sh` proves a window comes up at all —
+# but nothing between them proved that `import Leaf` in a `.qml` file actually resolves to
+# these same objects. This target runs `Boot::run` exactly as `main` does, headless, and reads
+# the singletons back afterwards to prove the seam holds both ways: the window picked up
+# `Widths.window` from its own width, and `Theme` and `Navigation` answer as the C++ says they
+# should.
+qt_add_executable(crosses-the-seam
+    tests/crosses_the_seam.cpp
+    src/Boot.h src/Boot.cpp
+    src/Fonts.h src/Fonts.cpp
+    src/Theme.h src/Theme.cpp
+    src/Words.h src/Words.cpp
+    src/Widths.h src/Widths.cpp
+    src/Navigation.h src/Navigation.cpp
+    src/Api.h
+)
+target_include_directories(crosses-the-seam PRIVATE src)
+qt_add_qml_module(crosses-the-seam
+    URI Leaf
+    VERSION 1.0
+    RESOURCE_PREFIX "/qt/qml"
+    # Its own directory: the default is named from the URI alone, and `leaf-desktop` already
+    # claims "Leaf" there. Same URI, same QML — this is the second build of one module, not a
+    # second module, so only the output path needs to differ.
+    OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/crosses-the-seam-qml/Leaf"
+    QML_FILES ${LEAF_QML}
+)
+qt_add_resources(crosses-the-seam "leaf-fonts-for-the-seam-test"
+    PREFIX "/fonts"
+    BASE "${CMAKE_CURRENT_SOURCE_DIR}/../assets/fonts"
+    FILES ${LEAF_FONTS})
+target_link_libraries(crosses-the-seam PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Quick Qt6::QuickControls2 Qt6::Qml Qt6::Test)
+add_test(NAME crosses-the-seam COMMAND crosses-the-seam)
+
 qt_add_executable(against-the-real-server EXCLUDE_FROM_ALL
     tests/against_real.cpp
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp)
@@ -171,6 +209,7 @@ add_test(NAME bytes-stay-utf8
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/bytes_stay_utf8.py)
 
 set_tests_properties(keeps-the-key talks-to-the-server keeps-its-contrast embeds-its-fonts
+    crosses-the-seam
     PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 install(TARGETS leaf-desktop
