@@ -35,6 +35,6 @@ namespace Boot {
 /// Neither failure throws or aborts: a window that opens with the wrong fonts or the wrong
 /// palette still opens, and nothing else would notice, so each is a warning rather than a
 /// silent fallback.
-void run(QQmlApplicationEngine &engine, QGuiApplication &application);
+void run(QQmlApplicationEngine &engine, const QGuiApplication &application);
 
 } // namespace Boot
