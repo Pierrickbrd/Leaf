@@ -12,7 +12,7 @@ using Qt::Literals::StringLiterals::operator""_s;
 
 namespace Boot {
 
-void run(QQmlApplicationEngine &engine, QGuiApplication &application)
+void run(QQmlApplicationEngine &engine, const QGuiApplication &application)
 {
     // Before any QML: a family the database does not know resolves to a fallback, and the
     // window would come up in Noto Sans with nothing said about it.
