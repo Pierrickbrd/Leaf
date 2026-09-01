@@ -11,11 +11,13 @@ QString Widths::bandLabel() const
 
 Widths::Band Widths::bandFor(int width)
 {
+    using enum Widths::Band;
+
     if (width >= 1100)
-        return Band::Wide;
+        return Wide;
     if (width >= 600)
-        return Band::Medium;
-    return Band::Narrow;
+        return Medium;
+    return Narrow;
 }
 
 void Widths::setWindow(int width)

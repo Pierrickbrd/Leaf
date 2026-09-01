@@ -159,6 +159,36 @@ private slots:
                  char16_t(0x00C9)); // É
         QCOMPARE(Words::band(Widths::Band::Narrow).at(0).unicode(), char16_t(0x00C9)); // É
     }
+
+    /// Each of `readStatus`, `medium`, `destination` and `band` switches exhaustively over its
+    /// own enum; the trailing `return {}` after every one of them is what an out-of-range
+    /// value — the shape an untrusted `int` cast from QML would take — reaches instead of
+    /// undefined behaviour. `Navigation::required()` is guarded the same way, for the same
+    /// reason: a switch with no `default:` is deliberate, and this is what the compiler-visible
+    /// gap after it is for.
+    void a_value_outside_its_enumeration_returns_nothing_rather_than_crashing()
+    {
+        QVERIFY(Words::readStatus(static_cast<Api::ReadStatus>(99)).isEmpty());
+        QVERIFY(Words::medium(static_cast<Api::Medium>(99)).isEmpty());
+        QVERIFY(Words::destination(static_cast<Navigation::Destination>(99)).isEmpty());
+        QVERIFY(Words::band(static_cast<Widths::Band>(99)).isEmpty());
+    }
+
+    /// A page number with nothing behind it — `pageCount` at zero — is left out exactly like
+    /// no page at all, not printed as "Page 3/0".
+    void a_page_with_no_page_count_is_left_out_too()
+    {
+        QCOMPARE(Words::where(Api::UpNext::Kind::Volume, 5.0, 3, 0, std::nullopt), u"Tome 5"_s);
+    }
+
+    /// A chapter recorded as an empty string is the same fact as no chapter at all — the field
+    /// was present in the JSON and empty, not absent, and the two must read the same.
+    void a_blank_chapter_is_left_out_like_a_missing_one()
+    {
+        QCOMPARE(Words::where(Api::UpNext::Kind::Volume, 12.0, 47, 190,
+                              std::optional<QString>(QString())),
+                 u"Tome 12 · Page 47/190"_s);
+    }
 };
 
 QTEST_APPLESS_MAIN(WritesFrench)

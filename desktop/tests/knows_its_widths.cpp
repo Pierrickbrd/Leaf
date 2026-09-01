@@ -9,6 +9,8 @@
 #include <QSignalSpy>
 #include <QTest>
 
+using Qt::Literals::StringLiterals::operator""_s;
+
 class KnowsItsWidths : public QObject
 {
     Q_OBJECT
@@ -67,6 +69,19 @@ private slots:
         QCOMPARE(said.count(), 1);
         widths.setWindow(800);
         QCOMPARE(said.count(), 2);
+    }
+
+    /// `bandLabel` is read only from QML today — the card's second line in `Main.qml` — so
+    /// nothing here had called it before.
+    void the_band_label_is_the_bands_own_name_in_french()
+    {
+        Widths widths;
+        widths.setWindow(1200);
+        QCOMPARE(widths.bandLabel(), u"Large"_s);
+        widths.setWindow(800);
+        QCOMPARE(widths.bandLabel(), u"Moyenne"_s);
+        widths.setWindow(200);
+        QCOMPARE(widths.bandLabel(), u"Étroite"_s);
     }
 };
 

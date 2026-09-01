@@ -155,6 +155,27 @@ private slots:
         theme.setDark(true);
         QCOMPARE(theme.focusGap(), 3);
     }
+
+    /// The three radii nothing else in this suite calls — a rounded rectangle either matches
+    /// the measured figure or it does not, and nobody would notice one drawn with the wrong
+    /// one until it sat next to a real card.
+    void the_three_radii_are_the_ones_measured()
+    {
+        Theme theme;
+        QCOMPARE(theme.cardRadius(), 18);
+        QCOMPARE(theme.coverRadius(), 12);
+        QCOMPARE(theme.buttonRadius(), 12);
+    }
+
+    /// `displayFamily`/`textFamily` exist so QML reaches the two families through `Theme`
+    /// rather than a second singleton — see the header comment. What is worth asserting is
+    /// that they still agree with `Fonts`, not a family name copied a second time in this file.
+    void the_two_families_still_agree_with_fonts()
+    {
+        Theme theme;
+        QCOMPARE(theme.displayFamily(), Fonts::display());
+        QCOMPARE(theme.textFamily(), Fonts::text());
+    }
 };
 
 QTEST_MAIN(KeepsItsContrast)

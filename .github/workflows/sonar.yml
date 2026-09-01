@@ -92,14 +92,27 @@ jobs:
       # of the report's worth of slack in it is a tripwire the report can collapse through:
       # the point is to notice the measurement breaking, and a broken one rarely comes back
       # a little smaller.
+      #
+      # `--exclude-throw-branches` is a correction to the measurement, not a relaxation of it:
+      # gcov counts the compiler's exception-unwinding edges as branches, and this suite cannot
+      # take one without making an allocation fail. Measured on this tree before this flag:
+      #
+      #     as CI counts today             branches 52.8%  (589 / 1116)
+      #     with --exclude-throw-branches  branches 74.5%  (589 /  791)
+      #
+      # 325 of 1116 counted branches — 29% — existed only because an exception could unwind.
+      # Line coverage does not move: gcov marks a line covered once anything on it ran, so
+      # dropping unwind edges from the branch denominator changes what a branch percentage
+      # says without changing what a line percentage says.
       - name: coverage, C++, written down
         working-directory: desktop/coverage
         run: |
           gcovr --root "$GITHUB_WORKSPACE" \
                 --filter "$GITHUB_WORKSPACE/desktop/src/" \
                 --gcov-ignore-errors=no_working_dir_found \
+                --exclude-throw-branches \
                 --sonarqube "$GITHUB_WORKSPACE/coverage-cpp.xml" \
-                --print-summary --fail-under-line 85 .
+                --print-summary --fail-under-line 87 .
 
       - uses: SonarSource/sonarqube-scan-action@v8.2.1
         env:
