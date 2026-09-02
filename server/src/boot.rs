@@ -18,11 +18,20 @@ use crate::api::keys::Keys;
 /// What the command line asked for.
 ///
 /// ```text
-/// leaf scan  [roots…] [--no-dimensions]   analyse and exit, with a report
-/// leaf serve [roots…]                     scan, then listen
+/// leaf-server scan  [roots…] [--no-dimensions]   analyse and exit, with a report
+/// leaf-server serve [roots…] [--no-dimensions]   scan, then listen
 /// ```
 ///
 /// `serve` is the default, because a server started with no argument should serve.
+///
+/// Built only through [`Invocation::of`], which returns an [`Outcome`] rather than this
+/// directly — a command or an option it does not recognise has to reach `main` as something
+/// it can fail on, and `--help` is not a run at all. Before that existed, an unrecognised
+/// argument was simply not there: `leaf-server --help` served the library, and
+/// `leaf-server scan --help` scanned it, both times because the first argument became
+/// `command` unchecked and every other `--flag` but one was dropped by a filter that never
+/// said what it had dropped. Deployed for the first time on 2 September 2026, that swallowed
+/// the same question twice in a row.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Invocation {
     pub command: String,
@@ -32,23 +41,84 @@ pub struct Invocation {
     pub all_dimensions: bool,
 }
 
+/// The three ways a command line can be answered: run something, print usage and stop, or
+/// refuse. Only the last of those is an error — `Invocation::of` returns `Ok` for `--help`
+/// too, because being asked how to run this is not a mistake.
+#[derive(Debug)]
+pub enum Outcome {
+    /// Proceed with this invocation.
+    Run(Invocation),
+    /// `--help` was asked. Usage to print on stdout before exiting 0.
+    Usage(&'static str),
+}
+
+/// The commands `Invocation::of` understands. Named once so the refusal that lists them and
+/// the check that accepts them cannot drift apart.
+const COMMANDS: [&str; 2] = ["scan", "serve"];
+
+/// Printed for `--help`, and nowhere else — so the options this claims to accept and the
+/// ones `Invocation::of` actually parses cannot quietly disagree.
+const USAGE: &str = "\
+Usage: leaf-server [scan|serve] [roots...] [--no-dimensions]
+
+  scan             analyse the roots and exit, with a report
+  serve            scan, then listen (the default when no command is given)
+
+  roots            paths to walk; the configured library when none are given
+  --no-dimensions  skip measuring each page's width and height
+  --help           print this message and exit";
+
 impl Invocation {
-    pub fn of<I, S>(args: I) -> Self
+    /// Parses a command line into something `main` can run, print, or fail on.
+    ///
+    /// Pure on purpose: everything here is a `String` in and a value out, with no
+    /// environment and no process to touch, which is the whole reason this lives in `boot`
+    /// rather than in `main` — a test can hand it any argument list and read back exactly
+    /// what a real invocation would have done with it.
+    pub fn of<I, S>(args: I) -> Result<Outcome>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
         let args: Vec<String> = args.into_iter().map(Into::into).collect();
-        Invocation {
-            command: args.first().cloned().unwrap_or_else(|| "serve".into()),
-            requested: args
-                .iter()
-                .skip(1)
-                .filter(|a| !a.starts_with("--"))
-                .map(PathBuf::from)
-                .collect(),
-            all_dimensions: !args.iter().any(|a| a == "--no-dimensions"),
+
+        // Checked before the command itself, and over the whole line rather than one
+        // position: `leaf-server --help` and `leaf-server scan --help` both used to run
+        // instead of answering, the first because `--help` was never compared against
+        // anything and the second because it sat after the command word, where nothing
+        // looked for it at all.
+        if args.iter().any(|a| a == "--help") {
+            return Ok(Outcome::Usage(USAGE));
         }
+
+        let command = args.first().cloned().unwrap_or_else(|| "serve".into());
+        if !COMMANDS.contains(&command.as_str()) {
+            anyhow::bail!(
+                "'{command}' is not a leaf-server command; the ones that exist are {}.",
+                COMMANDS.join(" and ")
+            );
+        }
+
+        let mut requested = Vec::new();
+        let mut all_dimensions = true;
+        for a in args.iter().skip(1) {
+            if a == "--no-dimensions" {
+                all_dimensions = false;
+            } else if a.starts_with("--") {
+                // Not filed as a root and not silently dropped either: the old filter kept
+                // only `--no-dimensions` and let every other `--flag` — a typo among them —
+                // pass through as though it meant nothing.
+                anyhow::bail!("'{a}' is not a recognised option; run --help for usage.");
+            } else {
+                requested.push(PathBuf::from(a));
+            }
+        }
+
+        Ok(Outcome::Run(Invocation {
+            command,
+            requested,
+            all_dimensions,
+        }))
     }
 
     pub fn is_scan(&self) -> bool {

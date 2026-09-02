@@ -9,10 +9,22 @@ use std::path::{Path, PathBuf};
 use leaf_server::api::keys::Keys;
 use leaf_server::boot::{
     cache_ceiling, jpeg_quality, refuse_an_open_library, split_volumes, tls_hosts, Invocation,
+    Outcome,
 };
 
+/// Parses a line that is expected to run rather than to print usage or be refused.
 fn asked(args: &[&str]) -> Invocation {
+    match Invocation::of(args.iter().copied().map(String::from)).unwrap() {
+        Outcome::Run(it) => it,
+        Outcome::Usage(usage) => panic!("expected a run, got usage:\n{usage}"),
+    }
+}
+
+/// The message a refused line was refused with.
+fn refused(args: &[&str]) -> String {
     Invocation::of(args.iter().copied().map(String::from))
+        .unwrap_err()
+        .to_string()
 }
 
 #[test]
@@ -70,7 +82,57 @@ fn the_dimensions_are_measured_unless_the_option_says_not_to() {
 
 #[test]
 fn an_unknown_option_is_not_a_root_either() {
-    assert!(asked(&["scan", "--quickly"]).requested.is_empty());
+    // `leaf-server scan --quickly` used to run with `requested` silently empty, as though
+    // nothing had been asked for — the option was dropped, not read as a root, but nothing
+    // said it had been dropped either. It is refused now, so an unread option can no longer
+    // be mistaken for "no roots were named."
+    let message = refused(&["scan", "--quickly"]);
+    assert!(message.contains("--quickly"), "{message}");
+}
+
+#[test]
+fn an_unknown_command_is_refused_rather_than_served() {
+    // `leaf-server sacn` used to serve, silently, because any first argument became
+    // `command` and only `"scan"` was ever compared against it.
+    let message = refused(&["sacn"]);
+    assert!(message.contains("sacn"), "{message}");
+    assert!(message.contains("scan"), "{message}");
+    assert!(message.contains("serve"), "{message}");
+}
+
+#[test]
+fn an_unknown_option_is_refused_and_named() {
+    let message = refused(&["scan", "--upside-down"]);
+    assert!(message.contains("--upside-down"), "{message}");
+}
+
+#[test]
+fn a_near_miss_option_is_refused_rather_than_silently_ignored() {
+    // The exact typo the old filter swallowed: it kept only the literal string
+    // "--no-dimensions", so "--no-dimension" — singular — passed through as though it meant
+    // nothing, and dimensions were measured anyway with nothing said about why.
+    let message = refused(&["scan", "--no-dimension"]);
+    assert!(message.contains("--no-dimension"), "{message}");
+}
+
+#[test]
+fn help_is_a_question_not_a_mistake() {
+    // Asked for the same way whether it comes before or after the command word — both
+    // `leaf-server --help` and `leaf-server scan --help` served or scanned instead of
+    // answering, in the deployment that found this.
+    for args in [
+        vec!["--help"],
+        vec!["scan", "--help"],
+        vec!["serve", "--help"],
+    ] {
+        match Invocation::of(args.iter().copied().map(String::from)).unwrap() {
+            Outcome::Usage(usage) => {
+                assert!(usage.contains("scan"), "{usage}");
+                assert!(usage.contains("serve"), "{usage}");
+            }
+            Outcome::Run(_) => panic!("--help must not run anything, args: {args:?}"),
+        }
+    }
 }
 
 #[test]

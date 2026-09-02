@@ -101,6 +101,40 @@ fn no_dimensions_is_read_as_an_option_and_never_as_a_root() {
 }
 
 #[test]
+fn help_prints_usage_and_exits_cleanly_rather_than_starting_a_server() {
+    // `leaf-server --help` used to start a server: the first argument became `command`
+    // unchecked, matched neither known command, and fell through to `serve` with a warning
+    // about the open library nobody had asked to open. Found in a real deployment on
+    // 2 September 2026, twice in a row.
+    let dir = a_library();
+    let done = leaf(&dir).arg("--help").output().unwrap();
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    let said = String::from_utf8_lossy(&done.stdout);
+    assert!(said.contains("Usage"), "{said}");
+    assert!(said.contains("scan"), "{said}");
+    assert!(said.contains("serve"), "{said}");
+    assert!(!dir.path().join("index.sqlite").exists());
+}
+
+#[test]
+fn an_unrecognised_argument_is_refused_rather_than_run() {
+    // `leaf-server sacn` used to serve the configured library, silently, because any first
+    // argument became the command and only `"scan"` was ever compared against it. A typo in
+    // a systemd unit's `ExecStart` must not quietly do something other than what the file
+    // says.
+    let dir = a_library();
+    let done = leaf(&dir).arg("sacn").output().unwrap();
+    assert!(!done.status.success());
+    let complained = String::from_utf8_lossy(&done.stderr);
+    assert!(complained.contains("sacn"), "{complained}");
+    assert!(!dir.path().join("index.sqlite").exists());
+}
+
+#[test]
 fn binding_past_the_loopback_with_no_key_is_refused_at_startup() {
     let dir = a_library();
     let done = leaf(&dir)
