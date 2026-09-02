@@ -15,6 +15,7 @@ use leaf_server::api::pages::Pages;
 use leaf_server::api::routes::{router, AppState};
 use leaf_server::boot::{
     cache_ceiling, jpeg_quality, refuse_an_open_library, split_volumes, tls_hosts, Invocation,
+    Outcome,
 };
 use leaf_server::config::Config;
 use leaf_server::net::tls::Tls;
@@ -30,7 +31,17 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    let asked = Invocation::of(std::env::args().skip(1));
+    // `--help` and an argument this cannot read are both settled here, before `Config`
+    // touches the environment or `Db::open` touches the disk — a question about how to run
+    // this, or a typo in how it was asked to, must not start anything on its way to an
+    // answer.
+    let asked = match Invocation::of(std::env::args().skip(1))? {
+        Outcome::Usage(usage) => {
+            println!("{usage}");
+            return Ok(());
+        }
+        Outcome::Run(it) => it,
+    };
     let config = Config::from_env();
     let keys = Keys::parse(std::env::var("LEAF_KEYS").ok().as_deref())?;
     refuse_an_open_library(&config.host, &keys)?;
