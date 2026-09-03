@@ -31,6 +31,20 @@ void Theme::followSystem()
 {
     // Lightness, not a colour comparison: a desktop may tint its window colour, and what
     // decides a theme is whether it is dark, not which hue it is dark in.
+    //
+    // What this depends on, because no test can see it: Qt only puts the desktop's colours
+    // in this palette when a platform theme plugin is loaded — `qt6-gtk-platformtheme` on
+    // Ubuntu. Without one, Qt answers with its own default, which is light, and the client
+    // would come up light on a dark desktop with nothing to say about it. Both tests here
+    // set the palette themselves, so neither would notice.
+    //
+    // Measured on the machine this is built for, 4 September 2026, GNOME set to prefer-dark:
+    // the window colour comes back #323232, lightness 50 against the 128 threshold, and the
+    // dark theme is chosen. The plugin is installed and this works.
+    //
+    // Qt 6.5 answers the question directly with QStyleHints::colorScheme, which reads the
+    // XDG appearance portal and needs no plugin. When this moves past 6.4, prefer it — that
+    // is the fix, not a D-Bus reader written here for a case this machine does not have.
     setDark(QGuiApplication::palette().color(QPalette::Window).lightness() < 128);
 }
 
