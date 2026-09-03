@@ -241,17 +241,17 @@ Read<Series> series(const QJsonObject &from)
     one.workId = field.text(u"workId"_s);
     one.name = field.text(u"name"_s);
     one.work = field.text(u"work"_s);
-    one.entryCount = field.whole(u"entryCount"_s);
-    one.chapterCount = field.whole(u"chapterCount"_s);
-    one.arcCount = field.whole(u"arcCount"_s);
+    one.counts.entries = field.whole(u"entryCount"_s);
+    one.counts.chapters = field.whole(u"chapterCount"_s);
+    one.counts.arcs = field.whole(u"arcCount"_s);
     if (field.broken())
         return refused<Series>(QStringLiteral("series"), field.trouble());
 
     one.universe = field.maybeText(u"universe"_s);
     one.edition = field.maybeText(u"edition"_s);
-    one.author = field.maybeText(u"author"_s);
-    one.authors = field.words(u"authors"_s);
-    one.artists = field.words(u"artists"_s);
+    one.credits.author = field.maybeText(u"author"_s);
+    one.credits.authors = field.words(u"authors"_s);
+    one.credits.artists = field.words(u"artists"_s);
     one.publisher = field.maybeText(u"publisher"_s);
     one.collection = field.maybeText(u"collection"_s);
     one.language = field.maybeText(u"language"_s);

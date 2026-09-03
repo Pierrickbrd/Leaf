@@ -43,22 +43,13 @@ struct Holding {
     std::optional<qint64> lastAddedAt;
 };
 
-/// A row of the shelf. "Series" is the API's word; in the model it is an EDITION.
-struct Series {
-    // Required by the contract.
-    QString id;
-    QString workId;
-    QString name;
-    QString work;
-    int entryCount = 0;
-    int chapterCount = 0;
-    int arcCount = 0;
-
-    // Everything the contract allows to be absent. `std::optional` rather than an empty
-    // string, because "no author recorded" and "author recorded as nothing" are different
-    // facts and only one of them is worth showing.
-    std::optional<QString> universe;
-    std::optional<QString> edition;
+/// Who made the work — not how much of it this library holds, which is `Holding`'s concern.
+/// `author` is the contract's original singular; `authors` and `artists` replaced it once a
+/// series needed several writers or a separate illustrator named. Grouping the old word with
+/// its replacements, instead of leaving the three scattered through `Series`'s field list,
+/// makes the relationship between them — one screen still reading the retired word — visible
+/// where before it was only implicit in three names that happened to sit near each other.
+struct Credits {
     /// The former singular, kept for a shelf that has not been taught `authors` yet. A new
     /// screen reads `authors`; this stays for one that has not been rebuilt.
     std::optional<QString> author;
@@ -66,6 +57,33 @@ struct Series {
     QList<QString> authors;
     /// The illustrators — penciller, inker and cover artist in one.
     QList<QString> artists;
+};
+
+/// How large a series is, counted three ways the shelf shows separately: the entries
+/// (volumes or one-shots), the chapters inside them, and the arcs that group chapters. Three
+/// answers to one question — how much is there — grouped for the same reason as `Credits`,
+/// so they read as one fact instead of three numbers that happen to be declared in sequence.
+struct Counts {
+    int entries = 0;
+    int chapters = 0;
+    int arcs = 0;
+};
+
+/// A row of the shelf. "Series" is the API's word; in the model it is an EDITION.
+struct Series {
+    // Required by the contract.
+    QString id;
+    QString workId;
+    QString name;
+    QString work;
+    Counts counts;
+
+    // Everything the contract allows to be absent. `std::optional` rather than an empty
+    // string, because "no author recorded" and "author recorded as nothing" are different
+    // facts and only one of them is worth showing.
+    std::optional<QString> universe;
+    std::optional<QString> edition;
+    Credits credits;
     std::optional<QString> publisher;
     /// The publisher's imprint, a sibling of `publisher` rather than a replacement for it.
     std::optional<QString> collection;

@@ -153,10 +153,10 @@ class ReadsThePreparedFile(unittest.TestCase):
         self.assertEqual(split_names(""), [])
 
     def test_black_and_white_yes_is_colour_false(self):
-        self.assertEqual(colour_of("Yes"), False)
+        self.assertFalse(colour_of("Yes"))
 
     def test_black_and_white_no_is_colour_true(self):
-        self.assertEqual(colour_of("No"), True)
+        self.assertTrue(colour_of("No"))
 
     def test_black_and_white_unknown_or_absent_says_nothing(self):
         self.assertIsNone(colour_of("Unknown"))
@@ -223,7 +223,7 @@ class WritesTheWorkAndEdition(unittest.TestCase):
     def test_black_and_white_yes_becomes_colour_false_on_the_edition(self):
         source = dict(TOMES, BlackAndWhite="Yes")
         edition = edition_of(source, "Black Edition", "completed")
-        self.assertEqual(edition["colour"], False)
+        self.assertFalse(edition["colour"])
 
     def test_no_black_and_white_field_leaves_colour_out(self):
         edition = edition_of(TOMES, "Black Edition", "completed")
