@@ -85,13 +85,13 @@ private slots:
 
         QCOMPARE(one.id, u"ed-1"_s);
         QCOMPARE(one.name, u"Assassination Classroom"_s);
-        QCOMPARE(one.entryCount, 21);
-        QCOMPARE(one.chapterCount, 180);
+        QCOMPARE(one.counts.entries, 21);
+        QCOMPARE(one.counts.chapters, 180);
         QCOMPARE(one.holding.ownedVolumes, 21);
         QCOMPARE(one.declaredVolumes, std::optional<int>(21));
-        QCOMPARE(one.author, std::optional<QString>(u"Yūsei Matsui"_s));
-        QCOMPARE(one.authors, QList<QString>({u"Yūsei Matsui"_s}));
-        QCOMPARE(one.artists, QList<QString>({u"Yūsei Matsui"_s}));
+        QCOMPARE(one.credits.author, std::optional<QString>(u"Yūsei Matsui"_s));
+        QCOMPARE(one.credits.authors, QList<QString>({u"Yūsei Matsui"_s}));
+        QCOMPARE(one.credits.artists, QList<QString>({u"Yūsei Matsui"_s}));
         QCOMPARE(one.medium, std::optional<Api::Medium>(Api::Medium::Manga));
         QCOMPARE(one.readingDirection,
                  std::optional<Api::ReadingDirection>(Api::ReadingDirection::RightToLeft));
