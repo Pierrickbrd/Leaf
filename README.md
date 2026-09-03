@@ -50,8 +50,8 @@ Four files carry the metadata, each holding only what belongs to its level:
 | File | Where | Holds |
 |---|---|---|
 | `universe.json` | universe folder | a name, and optionally reading orders |
-| `work.json` | work folder | title, author, status, reading direction, genres |
-| `edition.json` | edition folder | publisher, volume count, language, chapter label pattern, arcs |
+| `work.json` | work folder | title, authors, artists, status, reading direction, genres, tags, age rating |
+| `edition.json` | edition folder | publisher, collection, volume count, language, chapter label pattern, arcs, colour |
 | `entry.json` | **inside the CBZ** | number, title, chapters, their start pages and the volume they came from |
 
 `entry.json` lives inside the archive so a volume downloaded for offline reading carries its
@@ -71,9 +71,9 @@ and overriding it should not mean editing the archive.
 `ComicInfo.xml` is read as a fallback, so the server runs on an untouched library.
 
 Search is an FTS5 index inside the same database — ranked by relevance, accents folded in
-the tokenizer, and half-typed words already match. It searches titles, authors, genres and
-summaries; hits are series, entries and chapters, never a universe or a work, which are
-reached through the editions that carry them.
+the tokenizer, and half-typed words already match. It searches titles, authors, artists,
+genres, tags and summaries; hits are series, entries and chapters, never a universe or a
+work, which are reached through the editions that carry them.
 
 ## Running it
 

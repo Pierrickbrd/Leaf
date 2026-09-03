@@ -26,15 +26,23 @@ pub struct SeriesPatch {
     pub name: Option<String>,
     pub title: Option<String>,
     pub medium: Option<String>,
+    /// The former singular. `authors` is what a client should send; this stays readable for
+    /// one that has not been rebuilt.
     pub author: Option<String>,
+    pub authors: Option<Vec<String>>,
+    pub artists: Option<Vec<String>>,
     pub status: Option<String>,
     pub reading_direction: Option<String>,
     pub genres: Option<Vec<String>>,
+    pub tags: Option<Vec<String>>,
+    pub age_rating: Option<String>,
     pub summary: Option<String>,
     pub publisher: Option<String>,
+    pub collection: Option<String>,
     pub volume_count: Option<i32>,
     pub format: Option<String>,
     pub language: Option<String>,
+    pub colour: Option<bool>,
 }
 
 impl SeriesPatch {
@@ -43,19 +51,25 @@ impl SeriesPatch {
         self.title.is_some()
             || self.medium.is_some()
             || self.author.is_some()
+            || self.authors.is_some()
+            || self.artists.is_some()
             || self.status.is_some()
             || self.reading_direction.is_some()
-            || self.summary.is_some()
             || self.genres.is_some()
+            || self.tags.is_some()
+            || self.age_rating.is_some()
+            || self.summary.is_some()
     }
 
     fn touches_edition(&self) -> bool {
         self.name.is_some()
             || self.publisher.is_some()
+            || self.collection.is_some()
             || self.format.is_some()
             || self.language.is_some()
             || self.status.is_some()
             || self.volume_count.is_some()
+            || self.colour.is_some()
     }
 }
 
@@ -120,11 +134,21 @@ fn work_document(
         it.title = patch.title.clone().or(it.title);
         it.medium = words.medium.clone().or(it.medium);
         it.author = patch.author.clone().or(it.author);
+        if let Some(authors) = &patch.authors {
+            it.authors = authors.clone();
+        }
+        if let Some(artists) = &patch.artists {
+            it.artists = artists.clone();
+        }
         it.status = words.status.clone().or(it.status);
         it.reading_direction = words.reading_direction.clone().or(it.reading_direction);
         if let Some(genres) = &patch.genres {
             it.genres = genres.clone();
         }
+        if let Some(tags) = &patch.tags {
+            it.tags = tags.clone();
+        }
+        it.age_rating = patch.age_rating.clone().or(it.age_rating);
         it.summary = patch.summary.clone().or(it.summary);
     }
     // An implicit edition has no folder of its own: its fields go down into work.json.
@@ -132,10 +156,12 @@ fn work_document(
     // being a work and become an edition.
     if gets_the_edition {
         it.publisher = patch.publisher.clone().or(it.publisher);
+        it.collection = patch.collection.clone().or(it.collection);
         it.volume_count = patch.volume_count.or(it.volume_count);
         it.format = patch.format.clone().or(it.format);
         it.language = patch.language.clone().or(it.language);
         it.status = words.status.clone().or(it.status);
+        it.colour = patch.colour.or(it.colour);
     }
     Ok(Some(it))
 }
@@ -155,10 +181,12 @@ fn edition_document(
     it.leaf = Some(FORMAT_VERSION);
     it.name = patch.name.clone().or(it.name);
     it.publisher = patch.publisher.clone().or(it.publisher);
+    it.collection = patch.collection.clone().or(it.collection);
     it.status = words.status.clone().or(it.status);
     it.volume_count = patch.volume_count.or(it.volume_count);
     it.format = patch.format.clone().or(it.format);
     it.language = patch.language.clone().or(it.language);
+    it.colour = patch.colour.or(it.colour);
     Ok(Some(it))
 }
 

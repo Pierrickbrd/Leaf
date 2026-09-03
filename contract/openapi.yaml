@@ -1170,7 +1170,20 @@ components:
         universe: { type: [string, "null"] }
         work: { type: string }
         edition: { type: [string, "null"] }
-        author: { type: [string, "null"] }
+        author:
+          type: [string, "null"]
+          description: |
+            The former singular, kept for a client that has not been rebuilt: the writers
+            joined by ", " when there is more than one. `authors` carries the same names
+            separately, and is what a new client should read.
+        authors:
+          type: array
+          items: { type: string }
+          description: The writers. Several populate — *Les Terres d'Arran* carries five.
+        artists:
+          type: array
+          items: { type: string }
+          description: The illustrators — penciller, inker and cover artist in one.
         medium:
           type: [string, "null"]
           enum: [manga, bd, comics, manhwa, manhua, webtoon, artbook, other, null]
@@ -1216,7 +1229,20 @@ components:
         chapterCount: { type: integer }
         arcCount: { type: integer }
         genres: { type: array, items: { type: string } }
+        tags:
+          type: array
+          items: { type: string }
+          description: Beside genres, never folded into them.
+        ageRating:
+          type: [string, "null"]
+          description: 'A free string, never an enum: "16+" at Kana, "T" elsewhere.'
         publisher: { type: [string, "null"] }
+        collection:
+          type: [string, "null"]
+          description: The publisher's imprint — "Dark Kana" — a sibling of publisher.
+        colour:
+          type: [boolean, "null"]
+          description: Positive form, never blackAndWhite.
         language: { type: [string, "null"] }
         addedAt:
           type: [integer, "null"]
@@ -1432,15 +1458,26 @@ components:
         medium:
           type: string
           enum: [manga, bd, comics, manhwa, manhua, webtoon, artbook, other]
-        author: { type: string }
+        author:
+          type: string
+          description: The former singular. `authors` is what a client should send.
+        authors: { type: array, items: { type: string }, description: The writers. }
+        artists: { type: array, items: { type: string }, description: The illustrators. }
         status: { type: string, enum: [ongoing, completed] }
         readingDirection: { type: string, enum: [LEFT_TO_RIGHT, RIGHT_TO_LEFT, VERTICAL] }
         genres: { type: array, items: { type: string } }
+        tags:
+          type: array
+          items: { type: string }
+          description: Beside genres, never folded into them.
+        ageRating: { type: string, description: 'A free string, never an enum: "16+", "T".' }
         summary: { type: string }
         publisher: { type: string }
+        collection: { type: string, description: The publisher's imprint, beside publisher. }
         volumeCount: { type: integer }
         format: { type: string }
         language: { type: string }
+        colour: { type: boolean, description: Positive form, never blackAndWhite. }
 
     EntryPatch:
       type: object

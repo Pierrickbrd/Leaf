@@ -50,8 +50,17 @@ pub struct SeriesDto {
     pub work: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edition: Option<String>,
+    /// The former singular, kept for a client that has not been rebuilt: the writers
+    /// joined by ", " when there is more than one, absent when there are none. `authors`
+    /// carries the same names separately, and is what a new client should read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    /// The writers. Several populate — *Les Terres d'Arran* carries five.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub authors: Vec<String>,
+    /// The illustrators — penciller, inker and cover artist in one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub artists: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub medium: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,8 +88,20 @@ pub struct SeriesDto {
     pub arc_count: i64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub genres: Vec<String>,
+    /// Beside `genres`, never folded into them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// A free string, never an enum: "16+" at Kana, "T" elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_rating: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publisher: Option<String>,
+    /// The publisher's imprint, a sibling of `publisher`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
+    /// Positive form, never `blackAndWhite`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub colour: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

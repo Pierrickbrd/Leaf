@@ -25,10 +25,10 @@ pub const SCHEMA: &[&str] = &[
       path              TEXT NOT NULL UNIQUE,
       title             TEXT,
       medium            TEXT,
-      author            TEXT,
       status            TEXT,
       reading_direction TEXT,
-      summary           TEXT
+      summary           TEXT,
+      age_rating        TEXT
     )
     "#,
     // One row per genre, and the only record of one. A comma-joined column beside this
@@ -43,6 +43,43 @@ pub const SCHEMA: &[&str] = &[
     )
     "#,
     "CREATE INDEX IF NOT EXISTS work_genre_key ON work_genre(key)",
+    // Shaped exactly like work_genre, for the same reason: a comma-joined `author` column
+    // showed one name and matched none of the rest of it — "Obata" found nothing on Death
+    // Note, whose art is entirely his. Two of these, one for the writer and one for the
+    // illustrator, because 11 of the 25 series this was measured against have one of each
+    // and the two are never the same table.
+    r#"
+    CREATE TABLE IF NOT EXISTS work_author (
+      work_id TEXT NOT NULL REFERENCES work(id) ON DELETE CASCADE,
+      name    TEXT NOT NULL,
+      key     TEXT NOT NULL,
+      PRIMARY KEY (work_id, key)
+    )
+    "#,
+    "CREATE INDEX IF NOT EXISTS work_author_key ON work_author(key)",
+    // The illustrator: penciller, inker and cover artist in one table rather than a
+    // credits(role, name) list, because in all 25 series measured the three are one person
+    // without exception — a general mechanism for a case that does not exist.
+    r#"
+    CREATE TABLE IF NOT EXISTS work_artist (
+      work_id TEXT NOT NULL REFERENCES work(id) ON DELETE CASCADE,
+      name    TEXT NOT NULL,
+      key     TEXT NOT NULL,
+      PRIMARY KEY (work_id, key)
+    )
+    "#,
+    "CREATE INDEX IF NOT EXISTS work_artist_key ON work_artist(key)",
+    // Beside work_genre, never merged into it: measured, Les Terres d'Arran carries one
+    // genre and seven tags with nothing in common between the two lists.
+    r#"
+    CREATE TABLE IF NOT EXISTS work_tag (
+      work_id TEXT NOT NULL REFERENCES work(id) ON DELETE CASCADE,
+      name    TEXT NOT NULL,
+      key     TEXT NOT NULL,
+      PRIMARY KEY (work_id, key)
+    )
+    "#,
+    "CREATE INDEX IF NOT EXISTS work_tag_key ON work_tag(key)",
     // Where a search row lives, so removing it is a lookup rather than a scan of the index.
     r#"
     CREATE TABLE IF NOT EXISTS search_ref (
@@ -61,13 +98,15 @@ pub const SCHEMA: &[&str] = &[
       path         TEXT NOT NULL UNIQUE,
       implicit     INTEGER NOT NULL DEFAULT 0,
       publisher    TEXT,
+      collection   TEXT,
       status       TEXT,
       medium       TEXT,
       cover_file   TEXT,
       reading_direction TEXT,
       volume_count INTEGER,
       format       TEXT,
-      language     TEXT
+      language     TEXT,
+      colour       INTEGER
     )
     "#,
     // A range, not a list: four Haikyū volumes belong to two arcs, because an arc does
@@ -245,6 +284,63 @@ pub const MIGRATIONS: &[&str] = &[
     // every edition and deleting a universe scanned every work.
     "CREATE INDEX IF NOT EXISTS ix_edition_work ON edition(work_id)",
     "CREATE INDEX IF NOT EXISTS ix_work_universe ON work(universe_id)",
+    // 14 — one writer, tracked as its own fact instead of a free string sharing a column
+    // with nothing else — the string a work.author held could never be searched a name at a
+    // time, which is why "Obata" found nothing on Death Note even though he drew every page
+    // of it. The table is created here as well as in SCHEMA (a no-op on a fresh database,
+    // real work on one that predates it), and the column's content is carried into it before
+    // the column itself goes: one record of the fact, never two, the way migration 9 did for
+    // genres. The key is only lower-cased here rather than folded the way a scan folds it —
+    // an old row is corrected the moment its work is scanned again, and nothing is lost
+    // meanwhile.
+    r#"
+    CREATE TABLE IF NOT EXISTS work_author (
+      work_id TEXT NOT NULL REFERENCES work(id) ON DELETE CASCADE,
+      name    TEXT NOT NULL,
+      key     TEXT NOT NULL,
+      PRIMARY KEY (work_id, key)
+    )
+    "#,
+    "CREATE INDEX IF NOT EXISTS work_author_key ON work_author(key)",
+    r#"
+    INSERT OR IGNORE INTO work_author (work_id, name, key)
+    SELECT id, TRIM(author), LOWER(TRIM(author)) FROM work
+    WHERE author IS NOT NULL AND TRIM(author) <> ''
+    "#,
+    "ALTER TABLE work DROP COLUMN author",
+    // 15 — the illustrator, tracked apart from the writer for the first time: nothing before
+    // this migration ever recorded one. Penciller, inker and cover artist are the same
+    // person in all 25 series this was measured against, without one exception, so a table
+    // of names serves where a credits(role, name) list would serve a case that does not
+    // exist.
+    r#"
+    CREATE TABLE IF NOT EXISTS work_artist (
+      work_id TEXT NOT NULL REFERENCES work(id) ON DELETE CASCADE,
+      name    TEXT NOT NULL,
+      key     TEXT NOT NULL,
+      PRIMARY KEY (work_id, key)
+    )
+    "#,
+    "CREATE INDEX IF NOT EXISTS work_artist_key ON work_artist(key)",
+    // 16 — tags, beside genres and never folded into them: measured, Les Terres d'Arran
+    // carries one genre and seven tags with nothing in common between the two lists.
+    r#"
+    CREATE TABLE IF NOT EXISTS work_tag (
+      work_id TEXT NOT NULL REFERENCES work(id) ON DELETE CASCADE,
+      name    TEXT NOT NULL,
+      key     TEXT NOT NULL,
+      PRIMARY KEY (work_id, key)
+    )
+    "#,
+    "CREATE INDEX IF NOT EXISTS work_tag_key ON work_tag(key)",
+    // 17 — an age rating, a free string and never an enum: "16+" at Kana, "T" elsewhere, and
+    // neither is wrong.
+    "ALTER TABLE work ADD COLUMN age_rating TEXT",
+    // 18 — the publisher's imprint, a sibling of publisher rather than a replacement for it:
+    // "Dark Kana" beside "Kana".
+    "ALTER TABLE edition ADD COLUMN collection TEXT",
+    // 19 — positive form, never blackAndWhite: a page carries colour or it does not.
+    "ALTER TABLE edition ADD COLUMN colour INTEGER",
 ];
 
 /// What a fresh database is stamped with. Deriving it from the list is what makes adding a

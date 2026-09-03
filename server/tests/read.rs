@@ -76,10 +76,14 @@ impl Library {
         self.db
             .write(|cx| {
                 cx.execute(
-                    "INSERT INTO work (id, universe_id, name, path, title, medium, author, status,
+                    "INSERT INTO work (id, universe_id, name, path, title, medium, status,
                                        reading_direction)
-                     VALUES (?1, ?2, ?3, ?4, ?3, ?5, ?6, 'ongoing', 'RIGHT_TO_LEFT')",
-                    (id, universe, name, format!("/library/{id}"), medium, author),
+                     VALUES (?1, ?2, ?3, ?4, ?3, ?5, 'ongoing', 'RIGHT_TO_LEFT')",
+                    (id, universe, name, format!("/library/{id}"), medium),
+                )?;
+                cx.execute(
+                    "INSERT INTO work_author (work_id, name, key) VALUES (?1, ?2, ?3)",
+                    (id, author, leaf_server::store::text::search_key(author)),
                 )?;
                 for genre in genres {
                     cx.execute(
@@ -413,7 +417,10 @@ fn listing_the_series_does_not_ask_one_question_per_series() {
         three, fifteen,
         "the cost of a shelf must not follow its length"
     );
-    assert!(fifteen <= 6, "listing took {fifteen} queries");
+    // One query for the page itself, and one each for volumes, claimed volumes, missing
+    // chapters, genres, authors, artists and tags — eight queries whatever the shelf holds,
+    // never one of them per series.
+    assert!(fifteen <= 8, "listing took {fifteen} queries");
 }
 
 #[test]

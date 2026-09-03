@@ -59,14 +59,28 @@ struct Series {
     // facts and only one of them is worth showing.
     std::optional<QString> universe;
     std::optional<QString> edition;
+    /// The former singular, kept for a shelf that has not been taught `authors` yet. A new
+    /// screen reads `authors`; this stays for one that has not been rebuilt.
     std::optional<QString> author;
+    /// The writers. Several populate — *Les Terres d'Arran* carries five.
+    QList<QString> authors;
+    /// The illustrators — penciller, inker and cover artist in one.
+    QList<QString> artists;
     std::optional<QString> publisher;
+    /// The publisher's imprint, a sibling of `publisher` rather than a replacement for it.
+    std::optional<QString> collection;
     std::optional<QString> language;
     std::optional<Medium> medium;
     std::optional<ReadingDirection> readingDirection;
     std::optional<Run> run;
     std::optional<int> declaredVolumes;
     QList<QString> genres;
+    /// Beside `genres`, never folded into them.
+    QList<QString> tags;
+    /// A free string, never an enum: "16+" at Kana, "T" elsewhere.
+    std::optional<QString> ageRating;
+    /// Positive form, never `blackAndWhite`.
+    std::optional<bool> colour;
 
     Holding holding;
 };

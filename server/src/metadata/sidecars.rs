@@ -21,20 +21,42 @@ pub struct WorkJson {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub medium: Option<String>,
+    /// The former singular, kept so a file written before `authors` existed keeps reading
+    /// the same author it always did — see [`WorkJson::authors`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    /// The writers. Several populate: *Les Terres d'Arran* carries five of them, *Blake et
+    /// Mortimer* six.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub authors: Vec<String>,
+    /// The illustrators — penciller, inker and cover artist in one, because in the 25
+    /// series this was measured against the three are the same person without exception.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub artists: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reading_direction: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub genres: Vec<String>,
+    /// Beside `genres`, never folded into them: measured, *Les Terres d'Arran* carries one
+    /// genre and seven tags with nothing in common between the two lists.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// A free string, never an enum: "16+" at Kana, "T" elsewhere — the vocabulary is a
+    /// publisher's, not this format's to constrain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_rating: Option<String>,
     // A single-edition work has no edition folder to hold these: they live here and act as
     // defaults for its editions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publisher: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub colour: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volume_count: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -45,6 +67,19 @@ pub struct WorkJson {
     pub chapter_label: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub arcs: Vec<ArcJson>,
+}
+
+impl WorkJson {
+    /// The writers, resolved. `authors` when it says something; otherwise a one-element list
+    /// built from the legacy singular `author`, so a file written before `authors` existed
+    /// is read exactly as it always was — one name, the name it already had.
+    pub fn authors(&self) -> Vec<String> {
+        if !self.authors.is_empty() {
+            self.authors.clone()
+        } else {
+            self.author.iter().cloned().collect()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -67,6 +102,10 @@ pub struct EditionJson {
     pub medium: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publisher: Option<String>,
+    /// The publisher's imprint — "Dark Kana" — a sibling of `publisher`, not a replacement
+    /// for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reading_direction: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,6 +118,10 @@ pub struct EditionJson {
     pub language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chapter_label: Option<String>,
+    /// Positive form, never `blackAndWhite`: a page carries colour or it does not, and a
+    /// double negative is not a fact worth asking a file to hold.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub colour: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub arcs: Vec<ArcJson>,
 }

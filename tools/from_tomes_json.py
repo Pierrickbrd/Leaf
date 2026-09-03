@@ -79,6 +79,43 @@ def images_of(folder: Path) -> list[Path]:
     return sorted(found, key=lambda p: natural_key(p.name))
 
 
+def split_names(value: str | None) -> list[str]:
+    """A field that is already a list of names, packed into one string.
+
+    Writer and Penciller arrive this way, and the real library was prepared with two
+    different separators for the same kind of field, in two files for the same series:
+    Les Terres d'Arran : Elfes separates its five writers with ";", Les Terres d'Arran :
+    Mages separates its own with ",". Splitting on "," always would break a name that
+    carries one; splitting on ";" always would leave Mages's writers joined into one name.
+    So: split on ";" when the field carries one, on "," otherwise — and refuse a field
+    carrying both rather than silently keeping only the names on one side of it.
+    """
+    if not value:
+        return []
+    if ";" in value and "," in value:
+        raise SystemExit(
+            f'"{value}" mixes ";" and "," — which one separates the names here cannot be told apart'
+        )
+    separator = ";" if ";" in value else ","
+    return [part.strip() for part in value.split(separator) if part.strip()]
+
+
+def colour_of(black_and_white: str | None) -> bool | None:
+    """`BlackAndWhite` names the absence of colour; `colour` is the positive form of the
+    same fact, inverted here so nothing downstream has to remember which way the source
+    field points: "Yes" (it is black and white) becomes `colour: False`. "Unknown", "No" or
+    nothing at all says nothing worth writing, rather than a guessed `True`.
+    """
+    if not black_and_white:
+        return None
+    lowered = black_and_white.strip().lower()
+    if lowered == "yes":
+        return False
+    if lowered == "no":
+        return True
+    return None
+
+
 def reading_direction(manga: str | None) -> str:
     if not manga:
         return "LEFT_TO_RIGHT"
@@ -184,11 +221,17 @@ def work_of(data: dict, work_name: str, status: str) -> dict:
         "status": status,
         "readingDirection": reading_direction(data.get("Manga")),
     }
-    for key, field in (("Writer", "author"), ("Summary", "summary")):
+    if data.get("Writer"):
+        work["authors"] = split_names(data["Writer"])
+    if data.get("Penciller"):
+        work["artists"] = split_names(data["Penciller"])
+    for key, field in (("Summary", "summary"), ("AgeRating", "ageRating")):
         if data.get(key):
             work[field] = data[key]
     if data.get("Genre"):
         work["genres"] = [g.strip() for g in data["Genre"].split(",") if g.strip()]
+    if data.get("Tags"):
+        work["tags"] = split_names(data["Tags"])
     return work
 
 
@@ -200,9 +243,17 @@ def edition_of(data: dict, edition_name: str | None, status: str) -> dict:
         # What was published, and only the numbered volumes: a one-shot is not volume 7.
         "volumeCount": data.get("main_series_count") or data.get("Count"),
     }
-    for key, field in (("Publisher", "publisher"), ("LanguageISO", "language"), ("Format", "format")):
+    for key, field in (
+        ("Publisher", "publisher"),
+        ("LanguageISO", "language"),
+        ("Format", "format"),
+        ("Collection", "collection"),
+    ):
         if data.get(key):
             edition[field] = data[key]
+    colour = colour_of(data.get("BlackAndWhite"))
+    if colour is not None:
+        edition["colour"] = colour
     if edition_name:
         edition["name"] = edition_name
     label = chapter_label(data.get("chapter_name_template"), data.get("chapter_number_width"))

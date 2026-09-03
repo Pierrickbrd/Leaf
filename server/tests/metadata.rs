@@ -121,6 +121,26 @@ fn a_sidecar_from_a_later_version_still_reads() {
 }
 
 #[test]
+fn the_legacy_singular_author_reads_as_one_element_of_authors() {
+    // "author" is what a file already on disk carries; "authors" is what a new one writes.
+    // A file written before "authors" existed must keep reading the same name it always did.
+    let json = br#"{ "leaf": 1, "title": "Bleach", "author": "Kubo" }"#;
+    let work: WorkJson = sidecars::read(json).expect("a readable sidecar");
+    assert_eq!(vec!["Kubo".to_string()], work.authors());
+}
+
+#[test]
+fn authors_wins_over_the_legacy_singular_when_both_are_there() {
+    let json = br#"{ "leaf": 1, "title": "Bleach", "author": "Kubo",
+                     "authors": ["Kubo", "Quelqu'un d'autre"] }"#;
+    let work: WorkJson = sidecars::read(json).expect("a readable sidecar");
+    assert_eq!(
+        vec!["Kubo".to_string(), "Quelqu'un d'autre".to_string()],
+        work.authors()
+    );
+}
+
+#[test]
 fn an_entry_declares_the_volume_its_chapters_came_from() {
     let json = br#"{ "leaf": 1, "work": "Bleach", "type": "CHAPTER", "number": 685,
                      "volume": 9,

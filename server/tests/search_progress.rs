@@ -21,7 +21,7 @@ impl Fixture {
         let db = Db::open(&dir.path().join("index.sqlite")).expect("opening");
         db.write(|cx| {
             cx.execute(
-                "INSERT INTO work (id, name, path, author) VALUES ('w', 'L''Attaque des Titans', '/w', 'Isayama')",
+                "INSERT INTO work (id, name, path) VALUES ('w', 'L''Attaque des Titans', '/w')",
                 [],
             )?;
             cx.execute(
@@ -33,7 +33,7 @@ impl Fixture {
                 [],
             )?;
             cx.execute(
-                "INSERT INTO work (id, name, path, author) VALUES ('w2', 'Erased', '/w2', 'Sanbe')",
+                "INSERT INTO work (id, name, path) VALUES ('w2', 'Erased', '/w2')",
                 [],
             )?;
             cx.execute(
@@ -43,7 +43,7 @@ impl Fixture {
             // A title in its own script. Under the old fold its search key was the empty
             // string, so it was in the library and unreachable at the same time.
             cx.execute(
-                "INSERT INTO work (id, name, path, author) VALUES ('w3', 'ハイキュー!!', '/w3', 'Furudate')",
+                "INSERT INTO work (id, name, path) VALUES ('w3', 'ハイキュー!!', '/w3')",
                 [],
             )?;
             cx.execute(
