@@ -53,11 +53,13 @@ struct Seen {
 struct WorkDefaults {
     status: Option<String>,
     publisher: Option<String>,
+    collection: Option<String>,
     volume_count: Option<i32>,
     format: Option<String>,
     language: Option<String>,
     medium: Option<String>,
     reading_direction: Option<String>,
+    colour: Option<bool>,
     chapter_label: Option<String>,
     arcs: Vec<ArcJson>,
     work: Option<WorkJson>,
@@ -68,7 +70,7 @@ struct WorkDefaults {
 /// What the files turned out to know that `work.json` did not say.
 #[derive(Default, Clone)]
 struct Inherited {
-    author: Option<String>,
+    authors: Vec<String>,
     reading_direction: Option<String>,
     genres: Vec<String>,
 }
@@ -366,13 +368,14 @@ impl Scanner {
         seen.works.insert(id.clone());
 
         cx.execute(
-            "INSERT INTO work (id, universe_id, name, path, title, medium, author, status,
-                               reading_direction, summary)
+            "INSERT INTO work (id, universe_id, name, path, title, medium, status,
+                               reading_direction, summary, age_rating)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
              ON CONFLICT(id) DO UPDATE SET
                universe_id=excluded.universe_id, name=excluded.name, title=excluded.title,
-               medium=excluded.medium, author=excluded.author, status=excluded.status,
-               reading_direction=excluded.reading_direction, summary=excluded.summary",
+               medium=excluded.medium, status=excluded.status,
+               reading_direction=excluded.reading_direction, summary=excluded.summary,
+               age_rating=excluded.age_rating",
             rusqlite::params![
                 id,
                 universe_id,
@@ -380,10 +383,10 @@ impl Scanner {
                 absolute(folder),
                 meta.as_ref().and_then(|m| m.title.clone()),
                 meta.as_ref().and_then(|m| m.medium.clone()),
-                meta.as_ref().and_then(|m| m.author.clone()),
                 meta.as_ref().and_then(|m| m.status.clone()),
                 meta.as_ref().and_then(|m| m.reading_direction.clone()),
                 meta.as_ref().and_then(|m| m.summary.clone()),
+                meta.as_ref().and_then(|m| m.age_rating.clone()),
             ],
         )?;
         report.works += 1;
@@ -395,17 +398,34 @@ impl Scanner {
             &id,
             &meta.as_ref().map(|m| m.genres.clone()).unwrap_or_default(),
         )?;
+        self.record_authors(
+            cx,
+            &id,
+            &meta.as_ref().map(WorkJson::authors).unwrap_or_default(),
+        )?;
+        self.record_artists(
+            cx,
+            &id,
+            &meta.as_ref().map(|m| m.artists.clone()).unwrap_or_default(),
+        )?;
+        self.record_tags(
+            cx,
+            &id,
+            &meta.as_ref().map(|m| m.tags.clone()).unwrap_or_default(),
+        )?;
 
         // A single-edition work has no edition folder: its edition fields live in work.json
         // and come down here as defaults.
         let defaults = WorkDefaults {
             status: meta.as_ref().and_then(|m| m.status.clone()),
             publisher: meta.as_ref().and_then(|m| m.publisher.clone()),
+            collection: meta.as_ref().and_then(|m| m.collection.clone()),
             volume_count: meta.as_ref().and_then(|m| m.volume_count),
             format: meta.as_ref().and_then(|m| m.format.clone()),
             language: meta.as_ref().and_then(|m| m.language.clone()),
             medium: meta.as_ref().and_then(|m| m.medium.clone()),
             reading_direction: meta.as_ref().and_then(|m| m.reading_direction.clone()),
+            colour: meta.as_ref().and_then(|m| m.colour),
             chapter_label: meta.as_ref().and_then(|m| m.chapter_label.clone()),
             arcs: meta.as_ref().map(|m| m.arcs.clone()).unwrap_or_default(),
             work: meta.clone(),
@@ -460,18 +480,21 @@ impl Scanner {
         }
 
         // Whatever work.json does not say yet, we take from what is still in the files.
-        let Some(found) = inherited
-            .into_iter()
-            .find(|i| i.author.is_some() || i.reading_direction.is_some() || !i.genres.is_empty())
-        else {
+        let Some(found) = inherited.into_iter().find(|i| {
+            !i.authors.is_empty() || i.reading_direction.is_some() || !i.genres.is_empty()
+        }) else {
             return Ok(());
         };
         cx.execute(
-            "UPDATE work SET
-               author = COALESCE(author, ?1), reading_direction = COALESCE(reading_direction, ?2)
-             WHERE id = ?3",
-            rusqlite::params![found.author, found.reading_direction, id],
+            "UPDATE work SET reading_direction = COALESCE(reading_direction, ?1) WHERE id = ?2",
+            rusqlite::params![found.reading_direction, id],
         )?;
+        // The writer goes the same way as genres below — the files first, the legacy
+        // metadata only when work.json is silent about every one of them.
+        let declared_authors = meta.as_ref().map(WorkJson::authors).unwrap_or_default();
+        if declared_authors.is_empty() && !found.authors.is_empty() {
+            self.record_authors(cx, &id, &found.authors)?;
+        }
         // Genres go the same way as the rest — the files first, the legacy metadata only
         // when work.json is silent. They used to take a second route, into a column of their
         // own, and so were shown without ever being filterable.
@@ -513,13 +536,15 @@ impl Scanner {
 
         cx.execute(
             "INSERT INTO edition (id, work_id, name, path, implicit, publisher, status, medium,
-                                  cover_file, reading_direction, volume_count, format, language)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+                                  cover_file, reading_direction, volume_count, format, language,
+                                  collection, colour)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
              ON CONFLICT(id) DO UPDATE SET
                work_id=excluded.work_id, name=excluded.name, implicit=excluded.implicit,
                publisher=excluded.publisher, status=excluded.status, medium=excluded.medium,
                cover_file=excluded.cover_file, reading_direction=excluded.reading_direction,
-               volume_count=excluded.volume_count, format=excluded.format, language=excluded.language",
+               volume_count=excluded.volume_count, format=excluded.format, language=excluded.language,
+               collection=excluded.collection, colour=excluded.colour",
             rusqlite::params![
                 id,
                 work_id,
@@ -537,6 +562,11 @@ impl Scanner {
                 meta.as_ref().and_then(|m| m.volume_count).or(defaults.volume_count),
                 or_default(meta.as_ref().and_then(|m| m.format.clone()), &defaults.format),
                 or_default(meta.as_ref().and_then(|m| m.language.clone()), &defaults.language),
+                or_default(
+                    meta.as_ref().and_then(|m| m.collection.clone()),
+                    &defaults.collection
+                ),
+                meta.as_ref().and_then(|m| m.colour).or(defaults.colour),
             ],
         )?;
         report.editions += 1;
@@ -549,10 +579,15 @@ impl Scanner {
 
         // Neither a universe nor a work is a result of its own: you read an edition, you
         // never read Terres d'Arran and you never read "Parasite" in the abstract. So
-        // everything a reader half-remembers is indexed here — the work's title and author,
-        // the universe, the genres, the summary. The name column ranks tenfold; the rest
-        // sits in the low-weighted one, where a word met in a summary never outranks the
-        // same word in a title.
+        // everything a reader half-remembers is indexed here — the work's title, its writers
+        // and illustrators, the universe, the genres and tags, the summary. The name column
+        // ranks tenfold; the rest sits in the low-weighted one, where a word met in a summary
+        // never outranks the same word in a title.
+        //
+        // Authors, artists and tags join this the same way genres already did: as rows, not
+        // as a column, so a name buried in a list of thirteen illustrators is still a name
+        // this can find. Searching "Obata" and getting nothing on Death Note — its artist,
+        // credited nowhere a search could reach — is the failure this exists to fix.
         let work = defaults.work.as_ref();
         let names: Vec<String> = [
             work.and_then(|w| w.title.clone()),
@@ -564,9 +599,11 @@ impl Scanner {
         .flatten()
         .collect();
         let mut extra: Vec<String> = work.map(|w| w.genres.clone()).unwrap_or_default();
+        extra.extend(work.map(WorkJson::authors).unwrap_or_default());
+        extra.extend(work.map(|w| w.artists.clone()).unwrap_or_default());
+        extra.extend(work.map(|w| w.tags.clone()).unwrap_or_default());
         extra.extend(
             [
-                work.and_then(|w| w.author.clone()),
                 work.and_then(|w| w.summary.clone()),
                 or_default(
                     meta.as_ref().and_then(|m| m.publisher.clone()),
@@ -792,7 +829,7 @@ impl Scanner {
             declared: own.or_else(|| legacy.as_ref().map(|l| l.entry.clone())),
             legacy_arc: legacy.as_ref().and_then(|l| l.arc.clone()),
             inherited: legacy.as_ref().map(|l| Inherited {
-                author: l.author.clone(),
+                authors: l.author.iter().cloned().collect(),
                 reading_direction: l.reading_direction.clone(),
                 genres: l.genres.clone(),
             }),
@@ -1240,6 +1277,42 @@ impl Scanner {
         for name in genres.iter().map(|g| g.trim()).filter(|g| !g.is_empty()) {
             cx.execute(
                 "INSERT OR IGNORE INTO work_genre (work_id, name, key) VALUES (?1,?2,?3)",
+                rusqlite::params![work_id, name, search_key(name)],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The same rewrite-whole rule as genres, for the writers.
+    fn record_authors(&self, cx: &Cx<'_>, work_id: &str, authors: &[String]) -> Result<()> {
+        cx.execute("DELETE FROM work_author WHERE work_id = ?1", [work_id])?;
+        for name in authors.iter().map(|a| a.trim()).filter(|a| !a.is_empty()) {
+            cx.execute(
+                "INSERT OR IGNORE INTO work_author (work_id, name, key) VALUES (?1,?2,?3)",
+                rusqlite::params![work_id, name, search_key(name)],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The same rewrite-whole rule again, for the illustrators.
+    fn record_artists(&self, cx: &Cx<'_>, work_id: &str, artists: &[String]) -> Result<()> {
+        cx.execute("DELETE FROM work_artist WHERE work_id = ?1", [work_id])?;
+        for name in artists.iter().map(|a| a.trim()).filter(|a| !a.is_empty()) {
+            cx.execute(
+                "INSERT OR IGNORE INTO work_artist (work_id, name, key) VALUES (?1,?2,?3)",
+                rusqlite::params![work_id, name, search_key(name)],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// And again for the tags — beside genres, never merged into them.
+    fn record_tags(&self, cx: &Cx<'_>, work_id: &str, tags: &[String]) -> Result<()> {
+        cx.execute("DELETE FROM work_tag WHERE work_id = ?1", [work_id])?;
+        for name in tags.iter().map(|t| t.trim()).filter(|t| !t.is_empty()) {
+            cx.execute(
+                "INSERT OR IGNORE INTO work_tag (work_id, name, key) VALUES (?1,?2,?3)",
                 rusqlite::params![work_id, name, search_key(name)],
             )?;
         }

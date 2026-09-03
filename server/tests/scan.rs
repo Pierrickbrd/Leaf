@@ -958,7 +958,8 @@ fn placeholder(field: &str) -> serde_json::Value {
     match field {
         "leaf" | "startPage" | "volumeCount" => serde_json::json!(1),
         "number" | "volume" | "after" | "from" | "to" => serde_json::json!(1.0),
-        "genres" => serde_json::json!([""]),
+        "genres" | "authors" | "artists" | "tags" => serde_json::json!([""]),
+        "colour" => serde_json::json!(true),
         "arcs" => serde_json::json!([{"name": "", "unit": "VOLUME", "from": 1.0, "to": 1.0}]),
         "chapters" => serde_json::json!([{"raw": "", "number": 1.0, "title": "", "startPage": 1,
                                           "after": 1.0, "volume": 1.0, "label": ""}]),
@@ -1163,8 +1164,8 @@ fn comic_info_answers_for_a_work_that_declares_nothing() {
     library.scan();
 
     assert_eq!(
-        library.one::<String>("SELECT author FROM work"),
-        Some("Tite Kubo".to_string())
+        library.all("SELECT name FROM work_author"),
+        vec!["Tite Kubo"]
     );
     assert_eq!(
         library.one::<String>("SELECT reading_direction FROM work"),
@@ -1194,11 +1195,36 @@ fn what_the_work_declares_wins_over_what_comic_info_says() {
     );
     library.scan();
 
-    assert_eq!(
-        library.one::<String>("SELECT author FROM work"),
-        Some("Kubo".to_string())
-    );
+    assert_eq!(library.all("SELECT name FROM work_author"), vec!["Kubo"]);
     assert_eq!(library.all("SELECT name FROM work_genre"), vec!["Shonen"]);
+}
+
+/// The concrete failure this whole feature exists to fix: work.json used to have only a
+/// singular `author`, so an illustrator credited nowhere else — Obata drew every page of
+/// Death Note, and wrote none of it — could not be searched for at all.
+#[test]
+fn an_illustrator_credited_nowhere_else_is_still_searchable() {
+    let library = Library::new();
+    library.write(
+        "Death Note/work.json",
+        r#"{"leaf":1,"title":"Death Note","medium":"manga","authors":["Ōba"],
+            "artists":["Obata"],"status":"completed","readingDirection":"RIGHT_TO_LEFT"}"#,
+    );
+    archive(&library.folder("Death Note").join("Tome 1.cbz"), 2, None);
+    library.scan();
+
+    let hits = leaf_server::store::Repository::new(&library.db)
+        .search(
+            "Obata",
+            10,
+            &[],
+            &leaf_server::api::dto::SeriesFilter::default(),
+        )
+        .expect("searching");
+    assert!(
+        !hits.is_empty(),
+        "searching the illustrator's name must find the series"
+    );
 }
 
 #[test]

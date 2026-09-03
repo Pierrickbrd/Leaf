@@ -324,13 +324,17 @@ fn search_is_not_fts(cx: &Cx<'_>) -> Result<bool> {
 
 /// Whether the failure means the database is already in the state the step asks for.
 ///
-/// Two shapes qualify, and both are the step having nothing left to do: adding a column
-/// that is there, dropping one that is not. Anything else has to be seen.
+/// Three shapes qualify, and all three are the step having nothing left to do: adding a
+/// column that is there, dropping one that is not, or backfilling `work_author` from a
+/// `work.author` column that is not there either — a database new enough to have never had
+/// one has nothing to carry into the table that replaces it, which is the backfill's own
+/// goal already met rather than something wrong. Anything else has to be seen.
 fn already_satisfied(sql: &str, error: &anyhow::Error) -> bool {
     let statement = sql.to_lowercase();
     let message = format!("{error:#}").to_lowercase();
     (statement.contains("add column") && message.contains("duplicate column"))
         || (statement.contains("drop column") && message.contains("no such column"))
+        || (statement.contains("into work_author") && message.contains("no such column"))
 }
 
 /// SQL is written across several lines here; an error message wants one.

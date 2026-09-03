@@ -12,6 +12,8 @@ fn sound_work() -> WorkJson {
         leaf: Some(1),
         title: Some("Death Note".into()),
         medium: Some("manga".into()),
+        authors: vec!["Ōba".into()],
+        artists: vec!["Obata".into()],
         status: Some("completed".into()),
         reading_direction: Some("RIGHT_TO_LEFT".into()),
         ..Default::default()
@@ -37,7 +39,14 @@ fn names_every_required_field_that_is_missing() {
             ..Default::default()
         }),
     ));
-    for field in ["title", "medium", "status", "readingDirection"] {
+    for field in [
+        "title",
+        "medium",
+        "authors",
+        "artists",
+        "status",
+        "readingDirection",
+    ] {
         assert!(found.contains(field), "{found} should name {field}");
     }
 }
@@ -333,7 +342,14 @@ fn a_work_that_declares_itself_and_says_nothing_is_named_field_by_field() {
     };
     let said = leaf_server::scan::checks::work("Bleach", Some(&empty));
     let all = said.join(" ");
-    for field in ["title", "medium", "status", "readingDirection"] {
+    for field in [
+        "title",
+        "medium",
+        "authors",
+        "artists",
+        "status",
+        "readingDirection",
+    ] {
         assert!(all.contains(field), "{field} missing from: {all}");
     }
 }

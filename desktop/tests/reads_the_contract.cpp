@@ -33,6 +33,8 @@ QJsonObject aSeries()
         {u"universe"_s, QJsonValue::Null},
         {u"edition"_s, QJsonValue::Null},
         {u"author"_s, u"Yūsei Matsui"_s},
+        {u"authors"_s, QJsonArray{u"Yūsei Matsui"_s}},
+        {u"artists"_s, QJsonArray{u"Yūsei Matsui"_s}},
         {u"medium"_s, u"manga"_s},
         {u"readingDirection"_s, u"RIGHT_TO_LEFT"_s},
         {u"status"_s, u"completed"_s},
@@ -42,7 +44,11 @@ QJsonObject aSeries()
         {u"missingVolumes"_s, QJsonArray{}},
         {u"missingChapters"_s, QJsonArray{3.5}},
         {u"genres"_s, QJsonArray{u"Action"_s, u"Comédie"_s}},
+        {u"tags"_s, QJsonArray{u"École"_s}},
+        {u"ageRating"_s, u"12+"_s},
         {u"publisher"_s, u"Kana"_s},
+        {u"collection"_s, QJsonValue::Null},
+        {u"colour"_s, true},
         {u"language"_s, u"fr"_s},
         {u"addedAt"_s, 1750000000},
         {u"lastAddedAt"_s, 1755000000},
@@ -84,12 +90,18 @@ private slots:
         QCOMPARE(one.holding.ownedVolumes, 21);
         QCOMPARE(one.declaredVolumes, std::optional<int>(21));
         QCOMPARE(one.author, std::optional<QString>(u"Yūsei Matsui"_s));
+        QCOMPARE(one.authors, QList<QString>({u"Yūsei Matsui"_s}));
+        QCOMPARE(one.artists, QList<QString>({u"Yūsei Matsui"_s}));
         QCOMPARE(one.medium, std::optional<Api::Medium>(Api::Medium::Manga));
         QCOMPARE(one.readingDirection,
                  std::optional<Api::ReadingDirection>(Api::ReadingDirection::RightToLeft));
         QCOMPARE(one.run, std::optional<Api::Run>(Api::Run::Completed));
         QCOMPARE(one.holding.readStatus, std::optional<Api::ReadStatus>(Api::ReadStatus::InProgress));
         QCOMPARE(one.genres, QList<QString>({u"Action"_s, u"Comédie"_s}));
+        QCOMPARE(one.tags, QList<QString>({u"École"_s}));
+        QCOMPARE(one.ageRating, std::optional<QString>(u"12+"_s));
+        QVERIFY(!one.collection.has_value());
+        QCOMPARE(one.colour, std::optional<bool>(true));
         QCOMPARE(one.holding.missingChapters, QList<double>({3.5}));
         QVERIFY(one.holding.missingVolumes.isEmpty());
         QCOMPARE(one.holding.lastAddedAt, std::optional<qint64>(1755000000));

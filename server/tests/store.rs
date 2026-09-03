@@ -38,6 +38,17 @@ fn columns(path: &std::path::Path, table: &str) -> Vec<String> {
     rows.map(|r| r.expect("a column name")).collect()
 }
 
+fn tables(path: &std::path::Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open(path).expect("opening");
+    let mut st = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .expect("preparing");
+    let rows = st
+        .query_map([], |r| r.get::<_, String>(0))
+        .expect("querying");
+    rows.map(|r| r.expect("a table name")).collect()
+}
+
 // ---------------------------------------------------------------- migrations
 
 /// The index is rebuildable by rescanning, so migrations matter for exactly one thing: the
@@ -90,6 +101,80 @@ fn an_older_database_is_brought_up_and_marked() {
     // Migration 9 drops a column this old database never had. Tolerated, and only in that
     // exact shape — anything else has to be seen.
     assert!(!columns(&file, "work").contains(&"genres".to_string()));
+    // The migration that replaces work.author with work_author tolerates the same thing:
+    // a database old enough to predate this feature entirely has nothing to carry over,
+    // and that is not a failure either.
+    assert!(!columns(&file, "work").contains(&"author".to_string()));
+    assert!(tables(&file).contains(&"work_author".to_string()));
+    assert!(tables(&file).contains(&"work_artist".to_string()));
+    assert!(tables(&file).contains(&"work_tag".to_string()));
+}
+
+/// The migration this feature actually depends on: not a fresh database, one that already
+/// held real names in the column being replaced.
+///
+/// `work.author` was part of the schema from the very first version, so an existing library
+/// has it populated exactly like this — a name for the work that had one, nothing for the
+/// one that never carried it. The migration must carry that name into `work_author` before
+/// dropping the column, or upgrading a real library would quietly forget every author it
+/// already knew.
+#[test]
+fn an_existing_authors_column_is_carried_into_its_own_table_and_nothing_is_lost() {
+    let dir = temp();
+    let file = dir.path().join("migrating.sqlite");
+    {
+        // A database at version 13: every migration before this feature has already run,
+        // author is still a column on work, and it holds a real name.
+        let conn = rusqlite::Connection::open(&file).expect("opening");
+        conn.execute_batch(
+            "CREATE TABLE work (id TEXT PRIMARY KEY, universe_id TEXT, name TEXT NOT NULL,
+                                 path TEXT NOT NULL UNIQUE, title TEXT, medium TEXT,
+                                 author TEXT, status TEXT, reading_direction TEXT,
+                                 summary TEXT);
+             CREATE TABLE edition (id TEXT PRIMARY KEY, work_id TEXT NOT NULL, name TEXT,
+                                    path TEXT NOT NULL UNIQUE,
+                                    implicit INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO work (id, name, path, author)
+               VALUES ('death', 'Death Note', '/death', 'Ōba');
+             INSERT INTO work (id, name, path, author)
+               VALUES ('arran', 'Elfes', '/arran', NULL);
+             PRAGMA user_version = 13;",
+        )
+        .expect("building a database at version 13");
+    }
+
+    let db = Db::open(&file).expect("migrating an existing database");
+
+    let names: Vec<String> = db
+        .read(|cx| {
+            cx.query(
+                "SELECT name FROM work_author WHERE work_id = 'death'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+        })
+        .expect("reading work_author");
+    assert_eq!(
+        vec!["Ōba".to_string()],
+        names,
+        "the name a real library already held must not be lost"
+    );
+    assert!(
+        !columns(&file, "work").contains(&"author".to_string()),
+        "one record of the fact, never two"
+    );
+
+    // A work that never had an author gets no row, and the migration does not fail over it.
+    let none: Vec<String> = db
+        .read(|cx| {
+            cx.query(
+                "SELECT name FROM work_author WHERE work_id = 'arran'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+        })
+        .expect("reading work_author");
+    assert!(none.is_empty());
 }
 
 #[test]

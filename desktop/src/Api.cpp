@@ -87,6 +87,14 @@ public:
         return value.isDouble() ? std::optional<double>(value.toDouble()) : std::nullopt;
     }
 
+    std::optional<bool> maybeBool(QStringView name) const
+    {
+        if (!has(name))
+            return std::nullopt;
+        const QJsonValue value = m_from.value(name);
+        return value.isBool() ? std::optional<bool>(value.toBool()) : std::nullopt;
+    }
+
     /// An absent list and an empty list are the same thing, so neither is worth a complaint.
     QList<QString> words(QStringView name) const
     {
@@ -242,10 +250,16 @@ Read<Series> series(const QJsonObject &from)
     one.universe = field.maybeText(u"universe"_s);
     one.edition = field.maybeText(u"edition"_s);
     one.author = field.maybeText(u"author"_s);
+    one.authors = field.words(u"authors"_s);
+    one.artists = field.words(u"artists"_s);
     one.publisher = field.maybeText(u"publisher"_s);
+    one.collection = field.maybeText(u"collection"_s);
     one.language = field.maybeText(u"language"_s);
     one.declaredVolumes = field.maybeWhole(u"declaredVolumes"_s);
     one.genres = field.words(u"genres"_s);
+    one.tags = field.words(u"tags"_s);
+    one.ageRating = field.maybeText(u"ageRating"_s);
+    one.colour = field.maybeBool(u"colour"_s);
 
     one.holding.addedAt = field.maybeBig(u"addedAt"_s);
     one.holding.lastAddedAt = field.maybeBig(u"lastAddedAt"_s);

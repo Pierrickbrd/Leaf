@@ -71,7 +71,6 @@ impl<'a> Repository<'a> {
         // The editions of one work — how "the other editions of this one" is asked for.
         keep("w.id", &filter.works);
         keep("u.name", &filter.universes);
-        keep("w.author", &filter.authors);
         keep("COALESCE(e.medium, w.medium)", &filter.media);
         keep("COALESCE(e.status, w.status)", &filter.statuses);
         keep("e.language", &filter.languages);
@@ -86,6 +85,15 @@ impl<'a> Repository<'a> {
                 marks(filter.genres.len())
             ));
             args.extend(filter.genres.iter().map(|g| Value::Text(search_key(g))));
+        }
+        if !filter.authors.is_empty() {
+            // work.author held one string for the whole work; an author is now a row in its
+            // own table, folded the same way a genre is — "Ōba" and "oba" are one filter.
+            clauses.push(format!(
+                "EXISTS (SELECT 1 FROM work_author a WHERE a.work_id = w.id AND a.key IN ({}))",
+                marks(filter.authors.len())
+            ));
+            args.extend(filter.authors.iter().map(|a| Value::Text(search_key(a))));
         }
 
         Where {
@@ -145,9 +153,9 @@ impl<'a> Repository<'a> {
 
         let sql = format!(
             "SELECT e.id, e.name AS edition, COALESCE(e.status, w.status) AS status, e.volume_count,
-                    e.publisher, e.language,
+                    e.publisher, e.language, e.collection, e.colour,
                     w.id AS work_id, w.name AS work,
-                    w.author, COALESCE(e.medium, w.medium) AS medium,
+                    w.age_rating, COALESCE(e.medium, w.medium) AS medium,
                     COALESCE(e.reading_direction, w.reading_direction) AS reading_direction,
                     u.name AS universe,
                     {READ_STATUS} AS read_status,
@@ -171,7 +179,9 @@ impl<'a> Repository<'a> {
                 let universe: Option<String> = r.get("universe")?;
                 let work: String = r.get("work")?;
                 let edition: Option<String> = r.get("edition")?;
-                // The four collection facts are filled in below, once, for the whole page.
+                let colour: Option<i64> = r.get("colour")?;
+                // The four collection facts, plus authors, artists, genres and tags, are
+                // filled in below, once, for the whole page.
                 Ok(SeriesDto {
                     id: r.get("id")?,
                     work_id: r.get("work_id")?,
@@ -179,7 +189,9 @@ impl<'a> Repository<'a> {
                     universe,
                     work,
                     edition,
-                    author: r.get("author")?,
+                    author: None,
+                    authors: Vec::new(),
+                    artists: Vec::new(),
                     medium: r.get("medium")?,
                     reading_direction: r.get("reading_direction")?,
                     status: r.get("status")?,
@@ -192,7 +204,11 @@ impl<'a> Repository<'a> {
                     chapter_count: r.get("chapter_count")?,
                     arc_count: r.get("arc_count")?,
                     genres: Vec::new(),
+                    tags: Vec::new(),
+                    age_rating: r.get("age_rating")?,
                     publisher: r.get("publisher")?,
+                    collection: r.get("collection")?,
+                    colour: colour.map(|c| c != 0),
                     language: r.get("language")?,
                     added_at: r.get("added_at")?,
                     last_added_at: r.get("last_added_at")?,
@@ -217,6 +233,9 @@ impl<'a> Repository<'a> {
         let claimed = self.claimed_volumes(&edition_ids)?;
         let chapter_gaps = self.missing_chapters(&edition_ids)?;
         let genres = self.genres_of(&work_ids)?;
+        let authors = self.authors_of(&work_ids)?;
+        let artists = self.artists_of(&work_ids)?;
+        let tags = self.tags_of(&work_ids)?;
 
         Ok(rows
             .into_iter()
@@ -231,6 +250,12 @@ impl<'a> Repository<'a> {
                 s.owned_volumes = owned.len() as i64;
                 s.missing_chapters = chapter_gaps.get(&s.id).cloned().unwrap_or_default();
                 s.genres = genres.get(&s.work_id).cloned().unwrap_or_default();
+                s.authors = authors.get(&s.work_id).cloned().unwrap_or_default();
+                s.artists = artists.get(&s.work_id).cloned().unwrap_or_default();
+                s.tags = tags.get(&s.work_id).cloned().unwrap_or_default();
+                // Kept for a client that has not been rebuilt: the writers, joined, the way
+                // the single free-typed `author` string used to read.
+                s.author = (!s.authors.is_empty()).then(|| s.authors.join(", "));
                 s
             })
             .collect())
@@ -349,6 +374,49 @@ impl<'a> Repository<'a> {
         })
     }
 
+    /// The writers of several works at once, the same shape as [`Self::genres_of`] and for
+    /// the same reason: one query for the whole page, not one per series.
+    fn authors_of(&self, work_ids: &[String]) -> Result<Grouped<String>> {
+        self.grouped(work_ids, |cx, part| {
+            cx.query(
+                &format!(
+                    "SELECT work_id, name FROM work_author WHERE work_id IN ({}) ORDER BY name",
+                    marks(part.len())
+                ),
+                rusqlite::params_from_iter(part.iter()),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+        })
+    }
+
+    /// The illustrators, the same way.
+    fn artists_of(&self, work_ids: &[String]) -> Result<Grouped<String>> {
+        self.grouped(work_ids, |cx, part| {
+            cx.query(
+                &format!(
+                    "SELECT work_id, name FROM work_artist WHERE work_id IN ({}) ORDER BY name",
+                    marks(part.len())
+                ),
+                rusqlite::params_from_iter(part.iter()),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+        })
+    }
+
+    /// The tags, beside genres and never merged into them.
+    fn tags_of(&self, work_ids: &[String]) -> Result<Grouped<String>> {
+        self.grouped(work_ids, |cx, part| {
+            cx.query(
+                &format!(
+                    "SELECT work_id, name FROM work_tag WHERE work_id IN ({}) ORDER BY name",
+                    marks(part.len())
+                ),
+                rusqlite::params_from_iter(part.iter()),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+        })
+    }
+
     /// Runs a lookup for a list of ids and groups what comes back by that id.
     ///
     /// In chunks, because the list is a page of results and a statement carries a bounded
@@ -385,7 +453,7 @@ impl<'a> Repository<'a> {
         Ok(FacetsDto {
             read_statuses: self.facet(READ_STATUS)?,
             universes: self.facet("u.name")?,
-            authors: self.facet("w.author")?,
+            authors: self.author_facet()?,
             genres: self.genre_facet()?,
             media: self.facet("COALESCE(e.medium, w.medium)")?,
             statuses: self.facet("COALESCE(e.status, w.status)")?,
@@ -422,6 +490,27 @@ impl<'a> Repository<'a> {
                  FROM work_genre g
                  JOIN edition e ON e.work_id = g.work_id
                  GROUP BY g.key
+                 ORDER BY n DESC, LOWER(value)",
+                [],
+                |r| {
+                    Ok(FacetDto {
+                        value: r.get::<_, String>(0)?.trim().to_string(),
+                        count: r.get(1)?,
+                    })
+                },
+            )
+        })
+    }
+
+    /// The same grouping as [`Self::genre_facet`], over the table that replaced the single
+    /// `work.author` column.
+    fn author_facet(&self) -> Result<Vec<FacetDto>> {
+        self.db.read(|cx| {
+            cx.query(
+                "SELECT MIN(a.name) AS value, COUNT(*) AS n
+                 FROM work_author a
+                 JOIN edition e ON e.work_id = a.work_id
+                 GROUP BY a.key
                  ORDER BY n DESC, LOWER(value)",
                 [],
                 |r| {

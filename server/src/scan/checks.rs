@@ -23,6 +23,12 @@ pub fn work(folder: &str, meta: Option<&WorkJson>) -> Vec<String> {
     if blank(&meta.medium) {
         missing.push("medium");
     }
+    if meta.authors().is_empty() {
+        missing.push("authors");
+    }
+    if meta.artists.is_empty() {
+        missing.push("artists");
+    }
     if blank(&meta.status) {
         missing.push("status");
     }

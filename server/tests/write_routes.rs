@@ -88,6 +88,63 @@ async fn patching_a_series_writes_the_sidecar_and_answers_with_what_it_now_is() 
     assert!(server.library().join("Bleach/work.json").exists());
 }
 
+/// A field the server does not write disappears at the first edit — so every field added
+/// alongside `authors` has to round-trip through a patch exactly like the ones already
+/// there, and a later patch touching something else must not lose what an earlier one wrote.
+#[tokio::test]
+async fn the_new_fields_round_trip_through_a_patch_and_a_later_one_does_not_lose_them() {
+    let server = Server::new();
+    a_volume(&server);
+    let series = server.series();
+
+    let (status, body) = server
+        .send(
+            request("PATCH", &format!("/series/{series}"), IMPORTER)
+                .header("content-type", "application/json")
+                .body(json_body(serde_json::json!({
+                    "authors": ["Tsugumi Ōba"],
+                    "artists": ["Takeshi Obata"],
+                    "tags": ["Enquête"],
+                    "ageRating": "16+",
+                    "collection": "Dark Kana",
+                    "colour": false,
+                })))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(StatusCode::OK, status, "{body}");
+    assert_eq!(body["authors"], serde_json::json!(["Tsugumi Ōba"]));
+    assert_eq!(body["artists"], serde_json::json!(["Takeshi Obata"]));
+    assert_eq!(body["tags"], serde_json::json!(["Enquête"]));
+    assert_eq!(body["ageRating"], "16+");
+    assert_eq!(body["collection"], "Dark Kana");
+    assert_eq!(body["colour"], false);
+
+    // A second patch, touching only the summary — nothing said here about the fields the
+    // first patch wrote.
+    let (status, body) = server
+        .send(
+            request("PATCH", &format!("/series/{series}"), IMPORTER)
+                .header("content-type", "application/json")
+                .body(json_body(serde_json::json!({"summary": "Un carnet."})))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(StatusCode::OK, status, "{body}");
+    assert_eq!(
+        body["authors"],
+        serde_json::json!(["Tsugumi Ōba"]),
+        "the first patch's authors must survive the second: {body}"
+    );
+    assert_eq!(body["artists"], serde_json::json!(["Takeshi Obata"]));
+    assert_eq!(body["tags"], serde_json::json!(["Enquête"]));
+    assert_eq!(body["ageRating"], "16+");
+    assert_eq!(body["collection"], "Dark Kana");
+    assert_eq!(body["colour"], false);
+}
+
 #[tokio::test]
 async fn patching_something_that_is_not_there_is_a_404() {
     let server = Server::new();

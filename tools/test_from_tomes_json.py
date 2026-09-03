@@ -17,6 +17,8 @@ import zipfile
 
 from from_tomes_json import (
     arcs_of,
+    colour_of,
+    edition_of,
     main,
     a_folder_name,
     inside,
@@ -27,6 +29,8 @@ from from_tomes_json import (
     images_of,
     natural_key,
     reading_direction,
+    split_names,
+    work_of,
 )
 
 TOMES = {
@@ -120,6 +124,45 @@ class ReadsThePreparedFile(unittest.TestCase):
         self.assertEqual(reading_direction("Yes"), "LEFT_TO_RIGHT")
         self.assertEqual(reading_direction(None), "LEFT_TO_RIGHT")
 
+    def test_a_semicolon_separated_field_splits_on_semicolons(self):
+        # Les Terres d'Arran : Elfes, as it really is prepared.
+        self.assertEqual(
+            split_names("Jean-Luc Istin; Nicolas Jarry; Zang"),
+            ["Jean-Luc Istin", "Nicolas Jarry", "Zang"],
+        )
+
+    def test_a_comma_separated_field_splits_on_commas(self):
+        # Les Terres d'Arran : Mages, the same kind of field, prepared differently.
+        self.assertEqual(
+            split_names("Nicolas Jarry, Diego Aguirre"),
+            ["Nicolas Jarry", "Diego Aguirre"],
+        )
+
+    def test_a_single_name_has_no_separator_to_choose_between(self):
+        self.assertEqual(split_names("Tsugumi Ohba"), ["Tsugumi Ohba"])
+
+    def test_a_field_carrying_both_separators_is_refused_rather_than_guessed(self):
+        # Splitting on "," here would break "Jean-Luc Istin" apart; splitting on ";" would
+        # leave "Nicolas Jarry, Diego Aguirre" as one name. Neither is the truth, so this
+        # stops rather than picking one silently.
+        with self.assertRaises(SystemExit):
+            split_names("Jean-Luc Istin; Nicolas Jarry, Diego Aguirre")
+
+    def test_an_empty_or_missing_field_is_no_names_at_all(self):
+        self.assertEqual(split_names(None), [])
+        self.assertEqual(split_names(""), [])
+
+    def test_black_and_white_yes_is_colour_false(self):
+        self.assertEqual(colour_of("Yes"), False)
+
+    def test_black_and_white_no_is_colour_true(self):
+        self.assertEqual(colour_of("No"), True)
+
+    def test_black_and_white_unknown_or_absent_says_nothing(self):
+        self.assertIsNone(colour_of("Unknown"))
+        self.assertIsNone(colour_of(None))
+        self.assertIsNone(colour_of(""))
+
     def test_an_arc_without_both_ends_is_not_an_arc(self):
         arcs = arcs_of(TOMES)
         self.assertEqual([a["name"] for a in arcs], ["Kira", "Yotsuba"])
@@ -140,6 +183,51 @@ class ReadsThePreparedFile(unittest.TestCase):
             with self.assertRaises(SystemExit) as refused:
                 images_of(source / "Tome 1")
             self.assertIn("9.jpg", str(refused.exception))
+
+
+class WritesTheWorkAndEdition(unittest.TestCase):
+    def test_writer_and_penciller_become_authors_and_artists(self):
+        source = dict(TOMES, Writer="Tsugumi Ohba", Penciller="Takeshi Obata")
+        work = work_of(source, "Death Note", "completed")
+        self.assertEqual(work["authors"], ["Tsugumi Ohba"])
+        self.assertEqual(work["artists"], ["Takeshi Obata"])
+
+    def test_several_writers_stay_separate_names(self):
+        source = dict(TOMES, Writer="Jean-Luc Istin; Nicolas Jarry; Zang")
+        work = work_of(source, "Les Terres d'Arran", "ongoing")
+        self.assertEqual(work["authors"], ["Jean-Luc Istin", "Nicolas Jarry", "Zang"])
+
+    def test_no_writer_or_penciller_leaves_the_fields_out(self):
+        source = dict(TOMES)
+        del source["Writer"]
+        work = work_of(source, "Death Note", "completed")
+        self.assertNotIn("authors", work)
+        self.assertNotIn("artists", work)
+
+    def test_tags_stay_beside_genres_never_merged_into_them(self):
+        source = dict(TOMES, Tags="Enquête, Surnaturel")
+        work = work_of(source, "Death Note", "completed")
+        self.assertEqual(work["genres"], ["Thriller", "Surnaturel"])
+        self.assertEqual(work["tags"], ["Enquête", "Surnaturel"])
+
+    def test_age_rating_is_the_free_string_the_source_carries(self):
+        source = dict(TOMES, AgeRating="16+")
+        self.assertEqual(work_of(source, "Death Note", "completed")["ageRating"], "16+")
+
+    def test_collection_is_a_sibling_of_publisher(self):
+        source = dict(TOMES, Collection="Dark Kana")
+        edition = edition_of(source, "Black Edition", "completed")
+        self.assertEqual(edition["publisher"], "Kana")
+        self.assertEqual(edition["collection"], "Dark Kana")
+
+    def test_black_and_white_yes_becomes_colour_false_on_the_edition(self):
+        source = dict(TOMES, BlackAndWhite="Yes")
+        edition = edition_of(source, "Black Edition", "completed")
+        self.assertEqual(edition["colour"], False)
+
+    def test_no_black_and_white_field_leaves_colour_out(self):
+        edition = edition_of(TOMES, "Black Edition", "completed")
+        self.assertNotIn("colour", edition)
 
 
 class WritesOneEntry(unittest.TestCase):
@@ -219,7 +307,7 @@ class WritesTheTree(unittest.TestCase):
             self.assertEqual(work["medium"], "manga")
             self.assertEqual(work["readingDirection"], "RIGHT_TO_LEFT")
             self.assertEqual(work["status"], "completed")
-            self.assertEqual(work["author"], "Tsugumi Ohba")
+            self.assertEqual(work["authors"], ["Tsugumi Ohba"])
             self.assertEqual(work["genres"], ["Thriller", "Surnaturel"])
             self.assertNotIn("volumeCount", work)
 
