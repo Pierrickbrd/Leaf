@@ -277,7 +277,40 @@ private slots:
         const QModelIndex first = m_shelf->index(0);
         QCOMPARE(m_shelf->data(first, Shelf::MediumRole).toString(), u"Manga"_s);
         QCOMPARE(m_shelf->data(first, Shelf::VolumesRole).toString(), u"21 tomes"_s);
-        QCOMPARE(m_shelf->data(first, Shelf::CoverRole).toString(), u"/series/dn/cover"_s);
+        // Whole, and ready for an `Image`: the key it needs is put on by `Covers`, so no
+        // `.qml` has to splice `Settings.address` onto a path.
+        QCOMPARE(m_shelf->data(first, Shelf::CoverRole).toString(),
+                 m_settings->address() + u"/series/dn/cover"_s);
+    }
+
+    void only_a_series_being_read_is_marked()
+    {
+        // §01: an emerald bar means in progress, nothing means never opened, and finished
+        // carries no mark either — so two of the three answers are the same answer here.
+        QJsonObject reading = aSeries(u"dn"_s, u"Death Note"_s);
+        reading[u"readStatus"_s] = u"IN_PROGRESS"_s;
+        QJsonObject finished = aSeries(u"ac"_s, u"Assassination Classroom"_s);
+        finished[u"readStatus"_s] = u"READ"_s;
+        m_pretend->answers(200, aPage({reading, finished, aSeries(u"pa"_s, u"Parasite"_s)}, 3));
+        m_shelf->reload();
+        settle();
+
+        QVERIFY(m_shelf->data(m_shelf->index(0), Shelf::InProgressRole).toBool());
+        QVERIFY(!m_shelf->data(m_shelf->index(1), Shelf::InProgressRole).toBool());
+        QVERIFY(!m_shelf->data(m_shelf->index(2), Shelf::InProgressRole).toBool());
+    }
+
+    void a_shelf_with_no_server_says_so_rather_than_reaching_through_nothing()
+    {
+        // Only reachable when the `Server` singleton did not resolve — but that is a build
+        // away, and the difference between a sentence and a crash on the first tile is the
+        // difference between a bug report and a shrug.
+        Shelf orphan(nullptr);
+        orphan.reload();
+
+        QCOMPARE(orphan.rowCount(), 0);
+        QVERIFY(!orphan.trouble().isEmpty());
+        QVERIFY(!orphan.loading());
     }
 
     void a_medium_the_server_did_not_give_is_left_unsaid()

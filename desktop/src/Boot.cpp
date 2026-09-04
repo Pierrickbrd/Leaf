@@ -1,5 +1,6 @@
 #include "Boot.h"
 
+#include "Covers.h"
 #include "Fonts.h"
 #include "Theme.h"
 
@@ -28,6 +29,21 @@ void run(QQmlApplicationEngine &engine, const QGuiApplication &application)
     if (!Fonts::load())
         qWarning().noquote()
             << u"a font failed to load — the interface will draw in a fallback"_s;
+
+    // Before the load, and not after. Every cover on the shelf is an `Image` fetched by the
+    // engine's own network manager, which would send no key and be refused; this puts one on.
+    //
+    // It takes the engine rather than the settings for the reason this whole file exists: at
+    // this point "Leaf" is not a resolvable module yet, so there is no `Settings` singleton to
+    // hand over. The factory resolves it the first time the engine asks for a manager, which is
+    // after the load. Installing it after the load instead would work today, but only because
+    // nothing on screen fetches anything before the event loop runs — a fact about today's QML,
+    // not a rule the next screen would know it was breaking.
+    //
+    // Owned by the application: the engine takes no ownership of a factory and wants one that
+    // outlives it, and `application` arrives here as a const reference — deliberately, it is
+    // only a connection context — so the pointer `qApp` is what can be a parent.
+    engine.setNetworkAccessManagerFactory(new Covers(&engine, qApp));
 
     // A window that fails to load must not leave a process running with nothing on screen.
     QObject::connect(

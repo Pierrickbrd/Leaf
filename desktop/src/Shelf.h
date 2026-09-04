@@ -15,22 +15,27 @@
 // instance in the application, and a test builds its own against a server of forty lines.
 // Nothing here needs a window.
 //
-// One role is deliberately missing. A tile will want to show whether a series has been read,
-// and `Words::readStatus` says « Terminées » — a filter pill's plural, wrong on a single
-// tile. The role arrives when `Words` has the singular, rather than now with bad French or
-// with a raw enumeration for QML to switch on.
+// Whether a series is being read is a **fact the tile draws**, not a word: §01 asks for an
+// emerald bar on a cover that is in progress, nothing at all on one never opened, and no mark
+// on one finished. So the role is a boolean and not the enumeration — QML draws or does not
+// draw, and never sorts three cases. The *word* is still missing on purpose: `Words::read
+// Status` says « Terminées », a filter pill's plural and wrong on one tile, and it arrives
+// when `Words` has the singular.
 
 #include "Api.h"
 #include "Server.h"
 
 #include <QAbstractListModel>
 #include <QHash>
+#include <QQmlEngine>
 #include <QList>
 #include <QString>
 
 class Shelf : public QAbstractListModel
 {
     Q_OBJECT
+    QML_ELEMENT
+    QML_SINGLETON
     Q_PROPERTY(int count READ count NOTIFY changed)
     Q_PROPERTY(int total READ total NOTIFY changed)
     Q_PROPERTY(bool loading READ loading NOTIFY changed)
@@ -46,10 +51,14 @@ public:
         CoverRole,
         MediumRole,
         VolumesRole,
+        InProgressRole,
     };
     Q_ENUM(Role)
 
     explicit Shelf(Server *server, QObject *parent = nullptr);
+
+    /// The shelf the application shows, built by the engine from the `Server` singleton.
+    static Shelf *create(QQmlEngine *engine, QJSEngine *);
 
     int rowCount(const QModelIndex &parent = {}) const override;
     QVariant data(const QModelIndex &index, int role) const override;

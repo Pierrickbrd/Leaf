@@ -2,6 +2,8 @@
 
 #include "Words.h"
 
+#include <QDebug>
+
 #include <QJsonObject>
 #include <QUrlQuery>
 
@@ -15,6 +17,19 @@ namespace {
 constexpr int Size = 100;
 
 } // namespace
+
+Shelf *Shelf::create(QQmlEngine *engine, QJSEngine *)
+{
+    auto *server = engine->singletonInstance<Server *>(qmlTypeId("Leaf", 1, 0, "Server"));
+    if (!server) {
+        // Not fatal here. A shelf with no server fills with nothing and says so on the screen,
+        // which is a great deal more useful than a crash on the first tile.
+        qWarning().noquote()
+            << QStringLiteral("error resolving the Server singleton — the shelf will stay "
+                              "empty");
+    }
+    return new Shelf(server);
+}
 
 Shelf::Shelf(Server *server, QObject *parent)
     : QAbstractListModel(parent)
@@ -44,17 +59,21 @@ QVariant Shelf::data(const QModelIndex &index, int role) const
     case WorkRole:
         return one.work;
     case CoverRole:
-        // A **path**, not something QML can hand to an `Image`: the key rides as an
-        // `X-Leaf-Key` header and a plain `source:` would send none, so whatever turns this
-        // into pixels supplies it. Spelled once here rather than in every `.qml` showing a
-        // tile.
-        return u"/series/"_s + one.id + u"/cover"_s;
+        // Whole, and straight into an `Image`. The key it needs is put on by `Covers`, the
+        // engine's network manager factory, so the route is spelled once here instead of
+        // being assembled out of `Settings.address` in every `.qml` that draws a tile.
+        return m_server ? m_server->address() + u"/series/"_s + one.id + u"/cover"_s
+                        : QString();
     case MediumRole:
         // Absent stays absent. "Autre" is the answer for a word this client has not been
         // taught, not the answer for a medium nobody recorded.
         return one.medium ? Words::medium(*one.medium) : QString();
     case VolumesRole:
         return Words::volumes(one.holding.ownedVolumes, one.medium);
+    case InProgressRole:
+        // A tile draws a mark or draws nothing. Read and never-opened are the same answer
+        // here — neither carries one — so this is a boolean and not three cases sent to QML.
+        return one.holding.readStatus == Api::ReadStatus::InProgress;
     default:
         // Reached for `Qt::DisplayRole` and everything else a view asks about by habit, so it
         // is an ordinary answer rather than a case that should not happen.
@@ -69,6 +88,7 @@ QHash<int, QByteArray> Shelf::roleNames() const
     return {
         {SeriesIdRole, "seriesId"}, {NameRole, "name"},     {WorkRole, "work"},
         {CoverRole, "cover"},       {MediumRole, "medium"}, {VolumesRole, "volumes"},
+        {InProgressRole, "inProgress"},
     };
 }
 
@@ -99,6 +119,15 @@ void Shelf::reload()
 
 void Shelf::ask(int page)
 {
+    if (!m_server) {
+        // Only reachable when the `Server` singleton did not resolve, which `create` has
+        // already said out loud. Said again here, on the screen, because a log line is not
+        // where anybody looks at an empty shelf.
+        m_trouble = tr("Leaf could not set itself up, so there is nothing to ask for.");
+        emit changed();
+        return;
+    }
+
     m_loading = true;
     emit changed();
 
