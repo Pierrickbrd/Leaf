@@ -50,6 +50,8 @@ qt_add_executable(leaf-desktop
     src/Widths.cpp
     src/Navigation.h
     src/Navigation.cpp
+    src/Shelf.h
+    src/Shelf.cpp
 )
 
 # Every QML file is addressed under the module by its path below `qml/`, so the tree on disk
@@ -110,7 +112,7 @@ target_link_libraries(keeps-the-key PRIVATE
 add_test(NAME keeps-the-key COMMAND keeps-the-key)
 
 qt_add_executable(talks-to-the-server
-    tests/talks_to_the_server.cpp
+    tests/talks_to_the_server.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp)
 target_include_directories(talks-to-the-server PRIVATE src)
 target_link_libraries(talks-to-the-server PRIVATE
@@ -193,6 +195,19 @@ target_link_libraries(crosses-the-seam PRIVATE
     Qt6::Core Qt6::Gui Qt6::Quick Qt6::QuickControls2 Qt6::Qml Qt6::Test)
 add_test(NAME crosses-the-seam COMMAND crosses-the-seam)
 
+# The shelf's model, against the same forty-line server. It holds rows, pages and says why it
+# is empty — none of which needs a window, so none of it waits on the grid being written.
+qt_add_executable(holds-a-shelf
+    tests/holds_a_shelf.cpp tests/Pretend.h
+    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
+    src/Shelf.h src/Shelf.cpp)
+target_include_directories(holds-a-shelf PRIVATE src)
+target_link_libraries(holds-a-shelf PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME holds-a-shelf COMMAND holds-a-shelf)
+
 qt_add_executable(against-the-real-server EXCLUDE_FROM_ALL
     tests/against_real.cpp
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp)
@@ -209,7 +224,7 @@ add_test(NAME bytes-stay-utf8
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/bytes_stay_utf8.py)
 
 set_tests_properties(keeps-the-key talks-to-the-server keeps-its-contrast embeds-its-fonts
-    crosses-the-seam
+    crosses-the-seam holds-a-shelf
     PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 install(TARGETS leaf-desktop
