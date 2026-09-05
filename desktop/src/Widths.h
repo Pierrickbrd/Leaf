@@ -1,6 +1,6 @@
 #pragma once
 
-// The three widths, in the one place that declares them.
+// The three widths, and the shelf columns they imply, in the one place that declares them.
 //
 // Not `width < …` scattered through every delegate: the grid and the reader have to agree on
 // where the break falls, and two copies of a number agree only until one of them is edited.
@@ -10,9 +10,8 @@
 // break belongs to more than the grid. Below 600 the search field can no longer share the bar
 // with anything and takes the screen.
 //
-// That is the reasoning that chose them, deliberately not a description of the grid and the
-// reader: neither is written yet, so a line here claiming what they do could not be checked
-// today, and would go quietly false the day they are written differently.
+// That is the reasoning that chose them. The grid now reads its band and column count here;
+// the reader will later read the same band rather than grow a second set of thresholds.
 
 #include <QObject>
 #include <QQmlEngine>
@@ -29,6 +28,11 @@ class Widths : public QObject
     /// second would leave it reading a value frozen at the last band crossing.
     Q_PROPERTY(int window READ window WRITE setWindow NOTIFY windowChanged)
     Q_PROPERTY(Band band READ band NOTIFY changed)
+    /// The shelf changes from four to five columns inside the medium band, so this follows
+    /// every window change rather than only a band crossing.
+    Q_PROPERTY(int shelfColumns READ shelfColumns NOTIFY windowChanged)
+    Q_PROPERTY(int shelfMargin READ shelfMargin CONSTANT)
+    Q_PROPERTY(int shelfGap READ shelfGap CONSTANT)
     /// « Large », « Moyenne », « Étroite » — `Words::band(band())`, on this singleton for the
     /// same reason `Navigation::label` is on that one rather than on a second singleton.
     Q_PROPERTY(QString bandLabel READ bandLabel NOTIFY changed)
@@ -37,15 +41,23 @@ public:
     enum class Band { Narrow, Medium, Wide };
     Q_ENUM(Band)
 
+    static constexpr int ShelfMargin = 16;
+    static constexpr int ShelfGap = 14;
+    static constexpr int MinimumCoverWidth = 140;
+
     explicit Widths(QObject *parent = nullptr);
 
-    int window() const { return m_window; }
+    int window() const;
     void setWindow(int width);
 
     Band band() const { return bandFor(m_window); }
     QString bandLabel() const;
+    int shelfColumns() const;
+    int shelfMargin() const;
+    int shelfGap() const;
 
     static Band bandFor(int width);
+    static int shelfColumnsFor(int width);
 
 signals:
     /// Emitted on every real change of the stored width.

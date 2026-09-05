@@ -12,6 +12,7 @@
 #include <QList>
 #include <QNetworkAccessManager>
 #include <QPointer>
+#include <QQmlEngine>
 #include <QUrlQuery>
 #include <QObject>
 #include <QString>
@@ -24,8 +25,14 @@ class Settings;
 class Server : public QObject
 {
     Q_OBJECT
+    QML_ELEMENT
+    QML_SINGLETON
 
 public:
+    /// The header the key rides on. Spelled once because two different network managers write
+    /// it now: this one, and the engine's own for the covers an `Image` fetches.
+    static constexpr const char *KeyHeader = "X-Leaf-Key";
+
     /// What came back. `trouble` is empty when it went, and is the only thing a screen
     /// should ever show — the status is here for the few callers that treat one specially.
     struct Answer {
@@ -37,6 +44,19 @@ public:
     };
 
     explicit Server(Settings *settings, QObject *parent = nullptr);
+
+    /// The one instance the application talks through, built by the engine from the `Settings`
+    /// singleton.
+    ///
+    /// One, and not one per screen: `stopped()` is the whole reason. A refused key stops this
+    /// client for good, and three screens each holding their own `Server` would each have to
+    /// be refused separately — ten times over, which is what the server counts before it shuts
+    /// the address out for a quarter of an hour.
+    static Server *create(QQmlEngine *engine, QJSEngine *);
+
+    /// Where the server is, tidied — for whoever has to build a URL this class will not fetch
+    /// itself. A cover is one: it is drawn by an `Image`, not asked for here.
+    QString address() const;
 
     /// A path, and what goes after the `?` — separately, and never spliced by the caller.
     ///

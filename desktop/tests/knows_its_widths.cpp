@@ -41,6 +41,34 @@ private slots:
         QCOMPARE(widths.band(), Widths::Band::Medium);
     }
 
+    void the_shelf_columns_follow_the_three_width_rules()
+    {
+        // Section 09 gives the bands; the 140 px floor and the 14 px gutter decide the
+        // changes *inside* them. The medium band is deliberately clamped to four then five,
+        // while the narrow band is always two and the wide one keeps growing.
+        QCOMPARE(Widths::shelfColumnsFor(0), 2);
+        QCOMPARE(Widths::shelfColumnsFor(599), 2);
+        QCOMPARE(Widths::shelfColumnsFor(600), 4);
+        QCOMPARE(Widths::shelfColumnsFor(787), 4);
+        QCOMPARE(Widths::shelfColumnsFor(788), 5);
+        QCOMPARE(Widths::shelfColumnsFor(1099), 5);
+        QCOMPARE(Widths::shelfColumnsFor(1100), 7);
+        QCOMPARE(Widths::shelfColumnsFor(1249), 7);
+        QCOMPARE(Widths::shelfColumnsFor(1250), 8);
+    }
+
+    void the_shelf_column_property_follows_a_resize_inside_one_band()
+    {
+        // Four to five happens without crossing a band, so `shelfColumns` must notify with
+        // the window itself and never depend on the band-only `changed` signal.
+        Widths widths;
+        widths.setWindow(700);
+        QCOMPARE(widths.shelfColumns(), 4);
+        widths.setWindow(800);
+        QCOMPARE(widths.shelfColumns(), 5);
+        QCOMPARE(widths.band(), Widths::Band::Medium);
+    }
+
     /// A resize that does not cross a break must not make every screen rebind — but the width
     /// itself must still be the one just set, not a value `setWindow` quietly declined to
     /// store while only the band's own signal stayed silent.

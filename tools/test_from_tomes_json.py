@@ -421,6 +421,35 @@ class RunsFromTheCommandLine(unittest.TestCase):
             self.assertTrue((root / "library/Death Note/Tome 1.cbz").is_file())
             self.assertFalse((root / "library/Death Note/Black Edition").exists())
 
+    def test_an_existing_work_json_is_left_alone_and_the_run_says_so(self):
+        # It always was left alone; the saying was the half that was missing, and only for a
+        # work with a single edition. A series reconverted after the format grew rewrote its
+        # archives, kept its old fields, and announced a work.json it had not written.
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            source, library = str(prepared(root)), str(root / "library")
+            self.assertEqual(self.run_it(source, library, "--edition", "")[0], 0)
+            work = root / "library/Death Note/work.json"
+            work.write_text('{"leaf": 1, "title": "changed by hand"}', encoding="utf-8")
+
+            code, out = self.run_it(source, library, "--edition", "")
+            self.assertEqual(code, 0)
+            self.assertIn("left alone", out)
+            self.assertIn("changed by hand", work.read_text(encoding="utf-8"))
+
+    def test_refresh_rewrites_the_work_it_would_otherwise_keep(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            source, library = str(prepared(root)), str(root / "library")
+            self.assertEqual(self.run_it(source, library, "--edition", "")[0], 0)
+            work = root / "library/Death Note/work.json"
+            work.write_text('{"leaf": 1, "title": "changed by hand"}', encoding="utf-8")
+
+            code, out = self.run_it(source, library, "--edition", "", "--refresh")
+            self.assertEqual(code, 0)
+            self.assertNotIn("left alone", out)
+            self.assertNotIn("changed by hand", work.read_text(encoding="utf-8"))
+
     def test_the_names_can_be_given_instead(self):
         with tempfile.TemporaryDirectory() as root:
             root = pathlib.Path(root)
