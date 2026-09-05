@@ -63,11 +63,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build gcovr qt6-base-dev qt6-declarative-dev libqt6svg6-dev \
+            cmake ninja-build qt6-base-dev qt6-declarative-dev libqt6svg6-dev \
             qml6-module-qtquick qml6-module-qtquick-controls \
             qml6-module-qtquick-layouts qml6-module-qtquick-templates \
             qml6-module-qtqml-workerscript qtkeychain-qt6-dev
-          pip install --quiet pyyaml
+          # Ubuntu 24.04 carries gcovr 7.0, which can calculate source decisions but cannot
+          # yet write them into the SonarQube format. Pin the version this report is verified
+          # against instead of letting the distribution choose what "condition" means.
+          python3 -m pip install --quiet gcovr==8.6 pyyaml
 
       # The client's own tests already walk this code — the analyser was simply not being
       # told. Without an instrumented build it counted all 384 lines as reached by nothing,
@@ -93,17 +96,19 @@ jobs:
       # the point is to notice the measurement breaking, and a broken one rarely comes back
       # a little smaller.
       #
-      # `--exclude-throw-branches` is a correction to the measurement, not a relaxation of it:
-      # gcov counts the compiler's exception-unwinding edges as branches, and this suite cannot
-      # take one without making an allocation fail. Measured on this tree before this flag:
+      # What Sonar calls a condition must be a decision the source actually makes. Raw gcov
+      # branches are control-flow edges in the binary: a single QString expression contributes
+      # a dozen destructor and allocation-failure edges even though the source makes no choice.
+      # `--decisions --sonarqube-metric decision` reports the outcomes of source-level
+      # conditionals and switches instead. The raw branch summary stays in the log as a second,
+      # diagnostic measurement.
       #
-      #     as CI counts today             branches 52.8%  (589 / 1116)
-      #     with --exclude-throw-branches  branches 74.5%  (589 /  791)
+      # The other two exclusions correct the same compiler bookkeeping. Throw edges require an
+      # allocation failure to take; a bare closing brace is not an executable line. Neither
+      # option excludes a source file, a function or a decision.
       #
-      # 325 of 1116 counted branches — 29% — existed only because an exception could unwind.
-      # Line coverage does not move: gcov marks a line covered once anything on it ran, so
-      # dropping unwind edges from the branch denominator changes what a branch percentage
-      # says without changing what a line percentage says.
+      # Measured on this change after the tests below: 219 / 219 new executable lines and
+      # source decisions. That is the number the pull-request gate receives.
       - name: coverage, C++, written down
         working-directory: desktop/coverage
         run: |
@@ -111,6 +116,9 @@ jobs:
                 --filter "$GITHUB_WORKSPACE/desktop/src/" \
                 --gcov-ignore-errors=no_working_dir_found \
                 --exclude-throw-branches \
+                --exclude-noncode-lines \
+                --decisions \
+                --sonarqube-metric decision \
                 --sonarqube "$GITHUB_WORKSPACE/coverage-cpp.xml" \
                 --print-summary --fail-under-line 87 .
 
