@@ -33,7 +33,6 @@ class Widths : public QObject
     Q_PROPERTY(int shelfColumns READ shelfColumns NOTIFY windowChanged)
     Q_PROPERTY(int shelfMargin READ shelfMargin CONSTANT)
     Q_PROPERTY(int shelfGap READ shelfGap CONSTANT)
-    Q_PROPERTY(int minimumCoverWidth READ minimumCoverWidth CONSTANT)
     /// « Large », « Moyenne », « Étroite » — `Words::band(band())`, on this singleton for the
     /// same reason `Navigation::label` is on that one rather than on a second singleton.
     Q_PROPERTY(QString bandLabel READ bandLabel NOTIFY changed)
@@ -56,7 +55,6 @@ public:
     int shelfColumns() const { return shelfColumnsFor(m_window); }
     int shelfMargin() const { return ShelfMargin; }
     int shelfGap() const { return ShelfGap; }
-    int minimumCoverWidth() const { return MinimumCoverWidth; }
 
     static Band bandFor(int width);
     static int shelfColumnsFor(int width);

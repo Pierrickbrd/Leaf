@@ -126,6 +126,33 @@ private slots:
                  u"Death Note"_s);
     }
 
+    void a_row_it_no_longer_holds_and_a_role_it_does_not_offer_say_nothing()
+    {
+        // A reset makes every index a view held beforehand stale, while views also ask for
+        // `DisplayRole` by habit. Neither is exceptional and neither is one of this model's
+        // rows or roles, so both answers are deliberately empty.
+        m_pretend->answers(200, aPage({aSeries(u"dn"_s, u"Death Note"_s),
+                                       aSeries(u"ac"_s, u"Assassination Classroom"_s)},
+                                      2));
+        m_shelf->reload();
+        settle();
+
+        const QModelIndex first = m_shelf->index(0);
+        const QModelIndex stale = m_shelf->index(1);
+        QVERIFY(first.isValid());
+        QVERIFY(stale.isValid());
+        QCOMPARE(m_shelf->rowCount(first), 0);
+        QVERIFY(!m_shelf->data(first, Qt::DisplayRole).isValid());
+        QVERIFY(!m_shelf->data({}, Shelf::NameRole).isValid());
+
+        m_pretend->answers(200, aPage({aSeries(u"pa"_s, u"Parasite"_s)}, 1));
+        m_shelf->reload();
+        settle();
+
+        QVERIFY(stale.isValid());
+        QVERIFY(!m_shelf->data(stale, Shelf::NameRole).isValid());
+    }
+
     void it_asks_for_the_page_it_wants_and_the_size_it_chose()
     {
         // The contract's default size is 100 and its ceiling 500. Sent anyway: a page size

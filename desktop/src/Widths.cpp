@@ -35,15 +35,14 @@ int Widths::shelfColumnsFor(int width)
         ? 1
         : 1 + (available - MinimumCoverWidth) / (MinimumCoverWidth + ShelfGap);
 
-    switch (bandFor(width)) {
-    case Narrow:
+    const Band band = bandFor(width);
+    if (band == Narrow) {
         return 2;
-    case Medium:
-        return std::clamp(fit, 4, 5);
-    case Wide:
-        return fit;
     }
-    return 2;
+    if (band == Medium) {
+        return std::clamp(fit, 4, 5);
+    }
+    return fit;
 }
 
 void Widths::setWindow(int width)
