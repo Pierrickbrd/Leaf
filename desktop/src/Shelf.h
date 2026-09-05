@@ -18,9 +18,9 @@
 // Whether a series is being read is a **fact the tile draws**, not a word: §01 asks for an
 // emerald bar on a cover that is in progress, nothing at all on one never opened, and no mark
 // on one finished. So the role is a boolean and not the enumeration — QML draws or does not
-// draw, and never sorts three cases. The *word* is still missing on purpose: `Words::read
-// Status` says « Terminées », a filter pill's plural and wrong on one tile, and it arrives
-// when `Words` has the singular.
+// draw, and never sorts three cases. The *word* is still missing on purpose: the plural from
+// `Words::readStatus` says « Terminées », which is right on a filter pill and wrong on one
+// tile. It arrives when `Words` has the singular.
 
 #include "Api.h"
 #include "Server.h"

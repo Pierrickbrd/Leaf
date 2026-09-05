@@ -63,20 +63,33 @@ qt_add_executable(leaf-desktop
 set(LEAF_QML
     qml/Main.qml
     qml/FocusRing.qml
+    qml/CoverShadow.qml
+    qml/ShelfView.qml
 )
 foreach(qml_file IN LISTS LEAF_QML)
     string(REGEX REPLACE "^qml/" "" alias "${qml_file}")
     set_source_files_properties(${qml_file} PROPERTIES QT_RESOURCE_ALIAS "${alias}")
 endforeach()
 
+set(LEAF_IMAGES
+    qml/assets/cover-shadow-light.png
+    qml/assets/cover-shadow-dark.png
+)
+foreach(image_file IN LISTS LEAF_IMAGES)
+    string(REGEX REPLACE "^qml/" "" alias "${image_file}")
+    set_source_files_properties(${image_file} PROPERTIES QT_RESOURCE_ALIAS "${alias}")
+endforeach()
+
 qt_add_qml_module(leaf-desktop
     URI Leaf
     VERSION 1.0
+    DEPENDENCIES QtQuick
     # Spelled out, because the default moved: Qt 6.4 puts a module at `:/Leaf`, 6.5 and after
     # at `:/qt/qml/Leaf`. Fixing it here means the path in main.cpp is right on both, and is
     # the one `loadFromModule` resolves to on the versions that have it.
     RESOURCE_PREFIX "/qt/qml"
     QML_FILES ${LEAF_QML}
+    RESOURCES ${LEAF_IMAGES}
 )
 
 # The QML type registration Qt generates includes the headers by their bare name.
@@ -161,15 +174,15 @@ target_include_directories(finds-its-way-back PRIVATE src)
 target_link_libraries(finds-its-way-back PRIVATE Qt6::Core Qt6::Qml Qt6::Test)
 add_test(NAME finds-its-way-back COMMAND finds-its-way-back)
 
-# The only test that loads real QML through a real engine. The eight tests on Navigation and
-# the six on Widths all reach the C++ directly; `opens.sh` proves a window comes up at all —
+# The only test that loads real QML through a real engine. The tests on Navigation and Widths
+# all reach the C++ directly; `opens.sh` proves a window comes up at all —
 # but nothing between them proved that `import Leaf` in a `.qml` file actually resolves to
 # these same objects. This target runs `Boot::run` exactly as `main` does, headless, and reads
 # the singletons back afterwards to prove the seam holds both ways: the window picked up
 # `Widths.window` from its own width, and `Theme` and `Navigation` answer as the C++ says they
 # should.
 qt_add_executable(crosses-the-seam
-    tests/crosses_the_seam.cpp
+    tests/crosses_the_seam.cpp tests/Pretend.h
     src/Boot.h src/Boot.cpp
     src/Covers.h src/Covers.cpp
     src/Settings.h src/Settings.cpp
@@ -179,18 +192,21 @@ qt_add_executable(crosses-the-seam
     src/Words.h src/Words.cpp
     src/Widths.h src/Widths.cpp
     src/Navigation.h src/Navigation.cpp
-    src/Api.h
+    src/Api.h src/Api.cpp
+    src/Shelf.h src/Shelf.cpp
 )
 target_include_directories(crosses-the-seam PRIVATE src)
 qt_add_qml_module(crosses-the-seam
     URI Leaf
     VERSION 1.0
+    DEPENDENCIES QtQuick
     RESOURCE_PREFIX "/qt/qml"
     # Its own directory: the default is named from the URI alone, and `leaf-desktop` already
     # claims "Leaf" there. Same URI, same QML — this is the second build of one module, not a
     # second module, so only the output path needs to differ.
     OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/crosses-the-seam-qml/Leaf"
     QML_FILES ${LEAF_QML}
+    RESOURCES ${LEAF_IMAGES}
 )
 qt_add_resources(crosses-the-seam "leaf-fonts-for-the-seam-test"
     PREFIX "/fonts"

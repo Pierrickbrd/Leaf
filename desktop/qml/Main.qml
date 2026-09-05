@@ -1,6 +1,6 @@
-// The shell, and nothing else yet: the paper, the family, the width the screens read, and
-// the loader the navigation drives. Each destination shows a card naming itself — enough to
-// see the palette and the fonts on a real window, and not one line of a screen.
+// The shell: the paper, the window width shared with every screen, and the Loader that
+// navigation will drive. The shelf is its first real destination; later screens replace only
+// the Loader's source rather than restructuring the window around themselves.
 
 import QtQuick
 import QtQuick.Controls
@@ -24,42 +24,21 @@ ApplicationWindow {
     // Escape comes back. It is here rather than on each screen so that a screen written later
     // cannot forget it.
     Shortcut {
+        // StandardKey is a global QML enumeration: there is deliberately no object to qualify.
+        // qmllint disable unqualified
         sequence: StandardKey.Cancel
+        // qmllint enable unqualified
         onActivated: Navigation.back()
     }
 
-    // The sourceComponent never changes yet — there is only one screen to load. It stays a
-    // Loader anyway: swapping screens as the navigation changes will want exactly this seam,
-    // and this is the seam the first real screen replaces instead of restructuring the shell
-    // around it.
     Loader {
         anchors.fill: parent
-        sourceComponent: card
+        sourceComponent: shelfScreen
     }
 
     Component {
-        id: card
+        id: shelfScreen
 
-        Item {
-            Column {
-                anchors.centerIn: parent
-                spacing: 8
-
-                Label {
-                    text: Navigation.label
-                    font.family: Theme.displayFamily
-                    font.pixelSize: 28
-                    font.weight: Font.Bold
-                    color: Theme.ink
-                }
-
-                Label {
-                    text: Widths.bandLabel
-                    font.family: Theme.textFamily
-                    font.pixelSize: 15
-                    color: Theme.inkSoft
-                }
-            }
-        }
+        ShelfView {}
     }
 }
