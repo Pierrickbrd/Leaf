@@ -43,7 +43,7 @@ protected:
         // — the keyring answers after the run has started, and the settings screen can change
         // them again — and a manager built at the first cover would carry whatever was true
         // then for the rest of the session.
-        if (Settings *settings = m_covers ? m_covers->settings() : nullptr) {
+        if (const Settings *settings = m_covers ? m_covers->settings() : nullptr) {
             if (Covers::sameServer(request.url(), QUrl(Server::tidy(settings->address())))) {
                 carried.setRawHeader(Server::KeyHeader, settings->key().toUtf8());
             }

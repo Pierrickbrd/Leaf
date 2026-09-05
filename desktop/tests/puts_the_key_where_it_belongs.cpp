@@ -14,6 +14,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QQmlEngine>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTest>
@@ -108,6 +109,34 @@ private slots:
         QVERIFY(!heard.contains("8f3a92c1d4e5b6a7"));
     }
 
+    void a_manager_that_outlives_its_factory_carries_no_key()
+    {
+        // QQmlEngine owns the manager but not its factory. The application keeps the factory
+        // longer, yet a teardown in the opposite order must still become harmless rather
+        // than reading a deleted Settings pointer or disclosing the key.
+        delete m_covers;
+        m_covers = nullptr;
+
+        const QByteArray heard = fetch(m_leaf, u"/series/dn/cover"_s);
+
+        QVERIFY(!heard.contains(Server::KeyHeader));
+        QVERIFY(!heard.contains("8f3a92c1d4e5b6a7"));
+    }
+
+    void a_factory_that_cannot_resolve_settings_says_so_and_returns_none()
+    {
+        QQmlEngine engine;
+        Covers unresolved(&engine);
+        QTest::ignoreMessage(
+            QtWarningMsg,
+            "error resolving the Settings singleton — covers will be asked for without a key");
+
+        QVERIFY(!unresolved.settings());
+
+        Covers unconfigured(static_cast<Settings *>(nullptr));
+        QVERIFY(!unconfigured.settings());
+    }
+
     void two_addresses_are_the_same_server_or_they_are_not_data()
     {
         QTest::addColumn<QString>("one");
@@ -132,6 +161,10 @@ private slots:
             << u"qrc:/qt/qml/Leaf/Main.qml"_s << u"https://leaf.local"_s << false;
         QTest::newRow("nothing configured is not a match for nothing asked")
             << u"qrc:/qt/qml/Leaf/Main.qml"_s << QString() << false;
+        QTest::newRow("nothing configured is not the server an image named")
+            << u"https://leaf.local/series/x/cover"_s << QString() << false;
+        QTest::newRow("an unusual scheme gets no invented port")
+            << u"ftp://leaf.local/series/x/cover"_s << u"ftp://leaf.local"_s << true;
     }
 
     void two_addresses_are_the_same_server_or_they_are_not()

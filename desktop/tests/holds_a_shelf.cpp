@@ -14,6 +14,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMetaEnum>
+#include <QQmlEngine>
+#include <QScopedPointer>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTest>
@@ -44,6 +46,11 @@ QByteArray aPage(const QJsonArray &items, int total, int page = 0)
                              {u"size"_s, 100},
                          })
         .toJson(QJsonDocument::Compact);
+}
+
+constexpr int role(Shelf::Role value)
+{
+    return static_cast<int>(value);
 }
 
 } // namespace
@@ -122,7 +129,7 @@ private slots:
         QCOMPARE(m_shelf->rowCount(), 2);
         QCOMPARE(m_shelf->total(), 2);
         QVERIFY(m_shelf->trouble().isEmpty());
-        QCOMPARE(m_shelf->data(m_shelf->index(0), Shelf::NameRole).toString(),
+        QCOMPARE(m_shelf->data(m_shelf->index(0), role(Shelf::Role::Name)).toString(),
                  u"Death Note"_s);
     }
 
@@ -133,7 +140,7 @@ private slots:
         // rows or roles, so both answers are deliberately empty.
         m_pretend->answers(200, aPage({aSeries(u"dn"_s, u"Death Note"_s),
                                        aSeries(u"ac"_s, u"Assassination Classroom"_s)},
-                                      2));
+                                      3));
         m_shelf->reload();
         settle();
 
@@ -142,15 +149,20 @@ private slots:
         QVERIFY(first.isValid());
         QVERIFY(stale.isValid());
         QCOMPARE(m_shelf->rowCount(first), 0);
+        QVERIFY(m_shelf->canFetchMore({}));
+        QVERIFY(!m_shelf->canFetchMore(first));
+        m_pretend->heard.clear();
+        m_shelf->fetchMore(first);
+        QCOMPARE(requests(), 0);
         QVERIFY(!m_shelf->data(first, Qt::DisplayRole).isValid());
-        QVERIFY(!m_shelf->data({}, Shelf::NameRole).isValid());
+        QVERIFY(!m_shelf->data({}, role(Shelf::Role::Name)).isValid());
 
         m_pretend->answers(200, aPage({aSeries(u"pa"_s, u"Parasite"_s)}, 1));
         m_shelf->reload();
         settle();
 
         QVERIFY(stale.isValid());
-        QVERIFY(!m_shelf->data(stale, Shelf::NameRole).isValid());
+        QVERIFY(!m_shelf->data(stale, role(Shelf::Role::Name)).isValid());
     }
 
     void it_asks_for_the_page_it_wants_and_the_size_it_chose()
@@ -179,7 +191,7 @@ private slots:
 
         QVERIFY(m_pretend->heard.contains("page=1"));
         QCOMPARE(m_shelf->rowCount(), 2);
-        QCOMPARE(m_shelf->data(m_shelf->index(1), Shelf::NameRole).toString(),
+        QCOMPARE(m_shelf->data(m_shelf->index(1), role(Shelf::Role::Name)).toString(),
                  u"Assassination Classroom"_s);
     }
 
@@ -302,11 +314,11 @@ private slots:
         settle();
 
         const QModelIndex first = m_shelf->index(0);
-        QCOMPARE(m_shelf->data(first, Shelf::MediumRole).toString(), u"Manga"_s);
-        QCOMPARE(m_shelf->data(first, Shelf::VolumesRole).toString(), u"21 tomes"_s);
+        QCOMPARE(m_shelf->data(first, role(Shelf::Role::Medium)).toString(), u"Manga"_s);
+        QCOMPARE(m_shelf->data(first, role(Shelf::Role::Volumes)).toString(), u"21 tomes"_s);
         // Whole, and ready for an `Image`: the key it needs is put on by `Covers`, so no
         // `.qml` has to splice `Settings.address` onto a path.
-        QCOMPARE(m_shelf->data(first, Shelf::CoverRole).toString(),
+        QCOMPARE(m_shelf->data(first, role(Shelf::Role::Cover)).toString(),
                  m_settings->address() + u"/series/dn/cover"_s);
     }
 
@@ -322,22 +334,27 @@ private slots:
         m_shelf->reload();
         settle();
 
-        QVERIFY(m_shelf->data(m_shelf->index(0), Shelf::InProgressRole).toBool());
-        QVERIFY(!m_shelf->data(m_shelf->index(1), Shelf::InProgressRole).toBool());
-        QVERIFY(!m_shelf->data(m_shelf->index(2), Shelf::InProgressRole).toBool());
+        QVERIFY(m_shelf->data(m_shelf->index(0), role(Shelf::Role::InProgress)).toBool());
+        QVERIFY(!m_shelf->data(m_shelf->index(1), role(Shelf::Role::InProgress)).toBool());
+        QVERIFY(!m_shelf->data(m_shelf->index(2), role(Shelf::Role::InProgress)).toBool());
     }
 
-    void a_shelf_with_no_server_says_so_rather_than_reaching_through_nothing()
+    void a_shelf_factory_with_no_server_says_so_rather_than_reaching_through_nothing()
     {
-        // Only reachable when the `Server` singleton did not resolve — but that is a build
-        // away, and the difference between a sentence and a crash on the first tile is the
-        // difference between a bug report and a shrug.
-        Shelf orphan(nullptr);
-        orphan.reload();
+        // A test executable has no registered Leaf module, which is exactly the broken-build
+        // state this factory guards. It must still hand QML a model that can explain why it
+        // is empty instead of handing the engine a null object or crashing on its first row.
+        QQmlEngine engine;
+        QTest::ignoreMessage(
+            QtWarningMsg,
+            "error resolving the Server singleton — the shelf will stay empty");
+        QScopedPointer<Shelf> orphan(Shelf::create(&engine, nullptr));
+        QVERIFY(orphan);
+        orphan->reload();
 
-        QCOMPARE(orphan.rowCount(), 0);
-        QVERIFY(!orphan.trouble().isEmpty());
-        QVERIFY(!orphan.loading());
+        QCOMPARE(orphan->rowCount(), 0);
+        QVERIFY(!orphan->trouble().isEmpty());
+        QVERIFY(!orphan->loading());
     }
 
     void a_medium_the_server_did_not_give_is_left_unsaid()
@@ -348,7 +365,7 @@ private slots:
         m_shelf->reload();
         settle();
 
-        QVERIFY(m_shelf->data(m_shelf->index(0), Shelf::MediumRole).toString().isEmpty());
+        QVERIFY(m_shelf->data(m_shelf->index(0), role(Shelf::Role::Medium)).toString().isEmpty());
     }
 
     void every_role_the_grid_binds_to_has_a_name()

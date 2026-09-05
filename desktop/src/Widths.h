@@ -47,14 +47,14 @@ public:
 
     explicit Widths(QObject *parent = nullptr);
 
-    int window() const { return m_window; }
+    int window() const;
     void setWindow(int width);
 
     Band band() const { return bandFor(m_window); }
     QString bandLabel() const;
-    int shelfColumns() const { return shelfColumnsFor(m_window); }
-    int shelfMargin() const { return ShelfMargin; }
-    int shelfGap() const { return ShelfGap; }
+    int shelfColumns() const;
+    int shelfMargin() const;
+    int shelfGap() const;
 
     static Band bandFor(int width);
     static int shelfColumnsFor(int width);

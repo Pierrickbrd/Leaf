@@ -6,6 +6,11 @@
 
 Widths::Widths(QObject *parent) : QObject(parent) {}
 
+int Widths::window() const
+{
+    return m_window;
+}
+
 QString Widths::bandLabel() const
 {
     return Words::band(band());
@@ -43,6 +48,21 @@ int Widths::shelfColumnsFor(int width)
         return std::clamp(fit, 4, 5);
     }
     return fit;
+}
+
+int Widths::shelfColumns() const
+{
+    return shelfColumnsFor(m_window);
+}
+
+int Widths::shelfMargin() const
+{
+    return ShelfMargin;
+}
+
+int Widths::shelfGap() const
+{
+    return ShelfGap;
 }
 
 void Widths::setWindow(int width)

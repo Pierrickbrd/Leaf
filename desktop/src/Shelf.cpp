@@ -44,33 +44,52 @@ int Shelf::rowCount(const QModelIndex &parent) const
     return parent.isValid() ? 0 : int(m_held.size());
 }
 
+int Shelf::count() const
+{
+    return int(m_held.size());
+}
+
+int Shelf::total() const
+{
+    return m_total;
+}
+
+bool Shelf::loading() const
+{
+    return m_loading;
+}
+
+QString Shelf::trouble() const
+{
+    return m_trouble;
+}
+
 QVariant Shelf::data(const QModelIndex &index, int role) const
 {
-    if (!index.isValid() || index.row() < 0 || index.row() >= m_held.size()) {
+    if (!index.isValid() || index.row() >= m_held.size()) {
         return {};
     }
 
     const Api::Series &one = m_held.at(index.row());
-    switch (role) {
-    case SeriesIdRole:
+    switch (static_cast<Role>(role)) {
+    case Role::SeriesId:
         return one.id;
-    case NameRole:
+    case Role::Name:
         return one.name;
-    case WorkRole:
+    case Role::Work:
         return one.work;
-    case CoverRole:
+    case Role::Cover:
         // Whole, and straight into an `Image`. The key it needs is put on by `Covers`, the
         // engine's network manager factory, so the route is spelled once here instead of
         // being assembled out of `Settings.address` in every `.qml` that draws a tile.
-        return m_server ? m_server->address() + u"/series/"_s + one.id + u"/cover"_s
-                        : QString();
-    case MediumRole:
+        return m_server->address() + u"/series/"_s + one.id + u"/cover"_s;
+    case Role::Medium:
         // Absent stays absent. "Autre" is the answer for a word this client has not been
         // taught, not the answer for a medium nobody recorded.
         return one.medium ? Words::medium(*one.medium) : QString();
-    case VolumesRole:
+    case Role::Volumes:
         return Words::volumes(one.holding.ownedVolumes, one.medium);
-    case InProgressRole:
+    case Role::InProgress:
         // A tile draws a mark or draws nothing. Read and never-opened are the same answer
         // here — neither carries one — so this is a boolean and not three cases sent to QML.
         return one.holding.readStatus == Api::ReadStatus::InProgress;
@@ -85,11 +104,15 @@ QHash<int, QByteArray> Shelf::roleNames() const
 {
     // `seriesId` and not `id`: `id` is QML's own word for a component's name, and a role
     // called that is a trap laid for whoever writes the delegate.
-    return {
-        {SeriesIdRole, "seriesId"}, {NameRole, "name"},     {WorkRole, "work"},
-        {CoverRole, "cover"},       {MediumRole, "medium"}, {VolumesRole, "volumes"},
-        {InProgressRole, "inProgress"},
-    };
+    QHash<int, QByteArray> named;
+    named.insert(static_cast<int>(Role::SeriesId), "seriesId");
+    named.insert(static_cast<int>(Role::Name), "name");
+    named.insert(static_cast<int>(Role::Work), "work");
+    named.insert(static_cast<int>(Role::Cover), "cover");
+    named.insert(static_cast<int>(Role::Medium), "medium");
+    named.insert(static_cast<int>(Role::Volumes), "volumes");
+    named.insert(static_cast<int>(Role::InProgress), "inProgress");
+    return named;
 }
 
 bool Shelf::canFetchMore(const QModelIndex &parent) const
@@ -167,7 +190,7 @@ void Shelf::took(int page, const Server::Answer &answer)
     m_trouble.clear();
 
     if (!some.items.isEmpty()) {
-        const int first = int(m_held.size());
+        const auto first = int(m_held.size());
         beginInsertRows({}, first, first + int(some.items.size()) - 1);
         m_held.append(some.items);
         endInsertRows();

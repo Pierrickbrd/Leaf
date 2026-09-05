@@ -10,6 +10,7 @@
 
 #include <QCoreApplication>
 #include <QJsonObject>
+#include <QQmlEngine>
 #include <QtGlobal>
 #include <QSignalSpy>
 #include <QStandardPaths>
@@ -82,6 +83,18 @@ private slots:
         QVERIFY2(m_pretend->heard.contains("X-Leaf-Key: 8f3a92c1d4e5b6a7"),
                  m_pretend->heard.constData());
         QVERIFY2(m_pretend->heard.startsWith("GET /series "), m_pretend->heard.constData());
+    }
+
+    void a_server_factory_without_settings_refuses_to_build_a_client()
+    {
+        // This executable deliberately has no registered Leaf module: the same state as a
+        // registration rename or ordering regression in the application.
+        QQmlEngine engine;
+        QTest::ignoreMessage(
+            QtWarningMsg,
+            "error resolving the Settings singleton — nothing can be asked of the server");
+
+        QVERIFY(!Server::create(&engine, nullptr));
     }
 
     /// A search term is the one thing a person types, so it is the one place every byte

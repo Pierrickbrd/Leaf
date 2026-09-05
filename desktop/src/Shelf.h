@@ -44,14 +44,14 @@ class Shelf : public QAbstractListModel
 public:
     /// What a tile shows, one role each. `Q_ENUM` so a test names them rather than counting
     /// from `Qt::UserRole` and hoping.
-    enum Role {
-        SeriesIdRole = Qt::UserRole,
-        NameRole,
-        WorkRole,
-        CoverRole,
-        MediumRole,
-        VolumesRole,
-        InProgressRole,
+    enum class Role {
+        SeriesId = Qt::UserRole,
+        Name,
+        Work,
+        Cover,
+        Medium,
+        Volumes,
+        InProgress,
     };
     Q_ENUM(Role)
 
@@ -60,7 +60,7 @@ public:
     /// The shelf the application shows, built by the engine from the `Server` singleton.
     static Shelf *create(QQmlEngine *engine, QJSEngine *);
 
-    int rowCount(const QModelIndex &parent = {}) const override;
+    int rowCount(const QModelIndex &parent = QModelIndex()) const override;
     QVariant data(const QModelIndex &index, int role) const override;
     QHash<int, QByteArray> roleNames() const override;
 
@@ -75,13 +75,13 @@ public:
     bool canFetchMore(const QModelIndex &parent) const override;
     void fetchMore(const QModelIndex &parent) override;
 
-    int count() const { return int(m_held.size()); }
+    int count() const;
     /// How many there are behind the current answer, which is not how many are held.
-    int total() const { return m_total; }
-    bool loading() const { return m_loading; }
+    int total() const;
+    bool loading() const;
     /// Empty while nothing is wrong. The only thing a screen should ever show about a shelf
     /// that did not fill.
-    QString trouble() const { return m_trouble; }
+    QString trouble() const;
 
     /// Forget everything and ask again from the first page. Also the retry after a refusal,
     /// and later what a changed filter does.
