@@ -655,7 +655,14 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
-          description: Where the server thinks it belongs. Nothing has moved yet.
+          description: |
+            Where the server thinks it belongs. **Nothing is filed yet** — the library is
+            untouched until `POST /intake/{id}/file` confirms it.
+
+            The file itself has moved, though, when `consume` was left at its default: it is
+            staged, out of your folder, and the staged copy is then the only one. `onlyCopy`
+            on the waiting entry says so. Abandoning it deletes it, which is not the same
+            decision as abandoning something you still have a copy of.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Proposal" }

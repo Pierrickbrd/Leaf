@@ -4,52 +4,18 @@
 // client's own behaviour — that the key rides on every request, and that each way a request
 // can fail becomes a sentence rather than a number.
 
+#include "Pretend.h"
 #include "Server.h"
 #include "Settings.h"
 
 #include <QCoreApplication>
 #include <QJsonObject>
+#include <QQmlEngine>
 #include <QtGlobal>
 #include <QSignalSpy>
 #include <QStandardPaths>
-#include <QTcpServer>
-#include <QTcpSocket>
 #include <QTest>
 #include <QUrlQuery>
-
-/// Answers once, with whatever it was told to, and remembers what it was asked.
-class Pretend : public QTcpServer
-{
-    Q_OBJECT
-
-public:
-    QByteArray answer;
-    QByteArray heard;
-
-    /// Built rather than typed, because a hand-counted Content-Length is a way to fail a
-    /// test for a reason that has nothing to do with what it is testing.
-    void answers(int status, const QByteArray &body, const QByteArray &extra = {})
-    {
-        answer = "HTTP/1.1 " + QByteArray::number(status) + " .\r\n"
-                 "Content-Type: application/json\r\n" + extra
-                 + "Content-Length: " + QByteArray::number(body.size()) + "\r\n\r\n" + body;
-    }
-
-    void incomingConnection(qintptr handle) override
-    {
-        auto *socket = new QTcpSocket(this);
-        socket->setSocketDescriptor(handle);
-        connect(socket, &QTcpSocket::readyRead, this, [this, socket] {
-            heard += socket->readAll();
-            if (!heard.contains("\r\n\r\n")) {
-                return;
-            }
-            socket->write(answer);
-            socket->flush();
-            socket->disconnectFromHost();
-        });
-    }
-};
 
 class TalksToTheServer : public QObject
 {
@@ -117,6 +83,18 @@ private slots:
         QVERIFY2(m_pretend->heard.contains("X-Leaf-Key: 8f3a92c1d4e5b6a7"),
                  m_pretend->heard.constData());
         QVERIFY2(m_pretend->heard.startsWith("GET /series "), m_pretend->heard.constData());
+    }
+
+    void a_server_factory_without_settings_refuses_to_build_a_client()
+    {
+        // This executable deliberately has no registered Leaf module: the same state as a
+        // registration rename or ordering regression in the application.
+        QQmlEngine engine;
+        QTest::ignoreMessage(
+            QtWarningMsg,
+            "error resolving the Settings singleton — nothing can be asked of the server");
+
+        QVERIFY(!Server::create(&engine, nullptr));
     }
 
     /// A search term is the one thing a person types, so it is the one place every byte
