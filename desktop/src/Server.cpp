@@ -2,6 +2,8 @@
 
 #include "Settings.h"
 
+#include <QDebug>
+
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QNetworkReply>
@@ -40,6 +42,31 @@ Server::Server(Settings *settings, QObject *parent) : QObject(parent), m_setting
             get(one.path, QUrlQuery(one.encodedQuery), one.caller, one.then);
         }
     });
+}
+
+Server *Server::create(QQmlEngine *engine, QJSEngine *)
+{
+    // Resolved here rather than handed in: a QML singleton is built by the engine with nothing
+    // but the engine to go on. The type id resolves by now — QML asks for this the first time
+    // a screen names it, long after the module was registered, which is the same reason `Boot`
+    // reads the `Theme` back *after* `engine.load(...)` and not before.
+    auto *settings =
+        engine->singletonInstance<Settings *>(qmlTypeId("Leaf", 1, 0, "Settings"));
+    if (!settings) {
+        // Said out loud rather than crashed on: nothing covers a registration that stopped
+        // resolving, and a client that cannot reach its own settings has nothing to ask
+        // anybody. `Shelf` turns a missing server into a sentence on the screen.
+        qWarning().noquote()
+            << QStringLiteral("error resolving the Settings singleton — nothing can be asked "
+                              "of the server");
+        return nullptr;
+    }
+    return new Server(settings);
+}
+
+QString Server::address() const
+{
+    return tidy(m_settings->address());
 }
 
 QString Server::tidy(const QString &address)
@@ -124,7 +151,7 @@ void Server::get(const QString &path, const QUrlQuery &query, const QObject *cal
         url.setQuery(query);
     }
     QNetworkRequest request{url};
-    request.setRawHeader("X-Leaf-Key", m_settings->key().toUtf8());
+    request.setRawHeader(KeyHeader, m_settings->key().toUtf8());
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
 

@@ -256,9 +256,14 @@ cargo test --all-targets
 cargo test --test scan -- name_of_the_test  # one test
 
 # the client
+sudo apt-get install cmake ninja-build qt6-base-dev qt6-declarative-dev libqt6svg6-dev \
+  qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts \
+  qml6-module-qtquick-templates qml6-module-qtqml qml6-module-qtqml-workerscript \
+  qml6-module-qt5compat-graphicaleffects xauth xvfb qtkeychain-qt6-dev
 cd desktop
 cmake -S . -B build -G Ninja && cmake --build build
-ctest --test-dir build --output-on-failure
+ctest --test-dir build --output-on-failure                    # in a desktop session
+xvfb-run -a ctest --test-dir build --output-on-failure        # over SSH / headless
 tests/opens.sh build/leaf-desktop           # linking is not opening
 
 # the guards, from the repository root

@@ -7,17 +7,16 @@
 // enough to pass at a glance and never measured. Recopying that pair over the measured ones
 // is a regression that compiles.
 //
-// Two shadows are deliberately absent, though elevation was designed with them in mind —
+// The cover shadow is painted by CoverShadow.qml from a nine-slice texture: every delegate
+// shares two small decoded images instead of running a blur while the grid scrolls. Its values
+// are the measured card elevation —
 //   card: 0 1px 2px rgb(26 29 27 / .07), 0 8px 24px -6px rgb(26 29 27 / .14)
 //         dark: 0 1px 2px rgb(0 0 0 / .55), 0 10px 28px -8px rgb(0 0 0 / .65)
+// The bar's smaller shadow belongs to the bar itself, which is not drawn yet:
 //   bar:  0 1px 1px rgb(26 29 27 / .05)   dark: 0 1px 1px rgb(0 0 0 / .4)
-// — and nothing here can paint them: this is Qt 6.4.2, where MultiEffect (6.5) does not
-// exist and qml6-module-qt5compat-graphicaleffects is installed neither on the machine nor
-// in CI. The two routes are that compatibility module's shader, applied per item over a
-// scrolling grid of a hundred covers, or a nine-slice BorderImage with no shader at all.
-// That choice belongs to the first screen that draws one, in front of something scrolling.
-// It is written down here rather than dropped, because elevation and tone were designed as
-// coupled: a card carries a shadow, *therefore* its tone gap can stay small.
+// Qt 6.4.2 has no MultiEffect, and CI has no Qt5Compat GraphicalEffects module; the texture
+// keeps that missing dependency out. Elevation and tone stay coupled: a card carries a
+// shadow, therefore its tone gap can stay small.
 
 #include "Fonts.h"
 

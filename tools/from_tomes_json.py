@@ -332,10 +332,14 @@ def write_sidecars(
     work: dict,
     edition: dict,
     existing_work: bool,
+    refresh: bool,
 ) -> None:
     edition_dir.mkdir(parents=True, exist_ok=True)
-    # A second edition must not rewrite what the first one settled about the work.
-    if not existing_work:
+    # A second edition must not rewrite what the first one settled about the work — which is
+    # also why refreshing one has to be asked for. `--refresh` says "this source's view of
+    # the work wins", and for a work with two editions that is a choice between them, not a
+    # detail: their tomes.json can disagree about the summary and the tags.
+    if refresh or not existing_work:
         write_json(work_file, work)
     if edition_file:
         write_json(edition_file, edition)
@@ -348,16 +352,22 @@ def announce(
     edition_name: str | None,
     arcs: list,
     existing_work: bool,
+    refresh: bool,
 ) -> None:
     """What is about to be written, in the order it will be read."""
+    # « laissé tel quel » se disait dans une branche et pas dans l'autre, si bien qu'une
+    # série à édition implicite annonçait un work.json qu'elle n'écrivait pas. Reconvertie
+    # après un changement de format, elle réécrivait ses archives et gardait ses anciens
+    # champs — et rien ne le disait. Vu le 03/09/2026, sur quatre gigaoctets récrits pour
+    # rien avant que les dates de modification ne le trahissent.
+    left = "  (already there, left alone — --refresh to rewrite it)" if existing_work and not refresh else ""
     if edition_name:
-        print(f"  work.json    → {work_name}: {work['medium']}, {work['status']}, {work['readingDirection']}"
-              + ("  (already there, left alone)" if existing_work else ""))
+        print(f"  work.json    → {work_name}: {work['medium']}, {work['status']}, {work['readingDirection']}{left}")
         print(f"  edition.json → {edition_name}: {edition['volumeCount']} volumes, "
               f"label {edition.get('chapterLabel', '—')}, {len(arcs)} arc(s)")
     else:
         print(f"  work.json    → {work_name}: {work['medium']}, {work['status']}, {work['readingDirection']}, "
-              f"{work['volumeCount']} volumes, label {work.get('chapterLabel', '—')}, {len(arcs)} arc(s)")
+              f"{work['volumeCount']} volumes, label {work.get('chapterLabel', '—')}, {len(arcs)} arc(s){left}")
 
 
 def write_volumes(
@@ -405,6 +415,7 @@ def build(
     work_name: str,
     edition_name: str | None,
     universe_name: str | None,
+    refresh: bool = False,
 ) -> None:
     """Writes one edition. Call it again for the next one, into the same work.
 
@@ -446,9 +457,9 @@ def build(
         print(f"  universe.json→ {universe_name}")
 
     existing_work = work_file.is_file()
-    announce(work, edition, work_name, edition_name, arcs, existing_work)
+    announce(work, edition, work_name, edition_name, arcs, existing_work, refresh)
     if not dry_run:
-        write_sidecars(edition_dir, work_file, edition_file, work, edition, existing_work)
+        write_sidecars(edition_dir, work_file, edition_file, work, edition, existing_work, refresh)
     write_volumes(source, edition_dir, data, work_name, edition_name, dry_run)
 
 
@@ -462,6 +473,12 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--edition",
         help="the edition's name, or empty for a work that has only one (default: the source folder's name)",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="rewrite an existing work.json instead of leaving it — for a work with two "
+             "editions this chooses which source's view of it wins",
     )
     parser.add_argument(
         "--status",
@@ -494,6 +511,7 @@ def main(argv=None) -> int:
         work_name,
         edition_name,
         universe_name,
+        arguments.refresh,
     )
     return 0
 
