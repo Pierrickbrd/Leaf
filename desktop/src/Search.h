@@ -25,7 +25,7 @@
 
 class Shelf;
 
-class Search : public QAbstractListModel
+class Search final : public QAbstractListModel
 {
     Q_OBJECT
     QML_ELEMENT
@@ -42,30 +42,6 @@ class Search : public QAbstractListModel
     Q_PROPERTY(bool active READ active NOTIFY changed)
     Q_PROPERTY(bool loading READ loading NOTIFY changed)
     Q_PROPERTY(QString trouble READ trouble NOTIFY changed)
-    Q_PROPERTY(QString heading READ heading NOTIFY changed)
-    Q_PROPERTY(QString moreLabel READ moreLabel NOTIFY changed)
-    Q_PROPERTY(QString overviewLabel READ overviewLabel CONSTANT)
-    Q_PROPERTY(QString seriesHeading READ seriesHeading NOTIFY changed)
-    Q_PROPERTY(QString filesHeading READ filesHeading NOTIFY changed)
-    Q_PROPERTY(QString allSeriesLabel READ allSeriesLabel NOTIFY changed)
-    Q_PROPERTY(QString allFilesLabel READ allFilesLabel NOTIFY changed)
-    Q_PROPERTY(QString outsideFilters READ outsideFilters NOTIFY changed)
-    Q_PROPERTY(QString suggestion READ suggestion NOTIFY changed)
-
-    // The bar's words live on its state object rather than as untested French in QML.
-    Q_PROPERTY(QString placeholder READ placeholder CONSTANT)
-    Q_PROPERTY(QString shortPlaceholder READ shortPlaceholder CONSTANT)
-    Q_PROPERTY(QString clearLabel READ clearLabel CONSTANT)
-    Q_PROPERTY(QString filterLabel READ filterLabel CONSTANT)
-    Q_PROPERTY(QString settingsLabel READ settingsLabel CONSTANT)
-    Q_PROPERTY(QString noSeriesLabel READ noSeriesLabel CONSTANT)
-    Q_PROPERTY(QString clearFiltersLabel READ clearFiltersLabel CONSTANT)
-    Q_PROPERTY(QString nothingToFilterLabel READ nothingToFilterLabel CONSTANT)
-    Q_PROPERTY(QString noValueByThatNameLabel READ noValueByThatNameLabel CONSTANT)
-    Q_PROPERTY(QString sortLabel READ sortLabel NOTIFY changed)
-    Q_PROPERTY(QVariantList sortOptions READ sortOptions CONSTANT)
-    Q_PROPERTY(QString sortValue READ sortValue NOTIFY changed)
-
 public:
     enum class Role {
         Kind = Qt::UserRole,
@@ -98,30 +74,23 @@ public:
     bool loading() const { return m_loading; }
     QString trouble() const { return m_trouble; }
 
-    QString heading() const;
-    QString moreLabel() const;
-    QString overviewLabel() const;
-    QString seriesHeading() const;
-    QString filesHeading() const;
-    QString allSeriesLabel() const;
-    QString allFilesLabel() const;
-    QString outsideFilters() const;
-    QString suggestion() const;
-    QString placeholder() const;
-    QString shortPlaceholder() const;
-    QString clearLabel() const;
-    QString filterLabel() const;
-    QString settingsLabel() const;
-    QString noSeriesLabel() const;
-    QString clearFiltersLabel() const;
-    QString nothingToFilterLabel() const;
-    QString noValueByThatNameLabel() const;
+    /// What the answer said besides its rows: how many matches the filters are keeping off
+    /// the screen, and the name the server guessed at when nothing matched exactly. One
+    /// accessor and not two, because `Captions` needs both to word either.
+    struct Aside {
+        int outside = 0;
+        QString approximate;
+    };
+    Aside aside() const { return {m_outside, m_approximate}; }
+
+    /// The selection the answer in hand was fetched under, by the contract's axis names.
+    /// Read from here and not from the shelf: this is what the sentence describes, and a
+    /// search can run with filters before any shelf exists — which is how every test of
+    /// that sentence builds it.
+    QVariantMap narrowing() const { return m_narrowing; }
+
     /// Named after the axis it narrows, so a reader cannot mistake it for the field that
     /// asks the server a question.
-    Q_INVOKABLE QString searchWithin(const QString &axisTitle) const;
-    QString sortValue() const;
-    QString sortLabel() const;
-    QVariantList sortOptions() const;
 
     /// Public for a headless test and for a future screen with its own shelf. In the
     /// application Shelf::criteriaChanged calls this with the one canonical selection.
@@ -147,13 +116,11 @@ private:
     };
 
     void followShelf();
-    QStringList narrowedBy(const QString &axis) const;
     void updateSearch(const QString &query, const QVariantMap &narrowing,
                       const QString &sort, const QString &direction);
     void ask(bool filtered, int page);
     void took(bool filtered, int page, const Server::Answer &answer);
     Parsed parse(const Server::Answer &answer) const;
-    QStringList activeLabels() const;
     void replaceFiles(QList<Api::Hit> files);
     void appendFiles(QList<Api::Hit> files);
 

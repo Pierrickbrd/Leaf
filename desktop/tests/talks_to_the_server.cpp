@@ -7,6 +7,7 @@
 #include "Pretend.h"
 #include "Server.h"
 #include "Settings.h"
+#include "Words.h"
 
 #include <QCoreApplication>
 #include <QJsonObject>
@@ -126,7 +127,7 @@ private slots:
     {
         const auto got = ask(QStringLiteral("/search?q=Berserk"));
         QVERIFY(!got.went());
-        QVERIFY2(got.trouble.contains(QStringLiteral("apart from the path")),
+        QVERIFY2(got.trouble == Words::queryBelongsApart(),
                  qPrintable(got.trouble));
         QVERIFY2(m_pretend->heard.isEmpty(), m_pretend->heard.constData());
     }
@@ -165,7 +166,7 @@ private slots:
         const auto got = ask();
         QVERIFY(!got.went());
         QCOMPARE(got.status, 0);
-        QVERIFY2(got.trouble.contains(QStringLiteral("could not be reached")),
+        QVERIFY2(got.trouble.startsWith(Words::unreachable(QString()).trimmed()),
                  qPrintable(got.trouble));
     }
 
@@ -174,7 +175,7 @@ private slots:
         m_pretend->answers(200, "not json at all");
         const auto got = ask();
         QVERIFY(!got.went());
-        QVERIFY2(got.trouble.contains(QStringLiteral("cannot read")), qPrintable(got.trouble));
+        QVERIFY2(got.trouble == Words::unreadableAnswer(), qPrintable(got.trouble));
     }
 
     void an_address_typed_by_hand_is_filed_down_rather_than_refused()
@@ -234,7 +235,7 @@ private slots:
         const QByteArray afterOne = m_pretend->heard;
         const auto again = ask();
         QVERIFY(!again.went());
-        QVERIFY2(again.trouble.contains(QStringLiteral("more seconds")),
+        QVERIFY2(again.trouble.endsWith(QStringLiteral("avant de redemander.")),
                  qPrintable(again.trouble));
         QCOMPARE(m_pretend->heard, afterOne);
     }

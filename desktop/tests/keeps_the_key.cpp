@@ -5,6 +5,7 @@
 // looks in, and that a key anybody on the machine could read is not read at all.
 
 #include "Settings.h"
+#include "Words.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -69,6 +70,26 @@ private slots:
         waiting.exec();
     }
 
+    void partial_configuration_names_the_missing_value()
+    {
+        qputenv("LEAF_ADDRESS", "https://leaf.local");
+        Settings settings;
+        waitFor(settings);
+        QCOMPARE(settings.storageLabel(), Words::keyStorage(Words::KeyFrom::Environment));
+        QCOMPARE(settings.keyTitle(), Words::theKey());
+        QCOMPARE(settings.sections().size(), 2);
+        QCOMPARE(settings.missing(), Words::noKey(Settings::configurationFile()));
+        settings.setAddress({});
+        settings.setKey(QStringLiteral("test-value"));
+        QCOMPARE(settings.missing(), Words::noAddress(Settings::configurationFile()));
+        settings.setAddress(QStringLiteral("https://leaf.local"));
+        QVERIFY(settings.missing().isEmpty());
+        QSignalSpy changed(&settings, &Settings::changed);
+        settings.setAddress(settings.address());
+        settings.setKey(settings.key());
+        QCOMPARE(changed.count(), 0);
+    }
+
     void the_environment_is_read_first()
     {
         // What a launcher or a systemd unit sets, for one run.
@@ -97,6 +118,7 @@ private slots:
 
         QCOMPARE(settings.address(), QStringLiteral("https://leaf.local:8081"));
         QCOMPARE(settings.key(), QStringLiteral("8f3a92c1d4e5b6a7"));
+        QCOMPARE(settings.storageLabel(), Words::keyStorage(Words::KeyFrom::ProtectedFile));
         QVERIFY(settings.configured());
     }
 
@@ -125,6 +147,7 @@ private slots:
         waitFor(settings);
 
         QVERIFY(!settings.configured());
+        QCOMPARE(settings.storageLabel(), Words::keyStorage(Words::KeyFrom::Unknown));
         const QString said = settings.missing();
         // Saying what is absent is not the same as offering to manage it — but an empty
         // window that does not say why is a dead end.

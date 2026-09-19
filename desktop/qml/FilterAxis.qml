@@ -26,15 +26,18 @@ Item {
 
     signal picked(string value)
 
-    /// Above this many, the list gets a field to search itself. Twelve is where a column
-    /// stops being something you scan and starts being something you hunt through.
-    readonly property int tooManyToScan: 12
-    /// And above this many, it scrolls inside its own bounds rather than growing. Five rows
-    /// is enough to show that there is a list and that it continues; a library with three
-    /// hundred authors would otherwise make one axis nine thousand pixels tall, and build
-    /// three hundred items to draw the five anybody can see.
+    /// How many values show at once before the axis scrolls inside its own bounds rather
+    /// than growing. Five rows is enough to show that there is a list and that it continues;
+    /// a library with three hundred authors would otherwise make one axis nine thousand
+    /// pixels tall, and build three hundred items to draw the five anybody can see.
     readonly property int atMostOnScreen: 5
     readonly property int rowHeight: 30
+    /// Whether the axis gets a field to search itself — and it is the same threshold, on
+    /// purpose. It used to be its own number, twelve, which left six to twelve values in the
+    /// worst of both: a list you cannot see whole, in a window five rows tall, with nothing
+    /// to filter it by. The rule now says itself in one line — if you can see it all you
+    /// scan it, if you cannot you can type — and there is no second number to keep in step.
+    readonly property bool searchable: values.length > atMostOnScreen
     property bool open: startsOpen
     property string looking: ""
 
@@ -121,13 +124,28 @@ Item {
         visible: axisItem.open
         spacing: 0
 
+        // Air above and below the field, and only when there is a field. Against the head
+        // it read as one control with it — worse under the pointer, where the head takes
+        // the same wash as the field's own surface and the two became a single shape.
+        Item {
+            width: 1
+            height: 7
+            visible: axisItem.searchable
+        }
+
         LeafSearchLine {
             objectName: "filter-axis-search-" + axisItem.axis
             x: 8
             width: parent.width - 16
-            visible: axisItem.values.length > axisItem.tooManyToScan
+            visible: axisItem.searchable
             placeholder: axisItem.title
             onAsked: text => axisItem.looking = text
+        }
+
+        Item {
+            width: 1
+            height: 7
+            visible: axisItem.searchable
         }
 
         // A view and not a repeater: it builds the rows it draws and no more. The axis is
@@ -162,7 +180,7 @@ Item {
             x: 28
             width: parent.width - 36
             visible: axisItem.showing.length === 0 && axisItem.looking.trim().length > 0
-            text: Search.noValueByThatNameLabel
+            text: Captions.noValueByThatNameLabel
             color: Theme.inkSoft
             font.family: Theme.textFamily
             font.pixelSize: 13

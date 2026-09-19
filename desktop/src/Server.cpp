@@ -1,6 +1,7 @@
 #include "Server.h"
 
 #include "Settings.h"
+#include "Words.h"
 
 #include <QDebug>
 
@@ -39,7 +40,8 @@ Server::Server(Settings *settings, QObject *parent) : QObject(parent), m_setting
             if (!one.caller) {
                 continue;
             }
-            get(one.path, QUrlQuery(one.encodedQuery), one.caller, one.then);
+            send(one.verb, one.path, QUrlQuery(one.encodedQuery), one.body, one.caller,
+                 one.then);
         }
     });
 }
@@ -92,8 +94,21 @@ void Server::get(const QString &path, const QObject *caller,
     get(path, QUrlQuery(), caller, std::move(then));
 }
 
+void Server::post(const QString &path, const QByteArray &body, const QObject *caller,
+                  std::function<void(const Answer &)> then)
+{
+    send("POST", path, QUrlQuery(), body, caller, std::move(then));
+}
+
 void Server::get(const QString &path, const QUrlQuery &query, const QObject *caller,
                  std::function<void(const Answer &)> then)
+{
+    send("GET", path, query, {}, caller, std::move(then));
+}
+
+void Server::send(const QByteArray &verb, const QString &path, const QUrlQuery &query,
+                  const QByteArray &body, const QObject *caller,
+                  std::function<void(const Answer &)> then)
 {
     // Nothing given is this client itself: the answer then stands for as long as the thing
     // that would send it, which is what every caller had before there was anything to say.
@@ -102,7 +117,7 @@ void Server::get(const QString &path, const QUrlQuery &query, const QObject *cal
     // A caller that built its own query string has already lost the ampersands. Saying so is
     // better than encoding it twice or sending it broken.
     if (path.contains(u'?')) {
-        then({0, {}, tr("A query has to be given apart from the path, not spliced into it.")});
+        then({0, {}, Words::queryBelongsApart()});
         return;
     }
     if (!m_stopped.isEmpty()) {
@@ -111,8 +126,8 @@ void Server::get(const QString &path, const QUrlQuery &query, const QObject *cal
     }
     if (m_notBefore.isValid() && QDateTime::currentDateTime() < m_notBefore) {
         then({0, {},
-              tr("Waiting %1 more seconds before asking again.")
-                  .arg(QDateTime::currentDateTime().secsTo(m_notBefore))});
+              Words::waitingBeforeAsking(
+                  int(QDateTime::currentDateTime().secsTo(m_notBefore)))});
         return;
     }
 
@@ -123,13 +138,14 @@ void Server::get(const QString &path, const QUrlQuery &query, const QObject *cal
             // Said, and not held. A queue that quietly stops taking requests is a screen
             // waiting on an answer that was never going to come.
             then({0, {},
-                  tr("Too many requests are already waiting for Leaf to open your library.")});
+                  Words::tooManyWaiting()});
             return;
         }
         // Encoded here and parsed back on the way out — see `Waiting::encodedQuery` for why
         // it is not the `QUrlQuery` itself. `FullyEncoded` is the only form that survives the
         // round trip: a `PrettyDecoded` query hands its own ampersands back to the parser.
-        m_waiting.append({path, query.toString(QUrl::FullyEncoded), alive, std::move(then)});
+        m_waiting.append({verb, path, query.toString(QUrl::FullyEncoded), body, alive,
+                          std::move(then)});
         return;
     }
 
@@ -142,7 +158,7 @@ void Server::get(const QString &path, const QUrlQuery &query, const QObject *cal
         // for the case `missing()` should have covered and did not.
         const QString said = m_settings->missing();
         then({0, {},
-              said.isEmpty() ? tr("Leaf does not know where your library is.") : said});
+              said.isEmpty() ? Words::noLibrary() : said});
         return;
     }
 
@@ -155,7 +171,15 @@ void Server::get(const QString &path, const QUrlQuery &query, const QObject *cal
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
 
-    QNetworkReply *reply = m_network.get(request);
+    // A body means something to send, and a server that reads a length. Set even when the
+    // body is empty: `POST /scan` carries nothing, and a POST with no length at all is one
+    // some proxies hold open waiting for it.
+    if (verb != "GET") {
+        request.setHeader(QNetworkRequest::ContentTypeHeader,
+                          QByteArrayLiteral("application/json"));
+    }
+    QNetworkReply *reply = verb == "GET" ? m_network.get(request)
+                                         : m_network.sendCustomRequest(request, verb, body);
     connect(reply, &QNetworkReply::finished, this,
             [this, reply, alive, then = std::move(then)] {
                 reply->deleteLater();
@@ -185,7 +209,7 @@ Server::Answer Server::read(QNetworkReply *reply) const
     // Nothing came back at all: the machine is off, the name does not resolve, the
     // certificate is not the one pinned. Said as what it is rather than as a code.
     if (status == 0) {
-        return {0, {}, tr("The server could not be reached — %1").arg(reply->errorString())};
+        return {0, {}, Words::unreachable(reply->errorString())};
     }
 
     const QByteArray bytes = reply->readAll();
@@ -194,7 +218,7 @@ Server::Answer Server::read(QNetworkReply *reply) const
 
     if (status >= 200 && status < 300) {
         if (fault.error != QJsonParseError::NoError && !bytes.isEmpty()) {
-            return {status, {}, tr("The server answered something this cannot read.")};
+            return {status, {}, Words::unreadableAnswer()};
         }
         return {status, body, {}};
     }
@@ -207,18 +231,15 @@ Server::Answer Server::read(QNetworkReply *reply) const
     switch (status) {
     case 403:
         return {status, body,
-                said.isEmpty() ? tr("The key was refused.")
-                               : tr("The key was refused: %1").arg(said)};
+                Words::keyRefused(said)};
     case 429:
         return {status, body,
-                tr("Too many wrong keys have been tried. Wait %1 seconds.")
-                    .arg(QString::fromUtf8(reply->rawHeader("Retry-After")))};
+                Words::tooManyWrongKeys(
+                    QString::fromUtf8(reply->rawHeader("Retry-After")))};
     case 404:
-        return {status, body, said.isEmpty() ? tr("There is no such thing here.") : said};
+        return {status, body, said.isEmpty() ? Words::noSuchThing() : said};
     default:
         return {status, body,
-                said.isEmpty()
-                    ? tr("The server answered %1.").arg(status)
-                    : tr("The server answered %1: %2").arg(status).arg(said)};
+                Words::serverAnswered(status, said)};
     }
 }

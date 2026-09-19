@@ -6,6 +6,7 @@
 
 #include "Words.h"
 
+#include <QSet>
 #include <QTest>
 
 using Qt::Literals::StringLiterals::operator""_s;
@@ -95,6 +96,74 @@ private slots:
         QCOMPARE(Words::sortOrder(Api::Sort::Volumes), u"Nombre de tomes"_s);
         QCOMPARE(Words::labelled(u"Trier"_s, Words::sortOrder(Api::Sort::Name)),
                  u"Trier"_s + Words::Nbsp + u": Nom"_s);
+    }
+
+    /// What the settings screen says. Written here and nowhere else, for the reason this
+    /// file exists: a string spelled in a screen is a string no test ever reads.
+    void the_settings_screen_says_where_the_key_came_from()
+    {
+        // A reader does not have a server, they have a library that answers or does not.
+        QCOMPARE(Words::theServer(), u"Connexion"_s);
+        QCOMPARE(Words::connected(true), u"Bibliothèque connectée"_s);
+        QCOMPARE(Words::connected(false), u"Pas de connexion"_s);
+        QCOMPARE(Words::appearanceChoice(Words::Looks::System), u"Système"_s);
+        QCOMPARE(Words::appearanceChoice(Words::Looks::Light), u"Clair"_s);
+        QCOMPARE(Words::appearanceChoice(Words::Looks::Dark), u"Sombre"_s);
+        // Named after where it goes, not after itself: a tooltip repeating the arrow it
+        // sits on says nothing the arrow did not.
+        QVERIFY(Words::backTo(u"L’étagère"_s).contains(u"étagère"_s));
+        QCOMPARE(Words::backTo(QString()), u"Retour"_s);
+
+        using enum Words::KeyFrom;
+        QCOMPARE(Words::keyStorage(Environment), u"Dans l’environnement"_s);
+        QCOMPARE(Words::keyStorage(Keyring), u"Dans le trousseau de la session"_s);
+        QCOMPARE(Words::keyStorage(ProtectedFile), u"Dans un fichier protégé"_s);
+        // Not "no key": the key may be there and its origin unknown, and the screen must
+        // not accuse a working setup of being broken.
+        QCOMPARE(Words::keyStorage(Unknown), u"Introuvable"_s);
+    }
+
+    void the_settings_screen_says_where_the_scan_is()
+    {
+        using enum Words::Scanning;
+        QCOMPARE(Words::scanState(Running), u"En cours…"_s);
+        QCOMPARE(Words::scanState(Done), u"Terminé"_s);
+        QCOMPARE(Words::scanState(Idle), u"À l’arrêt"_s);
+        // A state the server grew and this client was not taught is said, not guessed at.
+        QVERIFY(!Words::scanState(Other).isEmpty());
+        QVERIFY(Words::scanState(Other) != Words::scanState(Idle));
+
+        // Never run is not a failure, and an empty line would read as a missing answer.
+        QCOMPARE(Words::lastScan(0), u"Jamais lancé"_s);
+        QVERIFY(Words::lastScan(1788463365455LL).startsWith(u"Dernier scan"_s));
+    }
+
+    /// Absolute and never « il y a trois heures »: the question asked of a scan is whether
+    /// it ran since you changed something, and only a date answers that.
+    void a_moment_is_a_date_and_not_a_distance()
+    {
+        // 3 May 2026, 12:02:45 UTC — read back in this machine's own zone, so the day is
+        // asserted and the hour is not.
+        const QString said = Words::moment(1777809765000LL);
+        QVERIFY2(said.contains(u"2026"_s), qPrintable(said));
+        QVERIFY2(said.contains(u"mai"_s), qPrintable(said));
+        QVERIFY2(!said.contains(u"May"_s), qPrintable(said));
+
+        // No scan has a date of zero; an empty string is what an absent one looks like.
+        QCOMPARE(Words::moment(0), QString());
+        QCOMPARE(Words::moment(-1), QString());
+    }
+
+    void the_settings_screen_counts_what_the_server_holds()
+    {
+        QCOMPARE(Words::libraryHolds(0), u"Aucune série"_s);
+        QCOMPARE(Words::libraryHolds(1), u"1 série"_s);
+        QCOMPARE(Words::libraryHolds(6), u"6 séries"_s);
+        QCOMPARE(Words::apiVersion(1, 1), u"API 1 · format 1"_s);
+        // A server that answers and one with no address at all are different troubles, and
+        // the screen says which.
+        QVERIFY(Words::answering(true) != Words::answering(false));
+        QVERIFY(Words::sharedFolder(true) != Words::sharedFolder(false));
     }
 
     /// The eight axes a library can be narrowed by. The contract's spelling goes in, because
@@ -294,7 +363,25 @@ private slots:
                           Words::seeAllFiles(12),    Words::didYouMean(u"Tsugumi Ōba"_s),
                           Words::searchHint(),       Words::searchHintShort(),
                           Words::clearTheSearch(),   Words::filter(),
-                          Words::noSeriesByThatName()};
+                          Words::noSeriesByThatName(),
+                          Words::noLibrary(),
+                          Words::unreachable(u"Connection refused"_s),
+                          Words::unreadableAnswer(),
+                          Words::keyRefused({}),
+                          Words::keyRefused(u"expirée"_s),
+                          Words::tooManyWrongKeys(u"30"_s),
+                          Words::noSuchThing(),
+                          Words::serverAnswered(500, {}),
+                          Words::serverAnswered(500, u"en panne"_s),
+                          Words::waitingBeforeAsking(12),
+                          Words::tooManyWaiting(),
+                          Words::queryBelongsApart(),
+                          Words::nothingConfigured(u"leaf.conf"_s),
+                          Words::noAddress(u"leaf.conf"_s),
+                          Words::noKey(u"leaf.conf"_s),
+                          Words::readableByOthers(u"leaf.conf"_s)};
+        for (int i = 0; i <= int(Words::Asking::State); ++i)
+            every << Words::notSetUp(Words::Asking(i));
         for (int i = 0; i <= int(Api::Medium::Other); ++i)
             every << Words::medium(Api::Medium(i));
         for (int i = 0; i <= int(Api::ReadStatus::Read); ++i)
@@ -355,6 +442,62 @@ private slots:
         QVERIFY(Words::destination(static_cast<Navigation::Destination>(99)).isEmpty());
         QVERIFY(Words::band(static_cast<Widths::Band>(99)).isEmpty());
         QVERIFY(Words::resumeAction(static_cast<Api::UpNext::Reason>(99)).isEmpty());
+        QVERIFY(Words::notSetUp(static_cast<Words::Asking>(99)).isEmpty());
+    }
+
+    /// Every sentence Leaf says when something is wrong was a `tr(...)` literal at its call
+    /// site, and no catalogue is installed — so `tr` handed its own English back and the
+    /// settings screen read « The server could not be reached ». These are the words a
+    /// reader meets on their worst day; they are the last place to leave in English.
+    void what_goes_wrong_is_said_in_french_too()
+    {
+        QCOMPARE(Words::notSetUp(Words::Asking::Shelf),
+                 u"Leaf n’a pas pu s’installer"_s + Words::Nbsp
+                         + u": il n’y a rien à afficher."_s);
+        QCOMPARE(Words::unreachable(u"Connexion refusée"_s),
+                 u"Le serveur est injoignable — Connexion refusée"_s);
+        QCOMPARE(Words::serverAnswered(404, {}), u"Le serveur a répondu 404."_s);
+        QCOMPARE(Words::keyRefused(u"périmée"_s),
+                 u"La clé a été refusée"_s + Words::Nbsp + u": périmée"_s);
+    }
+
+    /// The nine kinds of trouble a scan reports, each said in French. They were worded and
+    /// nothing read them: a kind the server grows and this file does not know comes back
+    /// empty, and the card above it would then carry a heading of nothing at all.
+    void every_kind_of_trouble_a_scan_reports_has_a_french_heading()
+    {
+        const QStringList kinds{u"ERRORS"_s,           u"MISSING_METADATA"_s,
+                                u"DISREGARDED"_s,      u"CONTRADICTIONS"_s,
+                                u"IDENTITY"_s,         u"WITHOUT_METADATA"_s,
+                                u"DUPLICATE_NUMBERS"_s, u"DUPLICATE_PAGES"_s,
+                                u"DERIVED_ARCS"_s};
+        QStringList said;
+        for (const QString &kind : kinds) {
+            const QString heading = Words::finding(kind);
+            QVERIFY2(!heading.isEmpty(), qPrintable(u"no heading for "_s + kind));
+            QVERIFY2(!heading.contains(u'\''), qPrintable(heading));
+            said << heading;
+        }
+        // Nine kinds and nine headings: two kinds sharing one would read as one card.
+        QCOMPARE(QSet<QString>(said.constBegin(), said.constEnd()).size(), kinds.size());
+        // And a word this version has not learned says nothing rather than guessing.
+        QVERIFY(Words::finding(u"SOMETHING_ELSE"_s).isEmpty());
+    }
+
+    /// The counted sentences all have a singular and a plural, and say nothing at zero —
+    /// a card that reads « 0 tome relu » is a card about nothing.
+    void what_a_scan_counted_is_said_once_or_not_at_all()
+    {
+        QVERIFY(Words::reanalysed(0).isEmpty());
+        QCOMPARE(Words::reanalysed(1), u"1 tome relu"_s);
+        QCOMPARE(Words::reanalysed(7), u"7 tomes relus"_s);
+        QVERIFY(Words::withoutStartPage(0).isEmpty());
+        QCOMPARE(Words::withoutStartPage(1), u"1 chapitre sans page de départ"_s);
+        QCOMPARE(Words::withoutStartPage(3), u"3 chapitres sans page de départ"_s);
+        QVERIFY(Words::andMore(0).isEmpty());
+        QCOMPARE(Words::andMore(1), u"et un autre"_s);
+        QCOMPARE(Words::andMore(12), u"et 12 autres"_s);
+        QVERIFY(Words::scanFailed(u"le disque est plein"_s).contains(u"le disque est plein"_s));
     }
 
     /// A page number with nothing behind it — `pageCount` at zero — is left out exactly like

@@ -12,7 +12,13 @@ QList<Step> plan(const QStringList &held, const QStringList &fresh)
     // What the new page does not hold, taken out in runs: a filter that drops half a shelf
     // is then a handful of signals rather than one per tile.
     QSet<QString> staying(fresh.constBegin(), fresh.constEnd());
-    for (int row = work.size() - 1; row >= 0; --row) {
+    // Downwards, and written as a `while` because the body shortens the very list the
+    // counter walks. As a `for` the `--row` landed inside the run it had just removed and
+    // re-read rows it had already kept — harmless, and only because every one of them was
+    // staying. Said this way, the counter goes where the next candidate actually is.
+    int row = work.size();
+    while (row > 0) {
+        --row;
         if (staying.contains(work.at(row)))
             continue;
         int first = row;
@@ -27,9 +33,9 @@ QList<Step> plan(const QStringList &held, const QStringList &fresh)
     // the whole point: it keeps its delegate.
     for (int at = 0; at < fresh.size(); ++at) {
         int found = -1;
-        for (int row = at; row < work.size(); ++row) {
-            if (work.at(row) == fresh.at(at)) {
-                found = row;
+        for (int candidate = at; candidate < work.size(); ++candidate) {
+            if (work.at(candidate) == fresh.at(at)) {
+                found = candidate;
                 break;
             }
         }

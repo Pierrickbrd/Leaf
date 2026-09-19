@@ -8,6 +8,13 @@ import Leaf
 Menu {
     id: menu
 
+    // OutsideParent and not the Menu default, which is OutsideOverlay: a menu is declared
+    // inside the button that opens it, so a press there is *inside* its parent and closes
+    // nothing. Left at the default, that press shut the menu before reaching the button, the
+    // button then found it closed, and the release opened it again — one gesture, and the
+    // menu never appeared to close.
+    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
+
     margins: 10
     padding: 8
     overlap: 0

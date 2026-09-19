@@ -21,7 +21,10 @@ if [[ $outcome -ne 124 ]]; then
     cat "$log"
     exit 1
 fi
-if grep -qiE "failed to load|no such file|error" "$log"; then
+# `Binding loop` among them, since 19/09/2026: a loop is not an error to Qt — it warns,
+# four times per layout, and carries on. Two of them shipped in one day because nothing
+# here read the warnings, and the second was written by somebody who had fixed the first.
+if grep -qiE "failed to load|no such file|error|binding loop" "$log"; then
     echo "✗ it ran, and said:"
     cat "$log"
     exit 1

@@ -58,6 +58,83 @@ QString searchWithin(const QString &axisTitle);
 /// What one axis says when its own field matches none of its values.
 QString noValueByThatName();
 
+/// Two vocabularies of its own, and not the models' enumerations.
+///
+/// `Words` is a leaf: it depends on `Api.h`, which is data, and on nothing that owns a
+/// socket. Taking `Settings::Storage` and `Scan::State` here would make the vocabulary
+/// depend on the objects that use it — a cycle, and a file no test could link alone. The
+/// models map to these, which costs one switch each and keeps the dependency pointing one
+/// way.
+enum class KeyFrom { Unknown, Environment, Keyring, ProtectedFile };
+enum class Scanning { Unknown, Idle, Running, Done, Other };
+
+/// The three things the settings screen says, in the order it says them.
+QString theServer();
+QString theKey();
+QString theScan();
+/// « Ce qu'il a trouvé » — the card beside the scan, which is what the scan is for.
+QString whatItFound();
+
+/// « Apparence », and the three answers to it. A fourth vocabulary of its own for the
+/// reason the other two have one: `Words` is a leaf, and taking `Preferences::Appearance`
+/// here would point the dependency back at the object that uses it.
+enum class Looks { System, Light, Dark };
+QString appearance();
+QString appearanceChoice(Looks which);
+
+/// « Bibliothèque connectée », « Pas de connexion ». What a reader needs of a server: not
+/// its address, not its version — whether their books are there.
+QString connected(bool reachable);
+
+/// What the back button says it does. Named after where it goes rather than « Retour »: a
+/// tooltip that repeats the arrow it sits on says nothing the arrow did not.
+QString backTo(const QString &destination);
+
+/// Its sections, behind the same pills the search scopes use. Two today; the reader's own
+/// preferences will be a third, and adding one is adding a line here.
+QString generalSettings();
+QString librarySettings();
+
+/// Where the key came from — « Dans l'environnement », « Dans le trousseau », « Dans un
+/// fichier protégé ». Worth showing rather than hiding: somebody told their key sits in a
+/// file can decide to move it, and somebody who is not, cannot.
+QString keyStorage(KeyFrom where);
+
+/// What the scan is doing, and what it found. « Jamais lancé » is not a failure: a library
+/// scanned at startup and never since is the ordinary case.
+QString scanState(Scanning state);
+QString startAScan();
+
+/// « 6 séries, 59 tomes, 546 chapitres » — what the library holds, as the last scan counted
+/// it. The counts describe the library and not the work done on it: an unchanged rescan
+/// still reports every chapter, because that is how many there are.
+QString scanCounts(const Api::ScanCounts &counted);
+/// « 3 tomes relus » — the one count that describes the work, and absent when it is zero.
+QString reanalysed(int entries);
+/// What one kind of finding is called. A word this client has not been taught comes back
+/// empty, and the screen shows the items without a heading rather than dropping them.
+QString finding(const QString &kind);
+/// « 12 chapitres sans page de départ » — a count and no list, because the list would be
+/// every chapter.
+QString withoutStartPage(int chapters);
+QString scanFailed(const QString &why);
+/// « et 18 autres » — a list is capped at sixteen, and the cap has to be visible or the
+/// screen quietly claims there were sixteen.
+QString andMore(int rest);
+QString lastScan(qint64 milliseconds);
+
+/// « 19 septembre 2026, 14:32 ». Absolute and never « il y a trois heures »: the question a
+/// reader asks of a scan is whether it ran since they changed something, and only a date
+/// answers that.
+QString moment(qint64 milliseconds);
+
+/// « Répond », « Ne répond pas ». The second is not the same as having no address at all,
+/// and the screen says which — one is fixed by reading, the other by looking at the machine.
+QString answering(bool reachable);
+QString libraryHolds(int series);
+QString apiVersion(int api, int format);
+QString sharedFolder(bool there);
+
 /// The eight axes a library can be narrowed by, worded for the panel that offers them. The
 /// contract's own spelling goes in — `read`, `medium`, `universe`… — because that is what the
 /// server answers with and what goes back on the wire; a word this client has not been taught
@@ -156,5 +233,70 @@ QString destination(Navigation::Destination value);
 /// « Étroite » — for the same reason `destination` exists: so nothing switches on the enum
 /// from inside QML.
 QString band(Widths::Band value);
+
+// ——— What Leaf says when something goes wrong ———————————————————————————————
+//
+// These sentences were `tr(...)` literals at their call sites, which meant English on the
+// screen: no catalogue is installed and none is planned, so `tr` hands back its source
+// string. It showed — « The server could not be reached — Connexion refusée », half of it
+// Qt's French and half ours. They live here now, with the rest of the French, and for the
+// reason at the top of this file: a sentence written far from `Words` is a sentence nobody
+// proofreads.
+
+/// Which screen was left with nothing when the client could not set itself up. One tail per
+/// screen and not one sentence for all of them: a reader who opened the shelf and a reader
+/// who typed in the field are owed different halves of it.
+enum class Asking { Shelf, Search, Filters, Resume, State };
+
+/// « Leaf n'a pas pu s'installer : il n'y a rien à afficher. »
+QString notSetUp(Asking what);
+
+/// « Leaf ne sait pas où est votre bibliothèque. » — no address at all, which is a setup
+/// that never happened rather than a server that is down.
+QString noLibrary();
+
+/// « Le serveur est injoignable — connexion refusée ». The tail is Qt's own words for the
+/// network error, which Qt does translate; only Leaf's half of the sentence was English.
+QString unreachable(const QString &why);
+
+/// « Le serveur a répondu quelque chose d'illisible. » — an answer that is not the JSON its
+/// own contract promises.
+QString unreadableAnswer();
+
+/// « La clé a été refusée. », and what the server said after it when it said anything.
+QString keyRefused(const QString &said);
+
+/// « Trop de clés fausses ont été essayées. Attendez 30 secondes. » — the server's own
+/// `Retry-After`, said rather than counted down, because nothing here ticks.
+QString tooManyWrongKeys(const QString &seconds);
+
+/// « Il n'y a rien de tel ici. » — a 404 the server did not word itself.
+QString noSuchThing();
+
+/// « Le serveur a répondu 500. », with its own sentence after the code when it sent one.
+QString serverAnswered(int status, const QString &said);
+
+/// « Encore 12 secondes avant de redemander. » — Leaf stopped asking on purpose, and says
+/// so, because a screen that has simply gone quiet reads as a screen that is broken.
+QString waitingBeforeAsking(int seconds);
+
+/// « Trop de demandes attendent déjà que Leaf ouvre votre bibliothèque. »
+QString tooManyWaiting();
+
+/// « Un paramètre se donne à part du chemin, pas collé dedans. » — a caller's mistake and
+/// not a reader's, but it comes out on the same screens as the rest.
+QString queryBelongsApart();
+
+/// What the setup is missing, naming the file that would hold it. Three sentences and not
+/// one: told that both are missing a reader fixes both, told only the key is, they look for
+/// the one thing.
+QString nothingConfigured(const QString &file);
+QString noAddress(const QString &file);
+QString noKey(const QString &file);
+
+/// « … est lisible par d'autres que vous, il n'a donc pas été lu du tout. » A key file
+/// anyone can read is a key already given away; Leaf refuses it rather than use it, and
+/// says the one command that fixes it.
+QString readableByOthers(const QString &path);
 
 } // namespace Words

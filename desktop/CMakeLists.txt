@@ -8,7 +8,7 @@ cmake_minimum_required(VERSION 3.21)
 
 project(leaf-desktop VERSION 0.1.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -52,9 +52,17 @@ qt_add_executable(leaf-desktop
     src/Navigation.cpp
     src/Shelf.h
     src/Rearrange.cpp
+    src/Preferences.h
+    src/Preferences.cpp
+    src/Health.h
+    src/Health.cpp
+    src/Scan.h
+    src/Scan.cpp
     src/Shelf.cpp
     src/Search.h
     src/Search.cpp
+    src/Captions.h
+    src/Captions.cpp
     src/Filters.h
     src/Filters.cpp
     src/Resume.h
@@ -82,6 +90,13 @@ set(LEAF_QML
     qml/FilterPills.qml
     qml/SeriesTile.qml
     qml/ShelfSkeleton.qml
+    qml/SettingsView.qml
+    qml/SettingsTabs.qml
+    qml/SettingsCard.qml
+    qml/SettingsChoice.qml
+    qml/SettingsStatus.qml
+    qml/SettingsLine.qml
+    qml/SettingsNote.qml
     qml/FilterPanel.qml
     qml/FilterAxis.qml
     qml/FilterValueRow.qml
@@ -93,7 +108,6 @@ set(LEAF_QML
     qml/SearchLink.qml
     qml/SearchScopeTabs.qml
     qml/SearchWorkspace.qml
-    qml/SearchResults.qml
     qml/CoverShadow.qml
     qml/ResumeBand.qml
     qml/ShelfView.qml
@@ -106,6 +120,13 @@ endforeach()
 set(LEAF_IMAGES
     qml/assets/cover-shadow-light.png
     qml/assets/cover-shadow-dark.png
+    qml/assets/icons/arrow_back.svg
+    qml/assets/icons/cloud_done.svg
+    qml/assets/icons/cloud_off.svg
+    qml/assets/icons/contrast.svg
+    qml/assets/icons/dark_mode.svg
+    qml/assets/icons/light_mode.svg
+    qml/assets/icons/refresh.svg
     qml/assets/icons/search.svg
     qml/assets/icons/settings.svg
     qml/assets/icons/sort.svg
@@ -174,7 +195,7 @@ target_link_libraries(leaf-desktop PRIVATE
 
 enable_testing()
 
-qt_add_executable(keeps-the-key tests/keeps_the_key.cpp src/Settings.h src/Settings.cpp)
+qt_add_executable(keeps-the-key tests/keeps_the_key.cpp src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp)
 target_include_directories(keeps-the-key PRIVATE src)
 target_link_libraries(keeps-the-key PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Test ${QTKEYCHAIN_LIBRARIES})
@@ -183,7 +204,7 @@ add_test(NAME keeps-the-key COMMAND keeps-the-key)
 
 qt_add_executable(talks-to-the-server
     tests/talks_to_the_server.cpp tests/Pretend.h
-    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp)
+    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Server.h src/Server.cpp)
 target_include_directories(talks-to-the-server PRIVATE src)
 target_link_libraries(talks-to-the-server PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
@@ -251,7 +272,11 @@ qt_add_executable(crosses-the-seam
     src/Rearrange.h src/Rearrange.cpp
     src/Shelf.h src/Shelf.cpp
     src/Search.h src/Search.cpp
+    src/Captions.h src/Captions.cpp
     src/Filters.h src/Filters.cpp
+    src/Health.h src/Health.cpp
+    src/Scan.h src/Scan.cpp
+    src/Preferences.h src/Preferences.cpp
     src/Resume.h src/Resume.cpp
 )
 target_include_directories(crosses-the-seam PRIVATE src)
@@ -291,13 +316,24 @@ add_test(NAME holds-a-shelf COMMAND holds-a-shelf)
 
 # The file rows returned beside the series grid. Like the shelf, this is HTTP state and words,
 # not pixels, so every branch is exercised without constructing a window.
+qt_add_executable(keeps-a-preference
+    tests/keeps_a_preference.cpp
+    src/Preferences.h src/Preferences.cpp src/Words.h src/Words.cpp
+    src/Api.h src/Api.cpp src/Navigation.h src/Navigation.cpp
+    src/Widths.h src/Widths.cpp)
+target_include_directories(keeps-a-preference PRIVATE src)
+target_link_libraries(keeps-a-preference PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Test)
+add_test(NAME keeps-a-preference COMMAND keeps-a-preference)
+
 qt_add_executable(holds-the-search
     tests/holds_the_search.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
     src/Api.h src/Api.cpp src/Words.h src/Words.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Rearrange.h src/Rearrange.cpp
-    src/Shelf.h src/Shelf.cpp src/Search.h src/Search.cpp)
+    src/Shelf.h src/Shelf.cpp src/Search.h src/Search.cpp
+    src/Captions.h src/Captions.cpp)
 target_include_directories(holds-the-search PRIVATE src)
 target_link_libraries(holds-the-search PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
@@ -325,6 +361,18 @@ target_include_directories(holds-the-order PRIVATE src)
 target_link_libraries(holds-the-order PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME holds-the-order COMMAND holds-the-order)
 
+# What the settings screen knows. Both models outlive any screen, so both are headless.
+qt_add_executable(holds-the-server-state
+    tests/holds_the_server_state.cpp tests/Pretend.h
+    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
+    src/Health.h src/Health.cpp src/Scan.h src/Scan.cpp)
+target_include_directories(holds-the-server-state PRIVATE src)
+target_link_libraries(holds-the-server-state PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME holds-the-server-state COMMAND holds-the-server-state)
+
 qt_add_executable(holds-the-filters
     tests/holds_the_filters.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
@@ -341,7 +389,7 @@ add_test(NAME holds-the-filters COMMAND holds-the-filters)
 # one configured, and another that must never be told the key.
 qt_add_executable(puts-the-key-where-it-belongs
     tests/puts_the_key_where_it_belongs.cpp tests/Pretend.h
-    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Server.h src/Server.cpp
     src/Covers.h src/Covers.cpp)
 target_include_directories(puts-the-key-where-it-belongs PRIVATE src)
 target_link_libraries(puts-the-key-where-it-belongs PRIVATE
@@ -350,7 +398,7 @@ add_test(NAME puts-the-key-where-it-belongs COMMAND puts-the-key-where-it-belong
 
 qt_add_executable(against-the-real-server EXCLUDE_FROM_ALL
     tests/against_real.cpp
-    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp)
+    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Server.h src/Server.cpp)
 target_include_directories(against-the-real-server PRIVATE src)
 target_link_libraries(against-the-real-server PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})

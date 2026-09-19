@@ -139,7 +139,7 @@ Item {
         width: parent.width - 2 * (Widths.shelfMargin + 4)
         height: visible ? 28 : 0
         visible: workspace.mode === workspace.overviewMode
-        text: Search.seriesHeading
+        text: Captions.seriesHeading
         color: Theme.inkFaint
         font.family: Theme.textFamily
         font.pixelSize: 12
@@ -213,7 +213,7 @@ Item {
                 width: parent.width - 2 * Widths.shelfMargin
                 visible: Shelf.total > overviewSeries.previewCount
                 height: visible ? 38 : 0
-                label: Search.allSeriesLabel
+                label: Captions.allSeriesLabel
                 navigationCursor: workspace.navigationCursor
                 onTriggered: workspace.selectMode(workspace.seriesMode)
                 onWentPast: forward => workspace.stepFrom(allSeries, forward)
@@ -232,7 +232,7 @@ Item {
                 x: Widths.shelfMargin + 4
                 width: parent.width - 2 * (Widths.shelfMargin + 4)
                 height: 28
-                text: Search.filesHeading
+                text: Captions.filesHeading
                 color: Theme.inkFaint
                 font.family: Theme.textFamily
                 font.pixelSize: 12
@@ -265,7 +265,7 @@ Item {
                 width: parent.width - 2 * Widths.shelfMargin
                 visible: Search.fileTotal > overviewFiles.previewMaximum
                 height: visible ? 38 : 0
-                label: Search.allFilesLabel
+                label: Captions.allFilesLabel
                 navigationCursor: workspace.navigationCursor
                 onTriggered: workspace.selectMode(workspace.filesMode)
                 onWentPast: forward => workspace.stepFrom(allFiles, forward)
@@ -276,7 +276,7 @@ Item {
                 x: Widths.shelfMargin + 4
                 width: parent.width - 2 * (Widths.shelfMargin + 4)
                 visible: Search.fileTotal > 0 && Shelf.total === 0 && !Shelf.loading
-                text: Search.noSeriesLabel
+                text: Captions.noSeriesLabel
                 color: Theme.inkSoft
                 font.family: Theme.textFamily
                 font.pixelSize: 13
@@ -290,9 +290,9 @@ Item {
                 objectName: "outside-filter-results"
                 x: Widths.shelfMargin
                 width: parent.width - 2 * Widths.shelfMargin
-                visible: Search.outsideFilters.length > 0
+                visible: Captions.outsideFilters.length > 0
                 height: visible ? 42 : 0
-                label: Search.outsideFilters
+                label: Captions.outsideFilters
                 navigationCursor: workspace.navigationCursor
                 onTriggered: Search.clearFilters()
                 onWentPast: forward => workspace.stepFrom(outsideFilters, forward)
@@ -302,8 +302,8 @@ Item {
                 objectName: "approximate-search-result"
                 x: Widths.shelfMargin + 4
                 width: parent.width - 2 * (Widths.shelfMargin + 4)
-                visible: Search.suggestion.length > 0
-                text: Search.suggestion
+                visible: Captions.suggestion.length > 0
+                text: Captions.suggestion
                 color: Theme.emerald
                 font.family: Theme.textFamily
                 font.pixelSize: 13

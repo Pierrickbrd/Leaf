@@ -20,19 +20,22 @@ Item {
     /// walked past; where the page goes next is the page's business, not the bar's.
     signal wentPast(bool forward)
 
-    /// Every value lit, across every axis — not the two the row draws. A reader who narrowed
-    /// by genre and closed the panel has to see, on the button, that something is in force.
-    readonly property int activeFilters: {
-        let total = 0
-        for (const axis in Shelf.narrowing)
-            total += Shelf.narrowing[axis].length
-        return total
-    }
-    /// Set by the screen below, which is the only thing that knows whether a list of files
-    /// is showing. False on the shelf, where there are no files to count.
-    property bool filtersCountFiles: false
     readonly property bool searchTakesBar: Widths.band === Widths.Narrow
                                             && searchField.activeFocus
+    /// Everything in this row exists to browse a shelf: a field that searches it, a filter
+    /// that narrows it, an order that sorts it. On any other page they act on something
+    /// nobody is looking at, so the bar keeps the brand and drops the rest — and the page
+    /// carries its own way back, because a control that leaves a page belongs to it.
+    readonly property bool browsing: Navigation.destination === Navigation.Shelf
+
+    // A popup outlives the button that opened it: hiding the button hides nothing that is
+    // already on screen. Leaving the shelf with the order menu down left it hanging over
+    // the settings, with no button left to shut it. The filter panel went down to the row
+    // of pills and is closed by the same rule there, the row going with the shelf.
+    onBrowsingChanged: {
+        if (!browsing)
+            sortMenu.close()
+    }
 
     objectName: "app-bar"
     height: 58
@@ -42,7 +45,7 @@ Item {
     /// the bar drops its commands when a narrow window gives the search the whole width.
     function stops() {
         const all = []
-        for (const one of [searchField, filterButton, sortButton, settingsButton]) {
+        for (const one of [searchField, sortButton, settingsButton]) {
             if (one && one.visible)
                 all.push(one)
         }
@@ -162,6 +165,7 @@ Item {
             id: searchField
 
             objectName: "search-field"
+            visible: bar.browsing
             Layout.fillWidth: true
             Layout.minimumWidth: bar.searchTakesBar ? 120 : 150
             Layout.preferredWidth: 520
@@ -173,7 +177,7 @@ Item {
             activeFocusOnTab: false
             text: Shelf.query
             placeholderText: Widths.band === Widths.Wide
-                             ? Search.placeholder : Search.shortPlaceholder
+                             ? Captions.placeholder : Captions.shortPlaceholder
             color: Theme.ink
             placeholderTextColor: Theme.inkFaint
             selectionColor: Theme.emerald
@@ -229,7 +233,7 @@ Item {
                 activeFocusOnTab: visible
 
                 Accessible.role: Accessible.Button
-                Accessible.name: Search.clearLabel
+                Accessible.name: Captions.clearLabel
                 Accessible.focusable: true
                 Accessible.focused: activeFocus
                 Accessible.onPressAction: clearSearch.clear()
@@ -287,36 +291,8 @@ Item {
                 LeafToolTip {
                     objectName: "clear-search-tooltip"
                     visible: clearPointer.hovered
-                    text: Search.clearLabel
+                    text: Captions.clearLabel
                 }
-            }
-        }
-
-        BarButton {
-            id: filterButton
-
-            objectName: "filter-button"
-            visible: !bar.searchTakesBar
-            source: "assets/icons/tune.svg"
-            label: Search.filterLabel
-            value: Widths.band !== Widths.Wide && bar.activeFilters > 0
-                   ? String(bar.activeFilters) : ""
-            held: bar.activeFilters > 0
-            toolTipSuppressed: filterPanel.opened
-            popup: filterPanel
-            onPointerEntered: bar.pointerLeftTheShelf()
-
-            FilterPanel {
-                id: filterPanel
-
-                y: filterButton.height + 7
-                // Anchored under the button and pulled left, because the button sits in the
-                // middle of the bar and a 380 px panel hung from its left edge would run off
-                // the right of a narrow window.
-                x: -width + filterButton.width
-                // The panel counts what the row beneath it counts: above a list of files, it
-                // counts files.
-                overFiles: bar.filtersCountFiles
             }
         }
 
@@ -329,10 +305,13 @@ Item {
             }
 
             objectName: "sort-button"
-            visible: Widths.band === Widths.Wide && !bar.searchTakesBar
+            visible: bar.browsing && !bar.searchTakesBar
             source: "assets/icons/sort.svg"
-            label: Search.sortLabel
-            value: Search.sortValue
+            label: Captions.sortLabel
+            // The order in force, spelled out, until the window is too narrow to spell it.
+            // Only the narrow band drops it: a half-screen window has room for all three
+            // commands and their words, and it used to lose two of the commands instead.
+            value: Widths.band === Widths.Narrow ? "" : Captions.sortValue
             toolTipSuppressed: sortMenu.opened
             popup: sortMenu
             onPointerEntered: bar.pointerLeftTheShelf()
@@ -344,7 +323,7 @@ Item {
                 y: sortButton.height + 7
 
                 Instantiator {
-                    model: Search.sortOptions
+                    model: Captions.sortOptions
 
                     delegate: LeafMenuItem {
                         required property var modelData
@@ -355,7 +334,7 @@ Item {
                         // The chosen criterion carries its direction, the others only their
                         // name: without the arrow here nothing says which way the shelf runs,
                         // and the second click that reverses it would have no visible target.
-                        text: inForce ? Search.sortValue : modelData.label
+                        text: inForce ? Captions.sortValue : modelData.label
                         checkable: true
                         checked: inForce
                         ButtonGroup.group: sortCriteria
@@ -369,8 +348,10 @@ Item {
             }
         }
 
+        // What holds the settings against the right edge, away from the two commands that
+        // act on the shelf. It goes only when the field takes the whole bar.
         Item {
-            visible: Widths.band === Widths.Wide && !bar.searchTakesBar
+            visible: !bar.searchTakesBar
             Layout.fillWidth: true
             Layout.minimumWidth: 8
         }
@@ -379,9 +360,10 @@ Item {
             id: settingsButton
 
             objectName: "settings-button"
-            visible: Widths.band === Widths.Wide && !bar.searchTakesBar
+            // Gone from the page it opens: a button that takes you where you already are.
+            visible: bar.browsing && !bar.searchTakesBar
             source: "assets/icons/settings.svg"
-            label: Search.settingsLabel
+            label: Captions.settingsLabel
             onTriggered: bar.settingsRequested()
             onPointerEntered: bar.pointerLeftTheShelf()
         }
