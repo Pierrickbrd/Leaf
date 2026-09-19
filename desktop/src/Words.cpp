@@ -1,5 +1,6 @@
 #include "Words.h"
 
+#include <QDateTime>
 #include <QLocale>
 
 #include <QStringList>
@@ -129,6 +130,227 @@ QString searchWithin(const QString &axisTitle)
 QString noValueByThatName()
 {
     return u"Aucune valeur ne porte ce nom."_s;
+}
+
+QString theServer()
+{
+    // Not « Le serveur »: a reader does not have a server, they have a library that is
+    // reachable or is not. The word names what they would notice, not what runs.
+    return u"Connexion"_s;
+}
+
+QString theKey()
+{
+    return u"La clé"_s;
+}
+
+QString theScan()
+{
+    return u"Le scan"_s;
+}
+
+QString appearance()
+{
+    return u"Apparence"_s;
+}
+
+QString appearanceChoice(Looks which)
+{
+    using enum Looks;
+
+    switch (which) {
+    case Light:
+        return u"Clair"_s;
+    case Dark:
+        return u"Sombre"_s;
+    case System:
+        break;
+    }
+    return u"Système"_s;
+}
+
+QString connected(bool reachable)
+{
+    // What a reader needs of a server is whether their books are there. The address, the
+    // version and where the key sits are a deployment's business, and appear only when
+    // something is wrong — which is the one moment they help.
+    return reachable ? u"Bibliothèque connectée"_s : u"Pas de connexion"_s;
+}
+
+QString backTo(const QString &destination)
+{
+    return destination.isEmpty() ? u"Retour"_s : u"Retour à %1"_s.arg(destination.toLower());
+}
+
+QString whatItFound()
+{
+    return u"Ce qu’il a trouvé"_s;
+}
+
+QString generalSettings()
+{
+    return u"Général"_s;
+}
+
+QString librarySettings()
+{
+    return u"Bibliothèque"_s;
+}
+
+QString keyStorage(KeyFrom where)
+{
+    using enum KeyFrom;
+
+    switch (where) {
+    case Environment:
+        return u"Dans l’environnement"_s;
+    case Keyring:
+        return u"Dans le trousseau de la session"_s;
+    case ProtectedFile:
+        return u"Dans un fichier protégé"_s;
+    case Unknown:
+        return u"Introuvable"_s;
+    }
+    return {};
+}
+
+QString scanState(Scanning state)
+{
+    using enum Scanning;
+
+    switch (state) {
+    case Running:
+        return u"En cours…"_s;
+    case Done:
+        return u"Terminé"_s;
+    case Idle:
+        return u"À l’arrêt"_s;
+    case Unknown:
+        return u"Inconnu"_s;
+    case Other:
+        // The server grew a state this client has not been taught. Saying so is better than
+        // showing nothing, and better than guessing which of the three it resembles.
+        return u"Dans un état que Leaf ne connaît pas"_s;
+    }
+    return {};
+}
+
+QString startAScan()
+{
+    return u"Lancer un scan"_s;
+}
+
+namespace {
+
+/// « 6 séries », « 1 série ». Written once because seven counts follow the same rule and
+/// six of them would otherwise each grow their own plural.
+QString counted(int how, const QString &one, const QString &many)
+{
+    return u"%1 %2"_s.arg(how).arg(how == 1 ? one : many);
+}
+
+} // namespace
+
+QString scanCounts(const Api::ScanCounts &counted_)
+{
+    QStringList said;
+    // Universes are rare, so an absent one says nothing rather than « 0 univers ».
+    if (counted_.universes > 0)
+        said << counted(counted_.universes, u"univers"_s, u"univers"_s);
+    said << counted(counted_.editions, u"série"_s, u"séries"_s);
+    said << counted(counted_.entries, u"tome"_s, u"tomes"_s);
+    if (counted_.chapters > 0)
+        said << counted(counted_.chapters, u"chapitre"_s, u"chapitres"_s);
+    return said.join(u", "_s);
+}
+
+QString reanalysed(int entries)
+{
+    if (entries <= 0)
+        return {};
+    return counted(entries, u"tome relu"_s, u"tomes relus"_s);
+}
+
+QString finding(const QString &kind)
+{
+    if (kind == u"ERRORS"_s)
+        return u"N’a pas pu être lu"_s;
+    if (kind == u"MISSING_METADATA"_s)
+        return u"Rien de déclaré"_s;
+    if (kind == u"DISREGARDED"_s)
+        return u"Lu, puis écarté"_s;
+    if (kind == u"CONTRADICTIONS"_s)
+        return u"Dit deux choses à la fois"_s;
+    if (kind == u"IDENTITY"_s)
+        return u"L’identité ne correspond pas au dossier"_s;
+    if (kind == u"WITHOUT_METADATA"_s)
+        return u"Ne dit rien de soi"_s;
+    if (kind == u"DUPLICATE_NUMBERS"_s)
+        return u"Deux fois le même numéro"_s;
+    if (kind == u"DUPLICATE_PAGES"_s)
+        return u"Deux fois le même nom de page"_s;
+    if (kind == u"DERIVED_ARCS"_s)
+        return u"Arcs déduits, donc par tome"_s;
+    return {};
+}
+
+QString withoutStartPage(int chapters)
+{
+    if (chapters <= 0)
+        return {};
+    return counted(chapters, u"chapitre sans page de départ"_s,
+                   u"chapitres sans page de départ"_s);
+}
+
+QString scanFailed(const QString &why)
+{
+    return u"Le scan a échoué : %1"_s.arg(why);
+}
+
+QString andMore(int rest)
+{
+    if (rest <= 0)
+        return {};
+    return rest == 1 ? u"et un autre"_s : u"et %1 autres"_s.arg(rest);
+}
+
+QString moment(qint64 milliseconds)
+{
+    if (milliseconds <= 0)
+        return {};
+    const QLocale french(QLocale::French);
+    return french.toString(QDateTime::fromMSecsSinceEpoch(milliseconds),
+                           u"d MMMM yyyy, HH:mm"_s);
+}
+
+QString lastScan(qint64 milliseconds)
+{
+    const QString when = moment(milliseconds);
+    // Never run is not a failure: a library scanned once at startup and never since is the
+    // ordinary case, and an empty line would read as a missing answer.
+    return when.isEmpty() ? u"Jamais lancé"_s : labelled(u"Dernier scan"_s, when);
+}
+
+QString answering(bool reachable)
+{
+    return reachable ? u"Répond"_s : u"Ne répond pas"_s;
+}
+
+QString libraryHolds(int series)
+{
+    if (series == 0)
+        return u"Aucune série"_s;
+    return series == 1 ? u"1 série"_s : u"%1 séries"_s.arg(series);
+}
+
+QString apiVersion(int api, int format)
+{
+    return u"API %1 · format %2"_s.arg(api).arg(format);
+}
+
+QString sharedFolder(bool there)
+{
+    return there ? u"Dossier de dépôt partagé"_s : u"Pas de dossier de dépôt partagé"_s;
 }
 
 QString axis(const QString &name)
@@ -280,7 +502,7 @@ QString fileContext(const Api::Hit &hit)
     // An entry already names itself on the first line. A chapter does not: add the volume
     // that contains it, then its optional title. `where` owns French number formatting.
     QString container;
-    if (hit.kind == Api::Hit::Kind::Chapter && hit.entryNumber) {
+    if (hit.kind == Api::Hit::Kind::Chapter && hit.entryNumber.has_value()) {
         const Api::UpNext::Kind kind = hit.entryKind.value_or(Api::UpNext::Kind::Volume);
         container = where(kind, hit.entryNumber, std::nullopt, 0, std::nullopt);
         if (!container.isEmpty())
@@ -292,7 +514,7 @@ QString fileContext(const Api::Hit &hit)
     if (hit.entryTitle && !hit.entryTitle->isEmpty() && *hit.entryTitle != hit.label
         && *hit.entryTitle != container)
         parts << *hit.entryTitle;
-    if (hit.entryPageCount && *hit.entryPageCount > 0) {
+    if (hit.entryPageCount.has_value() && *hit.entryPageCount > 0) {
         parts << (u"%1 page"_s.arg(*hit.entryPageCount)
                   + (*hit.entryPageCount >= 2 ? u"s"_s : QString()));
     }
@@ -378,6 +600,113 @@ QString band(Widths::Band value)
         return u"Étroite"_s;
     }
     return {};
+}
+
+QString notSetUp(Asking what)
+{
+    using enum Asking;
+
+    QString tail;
+    switch (what) {
+    case Shelf:
+        tail = u"afficher"_s;
+        break;
+    case Search:
+        tail = u"rechercher"_s;
+        break;
+    case Filters:
+        tail = u"filtrer"_s;
+        break;
+    case Resume:
+        tail = u"reprendre"_s;
+        break;
+    case State:
+        tail = u"demander"_s;
+        break;
+    }
+    if (tail.isEmpty())
+        return {};
+    return u"Leaf n’a pas pu s’installer"_s + Nbsp + u": il n’y a rien à "_s
+            + tail + u"."_s;
+}
+
+QString noLibrary()
+{
+    return u"Leaf ne sait pas où est votre bibliothèque."_s;
+}
+
+QString unreachable(const QString &why)
+{
+    return u"Le serveur est injoignable — %1"_s.arg(why);
+}
+
+QString unreadableAnswer()
+{
+    return u"Le serveur a répondu quelque chose d’illisible."_s;
+}
+
+QString keyRefused(const QString &said)
+{
+    if (said.isEmpty())
+        return u"La clé a été refusée."_s;
+    return u"La clé a été refusée"_s + Nbsp + u": "_s + said;
+}
+
+QString tooManyWrongKeys(const QString &seconds)
+{
+    return u"Trop de clés fausses ont été essayées. Attendez %1 secondes."_s
+        .arg(seconds);
+}
+
+QString noSuchThing()
+{
+    return u"Il n’y a rien de tel ici."_s;
+}
+
+QString serverAnswered(int status, const QString &said)
+{
+    if (said.isEmpty())
+        return u"Le serveur a répondu %1."_s.arg(status);
+    return u"Le serveur a répondu %1"_s.arg(status) + Nbsp + u": "_s + said;
+}
+
+QString waitingBeforeAsking(int seconds)
+{
+    return u"Encore %1 secondes avant de redemander."_s.arg(seconds);
+}
+
+QString tooManyWaiting()
+{
+    return u"Trop de demandes attendent déjà que Leaf ouvre votre bibliothèque."_s;
+}
+
+QString queryBelongsApart()
+{
+    return u"Un paramètre se donne à part du chemin, pas collé dedans."_s;
+}
+
+QString nothingConfigured(const QString &file)
+{
+    return noLibrary() + u"\nMettez une adresse et une clé dans %1, "
+                        u"ou dans LEAF_ADDRESS et LEAF_KEY."_s.arg(file);
+}
+
+QString noAddress(const QString &file)
+{
+    return u"Pas d’adresse pour le serveur. Posez-la dans %1, ou dans LEAF_ADDRESS."_s
+        .arg(file);
+}
+
+QString noKey(const QString &file)
+{
+    return u"Pas de clé pour le serveur. "
+           u"Posez-la dans %1, dans LEAF_KEY, ou dans le trousseau."_s.arg(file);
+}
+
+QString readableByOthers(const QString &path)
+{
+    return u"%1 est lisible par d’autres que vous, il n’a donc pas été lu "
+           u"du tout. Faites-en un chmod 600."_s.arg(path);
 }
 
 } // namespace Words

@@ -295,18 +295,20 @@ void Shelf::replaceWith(const QList<Api::Series> &fresh)
         wanted << one.id;
 
     for (const Rearrange::Step &step : Rearrange::plan(held, wanted)) {
+        using enum Rearrange::Step::Kind;
+
         switch (step.kind) {
-        case Rearrange::Step::Kind::Remove:
+        case Remove:
             beginRemoveRows({}, step.first, step.last);
             m_held.remove(step.first, step.last - step.first + 1);
             endRemoveRows();
             break;
-        case Rearrange::Step::Kind::Move:
+        case Move:
             beginMoveRows({}, step.from, step.from, {}, step.to);
             m_held.move(step.from, step.to);
             endMoveRows();
             break;
-        case Rearrange::Step::Kind::Insert:
+        case Insert:
             beginInsertRows({}, step.to, step.to);
             m_held.insert(step.to, fresh.at(step.to));
             endInsertRows();
@@ -330,7 +332,7 @@ void Shelf::ask(int page)
         // Only reachable when the `Server` singleton did not resolve, which `create` has
         // already said out loud. Said again here, on the screen, because a log line is not
         // where anybody looks at an empty shelf.
-        m_trouble = tr("Leaf could not set itself up, so there is nothing to ask for.");
+        m_trouble = Words::notSetUp(Words::Asking::Shelf);
         emit changed();
         return;
     }

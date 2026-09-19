@@ -2,12 +2,14 @@
 
 #include "Covers.h"
 #include "Fonts.h"
+#include "Preferences.h"
 #include "Theme.h"
 
 #include <QCoreApplication>
 #include <QDebug>
 #include <QGuiApplication>
 #include <QUrl>
+#include <utility>
 
 using Qt::Literals::StringLiterals::operator""_s;
 
@@ -68,9 +70,20 @@ void run(QQmlApplicationEngine &engine, const QGuiApplication &application)
     // catches a Theme that stopped resolving except this line landing in the log `opens.sh`
     // greps — a URI rename, a version bump or a registration-ordering change would otherwise
     // ship the light palette on a dark desktop with every test still green.
-    if (Theme *theme = engine.singletonInstance<Theme *>(qmlTypeId("Leaf", 1, 0, "Theme")))
-        theme->followSystem();
-    else
+    if (Theme *theme = engine.singletonInstance<Theme *>(qmlTypeId("Leaf", 1, 0, "Theme"))) {
+        // What the reader asked for wins over what the desktop says, and `System` is one of
+        // the things they can ask for — so the preference is consulted first and decides
+        // whether the palette is read at all.
+        const auto *wanted = engine.singletonInstance<Preferences *>(
+            qmlTypeId("Leaf", 1, 0, "Preferences"));
+        theme->follow(wanted ? std::to_underlying(wanted->appearance()) : 0);
+        if (wanted) {
+            QObject::connect(wanted, &Preferences::appearanceChosen, theme,
+                             [theme](Preferences::Appearance chosen) {
+                                 theme->follow(std::to_underlying(chosen));
+                             });
+        }
+    } else
         qWarning().noquote()
             << u"error resolving the Theme singleton — the interface will stay in its light "
                u"palette"_s;

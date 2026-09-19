@@ -94,7 +94,7 @@ void Resume::reload()
 
     if (!m_server) {
         m_loading = false;
-        m_trouble = tr("Leaf could not set itself up, so there is nothing to resume.");
+        m_trouble = Words::notSetUp(Words::Asking::Resume);
         emit changed();
         return;
     }

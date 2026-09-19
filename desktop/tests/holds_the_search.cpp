@@ -1,6 +1,7 @@
 // File matches above the shelf, against the real HTTP seam and without a window.
 
 #include "Pretend.h"
+#include "Captions.h"
 #include "Search.h"
 #include "Server.h"
 #include "Settings.h"
@@ -68,6 +69,7 @@ class HoldsTheSearch : public QObject
     Settings *m_settings = nullptr;
     Server *m_server = nullptr;
     Search *m_search = nullptr;
+    Captions *m_captions = nullptr;
 
     void settle()
     {
@@ -96,11 +98,15 @@ private slots:
         m_settings->setKey(QStringLiteral("8f3a92c1d4e5b6a7"));
         m_server = new Server(m_settings);
         m_search = new Search(m_server, nullptr, nullptr);
+        // The words the bar shows, which moved off the model that finds the rows: the two
+        // are exercised together because a caption quotes a count.
+        m_captions = new Captions(m_search, nullptr);
         m_pretend->answers(200, hits({}));
     }
 
     void cleanup()
     {
+        delete m_captions;
         delete m_search;
         delete m_server;
         delete m_settings;
@@ -113,16 +119,16 @@ private slots:
         QVERIFY(!m_search->loading());
         QCOMPARE(m_search->count(), 0);
         QVERIFY(m_pretend->heard.isEmpty());
-        QCOMPARE(m_search->placeholder(), u"Rechercher une série, un tome, un chapitre…"_s);
-        QCOMPARE(m_search->shortPlaceholder(), u"Rechercher…"_s);
-        QCOMPARE(m_search->clearLabel(), u"Effacer la recherche"_s);
-        QCOMPARE(m_search->filterLabel(), u"Filtrer"_s);
-        QCOMPARE(m_search->settingsLabel(), u"Réglages"_s);
-        QCOMPARE(m_search->noSeriesLabel(), u"Aucune série ne porte ce nom."_s);
-        QCOMPARE(m_search->overviewLabel(), u"Aperçu"_s);
-        QCOMPARE(m_search->filesHeading(), u"Fichiers · 0"_s);
-        QCOMPARE(m_search->sortLabel(), u"Trier : Nom · A → Z"_s);
-        QCOMPARE(m_search->sortOptions().size(), 4);
+        QCOMPARE(m_captions->placeholder(), u"Rechercher une série, un tome, un chapitre…"_s);
+        QCOMPARE(m_captions->shortPlaceholder(), u"Rechercher…"_s);
+        QCOMPARE(m_captions->clearLabel(), u"Effacer la recherche"_s);
+        QCOMPARE(m_captions->filterLabel(), u"Filtrer"_s);
+        QCOMPARE(m_captions->settingsLabel(), u"Réglages"_s);
+        QCOMPARE(m_captions->noSeriesLabel(), u"Aucune série ne porte ce nom."_s);
+        QCOMPARE(m_captions->overviewLabel(), u"Aperçu"_s);
+        QCOMPARE(m_captions->filesHeading(), u"Fichiers · 0"_s);
+        QCOMPARE(m_captions->sortLabel(), u"Trier : Nom · A → Z"_s);
+        QCOMPARE(m_captions->sortOptions().size(), 4);
     }
 
     /// A pill or an order must not put sixty lines out and a spinner in. What is on screen
@@ -196,7 +202,7 @@ private slots:
 
         QCOMPARE(m_search->total(), 2);
         QCOMPARE(m_search->count(), 2);
-        QCOMPARE(m_search->heading(), u"Fichiers · 2"_s);
+        QCOMPARE(m_captions->heading(), u"Fichiers · 2"_s);
         QCOMPARE(m_search->data(m_search->index(0), role(Search::Role::Label)).toString(),
                  u"Assassinat"_s);
         QCOMPARE(m_search->data(m_search->index(0), role(Search::Role::EntryId)).toString(),
@@ -236,7 +242,7 @@ private slots:
         QCOMPARE(m_search->total(), 6);
         QCOMPARE(m_search->count(), 4);
         QCOMPARE(m_search->remaining(), 2);
-        QCOMPARE(m_search->moreLabel(), u"Voir les 2 autres"_s);
+        QCOMPARE(m_captions->moreLabel(), u"Voir les 2 autres"_s);
         QVERIFY(!m_search->expanded());
 
         m_search->expand();
@@ -297,7 +303,7 @@ private slots:
         settle();
 
         QCOMPARE(requests(), 2);
-        QCOMPARE(m_search->outsideFilters(),
+        QCOMPARE(m_captions->outsideFilters(),
                  u"Aucun résultat dans Manga · 3 sans les filtres"_s);
     }
 
@@ -311,8 +317,8 @@ private slots:
         settle();
 
         QCOMPARE(m_search->count(), 0);
-        QCOMPARE(m_search->suggestion(), u"Vouliez-vous dire Tsugumi Ōba ?"_s);
-        QVERIFY(m_search->outsideFilters().isEmpty());
+        QCOMPARE(m_captions->suggestion(), u"Vouliez-vous dire Tsugumi Ōba ?"_s);
+        QVERIFY(m_captions->outsideFilters().isEmpty());
     }
 
     void clearing_the_field_clears_rows_without_asking_for_an_empty_search()
@@ -338,6 +344,67 @@ private slots:
 
         m_search->searchFor(u"parasite"_s, {}, {});
         QCOMPARE(requests(), 0);
+    }
+
+    void an_edition_only_page_is_followed_until_files_arrive()
+    {
+        m_pretend->answerFor = [](const QByteArray &request) {
+            if (request.contains("page=1"))
+                return reply(hitPage({aHit(u"ENTRY"_s, u"v1"_s, u"Tome 1"_s)}, 2, 1, 1, 1));
+            return reply(hitPage({aHit(u"EDITION"_s, u"e1"_s, u"Series"_s)}, 2, 1, 0, 1));
+        };
+        m_search->searchFor(u"tome"_s, {}, {});
+        settle();
+        QCOMPARE(requests(), 2);
+        QCOMPARE(m_search->count(), 1);
+        QCOMPARE(m_search->fileTotal(), 1);
+        QVERIFY(!m_search->canFetchMore({}));
+    }
+
+    void an_empty_following_page_stops_pagination()
+    {
+        m_pretend->answerFor = [](const QByteArray &request) {
+            if (request.contains("page=1"))
+                return reply(hitPage({}, 2, 1, 1, 1));
+            return reply(hitPage({aHit(u"EDITION"_s, u"e1"_s, u"Series"_s)}, 2, 1, 0, 1));
+        };
+        m_search->searchFor(u"tome"_s, {}, {});
+        settle();
+        QCOMPARE(requests(), 2);
+        QCOMPARE(m_search->count(), 0);
+        QVERIFY(!m_search->canFetchMore({}));
+        QVERIFY(m_search->trouble().isEmpty());
+    }
+
+    void reversing_results_moves_existing_rows_without_resetting()
+    {
+        const auto first = aHit(u"ENTRY"_s, u"v1"_s, u"Tome 1"_s);
+        const auto second = aHit(u"ENTRY"_s, u"v2"_s, u"Tome 2"_s);
+        m_pretend->answers(200, hits({first, second}));
+        m_search->searchFor(u"tome"_s, {}, {});
+        settle();
+        QSignalSpy moved(m_search, &QAbstractItemModel::rowsMoved);
+        QSignalSpy reset(m_search, &QAbstractItemModel::modelReset);
+        m_pretend->answers(200, hits({second, first}));
+        m_search->searchFor(u"tome"_s, {u"READ"_s}, {});
+        settle();
+        QCOMPARE(moved.count(), 1);
+        QCOMPARE(reset.count(), 0);
+        QCOMPARE(m_search->data(m_search->index(0), role(Search::Role::ResultId)).toString(), u"v2"_s);
+        QCOMPARE(m_search->data(m_search->index(1), role(Search::Role::ResultId)).toString(), u"v1"_s);
+    }
+
+    void unknown_filter_words_survive_in_the_explanation()
+    {
+        m_pretend->answerFor = [](const QByteArray &request) {
+            return reply(request.contains("medium=novel") ? hits({})
+                : hits({aHit(u"EDITION"_s, u"e1"_s, u"A guess"_s, {}, {}, {}, true)}));
+        };
+        m_search->searchFor(u"guess"_s, {u"FUTURE"_s}, {u"novel"_s});
+        settle();
+        QVERIFY(m_captions->outsideFilters().contains(u"FUTURE"_s));
+        QVERIFY(m_captions->outsideFilters().contains(u"novel"_s));
+        QCOMPARE(m_captions->suggestion(), u"Vouliez-vous dire A guess ?"_s);
     }
 
     void a_broken_hit_refuses_the_answer_and_says_which_one()

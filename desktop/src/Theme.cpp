@@ -27,6 +27,23 @@ void Theme::setDark(bool dark)
     emit changed();
 }
 
+void Theme::follow(int appearance)
+{
+    // The numbers are `Preferences::Appearance`, passed as an int so that `Theme` — which
+    // knows what a palette is and nothing else — does not have to include the object that
+    // knows what a reader asked for.
+    switch (appearance) {
+    case 1:
+        setDark(false);
+        return;
+    case 2:
+        setDark(true);
+        return;
+    default:
+        followSystem();
+    }
+}
+
 void Theme::followSystem()
 {
     // Lightness, not a colour comparison: a desktop may tint its window colour, and what

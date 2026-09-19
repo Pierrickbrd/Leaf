@@ -62,6 +62,15 @@ class HoldsTheResume : public QObject
     }
 
 private slots:
+    void a_non_object_offer_is_refused()
+    {
+        m_pretend->answers(200, offers({42}));
+        m_resume->reload();
+        settle();
+        QCOMPARE(m_resume->trouble(), u"upNext[0]: expected an object"_s);
+        QVERIFY(m_resume->entryId().isEmpty());
+    }
+
     void init()
     {
         QStandardPaths::setTestModeEnabled(true);

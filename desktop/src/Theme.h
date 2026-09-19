@@ -78,6 +78,9 @@ public:
     /// Qt 6.4 has no QStyleHints::colorScheme — it arrived in 6.5 — so the desktop's own
     /// window colour is what there is to read.
     Q_INVOKABLE void followSystem();
+    /// What the reader asked for, when they asked for something. `System` hands the choice
+    /// back to the desktop, which is what `followSystem` reads.
+    Q_INVOKABLE void follow(int appearance);
 
     QColor paper() const;
     QColor surface() const;

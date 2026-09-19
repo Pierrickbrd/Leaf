@@ -9,6 +9,7 @@
 #include <QVariantMap>
 
 #include <optional>
+#include <utility>
 
 using namespace Qt::StringLiterals;
 
@@ -49,7 +50,7 @@ QVariantList readStatusPills(const QList<Api::Facet> &facets)
     QVariantList pills;
     for (const Api::ReadStatus status : {Unread, InProgress, Read}) {
         const QString value = Api::spell(status);
-        if (const std::optional<int> count = counted(facets, value))
+        if (const auto count = counted(facets, value); count.has_value())
             pills << pill(value, Words::pill(Words::readStatus(status), *count), *count);
     }
     return pills;
@@ -64,7 +65,7 @@ QVariantList mediumPills(const QList<Api::Facet> &facets)
     for (const Api::Medium medium :
          {Manga, Bd, Comics, Manhwa, Manhua, Webtoon, Artbook, Other}) {
         const QString value = Api::spell(medium);
-        if (const std::optional<int> count = counted(facets, value))
+        if (const auto count = counted(facets, value); count.has_value())
             pills << pill(value, Words::pill(Words::medium(medium), *count), *count);
     }
     return pills;
@@ -83,7 +84,11 @@ QVariantList verbatimPills(const QList<Api::Facet> &facets)
     return pills;
 }
 
-QVariantList worded(const QList<Api::Facet> &facets, QString (*say)(const QString &))
+/// Takes the wording as a template parameter rather than a function pointer: the two
+/// callers each hand it a different `Words` function, and a pointer to one of them is a
+/// call the compiler cannot see through.
+template <typename Say>
+QVariantList worded(const QList<Api::Facet> &facets, Say say)
 {
     QVariantList pills;
     for (const Api::Facet &one : facets) {
@@ -111,12 +116,12 @@ QVariantList axesOf(const Api::Facets &facets)
     };
 
     QVariantList kept;
-    for (const auto &one : all) {
-        if (one.second.size() < Filters::Fewest)
+    for (const auto &[axis, pills] : all) {
+        if (pills.size() < Filters::Fewest)
             continue;
-        kept << QVariantMap{{u"axis"_s, one.first},
-                            {u"title"_s, Words::axis(one.first)},
-                            {u"values"_s, one.second}};
+        kept << QVariantMap{{u"axis"_s, axis},
+                            {u"title"_s, Words::axis(axis)},
+                            {u"values"_s, pills}};
     }
     return kept;
 }
@@ -148,6 +153,14 @@ Filters::Filters(Server *server, Shelf *shelf, QObject *parent)
     }
 }
 
+void Filters::offer(QVariantList &held, QVariantList fresh)
+{
+    if (held == fresh)
+        return;
+    held = std::move(fresh);
+    emit axesChanged();
+}
+
 void Filters::countFiles()
 {
     ++m_fileGeneration;
@@ -159,7 +172,7 @@ void Filters::countFiles()
         // Nothing is being searched for, so there is no list of files for a row to sit above.
         m_fileReadStatuses.clear();
         m_fileMedia.clear();
-        m_fileAxes.clear();
+        offer(m_fileAxes, {});
         emit changed();
         return;
     }
@@ -193,7 +206,7 @@ void Filters::tookFiles(const Server::Answer &answer)
     };
     m_fileReadStatuses = offered(statuses) ? statuses : QVariantList();
     m_fileMedia = offered(kinds) ? kinds : QVariantList();
-    m_fileAxes = axesOf(*read.value);
+    offer(m_fileAxes, axesOf(*read.value));
     emit changed();
 }
 
@@ -207,7 +220,7 @@ void Filters::reload()
 
     if (!m_server) {
         m_loading = false;
-        m_trouble = tr("Leaf could not set itself up, so there is nothing to filter by.");
+        m_trouble = Words::notSetUp(Words::Asking::Filters);
         emit changed();
         return;
     }
@@ -258,7 +271,7 @@ void Filters::took(const Server::Answer &answer)
     m_media = offered(kinds) ? kinds : QVariantList();
     // The panel has room the row has not, so the ceiling of four does not apply to it: a
     // list of thirty authors is a list, where a row of thirty pills is a wall.
-    m_axes = axesOf(*read.value);
+    offer(m_axes, axesOf(*read.value));
     m_trouble.clear();
     emit changed();
 }

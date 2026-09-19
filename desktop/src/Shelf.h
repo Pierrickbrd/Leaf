@@ -34,7 +34,7 @@
 #include <QVariantMap>
 #include <QTimer>
 
-class Shelf : public QAbstractListModel
+class Shelf final : public QAbstractListModel
 {
     Q_OBJECT
     QML_ELEMENT
@@ -108,6 +108,11 @@ public:
     /// getters: the panel repeats over it, and a ninth axis costs nothing.
     QVariantMap narrowing() const { return m_narrowing; }
     QStringList chosen(const QString &axis) const;
+    /// The base's own `sort(int, Qt::SortOrder)` brought back into scope beside this one.
+    /// Without it this getter hid it, and `model->sort(0)` — which nothing here calls, and
+    /// which anything reaching this model through `QAbstractItemModel` might — stopped
+    /// compiling for a reason no reader of either signature could see.
+    using QAbstractListModel::sort;
     QString sort() const { return m_sort; }
     bool sortReversed() const { return m_reversed.value(m_sort, false); }
     QString sortDirection() const;

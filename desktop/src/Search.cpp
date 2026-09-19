@@ -12,6 +12,7 @@
 #include <QtGlobal>
 
 #include <utility>
+#include <QMetaObject>
 
 using namespace Qt::StringLiterals;
 
@@ -31,15 +32,6 @@ QStringList kept(const QStringList &asked)
     return worth;
 }
 
-QString mediumLabel(const QString &word)
-{
-    for (int raw = int(Api::Medium::Manga); raw <= int(Api::Medium::Other); ++raw) {
-        const auto medium = static_cast<Api::Medium>(raw);
-        if (Api::spell(medium) == word)
-            return Words::medium(medium);
-    }
-    return word;
-}
 
 } // namespace
 
@@ -67,7 +59,11 @@ Search::Search(Server *server, Shelf *shelf, QObject *parent)
     // The sort label in the bar is a view of Shelf state. It does not issue another search,
     // but its binding still needs to be told when that state changes.
     connect(m_shelf, &Shelf::changed, this, &Search::changed);
-    followShelf();
+    // Posted, not called. `followShelf` resets the model, and resetting a model runs
+    // `index()` — a virtual, dispatched against a half-built object while a constructor is
+    // still running. Queued, it lands on this thread once the loop turns, which is before
+    // anything has asked this model for a row.
+    QMetaObject::invokeMethod(this, [this] { followShelf(); }, Qt::QueuedConnection);
 }
 
 int Search::rowCount(const QModelIndex &parent) const
@@ -136,127 +132,6 @@ void Search::fetchMore(const QModelIndex &parent)
         ask(true, m_next);
 }
 
-QString Search::heading() const
-{
-    return filesHeading();
-}
-
-QString Search::moreLabel() const
-{
-    return Words::seeTheOthers(remaining());
-}
-
-QString Search::overviewLabel() const
-{
-    return Words::overview();
-}
-
-QString Search::seriesHeading() const
-{
-    return Words::series(m_shelf ? m_shelf->total() : 0);
-}
-
-QString Search::filesHeading() const
-{
-    return Words::files(m_fileTotal);
-}
-
-QString Search::allSeriesLabel() const
-{
-    return Words::seeAllSeries(m_shelf ? m_shelf->total() : 0);
-}
-
-QString Search::allFilesLabel() const
-{
-    return Words::seeAllFiles(m_fileTotal);
-}
-
-QString Search::outsideFilters() const
-{
-    return m_outside > 0 ? Words::nothingHere(activeLabels(), m_outside) : QString();
-}
-
-QString Search::suggestion() const
-{
-    if (m_approximate.isEmpty())
-        return {};
-    return Words::didYouMean(m_approximate);
-}
-
-QString Search::placeholder() const
-{
-    return Words::searchHint();
-}
-
-QString Search::shortPlaceholder() const
-{
-    return Words::searchHintShort();
-}
-
-QString Search::clearLabel() const
-{
-    return Words::clearTheSearch();
-}
-
-QString Search::filterLabel() const
-{
-    return Words::filter();
-}
-
-QString Search::settingsLabel() const
-{
-    return Words::destination(Navigation::Destination::Settings);
-}
-
-QString Search::noSeriesLabel() const
-{
-    return Words::noSeriesByThatName();
-}
-
-QString Search::clearFiltersLabel() const
-{
-    return Words::clearEveryFilter();
-}
-
-QString Search::nothingToFilterLabel() const
-{
-    return Words::nothingToFilter();
-}
-
-QString Search::noValueByThatNameLabel() const
-{
-    return Words::noValueByThatName();
-}
-
-QString Search::searchWithin(const QString &axisTitle) const
-{
-    return Words::searchWithin(axisTitle);
-}
-
-QString Search::sortValue() const
-{
-    const Api::Sort order = m_shelf ? Api::sort(m_shelf->sort()) : Api::Sort::Name;
-    return Words::sortValue(order, m_shelf && m_shelf->sortReversed());
-}
-
-QString Search::sortLabel() const
-{
-    const Api::Sort order = m_shelf ? Api::sort(m_shelf->sort()) : Api::Sort::Name;
-    return Words::labelled(u"Trier"_s,
-                           Words::sortValue(order, m_shelf && m_shelf->sortReversed()));
-}
-
-QVariantList Search::sortOptions() const
-{
-    QVariantList options;
-    using enum Api::Sort;
-    for (const Api::Sort order : {Name, Added, Volumes, Read}) {
-        options << QVariantMap{{u"value"_s, Api::spell(order)},
-                               {u"label"_s, Words::sortOrder(order)}};
-    }
-    return options;
-}
-
 void Search::followShelf()
 {
     if (m_shelf) {
@@ -274,11 +149,6 @@ void Search::searchFor(const QString &query, const QStringList &readStatuses,
     if (!media.isEmpty())
         narrowing.insert(u"medium"_s, media);
     updateSearch(query, narrowing, m_sort, m_direction);
-}
-
-QStringList Search::narrowedBy(const QString &axis) const
-{
-    return m_narrowing.value(axis).toStringList();
 }
 
 void Search::updateSearch(const QString &query, const QVariantMap &narrowing,
@@ -331,7 +201,7 @@ void Search::ask(bool filtered, int page)
 {
     if (!m_server) {
         m_loading = false;
-        m_trouble = tr("Leaf could not set itself up, so there is nothing to search.");
+        m_trouble = Words::notSetUp(Words::Asking::Search);
         emit changed();
         return;
     }
@@ -388,14 +258,14 @@ Search::Parsed Search::parse(const Server::Answer &answer) const
     parsed.page = page.value->page;
     parsed.size = page.value->size;
     for (const Api::Hit &hit : page.value->items) {
+        using enum Api::Hit::Kind;
+
         if (!hit.approximate)
             ++parsed.exact;
-        if (hit.approximate && hit.kind == Api::Hit::Kind::Edition
-            && parsed.approximate.isEmpty()) {
+        if (hit.approximate && hit.kind == Edition && parsed.approximate.isEmpty()) {
             parsed.approximate = hit.label;
         }
-        if (!hit.approximate
-            && (hit.kind == Api::Hit::Kind::Entry || hit.kind == Api::Hit::Kind::Chapter)) {
+        if (!hit.approximate && (hit.kind == Entry || hit.kind == Chapter)) {
             parsed.files << hit;
         }
     }
@@ -466,18 +336,20 @@ void Search::replaceFiles(QList<Api::Hit> files)
         wanted << one.id;
 
     for (const Rearrange::Step &step : Rearrange::plan(held, wanted)) {
+        using enum Rearrange::Step::Kind;
+
         switch (step.kind) {
-        case Rearrange::Step::Kind::Remove:
+        case Remove:
             beginRemoveRows({}, step.first, step.last);
             m_files.remove(step.first, step.last - step.first + 1);
             endRemoveRows();
             break;
-        case Rearrange::Step::Kind::Move:
+        case Move:
             beginMoveRows({}, step.from, step.from, {}, step.to);
             m_files.move(step.from, step.to);
             endMoveRows();
             break;
-        case Rearrange::Step::Kind::Insert:
+        case Insert:
             beginInsertRows({}, step.to, step.to);
             m_files.insert(step.to, files.at(step.to));
             endInsertRows();
@@ -500,21 +372,6 @@ void Search::appendFiles(QList<Api::Hit> files)
     beginInsertRows({}, first, last);
     m_files.append(std::move(files));
     endInsertRows();
-}
-
-QStringList Search::activeLabels() const
-{
-    QStringList labels;
-    for (const QString &word : narrowedBy(u"read"_s)) {
-        const std::optional<Api::ReadStatus> status = Api::readStatus(word);
-        labels << (status ? Words::readStatus(*status) : word);
-    }
-    for (const QString &word : narrowedBy(u"medium"_s))
-        labels << mediumLabel(word);
-    // The axes the row never draws say themselves: a name is already a word.
-    for (const QString &axis : {u"universe"_s, u"genre"_s, u"author"_s, u"publisher"_s})
-        labels << narrowedBy(axis);
-    return labels;
 }
 
 void Search::expand()

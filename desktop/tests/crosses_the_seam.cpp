@@ -9,6 +9,7 @@
 // really reaches these objects rather than stand-ins compiled beside them.
 
 #include "Boot.h"
+#include "Preferences.h"
 #include "Navigation.h"
 #include "Pretend.h"
 #include "Shelf.h"
@@ -31,6 +32,7 @@
 #include <QQuickWindow>
 #include <QStandardPaths>
 #include <QTcpServer>
+#include <QMutex>
 #include <QTest>
 
 using Qt::Literals::StringLiterals::operator""_s;
@@ -181,6 +183,59 @@ QList<QQuickItem *> itemsNamed(QQuickItem *root, const QString &name)
     return all;
 }
 
+/// Every binding loop Qt reported while a test ran.
+///
+/// A loop is not an error to Qt: it warns, four times per layout, and carries on. Two of
+/// them shipped in one day for exactly that reason — nothing read the warnings, and the
+/// second was written by whoever had just fixed the first. `opens.sh` greps the launch for
+/// them, but the launch only ever draws the shelf; a screen reached by a click is only
+/// drawn here.
+///
+/// It is checked after **every** test and not in one of them, because the loop needs the
+/// text to arrive *after* the first layout: a detail read from the environment is there
+/// when the item is built and never loops, the same detail waited on from the server does.
+/// Running one test alone left this guard silent and looking sound.
+///
+/// Behind a mutex, because `qInstallMessageHandler` documents that the handler must be
+/// thread-safe and Qt takes it at its word: a socket warning arrives on whichever thread
+/// the socket lives on. Appending to a plain `QStringList` from there while the test
+/// thread cleared it corrupted the heap, and the run died with SIGSEGV at whatever it
+/// touched next — four different tests over four runs on the integration machine, none of
+/// them the one at fault, and never once on this one.
+QMutex loopLock;
+QStringList loops;
+QtMessageHandler passItOn = nullptr;
+
+void watchForLoops(QtMsgType type, const QMessageLogContext &where, const QString &said)
+{
+    if (said.contains(u"Binding loop"_s)) {
+        const QMutexLocker held(&loopLock);
+        loops.append(said);
+    }
+    if (passItOn)
+        passItOn(type, where, said);
+}
+
+QStringList loopsSoFar()
+{
+    const QMutexLocker held(&loopLock);
+    return loops;
+}
+
+void forgetLoops()
+{
+    const QMutexLocker held(&loopLock);
+    loops.clear();
+}
+
+/// The text of a named item, or a sentence saying there was no such item.
+///
+/// `itemNamed(...)->property("text")` reads well and dereferences a null the moment the
+/// item is not there. On a slower machine the filter panel's delegates were rebuilt
+/// between two lines of one test — an axis found, its own tally gone — and the run ended
+/// in SIGSEGV where a failed comparison would have named what was missing.
+QString textNamed(QQuickItem *root, const QString &name);
+
 QQuickItem *itemNamed(QQuickItem *root, const QString &name)
 {
     if (root->objectName() == name)
@@ -190,6 +245,29 @@ QQuickItem *itemNamed(QQuickItem *root, const QString &name)
             return found;
     }
     return nullptr;
+}
+
+QString textNamed(QQuickItem *root, const QString &name)
+{
+    QQuickItem *one = itemNamed(root, name);
+    return one ? one->property("text").toString()
+               : u"<aucun élément nommé "_s + name + u">"_s;
+}
+
+/// The filter button a hand can reach, and the panel hanging from it.
+///
+/// There are two rows of pills on the shelf — its own, and the one the search workspace
+/// draws over its results — so there are two of each, and only one is ever on screen.
+/// `findChild` hands back whichever comes first in the object tree, which was the button
+/// inside the hidden row: a popup opened from an item in an invisible subtree.
+QQuickItem *reachableFilterButton(QQuickWindow *window)
+{
+    QQuickItem *found = nullptr;
+    for (QQuickItem *one : itemsNamed(window->contentItem(), u"filter-button"_s)) {
+        if (one->isVisible())
+            found = one;
+    }
+    return found;
 }
 } // namespace
 
@@ -206,10 +284,14 @@ private slots:
     {
         QStandardPaths::setTestModeEnabled(true);
         QQuickStyle::setStyle(u"Basic"_s);
+        passItOn = qInstallMessageHandler(watchForLoops);
     }
+
+    void cleanupTestCase() { qInstallMessageHandler(passItOn); }
 
     void init()
     {
+        forgetLoops();
         // Never read the developer's real config or keyring when the shelf starts asking as
         // soon as its component completes. Port 1 refuses locally and deterministically.
         qputenv("LEAF_ADDRESS", QByteArrayLiteral("http://127.0.0.1:1"));
@@ -220,6 +302,9 @@ private slots:
     {
         qunsetenv("LEAF_ADDRESS");
         qunsetenv("LEAF_KEY");
+        // Every test, not one: whichever screen a test drew, it drew it properly.
+        const QStringList seen = loopsSoFar();
+        QVERIFY2(seen.isEmpty(), qPrintable(seen.join(u"\n"_s)));
     }
 
     void booting_loads_exactly_one_window()
@@ -475,8 +560,6 @@ private slots:
         QTRY_VERIFY(searchField->hasActiveFocus());
         QCOMPARE(grid->property("currentIndex").toInt(), -1);
         QTest::keyClick(window, Qt::Key_Tab);
-        QTRY_VERIFY(filterButton->hasActiveFocus());
-        QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(sortButton->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(settingsButton->hasActiveFocus());
@@ -491,7 +574,6 @@ private slots:
         QCOMPARE(grid->property("currentIndex").toInt(), -1);
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(searchField->hasActiveFocus());
-        QTest::keyClick(window, Qt::Key_Tab);
         QTest::keyClick(window, Qt::Key_Tab);
         QTest::keyClick(window, Qt::Key_Tab);
         QTest::keyClick(window, Qt::Key_Tab);
@@ -752,8 +834,6 @@ private slots:
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(searchField->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
-        QTRY_VERIFY(filterButton->hasActiveFocus());
-        QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(sortButton->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(settingsButton->hasActiveFocus());
@@ -1006,13 +1086,16 @@ private slots:
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(searchField->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
-        QTRY_VERIFY(filterButton->hasActiveFocus());
-        QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(sortButton->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(settingsButton->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(button->hasActiveFocus());
+        // The filter button is the head of this row now, before the pills it produces —
+        // it used to be the bar's second stop, an inch from the field and a screen away
+        // from what it narrows.
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(filterButton->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(unread->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Right);
@@ -1532,23 +1615,28 @@ private slots:
         window->requestActivate();
         QTRY_VERIFY(window->isActive());
 
-        auto *button = window->findChild<QQuickItem *>(u"filter-button"_s);
-        QVERIFY(button);
-        auto *panel = window->findChild<QObject *>(u"filter-panel"_s);
+        QQuickItem *button = nullptr;
+        QTRY_VERIFY((button = reachableFilterButton(window)));
+        auto *panel = button->findChild<QObject *>(u"filter-panel"_s);
         QVERIFY(panel);
         QVERIFY(!panel->property("opened").toBool());
 
         QVERIFY(QMetaObject::invokeMethod(panel, "open"));
         QTRY_VERIFY(panel->property("opened").toBool());
 
-        // Six axes: the two the row draws, plus genre, universe, language and author. The
-        // panel has the room the row has not, so nothing is dropped for being long.
-        QTRY_COMPARE(panel->property("axes").toList().size(), 6);
+        // Four axes: genre, universe, language and author. The panel has the room the row
+        // has not, so nothing is dropped for being long — and it leaves out the two the row
+        // draws, which sit as pills an inch below the button and were offered twice.
+        QTRY_COMPARE(panel->property("axes").toList().size(), 4);
         QQuickItem *page = window->contentItem();
-        for (const QString &axis : {u"read"_s, u"medium"_s, u"genre"_s, u"universe"_s,
-                                    u"language"_s, u"author"_s}) {
+        for (const QString &axis : {u"genre"_s, u"universe"_s, u"language"_s, u"author"_s}) {
             QVERIFY2(itemNamed(page, u"filter-axis-"_s + axis),
                      qPrintable(u"no axis "_s + axis));
+        }
+        for (const QString &axis : {u"read"_s, u"medium"_s}) {
+            QVERIFY2(!itemNamed(page, u"filter-axis-"_s + axis),
+                     qPrintable(u"the row already draws "_s + axis));
+            QVERIFY2(itemNamed(page, u"filter-chips"_s), "no row of pills");
         }
 
         // A short axis is open; a long one is folded and carries a field of its own, so that
@@ -1560,7 +1648,9 @@ private slots:
         QVERIFY(genreBody->isVisible());
         QVERIFY(!authorBody->isVisible());
         QVERIFY(itemNamed(page, u"filter-axis-search-author"_s));
-        QVERIFY(!itemNamed(page, u"filter-axis-search-genre"_s)->isVisible());
+        QQuickItem *genreField = itemNamed(page, u"filter-axis-search-genre"_s);
+        QVERIFY(genreField);
+        QVERIFY(!genreField->isVisible());
 
         // A language is a word, not a tag: the panel says « Français », not « fr ».
         auto *french = itemNamed(page, u"filter-value-text-fr"_s);
@@ -1584,10 +1674,12 @@ private slots:
         QTRY_VERIFY(chip->isVisible());
         QCOMPARE(chip->property("lit").toBool(), true);
 
-        // The button counts every axis, not the two the row owns.
-        auto *bar = window->findChild<QQuickItem *>(u"app-bar"_s);
-        QVERIFY(bar);
-        QCOMPARE(bar->property("activeFilters").toInt(), 1);
+        // The button counts every axis, not only the two the row draws — it sits at the
+        // head of that row and has to say, while the panel is shut, that something is in
+        // force on an axis no pill shows.
+        auto *pills = itemNamed(page, u"filter-pills"_s);
+        QVERIFY(pills);
+        QCOMPARE(pills->property("litCount").toInt(), 1);
 
         // « Tout effacer » appears only once there is something to clear, and empties every
         // axis at once — the only way out of a selection spread across eight of them.
@@ -1595,7 +1687,7 @@ private slots:
         QVERIFY(clear);
         QVERIFY(clear->isVisible());
         shelf->filterBy({});
-        QTRY_COMPARE(bar->property("activeFilters").toInt(), 0);
+        QTRY_COMPARE(pills->property("litCount").toInt(), 0);
         QTRY_VERIFY(!clear->isVisible());
     }
 
@@ -1634,7 +1726,9 @@ private slots:
         window->requestActivate();
         QTRY_VERIFY(window->isActive());
 
-        auto *panel = window->findChild<QObject *>(u"filter-panel"_s);
+        QQuickItem *button = nullptr;
+        QTRY_VERIFY((button = reachableFilterButton(window)));
+        auto *panel = button->findChild<QObject *>(u"filter-panel"_s);
         QVERIFY(panel);
         QVERIFY(QMetaObject::invokeMethod(panel, "open"));
         QTRY_VERIFY(panel->property("opened").toBool());
@@ -1643,9 +1737,11 @@ private slots:
         QQuickItem *axis = nullptr;
         QTRY_VERIFY((axis = itemNamed(page, u"filter-axis-author"_s)));
         // Folded, because it is long — and it says how many are behind it without opening.
-        QCOMPARE(itemNamed(page, u"filter-axis-tally-author"_s)->property("text").toString(),
+        QCOMPARE(textNamed(page, u"filter-axis-tally-author"_s),
                  u"300"_s);
-        QVERIFY(!itemNamed(page, u"filter-axis-body-author"_s)->isVisible());
+        QQuickItem *authorBody = itemNamed(page, u"filter-axis-body-author"_s);
+        QVERIFY(authorBody);
+        QVERIFY(!authorBody->isVisible());
 
         axis->setProperty("open", true);
         QQuickItem *rows = itemNamed(page, u"filter-axis-rows-author"_s);
@@ -1734,9 +1830,9 @@ private slots:
         QVERIFY(QMetaObject::invokeMethod(sortMenu, "close"));
         QTRY_VERIFY(!sortMenu->property("opened").toBool());
 
-        auto *button = window->findChild<QQuickItem *>(u"filter-button"_s);
-        auto *panel = window->findChild<QObject *>(u"filter-panel"_s);
-        QVERIFY(button);
+        QQuickItem *button = nullptr;
+        QTRY_VERIFY((button = reachableFilterButton(window)));
+        auto *panel = button->findChild<QObject *>(u"filter-panel"_s);
         QVERIFY(panel);
         const auto clickTheButton = [click, button] { click(button); };
 
@@ -1768,6 +1864,193 @@ private slots:
         // And the next gesture, which starts with the panel closed, opens it.
         clickTheButton();
         QTRY_VERIFY(panel->property("opened").toBool());
+    }
+
+    /// The settings button finally goes somewhere. It was left unwired because the Loader
+    /// was pinned to the shelf: opening a destination nothing draws changed the stack,
+    /// showed the same page, and spent the next Escape popping what nobody had seen.
+    void the_settings_button_opens_a_screen_and_escape_comes_back()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"ac"_s, u"Assassination Classroom"_s, 21, false)}, 1));
+        const QByteArray emptyNext =
+            aReply(200, QByteArrayLiteral("application/json"), QByteArrayLiteral("[]"));
+        const QByteArray healthReply =
+            aReply(200, QByteArrayLiteral("application/json"),
+                   QJsonDocument(QJsonObject{{u"status"_s, u"ok"_s},
+                                             {u"api"_s, 1},
+                                             {u"format"_s, 1},
+                                             {u"library"_s, 6},
+                                             {u"localDrop"_s, true}})
+                       .toJson(QJsonDocument::Compact));
+        const QByteArray scanReply =
+            aReply(200, QByteArrayLiteral("application/json"),
+                   QJsonDocument(QJsonObject{
+                       {u"state"_s, u"DONE"_s},
+                       {u"finishedAt"_s, 1788463370000LL},
+                       {u"report"_s,
+                        QJsonObject{{u"counts"_s,
+                                     QJsonObject{{u"universes"_s, 1},
+                                                 {u"works"_s, 5},
+                                                 {u"editions"_s, 6},
+                                                 {u"entries"_s, 59},
+                                                 {u"chapters"_s, 546},
+                                                 {u"pages"_s, 0},
+                                                 {u"reanalysed"_s, 0}}}}}})
+                       .toJson(QJsonDocument::Compact));
+        const QByteArray coverReply =
+            aReply(200, QByteArrayLiteral("image/png"), aCover());
+        // Answered here so the row of pills is drawn: the filter button lives at its head,
+        // and this slot has to leave the shelf with the panel open.
+        const QByteArray filtersReply =
+            aReply(200, QByteArrayLiteral("application/json"), someFilters());
+        pretend.answerFor = [pageReply, emptyNext, healthReply, scanReply, filtersReply,
+                             coverReply](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return emptyNext;
+            if (request.startsWith("GET /health"))
+                return healthReply;
+            if (request.startsWith("GET /scan"))
+                return scanReply;
+            if (request.startsWith("GET /filters"))
+                return filtersReply;
+            return request.startsWith("GET /series?") ? pageReply : coverReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+        QQuickItem *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(grid);
+
+        // Opened here to be found shut on the other side of the navigation: a popup lives
+        // in the overlay and outlives the button it hangs from, so hiding the bar's row
+        // left the filters over the settings, narrowing a shelf nobody could see.
+        // By its own button, and there are two of them on this page: the shelf's row of
+        // pills and the one the search workspace draws. Only the shelf's is on screen.
+        QQuickItem *filterButton = nullptr;
+        QTRY_VERIFY((filterButton = reachableFilterButton(window)));
+        auto *filters = filterButton->findChild<QObject *>(u"filter-panel"_s);
+        QVERIFY(filters);
+        QVERIFY(QMetaObject::invokeMethod(filters, "open"));
+        QTRY_VERIFY(filters->property("opened").toBool());
+
+        auto *button = window->findChild<QQuickItem *>(u"settings-button"_s);
+        QVERIFY(button);
+        QVERIFY(QMetaObject::invokeMethod(button, "triggered"));
+        QTRY_VERIFY(!filters->property("opened").toBool());
+        // And waited out, not merely flagged shut. Without this the Escape below reached
+        // the window while the panel was still winding down and was swallowed on roughly
+        // one run in three — the page stayed on the settings, with an empty search field
+        // and no shortcut fired. What exactly ate the key was not established; that it
+        // stops once the popup is finished is.
+        QTRY_VERIFY(!filters->property("visible").toBool());
+
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = window->findChild<QQuickItem *>(u"settings-view"_s)));
+        // The shelf goes out of sight and not out of existence. Destroyed and rebuilt it
+        // lost its scroll, decoded every cover again and flashed its skeleton on the way
+        // back, over a page the reader had already read.
+        QTRY_VERIFY(!grid->isVisible());
+        QCOMPARE(window->findChild<QQuickItem *>(u"shelf-grid"_s), grid);
+
+        // A state and not a table of facts: what a reader needs of a server is whether
+        // their books are there. The address and the version are nowhere on this screen.
+        QQuickItem *page = window->contentItem();
+        QTRY_COMPARE(textNamed(page, u"connection-label"_s),
+                     u"Bibliothèque connectée"_s);
+        QCOMPARE(textNamed(page, u"connection-detail"_s),
+                 u"6 séries"_s);
+        QVERIFY2(!itemNamed(page, u"settings-versions-label"_s),
+                 "the server's version is on a reader's settings screen");
+
+        // The one preference Leaf has, and the three answers to it.
+        QVERIFY(itemNamed(page, u"appearance-contrast"_s));
+        QVERIFY(itemNamed(page, u"appearance-light_mode"_s));
+        QVERIFY(itemNamed(page, u"appearance-dark_mode"_s));
+
+        // And a way back that names where it goes.
+        auto *back = window->findChild<QQuickItem *>(u"back-button"_s);
+        QVERIFY(back);
+        QTRY_VERIFY(back->isVisible());
+        QVERIFY2(back->property("label").toString().contains(u"étagère"_s),
+                 qPrintable(back->property("label").toString()));
+
+        // The scan lives behind the second pill, and what it counted is said in French
+        // here rather than arriving as a paragraph the vocabulary file could not reach.
+        auto *libraryTab = itemNamed(page, u"settings-tab-library"_s);
+        QVERIFY(libraryTab);
+        QVERIFY(QMetaObject::invokeMethod(itemNamed(page, u"settings-tabs"_s), "selected",
+                                          Q_ARG(int, 1)));
+        QTRY_COMPARE(textNamed(page, u"settings-scan-counts-label"_s),
+                     u"1 univers, 6 séries, 59 tomes, 546 chapitres"_s);
+
+        // The button goes back to the page underneath — the same one, item for item, which
+        // is the whole point of leaving it there.
+        QVERIFY(QMetaObject::invokeMethod(back, "triggered"));
+        QTRY_VERIFY(grid->isVisible());
+        QCOMPARE(window->findChild<QQuickItem *>(u"shelf-grid"_s), grid);
+        // And the way back went with the page it belonged to. Asserted by looking for it
+        // again rather than by asking the pointer whether it is still shown: the button
+        // moved out of the bar and into the settings' own tabs, so the Loader deletes it
+        // on the way out — `back->isVisible()` here read freed memory, and did it for
+        // however long the allocator left the bytes recognisable.
+        QTRY_VERIFY(!window->findChild<QQuickItem *>(u"back-button"_s));
+
+        // And Escape does the same, rather than being spent on a page nobody saw.
+        QVERIFY(QMetaObject::invokeMethod(button, "triggered"));
+        QTRY_VERIFY(window->findChild<QQuickItem *>(u"settings-view"_s));
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(grid->isVisible());
+        QTRY_VERIFY(!window->findChild<QQuickItem *>(u"settings-view"_s));
+    }
+
+    /// A setup that was never finished says what is missing and where it goes — the one
+    /// moment the technical detail helps rather than clutters.
+    ///
+    /// It is also the only test that draws those sentences, and a paragraph is where a
+    /// binding loop hides: a wrapped text with nothing in it is never laid out, so a loop
+    /// in it costs nothing until somebody's key is missing.
+    void a_setup_that_is_not_finished_says_what_is_missing()
+    {
+        qputenv("LEAF_ADDRESS", QByteArrayLiteral("http://127.0.0.1:1"));
+        qunsetenv("LEAF_KEY");
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+
+        auto *button = window->findChild<QQuickItem *>(u"settings-button"_s);
+        QVERIFY(button);
+        QVERIFY(QMetaObject::invokeMethod(button, "triggered"));
+        QTRY_VERIFY(window->findChild<QQuickItem *>(u"settings-view"_s));
+
+        QQuickItem *page = window->contentItem();
+        QTRY_COMPARE(textNamed(page, u"connection-label"_s),
+                     u"Pas de connexion"_s);
+
+        // The sentence names the file it wants and the variable that would do instead.
+        // `Settings` writes it: it is the one that knows which of the two is absent.
+        auto *detail = itemNamed(page, u"connection-detail"_s);
+        QVERIFY(detail);
+        QTRY_VERIFY(!detail->property("text").toString().isEmpty());
+        QVERIFY2(detail->property("text").toString().contains(u"LEAF_KEY"_s),
+                 qPrintable(detail->property("text").toString()));
+        QVERIFY(detail->isVisible());
+        QVERIFY(detail->height() > 0);
     }
 
     /// Nothing started is not an empty card: the header has to give its height back, or the
@@ -1995,6 +2278,27 @@ private slots:
     /// `Boot.h` documents as the only one that can work, because the module's registration is
     /// lazy. If that ordering ever regressed, `qmlTypeId` would find nothing here and this
     /// singleton would come back null rather than merely light where it should be dark.
+    void changing_appearance_updates_the_running_window()
+    {
+        const RestoresThePalette restoreOnExit;
+        QPalette night;
+        night.setColor(QPalette::Window, QColor(u"#101010"_s));
+        QGuiApplication::setPalette(night);
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *preferences = engine.singletonInstance<Preferences *>(
+            qmlTypeId("Leaf", 1, 0, "Preferences"));
+        auto *theme = engine.singletonInstance<Theme *>(qmlTypeId("Leaf", 1, 0, "Theme"));
+        QVERIFY(preferences);
+        QVERIFY(theme);
+        preferences->chooseAppearance(Preferences::Appearance::Dark);
+        QVERIFY(theme->dark());
+        preferences->chooseAppearance(Preferences::Appearance::Light);
+        QVERIFY(!theme->dark());
+        preferences->chooseAppearance(Preferences::Appearance::System);
+        QVERIFY(theme->dark());
+    }
+
     void theme_resolves_and_follows_the_desktop_palette()
     {
         const RestoresThePalette restoreOnExit;

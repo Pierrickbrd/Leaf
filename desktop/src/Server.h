@@ -78,6 +78,16 @@ public:
     void get(const QString &path, const QObject *caller,
              std::function<void(const Answer &)> then);
 
+    /// The same path, the same waiting, the same refusals — with a body, and a verb the
+    /// server reads as a command rather than a question.
+    ///
+    /// Everything `get` promises above holds here word for word, which is why the two share
+    /// one implementation: a second copy of the key header, the redirect policy, the 403
+    /// that stops the client and the 429 that holds it would be a second place to forget
+    /// one of them.
+    void post(const QString &path, const QByteArray &body, const QObject *caller,
+              std::function<void(const Answer &)> then);
+
     /// Whether anything more will be sent.
     ///
     /// A refused key is not a hiccup: it stays refused until somebody changes a file, and the
@@ -114,6 +124,9 @@ private:
     /// call. Before this branch neither could happen, because an unloaded client answered on
     /// the spot and no request outlived the call that made it.
     struct Waiting {
+        /// `GET` or `POST`. Held rather than assumed: a command held back until the keyring
+        /// answers and then replayed as a question would silently do nothing.
+        QByteArray verb;
         QString path;
         /// Encoded, and named so — not a `QUrlQuery`, and not a query anybody can read.
         ///
@@ -125,6 +138,7 @@ private:
         /// file was written for, `q=Haiky%C5%AB%20!!%20%26%20l'%C3%A9t%C3%A9` parses back
         /// equal to the query it came from, ampersand included.
         QString encodedQuery;
+        QByteArray body;
         QPointer<const QObject> caller;
         std::function<void(const Answer &)> then;
     };
@@ -134,6 +148,10 @@ private:
     /// promise it fails this line, instead of failing the next time the queue grows.
     static_assert(std::is_nothrow_move_constructible_v<Waiting>,
                   "a held request has to move without throwing: QList relocates them");
+
+    void send(const QByteArray &verb, const QString &path, const QUrlQuery &query,
+              const QByteArray &body, const QObject *caller,
+              std::function<void(const Answer &)> then);
 
     Settings *m_settings;
     QNetworkAccessManager m_network;

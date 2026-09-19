@@ -22,12 +22,12 @@
 #include "Api.h"
 #include "Server.h"
 
-class Shelf;
-
 #include <QObject>
 #include <QQmlEngine>
 #include <QString>
 #include <QVariantList>
+
+class Shelf;
 
 class Filters : public QObject
 {
@@ -49,8 +49,15 @@ class Filters : public QObject
     /// `{ axis, title, values: [{ value, label, count }] }`. One list rather than eight
     /// properties, so a ninth axis costs the panel nothing — and the row above keeps reading
     /// its own two, which are the same answer read twice.
-    Q_PROPERTY(QVariantList axes READ axes NOTIFY changed)
-    Q_PROPERTY(QVariantList fileAxes READ fileAxes NOTIFY changed)
+    /// Notified apart from the rest, and this matters. A QML `Repeater` keyed on a `var`
+    /// list rebuilds every delegate the moment the list is replaced, and reading this
+    /// property hands back a fresh copy each time — so on the catch-all signal the open
+    /// panel was torn down and built again whenever anything here moved, including the
+    /// file counts it does not read. A test found an axis and then found its own tally
+    /// gone between two lines; a reader would have found the row under the pointer
+    /// replaced by another.
+    Q_PROPERTY(QVariantList axes READ axes NOTIFY axesChanged)
+    Q_PROPERTY(QVariantList fileAxes READ fileAxes NOTIFY axesChanged)
     Q_PROPERTY(bool loading READ loading NOTIFY changed)
     Q_PROPERTY(QString trouble READ trouble NOTIFY changed)
     /// True when an axis was dropped for being longer than a row can hold, rather than for
@@ -81,9 +88,16 @@ public:
     Q_INVOKABLE void reload();
 
 signals:
+    /// Only when the offered axes are not the ones offered a moment ago. See the property.
+    void axesChanged();
+
     void changed();
 
 private:
+    /// Replaces a list of axes and says so, or says nothing at all. Every caller has just
+    /// rebuilt the list from a fresh answer, so an equal list is the common case.
+    void offer(QVariantList &held, QVariantList fresh);
+
     void took(const Server::Answer &answer);
     /// Asked for separately from the series counts and against the query in force, because
     /// the two answer different questions about different populations.

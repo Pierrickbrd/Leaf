@@ -1,9 +1,14 @@
-// Every axis a library can be narrowed by, under the button that opens them.
+// Every axis the row cannot draw, under the button that opens them.
 //
 // The row of pills says what you are looking at; this says what you *could* look at. It
-// holds the axes the row cannot: a row has four pills' worth of width and a library has
+// holds what the row has no width for: a row has four pills' worth and a library has
 // twenty-eight authors, so the row keeps the two axes worth a glance and everything else
 // lives here, one heading per axis.
+//
+// **And only what the row cannot draw.** Read status and medium sit permanently as pills an
+// inch below the button, so repeating them here offered the same choice twice within one
+// glance — see `drawnAlready`. What the row drops for being too long to hold, this picks
+// back up, so no axis falls between the two.
 //
 // Anchored under the button rather than a drawer or a modal, for the same reason the sort
 // menu is: a screen with one grammar of opening is a screen a reader learns once. And it
@@ -24,9 +29,26 @@ Popup {
     /// Which population the counts describe, the same question the row answers. A panel
     /// opened above a list of files counts files.
     property bool overFiles: false
+    /// The axes the row underneath already draws, which this one leaves out. Read status and
+    /// medium are permanently on screen as pills, right under the button that opens this, so
+    /// offering them here again is the same choice in two places — and the one the hand is
+    /// not aiming at is the one it hits by accident. Named rather than hard-coded: the row
+    /// drops an axis it cannot hold, and this has to pick it back up when it does.
+    property var drawnAlready: []
+    /// Short enough to be taken in at a glance, and so unfolded from the start. Its own
+    /// number and not `atMostOnScreen`: that one says how tall an axis may get, this one
+    /// says how much of the panel may be open at once, and eight axes unfolded is a wall.
+    readonly property int shortEnoughToUnfold: 5
 
-
-    readonly property var axes: overFiles ? source.fileAxes : source.axes
+    readonly property var axes: {
+        const all = overFiles ? source.fileAxes : source.axes
+        const kept = []
+        for (const one of all) {
+            if (drawnAlready.indexOf(one.axis) < 0)
+                kept.push(one)
+        }
+        return kept
+    }
     readonly property int litCount: {
         let total = 0
         for (const key in shelf.narrowing)
@@ -135,7 +157,7 @@ Popup {
                 anchors.left: parent.left
                 anchors.leftMargin: 6
                 anchors.verticalCenter: parent.verticalCenter
-                text: Search.filterLabel
+                text: Captions.filterLabel
                 color: Theme.inkFaint
                 font.family: Theme.textFamily
                 font.pixelSize: 12
@@ -152,7 +174,7 @@ Popup {
                 anchors.rightMargin: 2
                 anchors.verticalCenter: parent.verticalCenter
                 visible: panel.litCount > 0
-                label: Search.clearFiltersLabel
+                label: Captions.clearFiltersLabel
                 onTriggered: panel.shelf.filterBy({})
             }
         }
@@ -193,7 +215,8 @@ Popup {
                         // ones folded, because eight axes unfolded is a wall and a wall is
                         // read by nobody. An axis holding a lit value opens whatever its
                         // length: a filter in force must never be out of sight.
-                        startsOpen: modelData.values.length <= 5 || litHere > 0
+                        startsOpen: modelData.values.length <= panel.shortEnoughToUnfold
+                                    || litHere > 0
                         lit: (value) => panel.isLit(modelData.axis, value)
                         onPicked: value => panel.toggle(modelData.axis, value)
                     }
@@ -204,7 +227,7 @@ Popup {
                     x: 6
                     width: axesColumn.width - 12
                     visible: panel.axes.length === 0
-                    text: Search.nothingToFilterLabel
+                    text: Captions.nothingToFilterLabel
                     color: Theme.inkSoft
                     font.family: Theme.textFamily
                     font.pixelSize: 13

@@ -63,12 +63,45 @@ Item {
         return shown
     }
 
+    /// The axes the row draws itself, which the panel then leaves out. An axis the row
+    /// cannot hold — one value, or more than four — is not in here, so the panel keeps it.
+    ///
+    /// Two booleans and not the list itself: a computed list is a new list on every
+    /// evaluation, and the panel's own axes depend on this one. Built from the lists, it
+    /// handed the panel a fresh exclusion on every notification `Filters` sent, and a
+    /// `Repeater` given a new list rebuilds every delegate — under the pointer.
+    readonly property bool drawsRead: readStatusValues.length > 0
+    readonly property bool drawsMedium: mediumValues.length > 0
+    readonly property var drawnHere: (drawsRead ? ["read"] : [])
+                                     .concat(drawsMedium ? ["medium"] : [])
+
+    /// Everything lit, across every axis. The button says so while the panel is shut, which
+    /// is the only moment a filter in force can be out of sight.
+    readonly property int litCount: {
+        let total = 0
+        for (const axis in shelf.narrowing)
+            total += shelf.narrowing[axis].length
+        return total
+    }
+
+    /// Whether the button would open anything. The row is often empty — six series, all
+    /// manga, all unread, draws no pill at all — and the panel can still have authors and
+    /// genres to offer. Drawing the row for the button alone is what keeps them reachable.
+    readonly property bool offering: (overFiles ? source.fileAxes : source.axes).length > 0
+
     readonly property bool showing: readStatusValues.length > 0 || mediumValues.length > 0
-                                    || elsewhereValues.length > 0
+                                    || elsewhereValues.length > 0 || offering
 
     objectName: "filter-pills"
     visible: showing
-    height: showing ? chips.height + 2 * Widths.shelfGap : 0
+    // The panel hangs in the overlay and outlives the row it belongs to, so a screen drawn
+    // over the shelf left the filters floating above it with no button left to shut them.
+    // `visible` is the effective one: a hidden ancestor puts this out too.
+    onVisibleChanged: {
+        if (!visible)
+            panel.close()
+    }
+    height: showing ? Math.max(chips.height, filterButton.height) + 2 * Widths.shelfGap : 0
 
     /// The row was passed through, in that direction: forward is towards the covers, backward
     /// towards the band. The row knows how to walk its own chips and nothing else — where the
@@ -84,7 +117,10 @@ Item {
     /// Repeaters, because that is the order a reader sees — and the rule between them is not
     /// a stop, having no `activeFocusOnTab` of its own.
     function stops() {
-        const all = []
+        // The button first, because it is first under the eye and first on the line. It
+        // used to be a stop of the application bar; it moved down here with the panel it
+        // opens, and the walk moved with it.
+        const all = filterButton.visible ? [filterButton] : []
         for (let i = 0; i < chips.children.length; ++i) {
             const one = chips.children[i]
             if (one && one.visible && one.filterChip !== undefined)
@@ -167,12 +203,46 @@ Item {
         color: Theme.paper
     }
 
+    // The command that produces the pills, at the head of the line they appear on. It was
+    // in the application bar, between the field and the order, where it was one command
+    // among three and a long way from what it acts on; and the bar's fourth slot is wanted
+    // for importing. A control belongs beside the thing it changes.
+    BarButton {
+        id: filterButton
+
+        /// Not a chip, but a stop of this row all the same — `stops()` reads this.
+        property bool filterChip: true
+
+        objectName: "filter-button"
+        x: Widths.shelfMargin
+        anchors.verticalCenter: parent.verticalCenter
+        source: "assets/icons/tune.svg"
+        label: Captions.filterLabel
+        held: row.litCount > 0
+        toolTipSuppressed: panel.opened
+        popup: panel
+
+        FilterPanel {
+            id: panel
+
+            // Hung from the button's left edge, which is the left edge of the page: the
+            // 380 px it needs are always to its right. In the bar it was pulled the other
+            // way, the button sitting in the middle of a row.
+            x: 0
+            y: filterButton.height + 7
+            overFiles: row.overFiles
+            drawnAlready: row.drawnHere
+            source: row.source
+            shelf: row.shelf
+        }
+    }
+
     Row {
         id: chips
 
         objectName: "filter-chips"
-        x: Widths.shelfMargin
-        y: Widths.shelfGap
+        x: filterButton.x + filterButton.width + 14
+        anchors.verticalCenter: parent.verticalCenter
         spacing: 6
 
         Repeater {

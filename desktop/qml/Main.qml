@@ -10,6 +10,10 @@ ApplicationWindow {
     id: window
 
     readonly property alias navigationCursor: appNavigationCursor
+    /// Whatever the page is showing: the Loader's screen when there is one, the shelf
+    /// underneath it otherwise. The shelf is no longer the Loader's business, so nothing
+    /// may ask the Loader what is on screen.
+    readonly property var showing: screen.item ? screen.item : shelf
 
     function belongsTo(owner, item) {
         let candidate = item
@@ -30,7 +34,7 @@ ApplicationWindow {
     /// has nothing to focus — sends it straight round to the other end of the bar.
     function moveIntoScreen(forward) {
         appNavigationCursor.beginKeyboard(forward)
-        const view = screen.item
+        const view = window.showing
         if (view && view.takeFocus && view.takeFocus(forward))
             return
         appBar.takeFocus(!forward)
@@ -192,18 +196,29 @@ ApplicationWindow {
             // The highlight goes, the focus stays. Returning the focus to the page here is
             // what emptied the field of its focus when a pointer merely crossed a button.
             onPointerLeftTheShelf: window.clearNavigation()
-            // The screen below is the only thing that knows whether a list of files is
-            // showing, and the panel above has to count what that list holds.
-            filtersCountFiles: screen.item && screen.item.showingFiles !== undefined
-                               ? screen.item.showingFiles : false
             // Out of the bar and into the screen below — or round the other way, the screen
             // being the only other thing on the page. This is the whole of the order the eye
             // reads: bar, band, chips, covers, and back to the bar.
             onWentPast: forward => window.moveIntoScreen(forward)
-            // Nothing, on purpose, until there is a screen to go to. `Navigation` has the
-            // destination and the Loader has one component, so opening it changed the stack
-            // and not the screen: the click did nothing visible, and the next Escape spent
-            // itself popping what nobody had seen — which is worse than a button that waits.
+            onSettingsRequested: Navigation.open(Navigation.Settings)
+        }
+
+        // Built once and hidden, never destroyed. Inside the Loader it was torn down on the
+        // way to the settings and rebuilt on the way back: the scroll went to the top, every
+        // cover was decoded again and the skeleton flashed over a page the reader had already
+        // read. The shelf is the one screen you always come back to, so it is the one screen
+        // that stays.
+        ShelfView {
+            id: shelf
+
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: appBar.bottom
+            anchors.bottom: parent.bottom
+            visible: Navigation.destination === Navigation.Shelf
+            navigationCursor: window.navigationCursor
+            onNavigationBoundary: (origin, forward) => window.leaveScreen(forward)
+            onPointerNavigationCancelled: window.returnFocusToPage()
         }
 
         Loader {
@@ -213,21 +228,24 @@ ApplicationWindow {
             anchors.right: parent.right
             anchors.top: appBar.bottom
             anchors.bottom: parent.bottom
-            sourceComponent: shelfScreen
+            // Every destination that is not the shelf, drawn over it. It was pinned to the
+            // shelf, which is why the settings button had to be left unwired: opening a
+            // destination nothing draws changed the stack, showed the same page, and spent
+            // the next Escape popping something nobody had seen.
+            sourceComponent: {
+                switch (Navigation.destination) {
+                case Navigation.Settings:
+                    return settingsScreen
+                default:
+                    return null
+                }
+            }
         }
     }
 
     Component {
-        id: shelfScreen
+        id: settingsScreen
 
-        // This Component deliberately closes over the shell's one cursor and focus root.
-        // They are outside its object tree but inside its lexical scope.
-        // qmllint disable unqualified
-        ShelfView {
-            navigationCursor: window.navigationCursor
-            onNavigationBoundary: (origin, forward) => window.leaveScreen(forward)
-            onPointerNavigationCancelled: window.returnFocusToPage()
-        }
-        // qmllint enable unqualified
+        SettingsView { }
     }
 }

@@ -16,9 +16,9 @@ Item {
     height: 52
 
     readonly property var choices: [
-        { "name": "overview", "label": Search.overviewLabel },
-        { "name": "series", "label": Search.seriesHeading },
-        { "name": "files", "label": Search.filesHeading }
+        { "name": "overview", "label": Captions.overviewLabel },
+        { "name": "series", "label": Captions.seriesHeading },
+        { "name": "files", "label": Captions.filesHeading }
     ]
 
     function tabAt(position) {

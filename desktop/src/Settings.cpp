@@ -1,5 +1,7 @@
 #include "Settings.h"
 
+#include "Words.h"
+
 #include <QFile>
 #include <QFileInfo>
 #include <QPointer>
@@ -54,23 +56,47 @@ void Settings::setKey(const QString &key)
     emit changed();
 }
 
+QString Settings::keyTitle() const
+{
+    return Words::theKey();
+}
+
+QVariantList Settings::sections() const
+{
+    return {QVariantMap{{QStringLiteral("name"), QStringLiteral("general")},
+                        {QStringLiteral("label"), Words::generalSettings()}},
+            QVariantMap{{QStringLiteral("name"), QStringLiteral("library")},
+                        {QStringLiteral("label"), Words::librarySettings()}}};
+}
+
+QString Settings::storageLabel() const
+{
+    switch (m_storage) {
+    case Storage::Environment:
+        return Words::keyStorage(Words::KeyFrom::Environment);
+    case Storage::Keyring:
+        return Words::keyStorage(Words::KeyFrom::Keyring);
+    case Storage::ProtectedFile:
+        return Words::keyStorage(Words::KeyFrom::ProtectedFile);
+    case Storage::Unknown:
+        break;
+    }
+    return Words::keyStorage(Words::KeyFrom::Unknown);
+}
+
 QString Settings::missing() const
 {
     if (!m_loaded) {
         return {};
     }
     if (m_address.isEmpty() && m_key.isEmpty()) {
-        return tr("Leaf does not know where your library is.\n"
-                  "Put an address and a key in %1, or in LEAF_ADDRESS and LEAF_KEY.")
-            .arg(configurationFile());
+        return Words::nothingConfigured(configurationFile());
     }
     if (m_address.isEmpty()) {
-        return tr("No address for the server. Set it in %1, or in LEAF_ADDRESS.")
-            .arg(configurationFile());
+        return Words::noAddress(configurationFile());
     }
     if (m_key.isEmpty()) {
-        return tr("No key for the server. Set it in %1, in LEAF_KEY, or in the keyring.")
-            .arg(configurationFile());
+        return Words::noKey(configurationFile());
     }
     return {};
 }
@@ -145,9 +171,7 @@ void Settings::fromFile()
     for (auto reachable : {QFileDevice::ReadGroup, QFileDevice::WriteGroup,
                            QFileDevice::ReadOther, QFileDevice::WriteOther}) {
         if (permissions.testFlag(reachable)) {
-            emit trouble(tr("%1 can be read by more than you, so it was not read at all. "
-                            "chmod 600 it.")
-                             .arg(path));
+            emit trouble(Words::readableByOthers(path));
             return;
         }
     }

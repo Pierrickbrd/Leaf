@@ -6,6 +6,7 @@
 #include <QDebug>
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
+#include <QMetaObject>
 #include <QQmlEngine>
 
 using namespace Qt::StringLiterals;
@@ -42,11 +43,10 @@ protected:
         // Asked of the factory each time rather than held: the address and the key both change
         // — the keyring answers after the run has started, and the settings screen can change
         // them again — and a manager built at the first cover would carry whatever was true
-        // then for the rest of the session.
-        if (const Settings *settings = m_covers ? m_covers->settings() : nullptr) {
-            if (Covers::sameServer(request.url(), QUrl(Server::tidy(settings->address())))) {
-                carried.setRawHeader(Server::KeyHeader, settings->key().toUtf8());
-            }
+        // then for the rest of the session. `carry` answers from a copy taken on the
+        // factory's own thread, because this runs on whichever thread Qt loads an image on.
+        if (QByteArray key; m_covers && m_covers->carry(request.url(), key)) {
+            carried.setRawHeader(Server::KeyHeader, key);
         }
         return QNetworkAccessManager::createRequest(operation, carried, outgoing);
     }
@@ -61,12 +61,16 @@ Covers::Covers(QQmlEngine *engine, QObject *parent)
     : QObject(parent)
     , m_engine(engine)
 {
+    // Not now — "Leaf" is not a resolvable module until the engine has loaded, and this is
+    // built before that on purpose. Queued, so it lands on this thread once the loop turns.
+    QMetaObject::invokeMethod(this, [this] { resolve(); }, Qt::QueuedConnection);
 }
 
 Covers::Covers(Settings *settings, QObject *parent)
     : QObject(parent)
     , m_settings(settings)
 {
+    follow();
 }
 
 QNetworkAccessManager *Covers::create(QObject *parent)
@@ -74,7 +78,12 @@ QNetworkAccessManager *Covers::create(QObject *parent)
     return new Keyed(this, parent);
 }
 
-Settings *Covers::settings()
+Settings *Covers::settings() const
+{
+    return m_settings;
+}
+
+void Covers::resolve()
 {
     if (!m_settings && m_engine) {
         m_settings =
@@ -87,7 +96,40 @@ Settings *Covers::settings()
                                   "asked for without a key");
         }
     }
-    return m_settings;
+    follow();
+}
+
+void Covers::follow()
+{
+    if (m_settings) {
+        connect(m_settings, &Settings::changed, this, &Covers::take, Qt::UniqueConnection);
+    }
+    take();
+}
+
+void Covers::take()
+{
+    const QMutexLocker held(&m_lock);
+    m_address = m_settings ? m_settings->address() : QString();
+    m_key = m_settings ? m_settings->key() : QString();
+}
+
+bool Covers::carry(const QUrl &url, QByteArray &key) const
+{
+    QString address;
+    {
+        const QMutexLocker held(&m_lock);
+        if (m_address.isEmpty()) {
+            return false;
+        }
+        address = m_address;
+        key = m_key.toUtf8();
+    }
+    if (sameServer(url, QUrl(Server::tidy(address)))) {
+        return true;
+    }
+    key.clear();
+    return false;
 }
 
 bool Covers::sameServer(const QUrl &one, const QUrl &other)

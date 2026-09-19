@@ -30,6 +30,9 @@ class Navigation : public QObject
     /// singleton rather than a second one, the way `Theme` carries the two font families
     /// rather than exposing `Fonts` itself.
     Q_PROPERTY(QString label READ label NOTIFY changed)
+    /// « Retour à l'étagère » — named after where it goes. A tooltip repeating the arrow it
+    /// sits on says nothing the arrow did not.
+    Q_PROPERTY(QString backLabel READ backLabel NOTIFY changed)
 
 public:
     enum class Destination { Shelf, Series, Reader, Health, Settings };
@@ -41,6 +44,7 @@ public:
     QVariantMap parameters() const { return m_stack.last().with; }
     bool canGoBack() const { return m_stack.size() > 1; }
     QString label() const;
+    QString backLabel() const;
 
     /// False, and nothing changed, when what is asked makes no sense — a series with no
     /// identifier, a destination outside the enumeration. It neither throws nor shows: an

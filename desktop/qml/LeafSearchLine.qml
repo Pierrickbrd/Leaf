@@ -17,7 +17,7 @@ TextField {
 
     height: 30
     activeFocusOnTab: false
-    placeholderText: Search.searchWithin(placeholder)
+    placeholderText: Captions.searchWithin(placeholder)
     color: Theme.ink
     placeholderTextColor: Theme.inkFaint
     selectionColor: Theme.emerald

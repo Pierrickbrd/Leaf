@@ -40,6 +40,15 @@ QString Navigation::label() const
     return Words::destination(destination());
 }
 
+QString Navigation::backLabel() const
+{
+    // The page underneath, not the one showing. A back button named after where you are
+    // would be a button that tells you nothing you did not know.
+    if (m_stack.size() < 2)
+        return Words::backTo({});
+    return Words::backTo(Words::destination(m_stack.at(m_stack.size() - 2).where));
+}
+
 bool Navigation::open(Destination where, const QVariantMap &with)
 {
     const std::optional<QString> needs = required(where);

@@ -559,6 +559,20 @@ private slots:
         QCOMPARE(read.value->finishedAt.value_or(0), 1788463370000LL);
     }
 
+    void malformed_nested_scan_fields_are_refused_by_name()
+    {
+        QJsonObject report = aReport();
+        report.insert(u"counts"_s, QJsonObject{});
+        auto read = Api::scanStatus({{u"state"_s, u"DONE"_s}, {u"report"_s, report}});
+        QVERIFY(!read.ok());
+        QVERIFY(read.trouble.contains(u"universes"_s));
+        report = aReport();
+        report.insert(u"findings"_s, QJsonArray{QJsonObject{{u"kind"_s, u"ERRORS"_s}}});
+        read = Api::scanStatus({{u"state"_s, u"DONE"_s}, {u"report"_s, report}});
+        QVERIFY(!read.ok());
+        QVERIFY(read.trouble.contains(u"total"_s));
+    }
+
     void a_scan_without_its_state_is_refused_by_name()
     {
         const Api::Read<Api::ScanStatus> read = Api::scanStatus(QJsonObject{});

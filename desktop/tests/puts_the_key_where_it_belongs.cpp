@@ -131,6 +131,10 @@ private slots:
             QtWarningMsg,
             "error resolving the Settings singleton — covers will be asked for without a key");
 
+        // Asked for outright. The application gets this through the queued call the
+        // constructor posts, on the thread this object lives on — never on the thread a
+        // cover happens to be fetched from, which is what it used to do.
+        unresolved.resolve();
         QVERIFY(!unresolved.settings());
 
         Covers unconfigured(static_cast<Settings *>(nullptr));

@@ -23,6 +23,7 @@
 #include <QObject>
 #include <QQmlEngine>
 #include <QString>
+#include <QVariantList>
 
 class Settings : public QObject
 {
@@ -60,6 +61,16 @@ public:
     /// What is missing, and where it goes — in words, for the one screen that shows it.
     /// Empty when there is nothing to say.
     Q_PROPERTY(QString missing READ missing NOTIFY changed)
+    /// « La clé », and where it came from. Worded here for the same reason the rest is:
+    /// a screen that spells French is a screen no test reads.
+    Q_PROPERTY(QString keyTitle READ keyTitle CONSTANT)
+    Q_PROPERTY(QString storageLabel READ storageLabel NOTIFY changed)
+    /// The settings screen's own sections, `[{ name, label }]`. Held by the object the
+    /// screen is named after, because they belong to no one section.
+    Q_PROPERTY(QVariantList sections READ sections CONSTANT)
+    QString keyTitle() const;
+    QString storageLabel() const;
+    QVariantList sections() const;
     QString missing() const;
 
     /// Where the configuration file lives.
