@@ -23,8 +23,8 @@ use http_body_util::BodyExt;
 
 use super::bulk_import::{BulkImport, CleanupRequest, ImportRequest, ReceiveError};
 use super::dto::{
-    ArcDto, ChapterDto, EntryDto, ErrorDto, FacetsDto, HealthDto, PageDto, SearchHitDto,
-    SeriesFilter, SeriesPageDto, SeriesSort, API_VERSION, FORMAT_VERSION,
+    ArcDto, ChapterDto, EntryDto, ErrorDto, FacetsDto, HealthDto, PageDto, SeriesFilter,
+    SeriesPageDto, SeriesSort, SortDirection, API_VERSION, FORMAT_VERSION,
 };
 use super::intake::{Collision, FileRequest, Intake, Proposal};
 use super::keys::{Keys, Permission, HEADER};
@@ -344,6 +344,12 @@ async fn health(State(state): State<AppState>) -> Result<Json<HealthDto>, Failur
 }
 
 /// The shelf, filtered, sorted and paged.
+/// The level a grid can draw, and the ceiling on how many of them a search may reduce it to.
+/// Five hundred is `MAX_PAGE`: past the point where a page could show them, the number stops
+/// being the shelf's problem and starts being the search's.
+const EDITIONS: &str = "EDITION";
+const SEARCH_CEILING: i64 = MAX_PAGE;
+
 async fn list_series(
     _: Reader,
     State(state): State<AppState>,
@@ -351,6 +357,7 @@ async fn list_series(
 ) -> Result<Json<SeriesPageDto>, Failure> {
     let filter = query.filter;
     let sort = SeriesSort::of(query.sort.as_deref());
+    let direction = SortDirection::of(query.direction.as_deref(), sort);
     // A default that bounds the answer rather than one that hides part of it: `total`
     // always says how many there are, so a client can see it has only part and ask for the
     // rest. size=0 asks for everything on purpose.
@@ -363,10 +370,39 @@ async fn list_series(
     // Past the end is an empty page, and that is what an offset nothing can reach gives.
     let offset = page.checked_mul(size).unwrap_or(i64::MAX);
 
+    // What was typed, when anything was. Blank is not a search: a client clearing its field
+    // sends `q=` and means "the whole shelf", the same way a cleared chip does.
+    let wanted = query.q.unwrap_or_default().trim().to_string();
+
     let page_dto = blocking(move || {
         let repository = Repository::new(&state.db);
+        let mut filter = filter;
+
+        if !wanted.is_empty() {
+            // The same query the search route runs, restricted to the level a grid can draw:
+            // an edition is a tile, a chapter whose title matches is a line and belongs to
+            // `/search`. The chips go in with it, so the search happens inside what is
+            // showing rather than beside it, and the ids it finds become the filter the
+            // shelf already knows how to apply — which is why there is no second query here.
+            let found =
+                repository.search(&wanted, SEARCH_CEILING, &[EDITIONS.to_string()], &filter)?;
+            let ids: Vec<String> = found.into_iter().map(|hit| hit.id).collect();
+            if ids.is_empty() {
+                // An empty shelf, and not the whole one. `ids` empty means "no restriction"
+                // to the query builder, so nothing matching has to be answered here or a
+                // search for a word nobody has would hand back the entire library.
+                return Ok(SeriesPageDto {
+                    items: Vec::new(),
+                    total: 0,
+                    page,
+                    size,
+                });
+            }
+            filter.ids = ids;
+        }
+
         Ok(SeriesPageDto {
-            items: repository.series(&filter, sort, size, offset)?,
+            items: repository.series_ordered(&filter, sort, direction, size, offset)?,
             total: repository.count_series(&filter)?,
             page,
             size,
@@ -378,8 +414,26 @@ async fn list_series(
 
 /// The values the filters can take, so the application can offer them rather than make you
 /// spell them.
-async fn get_filters(_: Reader, State(state): State<AppState>) -> Result<Json<FacetsDto>, Failure> {
-    let facets = blocking(move || Repository::new(&state.db).facets()).await?;
+async fn get_filters(
+    _: Reader,
+    State(state): State<AppState>,
+    query: ListQuery,
+) -> Result<Json<FacetsDto>, Failure> {
+    // `over=files` counts the two axes a row of pills draws over files rather than over
+    // series, narrowed by `q` when one is given. A row above sixty file rows saying « Non
+    // lues 5 » is counting series, which is not what the reader is looking at and not what
+    // the pill beneath their finger would filter.
+    let over_files = query.over.as_deref() == Some("files");
+    let wanted = query.q.unwrap_or_default();
+    let facets = blocking(move || {
+        let repository = Repository::new(&state.db);
+        if over_files {
+            repository.file_facets(&wanted)
+        } else {
+            repository.facets()
+        }
+    })
+    .await?;
     Ok(Json(facets))
 }
 
@@ -746,17 +800,41 @@ async fn search(
     _: Reader,
     State(state): State<AppState>,
     query: ListQuery,
-) -> Result<Json<Vec<SearchHitDto>>, Failure> {
-    let hits = blocking(move || {
-        Repository::new(&state.db).search(
-            query.q.as_deref().unwrap_or_default(),
-            query.limit.unwrap_or(40),
-            &query.kind,
-            &query.filter,
-        )
-    })
-    .await?;
-    Ok(Json(hits))
+) -> Result<Response, Failure> {
+    // A client opts into the page envelope by naming either page coordinate. With neither,
+    // the historical bare array remains byte-for-byte the shape older clients understand.
+    let paged = query.page.is_some() || query.size.is_some();
+    let wanted = query.q.unwrap_or_default();
+    let size = query.size.or(query.limit).unwrap_or(40);
+    let page = query.page.unwrap_or(0);
+    let kinds = query.kind;
+    let filter = query.filter;
+    let explicitly_sorted = query.sort.is_some() || query.direction.is_some();
+    let sort = SeriesSort::of(query.sort.as_deref());
+    let direction = SortDirection::of(query.direction.as_deref(), sort);
+    let order = explicitly_sorted.then_some((sort, direction));
+
+    if paged {
+        let found = blocking(move || {
+            Repository::new(&state.db)
+                .search_page_ordered(&wanted, size, page, &kinds, &filter, order)
+        })
+        .await?;
+        Ok(Json(found).into_response())
+    } else if order.is_some() {
+        let found = blocking(move || {
+            Repository::new(&state.db)
+                .search_page_ordered(&wanted, size, 0, &kinds, &filter, order)
+                .map(|page| page.items)
+        })
+        .await?;
+        Ok(Json(found).into_response())
+    } else {
+        let found =
+            blocking(move || Repository::new(&state.db).search(&wanted, size, &kinds, &filter))
+                .await?;
+        Ok(Json(found).into_response())
+    }
 }
 
 // ----------------------------------------------------------------- progress
@@ -1262,6 +1340,10 @@ fn range_start(header: &str) -> Option<u64> {
 pub struct ListQuery {
     pub filter: SeriesFilter,
     pub sort: Option<String>,
+    pub direction: Option<String>,
+    /// `series` or `files`: what `/filters` counts. Absent is `series`, which is what every
+    /// client asking before this existed means.
+    pub over: Option<String>,
     pub page: Option<i64>,
     pub size: Option<i64>,
     /// What was typed, for /search.
@@ -1282,6 +1364,8 @@ impl ListQuery {
             let value = value.trim().to_string();
             match key.as_ref() {
                 "sort" => out.sort = Some(value),
+                "direction" => out.direction = Some(value),
+                "over" => out.over = Some(value),
                 "page" => out.page = value.parse().ok(),
                 "size" => out.size = value.parse().ok(),
                 "limit" => out.limit = value.parse().ok(),

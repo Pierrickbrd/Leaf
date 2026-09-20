@@ -9,7 +9,7 @@ use std::path::Path;
 mod common;
 use common::{read_only, writable};
 
-use leaf_server::api::dto::SeriesSort;
+use leaf_server::api::dto::{SeriesSort, SortDirection};
 use leaf_server::archive::images::media_type;
 use leaf_server::metadata::label::{compose, parse};
 use leaf_server::metadata::legacy_comic_info;
@@ -59,22 +59,119 @@ fn a_search_with_no_levels_left_finds_nothing() {
 
 // --------------------------------------------------------------------- the shelf
 
+const ORDERS: [SeriesSort; 4] = [
+    SeriesSort::Name,
+    SeriesSort::Added,
+    SeriesSort::Volumes,
+    SeriesSort::Read,
+];
+
 #[test]
 fn every_way_of_ordering_a_shelf_names_a_column() {
-    // Four orders, and each has to reach SQL as something the index can use.
-    for sort in [
-        SeriesSort::Name,
-        SeriesSort::Added,
-        SeriesSort::Updated,
-        SeriesSort::Volumes,
-    ] {
-        let sql = sort.sql();
-        assert!(!sql.is_empty(), "{sort:?}");
-        assert!(sql.contains("w.name"), "{sort:?}: {sql}");
+    // Four orders and two directions, and each has to reach SQL as something the index
+    // can use.
+    for sort in ORDERS {
+        for direction in [SortDirection::Ascending, SortDirection::Descending] {
+            let sql = sort.sql(direction);
+            assert!(!sql.is_empty(), "{sort:?} {direction:?}");
+            assert!(sql.contains("w.name"), "{sort:?} {direction:?}: {sql}");
+        }
     }
-    assert!(SeriesSort::Added.sql().starts_with("added_at DESC"));
-    assert!(SeriesSort::Updated.sql().starts_with("last_added_at DESC"));
-    assert!(SeriesSort::Volumes.sql().starts_with("entry_count DESC"));
+    let natural = |sort: SeriesSort| sort.sql(sort.natural_direction());
+    // `added` is the *latest* volume the series received, not the first: a tome added to a
+    // series already held is an arrival, and ordering on MIN left it where it was.
+    assert!(natural(SeriesSort::Added).contains("last_added_at DESC"));
+    assert!(natural(SeriesSort::Read).contains("last_read_at DESC"));
+    assert!(natural(SeriesSort::Volumes).starts_with("entry_count DESC"));
+}
+
+/// Page two of a shelf may not repeat or skip what page one held, and it will whenever the
+/// order leaves rows tied: LIMIT/OFFSET reruns the query, and SQLite is free to break a tie
+/// differently the second time. Every order therefore ends on a column that is unique.
+#[test]
+fn every_order_ends_on_something_that_cannot_tie() {
+    for sort in ORDERS {
+        for direction in [SortDirection::Ascending, SortDirection::Descending] {
+            let sql = sort.sql(direction);
+            assert!(
+                sql.contains("e.id"),
+                "{sort:?} {direction:?} can tie: {sql}"
+            );
+        }
+    }
+}
+
+/// A date that is not there sorts with the other absences rather than with the oldest: a
+/// series nobody dated is not a series added in 1970, and one never opened is not one read
+/// at the epoch.
+#[test]
+fn a_shelf_ordered_by_date_keeps_the_undated_together() {
+    for sort in [SeriesSort::Added, SeriesSort::Read] {
+        for direction in [SortDirection::Ascending, SortDirection::Descending] {
+            assert!(
+                sort.sql(direction).contains("IS NULL"),
+                "{sort:?} {direction:?}"
+            );
+        }
+    }
+}
+
+/// Each criterion has the direction a reader expects of it, so a client that names none
+/// still gets the shelf it knows.
+#[test]
+fn a_criterion_that_names_no_direction_keeps_its_familiar_one() {
+    assert_eq!(
+        SortDirection::Ascending,
+        SeriesSort::Name.natural_direction()
+    );
+    for sort in [SeriesSort::Added, SeriesSort::Volumes, SeriesSort::Read] {
+        assert_eq!(
+            SortDirection::Descending,
+            sort.natural_direction(),
+            "{sort:?}"
+        );
+    }
+}
+
+/// `updated` was a criterion of this shelf and is not one any more. It falls back like any
+/// other word the server does not know, so a client built before the change gets a shelf.
+#[test]
+fn the_criterion_this_shelf_dropped_falls_back_like_any_other_unknown_word() {
+    assert_eq!(SeriesSort::Name, SeriesSort::of(Some("updated")));
+    assert_eq!(SeriesSort::Read, SeriesSort::of(Some("read")));
+    assert_eq!(SeriesSort::Added, SeriesSort::of(Some("added")));
+}
+
+#[test]
+fn a_direction_nobody_knows_is_the_one_the_criterion_would_have_chosen() {
+    // Named, in either case and with the spaces a query string can carry.
+    assert_eq!(
+        SortDirection::Ascending,
+        SortDirection::of(Some("asc"), SeriesSort::Added)
+    );
+    assert_eq!(
+        SortDirection::Descending,
+        SortDirection::of(Some("DESC"), SeriesSort::Name)
+    );
+    assert_eq!(
+        SortDirection::Ascending,
+        SortDirection::of(Some(" Asc "), SeriesSort::Volumes)
+    );
+
+    // Absent, empty, or a word this server does not know: the criterion decides, which is
+    // what keeps `?sort=added` alone meaning what it has always meant.
+    for value in [None, Some(""), Some("   "), Some("ascending"), Some("↑")] {
+        assert_eq!(
+            SortDirection::Descending,
+            SortDirection::of(value, SeriesSort::Added),
+            "{value:?}"
+        );
+        assert_eq!(
+            SortDirection::Ascending,
+            SortDirection::of(value, SeriesSort::Name),
+            "{value:?}"
+        );
+    }
 }
 
 // -------------------------------------------------------------------- the labels

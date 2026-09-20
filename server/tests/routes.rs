@@ -348,6 +348,21 @@ async fn search_ranks_and_takes_a_kind() {
 }
 
 #[tokio::test]
+async fn naming_a_page_opts_into_the_counted_search_envelope() {
+    let (server, _, _) = a_library().await;
+    let (status, body) = get(&server, "/search?q=ble&page=0&size=1").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.is_object(), "{body}");
+    assert_eq!(body["page"], 0);
+    assert_eq!(body["size"], 1);
+    assert!(body["items"].is_array(), "{body}");
+    assert!(body["items"].as_array().unwrap().len() <= 1, "{body}");
+    assert!(body["total"].is_number(), "{body}");
+    assert!(body["fileTotal"].is_number(), "{body}");
+}
+
+#[tokio::test]
 async fn a_search_for_nothing_is_answered_rather_than_refused() {
     let (server, _, _) = a_library().await;
     let (status, body) = get(&server, "/search?q=zzzzzzzz").await;

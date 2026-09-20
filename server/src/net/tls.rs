@@ -52,9 +52,12 @@ impl Tls {
         // kept.
         close_private(key)?;
 
-        let certificate_pem = std::fs::read(certificate)
+        let certificate_pem = tokio::fs::read(certificate)
+            .await
             .with_context(|| format!("reading {}", certificate.display()))?;
-        let key_pem = std::fs::read(key).with_context(|| format!("reading {}", key.display()))?;
+        let key_pem = tokio::fs::read(key)
+            .await
+            .with_context(|| format!("reading {}", key.display()))?;
 
         let fingerprint = fingerprint(&certificate_pem)?;
         tracing::info!("TLS on, certificate fingerprint (pin this in the applications):");

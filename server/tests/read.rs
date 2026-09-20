@@ -11,6 +11,7 @@ use http_body_util::BodyExt;
 use leaf_server::api::dto::{SeriesFilter, SeriesSort};
 use leaf_server::api::keys::Keys;
 use leaf_server::api::routes::{router, AppState};
+use leaf_server::store::text::search_key;
 use leaf_server::store::{Db, Repository};
 use tower::ServiceExt;
 
@@ -106,6 +107,22 @@ impl Library {
                     "INSERT INTO edition (id, work_id, name, path, implicit, publisher, language, status)
                      VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7)",
                     (id, work, name, format!("/library/{work}/{id}"), publisher, language, status),
+                )?;
+                // The index, as the scanner would have written it: the work's name and its
+                // author, folded by the same function a query is folded with. Without it a
+                // search over this fixture finds nothing, and `?q=` would look broken in a
+                // test where the only thing missing is the scanner nobody wants to run here.
+                let (title, author): (String, String) = cx.query_one(
+                    "SELECT w.name, COALESCE(a.name, '') FROM work w
+                     LEFT JOIN work_author a ON a.work_id = w.id WHERE w.id = ?1",
+                    (work,),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?
+                .expect("the work this edition belongs to");
+                cx.execute(
+                    "INSERT INTO search (name, detail, kind, ref, edition_id, entry_id, label)
+                     VALUES (?1, ?2, 'EDITION', ?3, ?3, NULL, ?4)",
+                    (search_key(&title), search_key(&author), id, &title),
                 )?;
                 for v in 1..=volumes {
                     cx.execute(
@@ -470,6 +487,401 @@ async fn the_shelf_answers_a_page_and_a_total() {
     assert_eq!(2, body["size"]);
 }
 
+/// The shelf's own alphabet, which had the defect the search had: `w.name` ordered with
+/// SQLite's default collation, so a series named « Élève » sorted after « Zorro ». Invisible
+/// on a library whose titles all begin with an ASCII letter, and wrong the day one does not.
+#[tokio::test]
+async fn the_shelf_puts_an_accent_at_its_letter_and_a_digit_first() {
+    let library = Library::new();
+    library.work("eleve", None, "Élève", "Anon", "bd", &[]);
+    library.work("zorro", None, "Zorro", "Anon", "bd", &[]);
+    library.work("edena", None, "Edena", "Anon", "bd", &[]);
+    library.work("ferme", None, "Ferme", "Anon", "bd", &[]);
+    library.work("mille", None, "1984", "Anon", "bd", &[]);
+    for id in ["eleve", "zorro", "edena", "ferme", "mille"] {
+        library.edition(&format!("e-{id}"), id, None, "ongoing", 1);
+    }
+
+    let (status, body) = library.get("/series?sort=name&direction=asc&size=50").await;
+    assert_eq!(StatusCode::OK, status);
+    let found: Vec<String> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|one| one["work"].as_str().unwrap().to_string())
+        .collect();
+    let at = |what: &str| found.iter().position(|one| one == what).expect(what);
+
+    // A title beginning with a number comes before every letter. Few will, and the one that
+    // does should not be filed under Z.
+    assert_eq!(Some(&"1984".to_string()), found.first(), "{found:?}");
+
+    // É sits with the E's, between Edena and Ferme — not after Zorro, which is where the
+    // default collation put it.
+    assert!(at("Edena") < at("Élève"), "{found:?}");
+    assert!(at("Élève") < at("Ferme"), "{found:?}");
+    assert!(at("Ferme") < at("Zorro"), "{found:?}");
+
+    // And turned round it is the same alphabet read backwards — the whole shelf, not only
+    // its ends, because nothing here ties and a reversal that is not exact hides a tie
+    // whose two rows can then swap between two pages.
+    let (_, down) = library
+        .get("/series?sort=name&direction=desc&size=50")
+        .await;
+    let backwards: Vec<String> = down["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|one| one["work"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        found.iter().rev().cloned().collect::<Vec<_>>(),
+        backwards,
+        "the reversed shelf is not the shelf reversed"
+    );
+    assert_eq!(Some(&"1984".to_string()), backwards.last(), "{backwards:?}");
+}
+
+/// An alphabet that runs A, B, … Z, À, Â is not an alphabet. `COLLATE NOCASE` knows only
+/// ASCII, so ordering the search on the raw label put « À la verticale » and « Âmes sœurs »
+/// *after* Z — and reversed, the list opened on them. On a French library that is a fifth of
+/// the titles past the end of their own alphabet.
+#[tokio::test]
+async fn an_accented_title_sorts_with_its_letter_and_not_after_z() {
+    let library = Library::new();
+    library
+        .db
+        .write(|cx| {
+            for (name, label) in [
+                ("1984", "1984 chronique"),
+                ("ames soeurs", "Âmes sœurs"),
+                ("a la verticale", "À la verticale"),
+                ("adultes", "Adultes"),
+                ("zenith", "Zénith"),
+                ("brouillard", "Brouillard"),
+            ] {
+                // One word they all carry, so the query settles which rows come back and
+                // the assertions are about the order alone.
+                cx.execute(
+                    "INSERT INTO search (name, detail, kind, ref, edition_id, entry_id, label)
+                     VALUES (?1, 'partout', 'ENTRY', ?2, 'e-elfes', 'e-elfes-v1', ?3)",
+                    (name, label, label),
+                )?;
+            }
+            Ok(())
+        })
+        .expect("the entries indexed");
+
+    let labels = |body: &serde_json::Value| -> Vec<String> {
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|one| one["label"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let (status, up) = library
+        .get("/search?q=partout&size=50&sort=name&direction=asc&kind=ENTRY")
+        .await;
+    assert_eq!(StatusCode::OK, status);
+    let found = labels(&up);
+    assert_eq!(6, found.len(), "{found:?}");
+    let at = |what: &str| found.iter().position(|one| one == what).expect(what);
+
+    // The accents sit among the A's, where a reader looks for them, and every one of them
+    // comes before the B. Where exactly they fall among the A's is the space's business —
+    // « À la verticale » before « Adultes » is word-by-word order and is not the defect.
+    assert!(at("À la verticale") < at("Brouillard"), "{found:?}");
+    assert!(at("Âmes sœurs") < at("Brouillard"), "{found:?}");
+    assert!(at("Adultes") < at("Brouillard"), "{found:?}");
+    assert!(at("Brouillard") < at("Zénith"), "{found:?}");
+
+    // And a number comes before every letter, wherever it is that the title starts with one.
+    assert_eq!(
+        Some(&"1984 chronique".to_string()),
+        found.first(),
+        "{found:?}"
+    );
+
+    // And turned round it opens on the Z, not on the accents.
+    let (_, down) = library
+        .get("/search?q=partout&size=50&sort=name&direction=desc&kind=ENTRY")
+        .await;
+    assert_eq!(
+        Some(&"Zénith".to_string()),
+        labels(&down).first(),
+        "{:?}",
+        labels(&down)
+    );
+}
+
+/// A row of pills above a list of files counts files. Saying « Non lues 5 » over sixty
+/// rows counts series, which is neither what the reader is looking at nor what the pill
+/// beneath their finger would leave.
+#[tokio::test]
+async fn the_pills_above_a_list_of_files_count_files() {
+    let library = Library::new();
+    // Three editions, seven volumes between them. One volume of Elfes is finished and one is
+    // open partway, which is three read statuses over files where the shelf sees two.
+    library
+        .db
+        .write(|cx| {
+            cx.execute(
+                "INSERT INTO progress (entry_id, edition_id, page, finished, updated_at)
+                 VALUES ('e-elfes-v1', 'e-elfes', 10, 1, 100)",
+                [],
+            )?;
+            cx.execute(
+                "INSERT INTO progress (entry_id, edition_id, page, finished, updated_at)
+                 VALUES ('e-elfes-v2', 'e-elfes', 4, 0, 200)",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("some reading");
+
+    // The scanner indexes every entry it records; this fixture indexes only editions, and a
+    // row of pills over files counts the very population the file list is drawn from — the
+    // search index. Written here rather than in `edition`, which the other tests read.
+    library
+        .db
+        .write(|cx| {
+            for (edition, volumes) in [("e-elfes", 3), ("e-nains", 2), ("e-death", 2)] {
+                for v in 1..=volumes {
+                    cx.execute(
+                        "INSERT INTO search (name, detail, kind, ref, edition_id, entry_id, label)
+                         VALUES (?1, '', 'ENTRY', ?2, ?3, ?2, ?4)",
+                        (
+                            search_key(&format!("{edition} tome {v}")),
+                            format!("{edition}-v{v}"),
+                            edition,
+                            format!("Tome {v}"),
+                        ),
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .expect("the entries indexed");
+
+    // An axis with nothing in it is absent from the answer rather than empty, so a missing
+    // one is read as no values and not as a failure.
+    let counted = |body: &serde_json::Value, axis: &str| -> Vec<(String, i64)> {
+        body.get(axis)
+            .and_then(|one| one.as_array())
+            .map(|all| all.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .map(|one| {
+                (
+                    one["value"].as_str().unwrap().to_string(),
+                    one["count"].as_i64().unwrap(),
+                )
+            })
+            .collect()
+    };
+
+    let (status, files) = library.get("/filters?over=files").await;
+    assert_eq!(StatusCode::OK, status);
+
+    // Seven files: three of Elfes, two of Nains, two of Death Note. One read, one in
+    // progress, five untouched — and the three add up to every file there is.
+    let read = counted(&files, "readStatuses");
+    let total: i64 = read.iter().map(|(_, n)| n).sum();
+    assert_eq!(7, total, "{read:?}");
+    assert_eq!(
+        Some(&5),
+        read.iter().find(|(v, _)| v == "UNREAD").map(|(_, n)| n)
+    );
+    assert_eq!(
+        Some(&1),
+        read.iter().find(|(v, _)| v == "READ").map(|(_, n)| n)
+    );
+    assert_eq!(
+        Some(&1),
+        read.iter()
+            .find(|(v, _)| v == "IN_PROGRESS")
+            .map(|(_, n)| n)
+    );
+
+    // The same axes over series count something else entirely, and still do.
+    let (_, series) = library.get("/filters").await;
+    let over_series: i64 = counted(&series, "readStatuses")
+        .iter()
+        .map(|(_, n)| n)
+        .sum();
+    assert_eq!(3, over_series, "the shelf counts editions, not files");
+
+    // Narrowed by what is being searched for, because a count that ignores the query does
+    // not describe the list it sits above.
+    let (_, elves) = library.get("/filters?over=files&q=e-elfes").await;
+    let narrowed: i64 = counted(&elves, "readStatuses").iter().map(|(_, n)| n).sum();
+    assert!(narrowed < 7, "the query narrowed nothing: {narrowed}");
+    assert!(narrowed > 0, "the query matched nothing");
+
+    // And it is the *same* population, term for term. The two were written twice and
+    // disagreed: the list matched each term as a prefix and found sixty files, while the
+    // pills above it matched the whole query and counted eleven. A pill saying eleven over
+    // sixty rows is a worse answer than a pill saying nothing.
+    for typed in ["tome", "e-elf", "tome%201", ""] {
+        let (_, pills) = library.get(&format!("/filters?over=files&q={typed}")).await;
+        let (_, list) = library
+            .get(&format!(
+                "/search?q={typed}&size=200&kind=ENTRY&kind=CHAPTER"
+            ))
+            .await;
+        let shown = list["fileTotal"].as_i64().unwrap_or_default();
+        let above: i64 = counted(&pills, "readStatuses").iter().map(|(_, n)| n).sum();
+        if typed.is_empty() {
+            // Nothing typed is not a search; the row then counts every file there is.
+            assert_eq!(7, above, "empty query");
+            continue;
+        }
+        assert_eq!(
+            shown, above,
+            "« {typed} »: {shown} rows under {above} counted"
+        );
+    }
+
+    // Every axis, not two: a panel offering eight of them opens in this scope too, and a
+    // word shown there must carry the same number as the same word in the row above it.
+    for axis in ["readStatuses", "media", "universes", "authors", "genres"] {
+        assert!(!counted(&files, axis).is_empty(), "{axis} counted nothing");
+    }
+
+    // An author is counted once per file of their work, not once per work: seven files
+    // across three editions, all by the same two writers of the fixture.
+    let by_author: i64 = counted(&files, "authors").iter().map(|(_, n)| n).sum();
+    assert_eq!(7, by_author, "{:?}", counted(&files, "authors"));
+
+    // A genre is grouped on its folded key, so one spelling comes back per genre and the
+    // count is files and not works.
+    let fantasy = counted(&files, "genres")
+        .into_iter()
+        .find(|(v, _)| v == "Fantasy")
+        .map(|(_, n)| n);
+    assert_eq!(Some(5), fantasy, "Elfes' three files and Nains' two");
+
+    // A universe covers only the works inside it: Death Note has none.
+    assert_eq!(
+        vec![("Terres d'Arran".to_string(), 5)],
+        counted(&files, "universes")
+    );
+}
+
+/// Where the reader left off, across the whole shelf. No count and no arrival date stands in
+/// for it, which is why it took the place of `updated` — an order that said only that a
+/// series had received something, now what `added` itself means.
+#[tokio::test]
+async fn a_shelf_ordered_by_reading_puts_the_last_one_opened_first() {
+    let library = Library::new();
+    library
+        .db
+        .write(|cx| {
+            for (entry, edition, at) in [
+                ("e-death-v1", "e-death", 300),
+                ("e-elfes-v1", "e-elfes", 100),
+            ] {
+                cx.execute(
+                    "INSERT INTO progress (entry_id, edition_id, page, finished, updated_at)
+                     VALUES (?1, ?2, 3, 0, ?3)",
+                    (entry, edition, at),
+                )?;
+            }
+            Ok(())
+        })
+        .expect("some reading");
+
+    let names = |body: &serde_json::Value| -> Vec<String> {
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|one| one["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let (status, body) = library.get("/series?sort=read").await;
+    assert_eq!(StatusCode::OK, status);
+    // Death Note was opened after Elfes. Nains was never opened, and sorts with the other
+    // absences at the far end rather than ahead of everything that was read.
+    assert_eq!(
+        vec![
+            "Death Note",
+            "Terres d'Arran · Elfes",
+            "Terres d'Arran · Nains"
+        ],
+        names(&body)
+    );
+
+    // Reversed, the oldest reading first — and the unread stays at the far end either way,
+    // because "never opened" is not a date and does not belong at one end of a range.
+    let (_, oldest) = library.get("/series?sort=read&direction=asc").await;
+    assert_eq!(
+        vec![
+            "Terres d'Arran · Elfes",
+            "Death Note",
+            "Terres d'Arran · Nains"
+        ],
+        names(&oldest)
+    );
+}
+
+/// Asked for over the wire and not only in the SQL the order builds: the direction has to
+/// survive the query string, the handler and the repository, and nothing between `sql()` and
+/// the answer was covered — a parameter read into a struct nobody passes on is invisible.
+#[tokio::test]
+async fn a_shelf_asked_for_in_reverse_comes_back_in_reverse() {
+    let library = Library::new();
+    let names = |body: &serde_json::Value| -> Vec<String> {
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|one| one["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let counts = |body: &serde_json::Value| -> Vec<i64> {
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|one| one["entryCount"].as_i64().unwrap())
+            .collect()
+    };
+
+    let (status, most) = library.get("/series?sort=volumes&direction=desc").await;
+    assert_eq!(StatusCode::OK, status);
+    let (_, fewest) = library.get("/series?sort=volumes&direction=asc").await;
+    assert_eq!(3, counts(&most).len());
+    assert_ne!(counts(&most), counts(&fewest), "the direction was ignored");
+    assert!(counts(&most).windows(2).all(|two| two[0] >= two[1]));
+    assert!(counts(&fewest).windows(2).all(|two| two[0] <= two[1]));
+
+    // Only the criterion turns round. Series tied on it stay in alphabetical order either
+    // way, so the two shelves are not mirrors of one another and are not asserted to be:
+    // a reader reversing a count has not asked for the names to run backwards as well.
+    assert_eq!(vec!["Death Note", "Terres d'Arran · Nains"], {
+        let mut tied = names(&fewest);
+        tied.truncate(2);
+        tied
+    });
+
+    // And the alphabet, whose familiar direction is the other one and which has no ties.
+    let (_, forwards) = library.get("/series?sort=name&direction=asc").await;
+    let (_, backwards) = library.get("/series?sort=name&direction=desc").await;
+    assert_eq!(
+        names(&forwards),
+        names(&backwards).into_iter().rev().collect::<Vec<_>>()
+    );
+
+    // A criterion named with no direction keeps its own: `desc` for a count.
+    let (_, natural) = library.get("/series?sort=volumes").await;
+    assert_eq!(names(&most), names(&natural));
+}
+
 #[tokio::test]
 async fn a_default_never_crosses_the_wire() {
     let library = Library::new();
@@ -504,6 +916,69 @@ async fn the_filters_reach_the_query_string() {
         .map(|s| s["work"].as_str().unwrap())
         .collect();
     assert_eq!(vec!["Elfes"], works);
+}
+
+/// The shelf, reduced to what the search finds — the same folding as `/search`, so a
+/// half-typed word already finds something and accents are not a trap.
+#[tokio::test]
+async fn a_query_reduces_the_shelf_to_what_it_finds() {
+    let library = Library::new();
+    let (status, body) = library.get("/series?q=elf").await;
+
+    assert_eq!(StatusCode::OK, status);
+    assert_eq!(1, body["total"]);
+    assert_eq!("Elfes", body["items"][0]["work"]);
+}
+
+/// A search runs *inside* what is showing. A lit chip is a statement about what you are
+/// looking at, so the two narrow each other rather than the last one winning.
+#[tokio::test]
+async fn a_query_runs_inside_the_chips_that_are_lit() {
+    let library = Library::new();
+    let (_, both) = library.get("/series?q=jarry&medium=bd").await;
+    assert_eq!(2, both["total"], "Jarry drew both of the albums");
+
+    let (_, none) = library.get("/series?q=jarry&medium=manga").await;
+    assert_eq!(
+        0, none["total"],
+        "and none of the manga, whatever the query finds"
+    );
+}
+
+/// The answer a client cannot work out for itself: nothing matching is an empty shelf, and
+/// not the whole one. An empty set of ids means "no restriction" to the query builder.
+#[tokio::test]
+async fn a_query_nothing_matches_is_an_empty_shelf() {
+    let library = Library::new();
+    let (status, body) = library.get("/series?q=zzzz").await;
+
+    assert_eq!(StatusCode::OK, status);
+    assert_eq!(0, body["total"]);
+    assert!(body["items"].as_array().unwrap().is_empty());
+}
+
+/// A cleared field is not a search. The client sends `q=` on its way back to the whole
+/// shelf, exactly as it sends a cleared chip.
+#[tokio::test]
+async fn a_blank_query_is_the_whole_shelf() {
+    let library = Library::new();
+    let (_, body) = library.get("/series?q=%20").await;
+    assert_eq!(3, body["total"]);
+}
+
+/// Relevance orders the search; the shelf keeps its own order. A grid that reshuffled itself
+/// as you typed would be a different thing from the one you were reading a second ago.
+#[tokio::test]
+async fn a_query_does_not_take_over_the_order() {
+    let library = Library::new();
+    let (_, body) = library.get("/series?q=jarry&sort=name").await;
+    let works: Vec<&str> = body["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["work"].as_str().unwrap())
+        .collect();
+    assert_eq!(vec!["Elfes", "Nains"], works);
 }
 
 #[tokio::test]

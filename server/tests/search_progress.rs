@@ -175,6 +175,50 @@ fn the_client_can_ask_for_one_level_only() {
     assert_eq!("EDITION", editions[0].kind);
 }
 
+#[test]
+fn a_paged_search_counts_the_whole_answer_and_describes_its_files() {
+    let f = Fixture::new();
+    let repository = Repository::new(&f.db);
+    let filter = SeriesFilter::default();
+
+    let first = repository
+        .search_page("titans", 1, 0, &[], &filter)
+        .expect("the first search page");
+    let second = repository
+        .search_page("titans", 1, 1, &[], &filter)
+        .expect("the second search page");
+
+    assert_eq!(3, first.total, "one series, one volume and one chapter");
+    assert_eq!(2, first.file_total, "only volume and chapter are files");
+    assert_eq!(0, first.page);
+    assert_eq!(1, first.size);
+    assert_eq!(1, first.items.len());
+    assert_eq!(1, second.items.len());
+    assert_ne!(first.items[0].id, second.items[0].id);
+
+    let all = repository
+        .search_page("titans", 40, 0, &[], &filter)
+        .expect("all the context");
+    let volume = all
+        .items
+        .iter()
+        .find(|hit| hit.kind == "ENTRY")
+        .expect("the volume hit");
+    assert_eq!(Some("VOLUME"), volume.entry_kind.as_deref());
+    assert_eq!(Some(1.0), volume.entry_number);
+    assert_eq!(Some(190), volume.entry_page_count);
+
+    let chapter = all
+        .items
+        .iter()
+        .find(|hit| hit.kind == "CHAPTER")
+        .expect("the chapter hit");
+    assert_eq!(Some("VOLUME"), chapter.entry_kind.as_deref());
+    assert_eq!(Some(1.0), chapter.entry_number);
+    assert_eq!(Some(2.0), chapter.chapter_number);
+    assert_eq!(Some(190), chapter.entry_page_count);
+}
+
 /// The guess answers about the level that was asked for, or not at all.
 ///
 /// It is series-only by construction: it reads what it compares, so what it reads has to
