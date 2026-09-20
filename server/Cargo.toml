@@ -20,7 +20,9 @@ http-body-util = "0.1"
 tokio-util = { version = "0.7", features = ["io"] }
 
 # SQLite, compiled in: no system library, so there is nothing to install beside the binary.
-rusqlite = { version = "0.37", features = ["bundled"] }
+# `collation` registers the ORDER BY a French library needs: SQLite's own are ASCII, so
+# « Élève » sorted after « Zorro ». Pure Rust, no extra C, and nothing stored depends on it.
+rusqlite = { version = "0.37", features = ["bundled", "collation"] }
 
 # A CBZ is a renamed zip. Entries are read by name over Read + Seek, which is the ZipFile
 # model rather than the sequential one.

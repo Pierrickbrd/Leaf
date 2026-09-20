@@ -65,7 +65,9 @@ async fn main() -> Result<()> {
     // disposition, which is the death this exists to prevent.
     let stopping = Stopping::armed();
 
-    std::fs::create_dir_all(&config.inbox).context("creating the inbox")?;
+    tokio::fs::create_dir_all(&config.inbox)
+        .await
+        .context("creating the inbox")?;
     if split_volumes(&config.library, &config.inbox) {
         tracing::warn!(
             library = %config.library.display(),
@@ -74,7 +76,9 @@ async fn main() -> Result<()> {
         );
     }
     if let Some(folder) = &config.drop {
-        std::fs::create_dir_all(folder).context("creating the drop folder")?;
+        tokio::fs::create_dir_all(folder)
+            .await
+            .context("creating the drop folder")?;
     }
 
     tracing::info!(library = %config.library.display(), "Library");

@@ -254,11 +254,44 @@ pub struct SearchHitDto {
     pub series_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entry_id: Option<String>,
+    /// The file that contains the hit. A chapter inside a volume needs both levels on screen:
+    /// its own label is not enough to say where opening it will land.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_number: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_page_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chapter_number: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chapter_title: Option<String>,
     /// A guess, offered because nothing matched: "did you mean", not "here it is". It has
     /// to reach the screen as a guess — an approximate hit shown like an exact one costs
     /// more trust than finding nothing ever does.
     #[serde(skip_serializing_if = "is_false")]
     pub approximate: bool,
+}
+
+/// A searchable result set rather than one arbitrarily long response.
+///
+/// `/search` keeps returning a bare list unless a client explicitly supplies `page` or
+/// `size`. That makes this an additive contract: a running older client keeps working while
+/// the paged desktop learns exactly how much is behind its first screenful.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchPageDto {
+    pub items: Vec<SearchHitDto>,
+    /// Every exact hit at the requested levels. Approximate suggestions count only when
+    /// there was no exact hit at all.
+    pub total: i64,
+    /// ENTRY and CHAPTER only — the number a heading labelled "Files" must display even
+    /// though the same question also asks for editions to support "did you mean".
+    pub file_total: i64,
+    pub page: i64,
+    pub size: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -331,12 +364,49 @@ pub enum SeriesSort {
     /// Universe, then work, then edition — how a shelf reads.
     #[default]
     Name,
-    /// Newest arrivals first.
+    /// What last received a volume, newest first. Adding one tome to a series a reader
+    /// already owns is an arrival on this shelf: ordering on the *first* volume's date
+    /// instead left that series exactly where it was, which is not what "récent" means to
+    /// anyone watching a collection grow.
     Added,
-    /// What last received a volume — a series you follow surfaces when it moves.
-    Updated,
     /// The longest first.
     Volumes,
+    /// When a volume of this series was last read. The one order that says where a reader
+    /// left off across the whole shelf, which no count and no arrival date stands in for.
+    Read,
+}
+
+/// The direction is orthogonal to the criterion on the wire. When it is absent, each
+/// criterion keeps its familiar direction: names A–Z, dates newest first, counts largest
+/// first. Older clients therefore keep the shelf they already know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+impl SortDirection {
+    pub fn of(value: Option<&str>, sort: SeriesSort) -> Self {
+        match value
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "asc" => SortDirection::Ascending,
+            "desc" => SortDirection::Descending,
+            _ => sort.natural_direction(),
+        }
+    }
+
+    /// The word SQLite reads. Here rather than at each `ORDER BY`, so that the two places
+    /// that build one cannot disagree about which way `Descending` is.
+    pub fn sql(self) -> &'static str {
+        match self {
+            SortDirection::Ascending => "ASC",
+            SortDirection::Descending => "DESC",
+        }
+    }
 }
 
 impl SeriesSort {
@@ -350,18 +420,49 @@ impl SeriesSort {
             .as_str()
         {
             "added" => SeriesSort::Added,
-            "updated" => SeriesSort::Updated,
             "volumes" => SeriesSort::Volumes,
+            "read" => SeriesSort::Read,
             _ => SeriesSort::Name,
         }
     }
 
-    pub fn sql(self) -> &'static str {
+    pub fn natural_direction(self) -> SortDirection {
         match self {
-            SeriesSort::Name => "COALESCE(u.name, ''), w.name, COALESCE(e.name, '')",
-            SeriesSort::Added => "added_at DESC, w.name",
-            SeriesSort::Updated => "last_added_at DESC, w.name",
-            SeriesSort::Volumes => "entry_count DESC, w.name",
+            SeriesSort::Name => SortDirection::Ascending,
+            SeriesSort::Added | SeriesSort::Volumes | SeriesSort::Read => SortDirection::Descending,
+        }
+    }
+
+    /// The `ORDER BY` for a shelf, with the direction where it belongs.
+    ///
+    /// One arm per criterion and not one per pair. Written as eight, it hid the rule it was
+    /// following: the direction turns the *leading* term and nothing else. « Ajout récent »
+    /// reversed still reads its ties by name, A to Z, because a tie is not part of what you
+    /// asked to reverse — and that was invisible in eight arms where only two characters
+    /// differed between halves.
+    pub fn sql(self, direction: SortDirection) -> String {
+        let way = direction.sql();
+        match self {
+            // COLLATE LEAF and not the default: SQLite's own collations are ASCII, so an
+            // accented initial sorted past Z and a French shelf ran A, B, … Z, À, É. See
+            // `store::db::name_order` — an accent keeps its letter's place, digits come
+            // first. Name is the one criterion whose ties are part of the answer, so the
+            // direction runs through all of it.
+            SeriesSort::Name => format!(
+                "COALESCE(u.name, '') COLLATE LEAF {way}, w.name COLLATE LEAF {way}, \
+                 COALESCE(e.name, '') COLLATE LEAF {way}, e.id {way}"
+            ),
+            // `IS NULL` first, always ascending: a series nobody has added to or read is
+            // last whichever way the rest runs, rather than first half the time.
+            SeriesSort::Added => format!(
+                "last_added_at IS NULL, last_added_at {way}, w.name COLLATE LEAF ASC, e.id ASC"
+            ),
+            SeriesSort::Read => format!(
+                "last_read_at IS NULL, last_read_at {way}, w.name COLLATE LEAF ASC, e.id ASC"
+            ),
+            SeriesSort::Volumes => {
+                format!("entry_count {way}, w.name COLLATE LEAF ASC, e.id ASC")
+            }
         }
     }
 }

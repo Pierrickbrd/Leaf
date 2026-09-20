@@ -11,8 +11,8 @@ use rusqlite::types::Value;
 use rusqlite::Row;
 
 use crate::api::dto::{
-    ArcDto, ChapterDto, EntryDto, FacetDto, FacetsDto, PageDto, SearchHitDto, SeriesDto,
-    SeriesFilter, SeriesSort, UNREAD,
+    ArcDto, ChapterDto, EntryDto, FacetDto, FacetsDto, PageDto, SearchHitDto, SearchPageDto,
+    SeriesDto, SeriesFilter, SeriesSort, SortDirection, UNREAD,
 };
 use crate::store::text::{composed_name, gaps, nearest, search_key, tolerance};
 use crate::store::{Cx, Db};
@@ -32,6 +32,25 @@ const READ_STATUS: &str = "CASE
          >= (SELECT COUNT(*) FROM entry x WHERE x.edition_id = e.id) THEN 'READ'
     ELSE 'IN_PROGRESS'
   END";
+
+/// The status of one file. `READ_STATUS` above answers for a whole edition — every volume
+/// finished — which is not a question that can be asked of a single volume. A chapter takes
+/// the status of the entry it lives in: opening a volume is opening the chapters in it.
+const FILE_READ_STATUS: &str = "CASE
+    WHEN (SELECT COUNT(*) FROM progress p
+          WHERE p.entry_id = search.entry_id AND (p.finished = 1 OR p.page > 0)) = 0
+         THEN 'UNREAD'
+    WHEN (SELECT COUNT(*) FROM progress p
+          WHERE p.entry_id = search.entry_id AND p.finished = 1) > 0 THEN 'READ'
+    ELSE 'IN_PROGRESS'
+  END";
+
+fn read_facet(r: &Row) -> rusqlite::Result<FacetDto> {
+    Ok(FacetDto {
+        value: r.get::<_, String>(0)?.trim().to_string(),
+        count: r.get(1)?,
+    })
+}
 
 /// Well under SQLite's parameter ceiling, and above any page the API hands out.
 const CHUNK: usize = 400;
@@ -141,6 +160,17 @@ impl<'a> Repository<'a> {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<SeriesDto>> {
+        self.series_ordered(filter, sort, sort.natural_direction(), limit, offset)
+    }
+
+    pub fn series_ordered(
+        &self,
+        filter: &SeriesFilter,
+        sort: SeriesSort,
+        direction: SortDirection,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<SeriesDto>> {
         let w = Self::build_where(filter);
         let mut args = w.args;
         let window = if limit <= 0 {
@@ -163,7 +193,9 @@ impl<'a> Repository<'a> {
                     (SELECT COUNT(*) FROM chapter c WHERE c.edition_id = e.id) AS chapter_count,
                     (SELECT COUNT(*) FROM arc     a WHERE a.edition_id = e.id) AS arc_count,
                     (SELECT MIN(x.added_at) FROM entry x WHERE x.edition_id = e.id) AS added_at,
-                    (SELECT MAX(x.added_at) FROM entry x WHERE x.edition_id = e.id) AS last_added_at
+                    (SELECT MAX(x.added_at) FROM entry x WHERE x.edition_id = e.id) AS last_added_at,
+                    (SELECT MAX(p.updated_at) FROM progress p WHERE p.edition_id = e.id)
+                        AS last_read_at
              FROM edition e
              JOIN work w ON w.id = e.work_id
              LEFT JOIN universe u ON u.id = w.universe_id
@@ -171,7 +203,7 @@ impl<'a> Repository<'a> {
              ORDER BY {}
              {window}",
             w.sql,
-            sort.sql()
+            sort.sql(direction)
         );
 
         let rows = self.db.read(|cx| {
@@ -462,6 +494,93 @@ impl<'a> Repository<'a> {
         })
     }
 
+    /// The same axes, counted over files rather than over series.
+    ///
+    /// A row of pills above a list of sixty files that says « Non lues 5 » is counting
+    /// something else than what is under it — five *series*, where the reader is looking at
+    /// files and about to filter files. The count a pill shows has to be the number of rows
+    /// that pill would leave.
+    ///
+    /// Every axis, so that a panel offering eight of them can be opened in the files scope
+    /// and show the same word with the same number as the row above it. Counting only two
+    /// here made « Non lues » read 5 in one place and 59 in the other, on one screen.
+    pub fn file_facets(&self, query: &str) -> Result<FacetsDto> {
+        const UNIVERSE: &str = "LEFT JOIN universe u ON u.id = w.universe_id";
+        Ok(FacetsDto {
+            read_statuses: self.file_facet(FILE_READ_STATUS, "", query)?,
+            media: self.file_facet("COALESCE(e.medium, w.medium)", "", query)?,
+            universes: self.file_facet("u.name", UNIVERSE, query)?,
+            statuses: self.file_facet("COALESCE(e.status, w.status)", "", query)?,
+            languages: self.file_facet("e.language", "", query)?,
+            publishers: self.file_facet("e.publisher", "", query)?,
+            authors: self.file_name_facet("work_author", query)?,
+            genres: self.file_name_facet("work_genre", query)?,
+        })
+    }
+
+    /// Authors and genres live one row per name, so they are counted through their own table
+    /// and grouped on the folded key — « Shônen » and « shonen » are one genre. Shown under
+    /// the spelling the files use, which is what `MIN(name)` picks.
+    fn file_name_facet(&self, table: &str, query: &str) -> Result<Vec<FacetDto>> {
+        let (narrowed, wanted) = Self::file_narrowing(query);
+        let sql = format!(
+            "SELECT MIN(t.name) AS value, COUNT(*) AS n
+             FROM search
+             JOIN edition e ON e.id = search.edition_id
+             JOIN work w ON w.id = e.work_id
+             JOIN {table} t ON t.work_id = w.id
+             WHERE search.kind IN ('ENTRY', 'CHAPTER') {narrowed}
+             GROUP BY t.key
+             ORDER BY n DESC, LOWER(value)"
+        );
+        self.db.read(|cx| {
+            let rows = match wanted.as_deref() {
+                None => cx.query(&sql, [], read_facet)?,
+                Some(expression) => cx.query(&sql, [expression], read_facet)?,
+            };
+            Ok(rows)
+        })
+    }
+
+    /// The `AND search MATCH ?` a query adds, and the expression it binds — or neither, when
+    /// nothing is being searched for and the count is over every file there is.
+    fn file_narrowing(query: &str) -> (String, Option<String>) {
+        // The same expression the list is built from, so the two cannot disagree.
+        let terms = search_terms(query);
+        let wanted = (!terms.is_empty()).then(|| match_expression(&terms));
+        let narrowed = if wanted.is_none() {
+            String::new()
+        } else {
+            "AND search MATCH ?".to_string()
+        };
+        (narrowed, wanted)
+    }
+
+    fn file_facet(&self, expression: &str, join: &str, query: &str) -> Result<Vec<FacetDto>> {
+        // A file is an ENTRY or a CHAPTER; an EDITION hit is the series itself and is
+        // counted by the other row. Both kinds carry the entry they live in, which is what
+        // makes a chapter's read status the status of the volume holding it.
+        let (narrowed, wanted) = Self::file_narrowing(query);
+        let sql = format!(
+            "SELECT {expression} AS value, COUNT(*) AS n
+             FROM search
+             JOIN edition e ON e.id = search.edition_id
+             JOIN work w ON w.id = e.work_id
+             {join}
+             WHERE search.kind IN ('ENTRY', 'CHAPTER') {narrowed}
+               AND TRIM(COALESCE({expression}, '')) <> ''
+             GROUP BY value
+             ORDER BY n DESC, LOWER(value)"
+        );
+        self.db.read(|cx| {
+            let rows = match wanted.as_deref() {
+                None => cx.query(&sql, [], read_facet)?,
+                Some(expression) => cx.query(&sql, [expression], read_facet)?,
+            };
+            Ok(rows)
+        })
+    }
+
     fn facet(&self, expression: &str) -> Result<Vec<FacetDto>> {
         let sql = format!(
             "SELECT {expression} AS value, COUNT(*) AS n
@@ -724,6 +843,61 @@ pub const UNREAD_STATUS: &str = UNREAD;
 /// The three things a search can answer with. A universe and a work are not among them.
 const KINDS: [&str; 3] = ["EDITION", "ENTRY", "CHAPTER"];
 
+/// The FTS expression a typed query becomes: every folded term, each matched as a prefix,
+/// and all of them required.
+///
+/// Shared, because it was written twice and the two spellings disagreed: the list matched
+/// `"a"*` and found sixty files while the pills above it matched `a` and counted eleven. A
+/// count that describes a different population than the rows under it is worse than none.
+fn search_terms(query: &str) -> Vec<String> {
+    search_key(query)
+        .split(' ')
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn match_expression(terms: &[String]) -> String {
+    terms
+        .iter()
+        .map(|t| format!("\"{t}\"*"))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+/// `search.name` and not `search.label`: the index already stores the folded spelling of
+/// each row's own name, and `COLLATE NOCASE` only knows ASCII. Ordered by the raw label, « À
+/// la verticale » and « Âmes sœurs » sorted *after* Z — so an alphabet ran A, B, …, Z, À, Â,
+/// and turned round it opened on the accents. A French library cannot have an alphabet that
+/// puts a fifth of its titles past the end.
+fn search_order(sort: SeriesSort, direction: SortDirection) -> String {
+    // One arm per criterion, like the shelf's own: the direction turns the leading term and
+    // the tie-breakers stay put. See `SeriesSort::sql`, which this has to agree with — a
+    // search and the shelf behind it running different orders is the defect this pairing
+    // exists to prevent.
+    let way = direction.sql();
+    let ties = "search.name ASC, search.kind ASC, search.ref ASC";
+    match sort {
+        SeriesSort::Name => {
+            format!("search.name {way}, search.kind {way}, search.ref {way}")
+        }
+        // A file hit carries its own arrival; an edition hit borrows the latest of its
+        // entries, which is what `added` means on the shelf beside it.
+        SeriesSort::Added => format!(
+            "COALESCE(entry.added_at, (SELECT MAX(x.added_at) FROM entry x \
+             WHERE x.edition_id = search.edition_id), 0) {way}, {ties}"
+        ),
+        SeriesSort::Read => format!(
+            "COALESCE((SELECT MAX(p.updated_at) FROM progress p \
+             WHERE p.edition_id = search.edition_id), 0) {way}, {ties}"
+        ),
+        SeriesSort::Volumes => format!(
+            "(SELECT COUNT(*) FROM entry x WHERE x.edition_id = search.edition_id) {way}, \
+             {ties}"
+        ),
+    }
+}
+
 impl Repository<'_> {
     /// Find something by name.
     ///
@@ -745,20 +919,47 @@ impl Repository<'_> {
         kinds: &[String],
         filter: &SeriesFilter,
     ) -> Result<Vec<SearchHitDto>> {
-        let terms: Vec<String> = search_key(query)
-            .split(' ')
-            .filter(|t| !t.is_empty())
-            .map(str::to_string)
-            .collect();
-        if terms.is_empty() {
-            return Ok(Vec::new());
-        }
+        Ok(self.search_page(query, limit, 0, kinds, filter)?.items)
+    }
 
-        let expression = terms
-            .iter()
-            .map(|t| format!("\"{t}\"*"))
-            .collect::<Vec<_>>()
-            .join(" AND ");
+    /// The same ranked search, one bounded window and its exact counts.
+    ///
+    /// Editions still travel with the page because they carry approximate suggestions;
+    /// `file_total` separately counts the ENTRY and CHAPTER levels a file list draws.
+    pub fn search_page(
+        &self,
+        query: &str,
+        size: i64,
+        page: i64,
+        kinds: &[String],
+        filter: &SeriesFilter,
+    ) -> Result<SearchPageDto> {
+        self.search_page_ordered(query, size, page, kinds, filter, None)
+    }
+
+    pub fn search_page_ordered(
+        &self,
+        query: &str,
+        size: i64,
+        page: i64,
+        kinds: &[String],
+        filter: &SeriesFilter,
+        order: Option<(SeriesSort, SortDirection)>,
+    ) -> Result<SearchPageDto> {
+        let size = size.clamp(1, 200);
+        let page = page.max(0);
+        let offset = page.checked_mul(size).unwrap_or(i64::MAX);
+        let terms = search_terms(query);
+        if terms.is_empty() {
+            return Ok(SearchPageDto {
+                items: Vec::new(),
+                total: 0,
+                file_total: 0,
+                page,
+                size,
+            });
+        }
+        let expression = match_expression(&terms);
         let wanted: Vec<String> = kinds
             .iter()
             .map(|k| k.to_uppercase())
@@ -772,7 +973,13 @@ impl Repository<'_> {
         } else {
             let allowed = self.editions_matching(filter)?;
             if allowed.is_empty() {
-                return Ok(Vec::new());
+                return Ok(SearchPageDto {
+                    items: Vec::new(),
+                    total: 0,
+                    file_total: 0,
+                    page,
+                    size,
+                });
             }
             Some(allowed)
         };
@@ -786,29 +993,56 @@ impl Repository<'_> {
             String::new()
         } else {
             args.extend(wanted.iter().map(|k| Value::Text(k.clone())));
-            format!("AND kind IN ({})", marks(wanted.len()))
+            format!("AND search.kind IN ({})", marks(wanted.len()))
         };
         let only_editions = match &within {
             None => String::new(),
             Some(ids) => {
                 args.extend(ids.iter().map(|i| Value::Text(i.clone())));
-                format!("AND edition_id IN ({})", marks(ids.len()))
+                format!("AND search.edition_id IN ({})", marks(ids.len()))
             }
         };
 
-        let sql = format!(
-            "SELECT kind, ref, label, edition_id, entry_id
+        let count_sql = format!(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN search.kind IN ('ENTRY','CHAPTER') THEN 1 ELSE 0 END), 0)
              FROM search
+             WHERE search MATCH ? {only_kinds} {only_editions}"
+        );
+        let order_by = order
+            .map(|(sort, direction)| search_order(sort, direction))
+            .unwrap_or_else(|| {
+                "bm25(search, 10.0, 1.0) * CASE search.kind WHEN 'EDITION' THEN 3.0 \
+                 WHEN 'ENTRY' THEN 1.5 ELSE 1.0 END"
+                    .to_owned()
+            });
+        let sql = format!(
+            "SELECT search.kind AS kind, search.ref AS ref, search.label AS label,
+                    search.edition_id AS edition_id, search.entry_id AS entry_id,
+                    entry.type AS entry_kind, entry.volume_number AS entry_number,
+                    entry.title AS entry_title, entry.page_count AS entry_page_count,
+                    chapter.number AS chapter_number, chapter.title AS chapter_title
+             FROM search
+             LEFT JOIN entry
+               ON entry.id = COALESCE(search.entry_id,
+                                      CASE WHEN search.kind = 'ENTRY' THEN search.ref END)
+             LEFT JOIN chapter
+               ON search.kind = 'CHAPTER' AND chapter.id = search.ref
              WHERE search MATCH ? {only_kinds} {only_editions}
-             ORDER BY bm25(search, 10.0, 1.0) * CASE kind
-                        WHEN 'EDITION' THEN 3.0 WHEN 'ENTRY' THEN 1.5 ELSE 1.0
-                      END
-             LIMIT {}",
-            limit.clamp(1, 200)
+             ORDER BY {order_by}
+             LIMIT ? OFFSET ?"
         );
 
-        let hits = self.db.read(|cx| {
-            cx.query(&sql, rusqlite::params_from_iter(args.iter()), |r| {
+        let mut page_args = args.clone();
+        page_args.push(Value::Integer(size));
+        page_args.push(Value::Integer(offset));
+        let ((total, file_total), hits) = self.db.read(|cx| {
+            let counts = cx
+                .query_one(&count_sql, rusqlite::params_from_iter(args.iter()), |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+                })?
+                .unwrap_or((0, 0));
+            let hits = cx.query(&sql, rusqlite::params_from_iter(page_args.iter()), |r| {
                 let kind: String = r.get("kind")?;
                 let reference: String = r.get("ref")?;
                 let edition_id: Option<String> = r.get("edition_id")?;
@@ -828,19 +1062,45 @@ impl Repository<'_> {
                     series_name: edition_id.as_ref().and_then(|e| names.get(e).cloned()),
                     series_id: edition_id,
                     entry_id: r.get("entry_id")?,
+                    entry_kind: r.get("entry_kind")?,
+                    entry_number: r.get("entry_number")?,
+                    entry_title: r.get("entry_title")?,
+                    entry_page_count: r.get("entry_page_count")?,
+                    chapter_number: r.get("chapter_number")?,
+                    chapter_title: r.get("chapter_title")?,
                     approximate: false,
                 })
-            })
+            })?;
+            Ok((counts, hits))
         })?;
 
         // A client that asked for chapters and got none wants "no chapters", not "here is
         // a series you might have meant". The guess is series-only by construction — it
         // reads what it compares, so what it reads has to stay bounded by the shelf — so it
         // is offered only when a series was among the things asked for.
-        if hits.is_empty() && (wanted.is_empty() || wanted.iter().any(|k| k == "EDITION")) {
-            return self.approximate(&terms, &names, limit, within.as_deref());
+        if total == 0 && (wanted.is_empty() || wanted.iter().any(|k| k == "EDITION")) {
+            let guesses = self.approximate(&terms, &names, 20, within.as_deref())?;
+            let total = guesses.len() as i64;
+            let start = usize::try_from(offset).unwrap_or(usize::MAX);
+            return Ok(SearchPageDto {
+                items: guesses
+                    .into_iter()
+                    .skip(start)
+                    .take(size as usize)
+                    .collect(),
+                total,
+                file_total: 0,
+                page,
+                size,
+            });
         }
-        Ok(hits)
+        Ok(SearchPageDto {
+            items: hits,
+            total,
+            file_total,
+            page,
+            size,
+        })
     }
 
     /// What you might have meant, when nothing matched.
@@ -895,6 +1155,12 @@ impl Repository<'_> {
                         series_id: r.get("edition_id")?,
                         series_name: None,
                         entry_id: r.get("entry_id")?,
+                        entry_kind: None,
+                        entry_number: None,
+                        entry_title: None,
+                        entry_page_count: None,
+                        chapter_number: None,
+                        chapter_title: None,
                         approximate: true,
                     },
                     format!(

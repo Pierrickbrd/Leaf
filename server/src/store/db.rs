@@ -29,6 +29,7 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, Params, Row, Transaction};
 
 use super::schema::{schema_version, MIGRATIONS, SCHEMA, SEARCH_SCHEMA};
+use super::text::search_key;
 
 /// How many reader connections are kept alive between calls. Opening one is not free, and
 /// a handful covers a household: the writer is the thing that serialises, not these.
@@ -112,6 +113,33 @@ pub struct Db {
     statements: AtomicU64,
 }
 
+/// Alphabetical order for a library that is not written in ASCII.
+///
+/// SQLite ships `BINARY` and `NOCASE`, and `NOCASE` folds A–Z and nothing else — so « Élève »
+/// sorted after « Zorro », and a French shelf ran A, B, … Z, À, Â, É. This folds both sides
+/// the way the search index is folded: the accent goes onto its letter, the case goes away,
+/// and an accented initial keeps its letter's place. Digits fold to themselves and so come
+/// before every letter, which is where a title beginning with a number belongs.
+///
+/// Registered on every connection, reader and writer alike — a collation is a property of
+/// the connection, and a query running on one that lacks it fails rather than sorting badly.
+/// Used only in `ORDER BY`, never in an index, so no stored data depends on it and nothing
+/// has to be migrated when the folding changes.
+fn name_order(one: &str, other: &str) -> std::cmp::Ordering {
+    // Folded first, then the raw text: two spellings that fold to the same key — « Elève »
+    // and « Élève » — must still have a fixed order, or a page boundary can fall between
+    // them and show one of them twice.
+    search_key(one)
+        .cmp(&search_key(other))
+        .then_with(|| one.cmp(other))
+}
+
+fn with_collation(conn: Connection) -> Result<Connection> {
+    conn.create_collation("LEAF", name_order)
+        .context("registering the LEAF collation")?;
+    Ok(conn)
+}
+
 impl Db {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -119,8 +147,9 @@ impl Db {
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
 
-        let writer =
-            Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let writer = with_collation(
+            Connection::open(path).with_context(|| format!("opening {}", path.display()))?,
+        )?;
         writer.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA foreign_keys = ON;
@@ -185,7 +214,8 @@ impl Db {
                 Ok(()) => {}
                 Err(e) if already_satisfied(sql, &e) => {}
                 Err(e) => {
-                    return Err(e.context(format!("migration {step} failed: {}", first_line(sql))))
+                    return Err(e)
+                        .with_context(|| format!("migration {step} failed: {}", first_line(sql)))
                 }
             }
             self.set_version(step as i32)?;
@@ -272,7 +302,7 @@ impl Db {
         // A reader never waits on the writer in WAL, but a checkpoint can hold the file for
         // a moment. Waiting briefly beats failing the request.
         conn.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;")?;
-        Ok(conn)
+        with_collation(conn)
     }
 
     fn give_back(&self, conn: Connection) {
