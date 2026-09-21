@@ -3,6 +3,7 @@
 //! The counts describe **the library**, not the work done on it: an unchanged rescan still
 //! reports fifty thousand chapters, because that is how many there are. The lists describe
 //! what a person might want to fix.
+use serde::Serialize;
 
 #[derive(Debug, Default, Clone)]
 pub struct ScanReport {
@@ -41,7 +42,105 @@ pub struct ScanReport {
     pub reanalysed: u32,
 }
 
+/// What a scan found, in numbers and named lists rather than in a paragraph.
+///
+/// The paragraph still exists — `summary()` writes it, and a terminal is exactly where a
+/// paragraph belongs. A screen is not: the client words its own French, every string of it
+/// living in one file that a typography test can sweep, and a sentence arriving from the
+/// server would be the one string that file could not reach.
+///
+/// So the counts and the *kind* of each list cross the wire, and the client says them in
+/// French. What does not cross translated is each item's own line — « Death Note/Tome 1.cbz
+/// — no number » is about one file, written by whoever met it, and turning every one of
+/// those into a code with parameters is a contract the size of the scanner itself.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanCounts {
+    pub universes: u32,
+    pub works: u32,
+    pub editions: u32,
+    pub entries: u32,
+    pub chapters: u32,
+    pub pages: u32,
+    pub reanalysed: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Finding {
+    /// A word the client has a French sentence for. Unknown ones are shown by their items
+    /// alone rather than dropped: the scan found something either way.
+    pub kind: &'static str,
+    /// How many there are, which is not how many are listed.
+    pub total: usize,
+    /// The first sixteen, as whoever met them wrote them. The same ceiling the paragraph
+    /// uses: a library with four hundred untitled volumes should not send four hundred
+    /// lines to say so.
+    pub items: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Findings {
+    pub counts: ScanCounts,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<Finding>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub chapters_without_start_page: usize,
+    /// Set when the scan itself failed. The failure reaches the client rather than only the
+    /// log: a scan that quietly did nothing is worse than one that says why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+/// The most a list sends. Sixteen is what the paragraph shows, and a screen has no more
+/// reason than a terminal to hold four hundred lines about one mistake repeated.
+const MOST: usize = 16;
+
 impl ScanReport {
+    /// The same report, for a screen instead of a terminal.
+    pub fn findings(&self) -> Findings {
+        let mut found = Findings {
+            counts: ScanCounts {
+                universes: self.universes,
+                works: self.works,
+                editions: self.editions,
+                entries: self.entries,
+                chapters: self.chapters,
+                pages: self.pages,
+                reanalysed: self.reanalysed,
+            },
+            chapters_without_start_page: self.chapters_without_start_page.len(),
+            ..Findings::default()
+        };
+        let mut add = |kind: &'static str, items: &[String]| {
+            if items.is_empty() {
+                return;
+            }
+            found.findings.push(Finding {
+                kind,
+                total: items.len(),
+                items: items.iter().take(MOST).cloned().collect(),
+            });
+        };
+        // The same order the paragraph uses, worst first: what stopped a shelf being read
+        // before what a file failed to say about itself.
+        add("ERRORS", &self.errors);
+        add("MISSING_METADATA", &self.missing_required);
+        add("DISREGARDED", &self.disregarded);
+        add("CONTRADICTIONS", &self.contradictions);
+        add("IDENTITY", &self.identity_mismatch);
+        add("WITHOUT_METADATA", &self.entries_without_metadata);
+        add("DUPLICATE_NUMBERS", &self.duplicate_numbers);
+        add("DUPLICATE_PAGES", &self.duplicate_page_names);
+        add("DERIVED_ARCS", &self.derived_arcs);
+        found
+    }
+
     pub fn summary(&self) -> String {
         let mut out = format!(
             "{} universe(s), {} work(s), {} edition(s), {} entry(ies), {} chapter(s), {} page(s)\n\

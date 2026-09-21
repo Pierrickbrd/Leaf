@@ -193,6 +193,31 @@ pub const SCHEMA: &[&str] = &[
     // Keyed by entry, but read by edition: the read status of a shelf asks "what has this
     // edition got" twice for every tile.
     "CREATE INDEX IF NOT EXISTS ix_progress_edition ON progress(edition_id, finished)",
+    r#"
+    CREATE TABLE IF NOT EXISTS reading_order (
+      id          TEXT PRIMARY KEY,
+      universe_id TEXT NOT NULL REFERENCES universe(id) ON DELETE CASCADE,
+      declared_id TEXT NOT NULL,
+      name        TEXT NOT NULL,
+      position    INTEGER NOT NULL,
+      is_default  INTEGER NOT NULL DEFAULT 0,
+      UNIQUE (universe_id, declared_id)
+    )
+    "#,
+    r#"
+    CREATE TABLE IF NOT EXISTS reading_order_step (
+      id         TEXT PRIMARY KEY,
+      order_id   TEXT NOT NULL REFERENCES reading_order(id) ON DELETE CASCADE,
+      position   INTEGER NOT NULL,
+      work_id    TEXT NOT NULL REFERENCES work(id) ON DELETE CASCADE,
+      unit       TEXT CHECK (unit IN ('CHAPTER','VOLUME')),
+      edition_id TEXT REFERENCES edition(id) ON DELETE CASCADE,
+      from_number REAL,
+      to_number   REAL
+    )
+    "#,
+    "CREATE INDEX IF NOT EXISTS ix_order_step ON reading_order_step(order_id, position)",
+    "CREATE INDEX IF NOT EXISTS ix_order_universe ON reading_order(universe_id, position)",
 ];
 
 /// The search index, as an FTS5 table.
@@ -341,6 +366,40 @@ pub const MIGRATIONS: &[&str] = &[
     "ALTER TABLE edition ADD COLUMN collection TEXT",
     // 19 — positive form, never blackAndWhite: a page carries colour or it does not.
     "ALTER TABLE edition ADD COLUMN colour INTEGER",
+    // 20 — the named ways through a universe. Derived from `universe.json` at every scan and
+    // rewritten whole, so nothing here is a source of truth: the file is.
+    r#"
+    CREATE TABLE IF NOT EXISTS reading_order (
+      id          TEXT PRIMARY KEY,
+      universe_id TEXT NOT NULL REFERENCES universe(id) ON DELETE CASCADE,
+      declared_id TEXT NOT NULL,
+      name        TEXT NOT NULL,
+      position    INTEGER NOT NULL,
+      is_default  INTEGER NOT NULL DEFAULT 0,
+      UNIQUE (universe_id, declared_id)
+    )
+    "#,
+    // 21 — one stretch of one work. `position` is explicit and not the row order: an order
+    // is a sequence, and a sequence that depends on how rows happen to come back is a
+    // sequence that changes the day an index does.
+    //
+    // `edition_id` is set on a VOLUME step and null on a CHAPTER one. The range bounds are
+    // REAL because chapter numbers are: 12.5 is a chapter, and so is -1 for a prologue some
+    // publishers number that way.
+    r#"
+    CREATE TABLE IF NOT EXISTS reading_order_step (
+      id         TEXT PRIMARY KEY,
+      order_id   TEXT NOT NULL REFERENCES reading_order(id) ON DELETE CASCADE,
+      position   INTEGER NOT NULL,
+      work_id    TEXT NOT NULL REFERENCES work(id) ON DELETE CASCADE,
+      unit       TEXT CHECK (unit IN ('CHAPTER','VOLUME')),
+      edition_id TEXT REFERENCES edition(id) ON DELETE CASCADE,
+      from_number REAL,
+      to_number   REAL
+    )
+    "#,
+    "CREATE INDEX IF NOT EXISTS ix_order_step ON reading_order_step(order_id, position)",
+    "CREATE INDEX IF NOT EXISTS ix_order_universe ON reading_order(universe_id, position)",
 ];
 
 /// What a fresh database is stamped with. Deriving it from the list is what makes adding a

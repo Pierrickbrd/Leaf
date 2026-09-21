@@ -89,7 +89,63 @@ pub struct UniverseJson {
     pub leaf: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Which of the orders below a reader is offered first, by `id`. Optional: a universe
+    /// with one order does not need to say which.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_order: Option<String>,
+    /// Several named ways through the same universe. Kept in the order they are written:
+    /// the file is the author's, and the first one is the one they put first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub orders: Vec<OrderJson>,
 }
+
+/// One named way through a universe.
+///
+/// Steps and not a flat list of editions: the same work appears more than once in most
+/// reading orders worth writing down — « work A, part 1; work B; work A, part 2 » — and a
+/// list of editions cannot say that.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct OrderJson {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<StepJson>,
+}
+
+/// A stretch of one work, read at this point of the order.
+///
+/// `work` is the work folder's path relative to the universe, never its display title: a
+/// title is edited in a sidecar and an order written against it would break silently, where
+/// a folder that moves is a folder somebody moved.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct StepJson {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work: Option<String>,
+    /// `CHAPTER` or `VOLUME`. Absent means the whole work, which is the common case and the
+    /// one worth writing shortest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// Required of a `VOLUME` step and refused on a `CHAPTER` one: « volumes 1 to 7 »
+    /// describes different content in a 42-volume edition and a 34-volume one, while a
+    /// chapter number identifies the same story across both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edition: Option<String>,
+    /// Inclusive, and open at either end: no `from` means the beginning, no `to` means the
+    /// current end and whatever is added after it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<f64>,
+}
+
+/// The two units a step can be measured in. A third would be a third kind of range, so this
+/// is an enumeration and not a free string — unlike a status, which a library may spell in
+/// a way this server has not been taught.
+pub const UNITS: [&str; 2] = ["CHAPTER", "VOLUME"];
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]

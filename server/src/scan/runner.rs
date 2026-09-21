@@ -8,6 +8,7 @@
 //! sequence would be work done twice. A second request while one is running is told so
 //! rather than queued: there is nothing to queue, since the second would read the same disk.
 
+use crate::scan::report::Findings;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -24,9 +25,11 @@ pub struct ScanStatus {
     pub started_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<i64>,
-    /// The last report, once there is one.
+    /// The last report, once there is one — in counts and named lists, because the client
+    /// words its own French and a paragraph from here would be the one string its
+    /// vocabulary file could not reach.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
+    pub report: Option<Findings>,
 }
 
 impl Default for ScanStatus {
@@ -35,7 +38,7 @@ impl Default for ScanStatus {
             state: "IDLE",
             started_at: None,
             finished_at: None,
-            summary: None,
+            report: None,
         }
     }
 }
@@ -76,7 +79,7 @@ impl ScanRunner {
             state: "RUNNING",
             started_at: Some(started_at),
             finished_at: None,
-            summary: None,
+            report: None,
         });
 
         let runner = Arc::clone(self);
@@ -89,27 +92,32 @@ impl ScanRunner {
                 // scan could be started again. A destructor is the only thing an unwinding
                 // thread still runs.
                 let _release = Release(&runner);
-                let summary = match scan() {
+                let found = match scan() {
                     Ok(report) => {
                         tracing::info!(
                             label,
                             seconds = (now() - started_at) / 1000,
                             "scan finished"
                         );
-                        report.summary()
+                        // The paragraph still goes to the log, where a paragraph belongs.
+                        tracing::info!(label, "{}", report.summary());
+                        report.findings()
                     }
                     Err(e) => {
                         tracing::error!(label, error = format!("{e:#}"), "scan failed");
                         // The failure reaches the client rather than only the log: a scan
                         // that quietly did nothing is worse than one that says why.
-                        format!("failed: {e:#}")
+                        Findings {
+                            failure: Some(format!("{e:#}")),
+                            ..Findings::default()
+                        }
                     }
                 };
                 runner.set(ScanStatus {
                     state: "DONE",
                     started_at: Some(started_at),
                     finished_at: Some(now()),
-                    summary: Some(summary),
+                    report: Some(found),
                 });
             })
             .expect("spawning the scan thread");
@@ -136,7 +144,10 @@ impl Drop for Release<'_> {
                 state: "DONE",
                 started_at: None,
                 finished_at: Some(now()),
-                summary: Some("failed: the scan thread died".to_string()),
+                report: Some(Findings {
+                    failure: Some("the scan thread died".to_string()),
+                    ..Findings::default()
+                }),
             });
             tracing::error!("the scan thread panicked");
         }

@@ -770,6 +770,153 @@ async fn the_pills_above_a_list_of_files_count_files() {
     );
 }
 
+/// The ways through a universe, over the wire — and at a cost that does not grow with how
+/// many of them there are.
+#[tokio::test]
+async fn the_ways_through_an_universe_are_answered_whole_and_in_two_questions() {
+    let library = Library::new();
+    // Two orders over the works the fixture already holds, written straight into the rows
+    // the scanner would have derived: this asks what the route answers, not how it is filled.
+    library
+        .db
+        .write(|cx| {
+            for (id, declared, name, position, default) in [
+                ("o-main", "main", "Ordre conseillé", 0, 1),
+                ("o-pub", "publication", "Ordre de parution", 1, 0),
+            ] {
+                cx.execute(
+                    "INSERT INTO reading_order (id, universe_id, declared_id, name, position,
+                                                is_default)
+                     VALUES (?1, 'u-arran', ?2, ?3, ?4, ?5)",
+                    rusqlite::params![id, declared, name, position, default],
+                )?;
+            }
+            // A whole work, then a volume range of one edition, then the first work again:
+            // the interleaving a flat list of editions cannot express.
+            for (id, order, position, work, unit, edition, from, to) in [
+                ("s1", "o-main", 0, "elfes", None, None, None, None),
+                (
+                    "s2",
+                    "o-main",
+                    1,
+                    "nains",
+                    Some("VOLUME"),
+                    Some("e-nains"),
+                    Some(1.0),
+                    Some(2.0),
+                ),
+                (
+                    "s3",
+                    "o-main",
+                    2,
+                    "elfes",
+                    Some("CHAPTER"),
+                    None,
+                    Some(121.0),
+                    None,
+                ),
+                ("s4", "o-pub", 0, "nains", None, None, None, None),
+            ] {
+                cx.execute(
+                    "INSERT INTO reading_order_step (id, order_id, position, work_id, unit,
+                                                     edition_id, from_number, to_number)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                    rusqlite::params![id, order, position, work, unit, edition, from, to],
+                )?;
+            }
+            Ok(())
+        })
+        .expect("some orders");
+
+    let (status, universes) = library.get("/universes").await;
+    assert_eq!(StatusCode::OK, status);
+    assert_eq!(1, universes.as_array().unwrap().len());
+    assert_eq!("Terres d'Arran", universes[0]["name"]);
+    assert_eq!(2, universes[0]["orderCount"]);
+
+    let (status, orders) = library.get("/universes/u-arran/orders").await;
+    assert_eq!(StatusCode::OK, status);
+    let all = orders.as_array().unwrap();
+    assert_eq!(2, all.len());
+
+    // Addressed by what the file called it, in the order the file wrote them.
+    assert_eq!("main", all[0]["id"]);
+    assert_eq!("Ordre conseillé", all[0]["name"]);
+    assert_eq!(true, all[0]["default"]);
+    // False is absent rather than written: a default nobody holds says nothing.
+    assert!(all[1].get("default").is_none(), "{:?}", all[1]);
+
+    let steps = all[0]["steps"].as_array().unwrap();
+    assert_eq!(3, steps.len());
+    // A whole work carries no unit and no bounds at all.
+    assert!(steps[0].get("unit").is_none(), "{:?}", steps[0]);
+    assert!(steps[0].get("from").is_none(), "{:?}", steps[0]);
+    assert_eq!("Elfes", steps[0]["work"]);
+    // A volume range says which edition it is counted in, under the name `/series` uses.
+    assert_eq!("VOLUME", steps[1]["unit"]);
+    assert_eq!("e-nains", steps[1]["seriesId"]);
+    assert_eq!(1.0, steps[1]["from"]);
+    assert_eq!(2.0, steps[1]["to"]);
+    // And a chapter range names none, with an open end written as no `to`.
+    assert_eq!("CHAPTER", steps[2]["unit"]);
+    assert!(steps[2].get("seriesId").is_none(), "{:?}", steps[2]);
+    assert_eq!(121.0, steps[2]["from"]);
+    assert!(steps[2].get("to").is_none(), "{:?}", steps[2]);
+
+    // Two questions for two orders and four steps — and still two for one order, so the
+    // cost is the shape of the answer and not its size.
+    let both = cost(&library.db, || {
+        library
+            .repository()
+            .orders_of_universe("u-arran")
+            .expect("orders");
+    });
+    assert_eq!(2, both, "{both} questions for two orders");
+
+    library
+        .db
+        .write(|cx| {
+            cx.execute("DELETE FROM reading_order WHERE id = 'o-pub'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let one = cost(&library.db, || {
+        library
+            .repository()
+            .orders_of_universe("u-arran")
+            .expect("orders");
+    });
+    assert_eq!(both, one, "one order cost {one} where two cost {both}");
+
+    library
+        .db
+        .write(|cx| {
+            cx.execute(
+                "UPDATE edition SET name = 'Deluxe' WHERE id = 'e-nains'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let (status, named) = library.get("/universes/u-arran/orders").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(named[0]["steps"][1]["series"], "Deluxe");
+}
+
+/// A universe that declares no order answers an empty list. Declaring none is the ordinary
+/// case, and a 404 would say the universe does not exist.
+#[tokio::test]
+async fn an_universe_with_no_order_answers_an_empty_list() {
+    let library = Library::new();
+    let (status, orders) = library.get("/universes/u-arran/orders").await;
+    assert_eq!(StatusCode::OK, status);
+    assert!(orders.as_array().unwrap().is_empty());
+
+    let (status, universes) = library.get("/universes").await;
+    assert_eq!(StatusCode::OK, status);
+    assert_eq!(0, universes[0]["orderCount"]);
+}
+
 /// Where the reader left off, across the whole shelf. No count and no arrival date stands in
 /// for it, which is why it took the place of `updated` — an order that said only that a
 /// series had received something, now what `added` itself means.
@@ -1030,4 +1177,21 @@ async fn a_misspelled_search_held_to_a_filter_stays_held_to_it() {
     // And with a publisher instead, which narrows to a different set of editions.
     let (status, body) = library.get("/search?q=Blaech&publisher=Kana").await;
     assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn explicitly_sorted_legacy_search_keeps_the_array_and_matches_paged_results() {
+    let library = Library::new();
+    for sort in ["name", "added", "read", "volumes"] {
+        for direction in ["asc", "desc"] {
+            let query = format!("/search?q=e&sort={sort}&direction={direction}");
+            let (status, legacy) = library.get(&query).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(legacy.is_array());
+            assert!(!legacy.as_array().unwrap().is_empty());
+            let (status, paged) = library.get(&format!("{query}&page=0&size=40")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(legacy, paged["items"], "{sort} {direction}");
+        }
+    }
 }

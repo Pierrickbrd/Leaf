@@ -681,8 +681,10 @@ fn a_scan_that_fails_says_why_rather_than_only_writing_it_down() {
     loop {
         let status = runner.status();
         if status.state == "DONE" {
-            let said = status.summary.unwrap_or_default();
-            assert!(said.contains("failed:"), "{said}");
+            // Named on its own field rather than buried in a paragraph: a client shows a
+            // failure differently from a count, and cannot if it has to read prose to
+            // tell them apart.
+            let said = status.report.expect("a report").failure.unwrap_or_default();
             assert!(said.contains("the library is not there"), "{said}");
             return;
         }
@@ -845,4 +847,43 @@ fn only_0600_and_0400_shut_a_private_key_to_everyone_but_its_owner() {
             "{open:04o} must be reachable by others"
         );
     }
+}
+
+#[test]
+fn scan_findings_omit_empty_fields_and_serialize_nonzero_counts() {
+    use leaf_server::scan::report::ScanReport;
+    let empty = serde_json::to_value(ScanReport::default().findings()).unwrap();
+    assert!(empty.get("chaptersWithoutStartPage").is_none());
+    assert!(empty.get("findings").is_none());
+    assert!(empty.get("failure").is_none());
+
+    let report = ScanReport {
+        chapters_without_start_page: vec!["Tome 1 → Chapitre 1".into()],
+        errors: (0..20).map(|n| format!("file {n}")).collect(),
+        ..Default::default()
+    };
+    let found = serde_json::to_value(report.findings()).unwrap();
+    assert_eq!(found["chaptersWithoutStartPage"], 1);
+    assert_eq!(found["findings"][0]["total"], 20);
+    assert_eq!(found["findings"][0]["items"].as_array().unwrap().len(), 16);
+}
+
+#[test]
+fn a_database_parent_that_is_a_file_is_reported() {
+    use leaf_server::store::Db;
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("file");
+    std::fs::write(&parent, "occupied").unwrap();
+    let error = Db::open(&parent.join("index.sqlite"))
+        .err()
+        .expect("not a directory");
+    assert!(error.to_string().contains("creating"), "{error:#}");
+}
+
+#[test]
+fn a_database_path_that_is_a_directory_is_reported() {
+    use leaf_server::store::Db;
+    let dir = tempfile::tempdir().unwrap();
+    let error = Db::open(dir.path()).err().expect("not a database file");
+    assert!(error.to_string().contains("opening"), "{error:#}");
 }

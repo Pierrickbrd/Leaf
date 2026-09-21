@@ -23,7 +23,7 @@ use crate::archive::cbz;
 use crate::metadata::label;
 use crate::metadata::legacy_comic_info::{self as comic_info, LegacyRead};
 use crate::metadata::sidecars::{
-    self, ArcJson, ChapterJson, EditionJson, EntryJson, UniverseJson, WorkJson,
+    self, ArcJson, ChapterJson, EditionJson, EntryJson, StepJson, UniverseJson, WorkJson, UNITS,
 };
 use crate::scan::checks;
 use crate::scan::covers;
@@ -329,7 +329,7 @@ impl Scanner {
         seen: &mut Seen,
         report: &mut ScanReport,
     ) -> Result<()> {
-        let id = self.record_universe(cx, folder, seen, report)?;
+        let (id, meta) = self.record_universe(cx, folder, seen, report)?;
         let name = self.universe_name(cx, &id)?;
         for work in layout::sub_folders(folder) {
             // Universes do not nest: the model is universe, work, edition, and a fourth
@@ -347,7 +347,217 @@ impl Scanner {
             }
             self.visit_work(cx, &work, Some(&id), name.as_deref(), seen, report)?;
         }
+        // Last, and in the same transaction as the works it points at: an order names works
+        // by folder, and a step cannot be resolved against a work nobody has recorded yet.
+        self.record_orders(cx, folder, &id, meta.as_ref(), report)?;
         Ok(())
+    }
+
+    /// The named ways through this universe, rewritten whole.
+    ///
+    /// Derived and never authoritative: `universe.json` is the truth, these rows are what a
+    /// query can reach. So they are deleted and written again rather than reconciled — a
+    /// half-updated order is an order that reads wrong, where a rewritten one cannot.
+    fn record_orders(
+        &self,
+        cx: &Cx<'_>,
+        folder: &Path,
+        universe_id: &str,
+        meta: Option<&UniverseJson>,
+        report: &mut ScanReport,
+    ) -> Result<()> {
+        cx.execute(
+            "DELETE FROM reading_order WHERE universe_id = ?1",
+            [universe_id],
+        )?;
+        let Some(meta) = meta else {
+            return Ok(());
+        };
+        if meta.orders.is_empty() {
+            return Ok(());
+        }
+
+        let here = name_of(folder);
+        let mut declared_ids: Vec<String> = Vec::new();
+        for (at, order) in meta.orders.iter().enumerate() {
+            let declared = order
+                .id
+                .clone()
+                .filter(|one| !one.trim().is_empty())
+                .or_else(|| {
+                    order
+                        .name
+                        .as_deref()
+                        .map(search_key)
+                        .filter(|one| !one.is_empty())
+                })
+                .unwrap_or_else(|| (at + 1).to_string());
+            if declared_ids.contains(&declared) {
+                report.contradictions.push(format!(
+                    "{here}/universe.json — two orders are both called \"{declared}\"; the                      second is disregarded"
+                ));
+                continue;
+            }
+            declared_ids.push(declared.clone());
+
+            let order_id = id_of(&folder.join(&declared), "order");
+            let name = order
+                .name
+                .clone()
+                .filter(|one| !one.trim().is_empty())
+                .unwrap_or_else(|| declared.clone());
+            let is_default = meta.default_order.as_deref() == Some(declared.as_str());
+            cx.execute(
+                "INSERT INTO reading_order (id, universe_id, declared_id, name, position,
+                                            is_default)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![
+                    order_id,
+                    universe_id,
+                    declared,
+                    name,
+                    at as i64,
+                    i64::from(is_default)
+                ],
+            )?;
+
+            let mut position = 0i64;
+            for (step_at, step) in order.steps.iter().enumerate() {
+                let complaint =
+                    self.record_step(cx, folder, &order_id, position, step, &declared)?;
+                match complaint {
+                    Some(why) => report.disregarded.push(format!(
+                        "{here}/universe.json — order \"{declared}\", step {}: {why}",
+                        step_at + 1
+                    )),
+                    None => position += 1,
+                }
+            }
+        }
+
+        if let Some(wanted) = meta.default_order.as_deref() {
+            if !declared_ids.iter().any(|one| one == wanted) {
+                report.contradictions.push(format!(
+                    "{here}/universe.json — defaultOrder is \"{wanted}\" and no order is                      called that; the first one is offered instead"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// One step, or the reason it was left out. Returning the complaint rather than pushing
+    /// it here keeps the wording of "which order, which step" in one place.
+    fn record_step(
+        &self,
+        cx: &Cx<'_>,
+        folder: &Path,
+        order_id: &str,
+        position: i64,
+        step: &StepJson,
+        declared: &str,
+    ) -> Result<Option<String>> {
+        let Some(work) = step
+            .work
+            .as_deref()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+        else {
+            return Ok(Some("no work named".to_string()));
+        };
+
+        // By path and not by hashing the folder name: a path that is not in the database is
+        // a work this universe does not hold, which is exactly what has to be reported.
+        let work_path = absolute(&folder.join(work));
+        let Some(work_id) = cx.query_one(
+            "SELECT id FROM work WHERE path = ?1",
+            [work_path.as_str()],
+            |r| r.get::<_, String>(0),
+        )?
+        else {
+            return Ok(Some(format!("\"{work}\" is not a work of this universe")));
+        };
+
+        let unit = step
+            .unit
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty());
+        let unit = match unit {
+            None => None,
+            Some(word) => {
+                let upper = word.to_uppercase();
+                if !UNITS.contains(&upper.as_str()) {
+                    return Ok(Some(format!(
+                        "\"{word}\" is not a unit; it is CHAPTER or VOLUME"
+                    )));
+                }
+                Some(upper)
+            }
+        };
+
+        let named_edition = step
+            .edition
+            .as_deref()
+            .map(str::trim)
+            .filter(|e| !e.is_empty());
+        let edition_id = match (unit.as_deref(), named_edition) {
+            // A range of volumes describes different content in a 42-volume edition and a
+            // 34-volume one, so it has to say which.
+            (Some("VOLUME"), None) => {
+                return Ok(Some(
+                    "a VOLUME range must name its edition, because volume numbers differ                      between editions of the same work"
+                        .to_string(),
+                ))
+            }
+            (Some("CHAPTER"), Some(_)) => {
+                return Ok(Some(
+                    "a CHAPTER range must not name an edition: a chapter number identifies                      the same story in every edition"
+                        .to_string(),
+                ))
+            }
+            (_, None) => None,
+            (_, Some(edition)) => {
+                let path = absolute(&folder.join(work).join(edition));
+                let found = cx.query_one(
+                    "SELECT id FROM edition WHERE path = ?1 AND work_id = ?2",
+                    rusqlite::params![path.as_str(), work_id.as_str()],
+                    |r| r.get::<_, String>(0),
+                )?;
+                match found {
+                    Some(id) => Some(id),
+                    None => {
+                        return Ok(Some(format!(
+                            "\"{edition}\" is not an edition of \"{work}\""
+                        )))
+                    }
+                }
+            }
+        };
+
+        if let (Some(from), Some(to)) = (step.from, step.to) {
+            if from > to {
+                return Ok(Some(format!(
+                    "the range runs from {from} to {to}, which is backwards"
+                )));
+            }
+        }
+
+        cx.execute(
+            "INSERT INTO reading_order_step (id, order_id, position, work_id, unit,
+                                             edition_id, from_number, to_number)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            rusqlite::params![
+                id_of(&folder.join(declared), &format!("step{position}")),
+                order_id,
+                position,
+                work_id,
+                unit,
+                edition_id,
+                step.from,
+                step.to
+            ],
+        )?;
+        Ok(None)
     }
 
     fn visit_work(
@@ -1325,7 +1535,7 @@ impl Scanner {
         folder: &Path,
         seen: &mut Seen,
         report: &mut ScanReport,
-    ) -> Result<String> {
+    ) -> Result<(String, Option<UniverseJson>)> {
         let meta: Option<UniverseJson> = read_json(folder, layout::UNIVERSE_FILE);
         let id = id_of(folder, "universe");
         seen.universes.insert(id.clone());
@@ -1334,12 +1544,16 @@ impl Scanner {
              ON CONFLICT(id) DO UPDATE SET name = excluded.name",
             rusqlite::params![
                 id,
-                meta.and_then(|m| m.name).unwrap_or_else(|| name_of(folder)),
+                meta.as_ref()
+                    .and_then(|m| m.name.clone())
+                    .unwrap_or_else(|| name_of(folder)),
                 absolute(folder)
             ],
         )?;
         report.universes += 1;
-        Ok(id)
+        // Handed back rather than read again: the orders in it name works, and no work of
+        // this universe is in the database yet.
+        Ok((id, meta))
     }
 
     fn universe_name(&self, cx: &Cx<'_>, id: &str) -> Result<Option<String>> {
