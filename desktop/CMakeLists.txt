@@ -433,7 +433,7 @@ install(TARGETS leaf-desktop
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
-install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../assets/logos/leaf-light.svg
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../assets/logos/leaf-dark.svg
     DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps
     RENAME leaf.svg
 )
