@@ -14,9 +14,12 @@
 //         dark: 0 1px 2px rgb(0 0 0 / .55), 0 10px 28px -8px rgb(0 0 0 / .65)
 // The bar's smaller shadow belongs to the bar itself, which is not drawn yet:
 //   bar:  0 1px 1px rgb(26 29 27 / .05)   dark: 0 1px 1px rgb(0 0 0 / .4)
-// Qt 6.4.2 has no MultiEffect, and CI has no Qt5Compat GraphicalEffects module; the texture
-// keeps that missing dependency out. Elevation and tone stay coupled: a card carries a
-// shadow, therefore its tone gap can stay small.
+// Qt 6.4.2 has no MultiEffect, and a blur recomputed by every delegate of a scrolling grid is
+// the cost the texture exists to avoid — two decoded images shared by all of them instead.
+// (This used to add that CI had no Qt5Compat GraphicalEffects module at all. It has, since
+// `qml6-module-qt5compat-graphicaleffects` joined the workflow's apt line, and the QML has
+// been importing it for a while; the reason above is the one that still holds.) Elevation and
+// tone stay coupled: a card carries a shadow, therefore its tone gap can stay small.
 
 #include "Fonts.h"
 
@@ -43,6 +46,10 @@ class Theme : public QObject
     Q_PROPERTY(QColor inkFaint READ inkFaint NOTIFY changed)
     Q_PROPERTY(QColor emerald READ emerald NOTIFY changed)
     Q_PROPERTY(QColor emeraldWash READ emeraldWash NOTIFY changed)
+    /// What is written on an emerald pill — the resume band's button. Emerald is dark in
+    /// the light theme and bright in the dark one, so its label turns over with it; a
+    /// single fixed tone is unreadable on one of the two.
+    Q_PROPERTY(QColor onEmerald READ onEmerald NOTIFY changed)
     Q_PROPERTY(QColor alert READ alert NOTIFY changed)
     Q_PROPERTY(QColor alertWash READ alertWash NOTIFY changed)
     /// The reader has paper of its own, deeper than the application's: a white page needs
@@ -82,6 +89,7 @@ public:
     QColor inkFaint() const;
     QColor emerald() const;
     QColor emeraldWash() const;
+    QColor onEmerald() const;
     QColor alert() const;
     QColor alertWash() const;
     QColor readerPaper() const;

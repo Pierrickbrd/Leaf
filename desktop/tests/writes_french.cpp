@@ -72,6 +72,176 @@ private slots:
                  u"Tome 12 · Page 47/190 · Chapitre 98"_s);
     }
 
+    /// « Non lues 12 » — the count belongs to the pill, and the pill is one string.
+    void a_pill_carries_its_count()
+    {
+        QCOMPARE(Words::pill(Words::readStatus(Api::ReadStatus::Unread), 12),
+                 u"Non lues 12"_s);
+        QCOMPARE(Words::pill(Words::medium(Api::Medium::Bd), 12), u"BD 12"_s);
+        // A count of zero is still a count: the server does not offer a value nothing
+        // matches, so this can only arrive from a client that made one up.
+        QCOMPARE(Words::pill(u"Comics"_s, 0), u"Comics 0"_s);
+    }
+
+    /// « Trier : Nom », with the space that will not break before the colon — and the four
+    /// orders the bar offers, worded here and nowhere else.
+    void the_bar_names_the_order_in_full()
+    {
+        QCOMPARE(Words::sortOrder(Api::Sort::Name), u"Nom"_s);
+        // "Ajout" and not "Ajout récent": the direction is now said beside the criterion, and
+        // a criterion that carries one of them in its name contradicts the other half.
+        QCOMPARE(Words::sortOrder(Api::Sort::Added), u"Ajout"_s);
+        QCOMPARE(Words::sortOrder(Api::Sort::Read), u"Dernière lecture"_s);
+        QCOMPARE(Words::sortOrder(Api::Sort::Volumes), u"Nombre de tomes"_s);
+        QCOMPARE(Words::labelled(u"Trier"_s, Words::sortOrder(Api::Sort::Name)),
+                 u"Trier"_s + Words::Nbsp + u": Nom"_s);
+    }
+
+    /// The eight axes a library can be narrowed by. The contract's spelling goes in, because
+    /// that is what the server answers with and what goes back on the wire.
+    void the_panel_names_every_axis_it_offers()
+    {
+        QCOMPARE(Words::axis(u"read"_s), u"Lecture"_s);
+        QCOMPARE(Words::axis(u"medium"_s), u"Type"_s);
+        QCOMPARE(Words::axis(u"universe"_s), u"Univers"_s);
+        QCOMPARE(Words::axis(u"genre"_s), u"Genre"_s);
+        QCOMPARE(Words::axis(u"author"_s), u"Auteur"_s);
+        QCOMPARE(Words::axis(u"publisher"_s), u"Éditeur"_s);
+        QCOMPARE(Words::axis(u"language"_s), u"Langue"_s);
+        QCOMPARE(Words::axis(u"status"_s), u"Statut"_s);
+
+        // An axis this client has no word for is not drawn rather than drawn nameless: the
+        // server may grow a ninth before this client is taught it.
+        QCOMPARE(Words::axis(u"colour"_s), QString());
+    }
+
+    /// Whether the work is still being published, which is not whether you have read it.
+    /// « En cours » under two headings would be one word doing two jobs.
+    void a_work_still_being_published_is_not_a_work_you_are_partway_through()
+    {
+        QCOMPARE(Words::editionStatus(u"ongoing"_s), u"En parution"_s);
+        QCOMPARE(Words::editionStatus(u"completed"_s), u"Terminée"_s);
+        QVERIFY(Words::editionStatus(u"ongoing"_s) != Words::readStatus(Api::ReadStatus::InProgress));
+
+        // A word this client has not been taught is shown as it stands: the reader can still
+        // choose it, and it is their own library saying it.
+        QCOMPARE(Words::editionStatus(u"hiatus"_s), u"hiatus"_s);
+    }
+
+    void a_language_tag_becomes_a_word_for_it()
+    {
+        QCOMPARE(Words::language(u"fr"_s), u"Français"_s);
+        QCOMPARE(Words::language(u"ja"_s), u"日本語"_s);
+        // Not a tag anybody speaks: shown as it stands rather than filed under whatever the
+        // system happens to answer, which would put every foreign edition under « Français ».
+        QCOMPARE(Words::language(u"zzz"_s), u"zzz"_s);
+        QCOMPARE(Words::language(QString()), QString());
+    }
+
+    /// The order and the way it runs, in the one string the bar shows and the menu repeats on
+    /// the criterion in force — which is what makes the second click on it have a target.
+    void the_order_says_which_way_it_runs()
+    {
+        QCOMPARE(Words::sortValue(Api::Sort::Name, false), u"Nom · A → Z"_s);
+        QCOMPARE(Words::sortValue(Api::Sort::Name, true), u"Nom · Z → A"_s);
+        QCOMPARE(Words::sortValue(Api::Sort::Added, false), u"Ajout · récent → ancien"_s);
+        QCOMPARE(Words::sortValue(Api::Sort::Added, true), u"Ajout · ancien → récent"_s);
+        QCOMPARE(Words::sortValue(Api::Sort::Read, false), u"Lecture · récente → ancienne"_s);
+        QCOMPARE(Words::sortValue(Api::Sort::Read, true), u"Lecture · ancienne → récente"_s);
+        QCOMPARE(Words::sortValue(Api::Sort::Volumes, false), u"Tomes · plus → moins"_s);
+        QCOMPARE(Words::sortValue(Api::Sort::Volumes, true), u"Tomes · moins → plus"_s);
+
+        // Every one of the eight is a sentence, never an empty string from a value the
+        // enumeration grew and this file was not told about.
+        using enum Api::Sort;
+        for (const Api::Sort order : {Name, Added, Volumes, Read}) {
+            for (const bool reversed : {false, true})
+                QVERIFY2(!Words::sortValue(order, reversed).isEmpty(), "un tri sans mots");
+        }
+    }
+
+    /// What a search says about what it found, and about what it did not. Written here rather
+    /// than where they are shown, for the reason this whole file exists: a string spelled in a
+    /// screen is a string no test ever reads.
+    void a_search_says_what_it_found()
+    {
+        QCOMPARE(Words::overview(), u"Aperçu"_s);
+        QCOMPARE(Words::series(6), u"Séries · 6"_s);
+        QCOMPARE(Words::files(17), u"Fichiers · 17"_s);
+        QCOMPARE(Words::files(1), u"Fichiers · 1"_s);
+
+        QCOMPARE(Words::seeAllSeries(6), u"Voir les 6 séries"_s);
+        QCOMPARE(Words::seeAllSeries(1), u"Voir la série"_s);
+        QCOMPARE(Words::seeAllFiles(60), u"Voir les 60 fichiers"_s);
+        QCOMPARE(Words::seeAllFiles(1), u"Voir le fichier"_s);
+
+        // One is not "les 1 autres".
+        QCOMPARE(Words::seeTheOthers(12), u"Voir les 12 autres"_s);
+        QCOMPARE(Words::seeTheOthers(1), u"Voir l’autre"_s);
+
+        // A guess is asked, not stated — and French puts a space before the mark.
+        QCOMPARE(Words::didYouMean(u"Tsugumi Ōba"_s),
+                 u"Vouliez-vous dire Tsugumi Ōba"_s + Words::Nbsp + u"?"_s);
+        QVERIFY(Words::didYouMean(u"x"_s).contains(Words::Nbsp));
+
+        QCOMPARE(Words::noSeriesByThatName(), u"Aucune série ne porte ce nom."_s);
+        QVERIFY(Words::searchHint().endsWith(u"…"_s));
+        QVERIFY2(!Words::searchHint().contains(u"..."_s), "three dots are not an ellipsis");
+        QCOMPARE(Words::filter(), u"Filtrer"_s);
+        QCOMPARE(Words::clearTheSearch(), u"Effacer la recherche"_s);
+    }
+
+    void a_file_says_which_volume_contains_it()
+    {
+        Api::Hit chapter;
+        chapter.kind = Api::Hit::Kind::Chapter;
+        chapter.label = u"Assaut"_s;
+        chapter.seriesName = u"Parasite · Édition Deluxe"_s;
+        chapter.entryKind = Api::UpNext::Kind::Volume;
+        chapter.entryNumber = 8.0;
+        chapter.entryTitle = u"Invasion"_s;
+        chapter.entryPageCount = 190;
+        QCOMPARE(Words::fileContext(chapter),
+                 u"Parasite · Édition Deluxe · Tome 8 · Invasion · 190 pages"_s);
+
+        Api::Hit volume;
+        volume.kind = Api::Hit::Kind::Entry;
+        volume.label = u"Tome 1"_s;
+        volume.seriesName = u"Death Note · Black Edition"_s;
+        volume.entryNumber = 1.0;
+        volume.entryPageCount = 1;
+        QCOMPARE(Words::fileContext(volume), u"Death Note · Black Edition · 1 page"_s);
+
+        // A volume nobody titled carries its own label as its title. Said once: the line
+        // read « Parasite Reversi · Tome 2 · Tome 2 · 187 pages » on a real library.
+        Api::Hit untitled;
+        untitled.kind = Api::Hit::Kind::Chapter;
+        untitled.label = u"Amour d’été, premier émoi"_s;
+        untitled.seriesName = u"Parasite Reversi"_s;
+        untitled.entryKind = Api::UpNext::Kind::Volume;
+        untitled.entryNumber = 2.0;
+        untitled.entryTitle = u"Tome 2"_s;
+        untitled.entryPageCount = 187;
+        QCOMPARE(Words::fileContext(untitled),
+                 u"Parasite Reversi · Tome 2 · 187 pages"_s);
+    }
+
+    void the_band_distinguishes_resuming_from_the_next_entry()
+    {
+        QCOMPARE(Words::resumeAction(Api::UpNext::Reason::InProgress), u"Reprendre"_s);
+        QCOMPARE(Words::resumeAction(Api::UpNext::Reason::NextUp), u"Continuer"_s);
+    }
+
+    /// Half a screen leaves no room for the long line. Only the volume abbreviates: the
+    /// chapter segment goes rather than turn into an abbreviation nobody has agreed on.
+    void a_band_at_half_a_screen_shortens_the_volume_and_drops_the_chapter()
+    {
+        QCOMPARE(Words::whereShort(Api::UpNext::Kind::Volume, 12.0, 47, 190),
+                 u"T12 · Page 47/190"_s);
+        QCOMPARE(Words::whereShort(Api::UpNext::Kind::Chapter, 98.0, 47, 190),
+                 u"Chapitre 98 · Page 47/190"_s);
+    }
+
     /// A chapter entry has already said which chapter it is. Saying it twice reads as two
     /// different chapters.
     void a_chapter_entry_does_not_name_its_chapter_twice()
@@ -114,7 +284,17 @@ private slots:
     /// Nothing produced here has one today; this is what keeps it that way.
     void nothing_carries_a_straight_apostrophe()
     {
-        QStringList every{Words::labelled(u"Trier"_s, u"Nom"_s), Words::nothingHere({u"BD"_s}, 1)};
+        QStringList every{Words::labelled(u"Trier"_s, u"Nom"_s),
+                          Words::nothingHere({u"BD"_s}, 1),
+                          Words::overview(),         Words::series(3),
+                          Words::sortValue(Api::Sort::Name, false),
+                          Words::sortValue(Api::Sort::Added, true),
+                          Words::files(17),          Words::seeTheOthers(1),
+                          Words::seeTheOthers(12),   Words::seeAllSeries(3),
+                          Words::seeAllFiles(12),    Words::didYouMean(u"Tsugumi Ōba"_s),
+                          Words::searchHint(),       Words::searchHintShort(),
+                          Words::clearTheSearch(),   Words::filter(),
+                          Words::noSeriesByThatName()};
         for (int i = 0; i <= int(Api::Medium::Other); ++i)
             every << Words::medium(Api::Medium(i));
         for (int i = 0; i <= int(Api::ReadStatus::Read); ++i)
@@ -123,6 +303,8 @@ private slots:
             every << Words::destination(Navigation::Destination(i));
         for (int i = 0; i <= int(Widths::Band::Wide); ++i)
             every << Words::band(Widths::Band(i));
+        for (int i = 0; i <= int(Api::UpNext::Reason::NextUp); ++i)
+            every << Words::resumeAction(Api::UpNext::Reason(i));
 
         for (const QString &one : std::as_const(every))
             QVERIFY2(!one.contains(u'\''), qPrintable(u"straight apostrophe in: "_s + one));
@@ -172,6 +354,7 @@ private slots:
         QVERIFY(Words::medium(static_cast<Api::Medium>(99)).isEmpty());
         QVERIFY(Words::destination(static_cast<Navigation::Destination>(99)).isEmpty());
         QVERIFY(Words::band(static_cast<Widths::Band>(99)).isEmpty());
+        QVERIFY(Words::resumeAction(static_cast<Api::UpNext::Reason>(99)).isEmpty());
     }
 
     /// A page number with nothing behind it — `pageCount` at zero — is left out exactly like

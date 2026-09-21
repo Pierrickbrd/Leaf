@@ -76,6 +76,75 @@ QByteArray aPage(const QJsonArray &items, int total = -1, int page = 0)
         .toJson(QJsonDocument::Compact);
 }
 
+/// The one `/next` row the artifact draws: volume 12, page 47 of 190, inside chapter 98.
+QByteArray anOffer(const QString &reason = u"IN_PROGRESS"_s)
+{
+    const QJsonObject row{
+        {u"seriesId"_s, u"ac"_s},
+        {u"seriesName"_s, u"Assassination Classroom"_s},
+        {u"reason"_s, reason},
+        {u"entry"_s,
+         QJsonObject{
+             {u"id"_s, u"volume-12"_s},
+             {u"type"_s, u"VOLUME"_s},
+             {u"number"_s, 12.0},
+             {u"pageCount"_s, 190},
+         }},
+        {u"progress"_s,
+         QJsonObject{
+             {u"page"_s, 47},
+             {u"pageCount"_s, 190},
+             {u"chapter"_s, QJsonObject{{u"label"_s, u"Chapitre 98"_s}}},
+         }},
+    };
+    return QJsonDocument(QJsonArray{row}).toJson(QJsonDocument::Compact);
+}
+
+/// `/filters`, with two values on each axis so that both are worth offering.
+QByteArray someFilters()
+{
+    const auto counted = [](const QString &value, int count) {
+        return QJsonObject{{u"value"_s, value}, {u"count"_s, count}};
+    };
+    // Two axes the row can draw, and four it cannot — one of them long enough that the panel
+    // folds it and gives it a field of its own.
+    QJsonArray manyAuthors;
+    for (int i = 1; i <= 14; ++i)
+        manyAuthors << counted(u"Auteur %1"_s.arg(i, 2, 10, QChar(u'0')), 15 - i);
+    return QJsonDocument(
+               QJsonObject{
+                   {u"readStatuses"_s,
+                    QJsonArray{counted(u"UNREAD"_s, 12), counted(u"READ"_s, 4)}},
+                   {u"media"_s, QJsonArray{counted(u"manga"_s, 8), counted(u"bd"_s, 3)}},
+                   {u"genres"_s,
+                    QJsonArray{counted(u"Horreur"_s, 5), counted(u"Aventure"_s, 3)}},
+                   {u"universes"_s,
+                    QJsonArray{counted(u"Parasite"_s, 3), counted(u"Terres d’Arran"_s, 2)}},
+                   {u"languages"_s, QJsonArray{counted(u"fr"_s, 9), counted(u"ja"_s, 2)}},
+                   {u"authors"_s, manyAuthors},
+               })
+        .toJson(QJsonDocument::Compact);
+}
+
+/// The same axes, with an author list the size a real library reaches. Kept apart from
+/// `someFilters` so that every other test keeps the small one and stays quick.
+QByteArray manyFilters(int authors)
+{
+    const auto counted = [](const QString &value, int count) {
+        return QJsonObject{{u"value"_s, value}, {u"count"_s, count}};
+    };
+    QJsonArray names;
+    for (int i = 1; i <= authors; ++i)
+        names << counted(u"Auteur %1"_s.arg(i, 4, 10, QChar(u'0')), 1);
+    return QJsonDocument(
+               QJsonObject{
+                   {u"readStatuses"_s,
+                    QJsonArray{counted(u"UNREAD"_s, 12), counted(u"READ"_s, 4)}},
+                   {u"authors"_s, names},
+               })
+        .toJson(QJsonDocument::Compact);
+}
+
 QByteArray aReply(int status, const QByteArray &contentType, const QByteArray &body)
 {
     return "HTTP/1.1 " + QByteArray::number(status) + " .\r\n"
@@ -92,6 +161,24 @@ QByteArray aCover()
     buffer.open(QIODevice::WriteOnly);
     image.save(&buffer, "PNG");
     return bytes;
+}
+
+/// Every item under `root` carrying that name. `findChildren` misses them: a Repeater's
+/// delegates are not QObject children of the item they are drawn in, which is the same
+/// reason `itemNamed` walks the item tree rather than the object tree.
+void itemsNamed(QQuickItem *root, const QString &name, QList<QQuickItem *> &into)
+{
+    if (root->objectName() == name)
+        into.append(root);
+    for (QQuickItem *child : root->childItems())
+        itemsNamed(child, name, into);
+}
+
+QList<QQuickItem *> itemsNamed(QQuickItem *root, const QString &name)
+{
+    QList<QQuickItem *> all;
+    itemsNamed(root, name, all);
+    return all;
 }
 
 QQuickItem *itemNamed(QQuickItem *root, const QString &name)
@@ -332,11 +419,16 @@ private slots:
         QTRY_VERIFY(ring->isVisible());
         QTRY_COMPARE(visibleRingCount(), 1);
 
-        // The pointer remains physically over the first cover. A key must transfer the one
-        // emphasis to the keyboard's next item, not leave a hover ring behind it.
+        // The pointer paints; it does not anchor, and it does not take the focus either —
+        // hovering used to do both, so crossing the shelf with the mouse emptied the search
+        // field of its focus in the middle of a word. The keyboard takes the shelf when it is
+        // given it, and enters at the first cover even though the pointer is over that same
+        // one. Then Right continues from where the keyboard stands.
+        grid->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_COMPARE(grid->property("currentIndex").toInt(), 0);
+        QTRY_VERIFY(ring->isVisible());
         QTest::keyClick(window, Qt::Key_Right);
         QTRY_COMPARE(grid->property("currentIndex").toInt(), 1);
-        QTRY_VERIFY(!ring->isVisible());
         QTRY_VERIFY(finishedRing->isVisible());
         QTRY_COMPARE(visibleRingCount(), 1);
 
@@ -352,13 +444,13 @@ private slots:
         QTRY_COMPARE(visibleRingCount(), 0);
         QTRY_COMPARE(grid->property("currentIndex").toInt(), 1);
 
-        // While it is actually hovered, however, the pointer is the anchor: Left starts
-        // immediately beside the third tile, not beside the former keyboard position.
+        // And a key continues from where the keyboard stands, not from under the pointer: the
+        // third cover is hovered, Left goes to the first — the one beside the second.
         QTest::mouseMove(window, centreOf(queuedCover), 20);
         QTRY_VERIFY(queuedRing->isVisible());
         QTest::keyClick(window, Qt::Key_Left);
-        QTRY_COMPARE(grid->property("currentIndex").toInt(), 1);
-        QTRY_VERIFY(finishedRing->isVisible());
+        QTRY_COMPARE(grid->property("currentIndex").toInt(), 0);
+        QTRY_VERIFY(ring->isVisible());
         QTRY_VERIFY(!queuedRing->isVisible());
         QTRY_COMPARE(visibleRingCount(), 1);
 
@@ -369,7 +461,26 @@ private slots:
                           QPoint(window->width() - 2, window->height() - 2));
         QTRY_COMPARE(visibleRingCount(), 0);
         QCOMPARE(grid->property("currentIndex").toInt(), -1);
+
+        auto *searchField = window->findChild<QQuickItem *>(u"search-field"_s);
+        auto *filterButton = window->findChild<QQuickItem *>(u"filter-button"_s);
+        auto *sortButton = window->findChild<QQuickItem *>(u"sort-button"_s);
+        auto *settingsButton = window->findChild<QQuickItem *>(u"settings-button"_s);
+        QVERIFY(searchField);
+        QVERIFY(filterButton);
+        QVERIFY(sortButton);
+        QVERIFY(settingsButton);
+
         QTest::keyClick(window, Qt::Key_Right);
+        QTRY_VERIFY(searchField->hasActiveFocus());
+        QCOMPARE(grid->property("currentIndex").toInt(), -1);
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(filterButton->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(sortButton->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(settingsButton->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab);
         QTRY_COMPARE(grid->property("currentIndex").toInt(), 0);
         QTRY_VERIFY(ring->isVisible());
         QTRY_COMPARE(visibleRingCount(), 1);
@@ -378,6 +489,11 @@ private slots:
                           QPoint(window->width() - 2, window->height() - 2));
         QTRY_COMPARE(visibleRingCount(), 0);
         QCOMPARE(grid->property("currentIndex").toInt(), -1);
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(searchField->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTest::keyClick(window, Qt::Key_Tab);
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_COMPARE(grid->property("currentIndex").toInt(), 0);
         QTRY_VERIFY(ring->isVisible());
@@ -398,50 +514,48 @@ private slots:
         QTRY_VERIFY(finishedAccessible->state().focused);
         QVERIFY(!accessible->state().focused);
 
-        // With no following page participant, every boundary wraps explicitly instead of
-        // swallowing the key and trapping focus on the edge tile.
+        // The bar is now the next page region. Crossing the grid boundary reaches its first
+        // participant, and coming back enters the shelf through its last cover.
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_COMPARE(grid->property("currentIndex").toInt(), 2);
         QTest::keyClick(window, Qt::Key_Tab);
-        QTRY_COMPARE(grid->property("currentIndex").toInt(), 0);
+        QTRY_VERIFY(searchField->hasActiveFocus());
+        QCOMPARE(grid->property("currentIndex").toInt(), -1);
         QTest::keyClick(window, Qt::Key_Backtab);
         QTRY_COMPARE(grid->property("currentIndex").toInt(), 2);
         QTest::keyClick(window, Qt::Key_Down);
-        QTRY_COMPARE(grid->property("currentIndex").toInt(), 0);
+        QTRY_VERIFY(searchField->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Up);
         QTRY_COMPARE(grid->property("currentIndex").toInt(), 2);
 
-        // Adding a later focus-chain participant is enough to make the shelf leave itself;
-        // no shelf code knows its type. Backtab enters the composite from its far edge.
+        // An item added to the tree is no longer part of the page's order: that order is
+        // stated by the page — bar, band, row, covers, and round — rather than read from the
+        // item tree, which cannot express it. What still holds is that a focus change caused
+        // from outside the shelf clears the position the shelf was keeping.
         auto *page = window->findChild<QQuickItem *>(u"page-navigation-root"_s);
         auto *navigationStart = window->findChild<QQuickItem *>(u"navigation-start"_s);
         QVERIFY(page);
         QVERIFY(navigationStart);
-        auto *following = new QQuickItem(page);
-        following->setParentItem(page);
-        following->setActiveFocusOnTab(true);
-        following->setSize(QSizeF(1, 1));
-        QTest::keyClick(window, Qt::Key_Tab);
-        QTRY_VERIFY(following->hasActiveFocus());
-        QTRY_COMPARE(visibleRingCount(), 0);
-        QTest::keyClick(window, Qt::Key_Backtab);
-        QTRY_VERIFY(grid->hasActiveFocus());
-        QTRY_COMPARE(grid->property("currentIndex").toInt(), 2);
+        auto *elsewhere = new QQuickItem(page);
+        elsewhere->setParentItem(page);
+        elsewhere->setActiveFocusOnTab(true);
+        elsewhere->setSize(QSizeF(1, 1));
 
-        // A focus change caused outside the composite clears its stored position globally.
-        following->forceActiveFocus(Qt::MouseFocusReason);
+        elsewhere->forceActiveFocus(Qt::MouseFocusReason);
         QTRY_COMPARE(visibleRingCount(), 0);
         QTRY_COMPARE(grid->property("currentIndex").toInt(), -1);
 
         // Once the page itself has been reset, direction no longer changes the entry point:
         // Left, Up and Backtab all restart at the first participant, just like Right and Tab.
         const QPoint blank(window->width() - 2, window->height() - 2);
-        const auto resetAndPress = [window, grid, navigationStart, blank](int key) {
+        const auto resetAndPress =
+            [window, grid, navigationStart, searchField, blank](int key) {
             QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, blank);
             QTRY_COMPARE(grid->property("currentIndex").toInt(), -1);
             QTRY_VERIFY(navigationStart->hasActiveFocus());
             QTest::keyClick(window, static_cast<Qt::Key>(key));
-            QTRY_COMPARE(grid->property("currentIndex").toInt(), 0);
+            QTRY_VERIFY(searchField->hasActiveFocus());
+            QTRY_COMPARE(grid->property("currentIndex").toInt(), -1);
         };
         resetAndPress(Qt::Key_Left);
         resetAndPress(Qt::Key_Up);
@@ -452,6 +566,1294 @@ private slots:
         theme->setDark(true);
         QTRY_VERIFY(shadow->property("source").toString().endsWith(
             u"assets/cover-shadow-dark.png"_s));
+    }
+
+    /// The band the artifact puts above the grid, with the wording and the elevation it draws.
+    /// Every string here was settled in C++ — this asserts the QML shows those and not others.
+    void the_resume_band_draws_the_one_offer_above_the_grid()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"ac"_s, u"Assassination Classroom"_s, 21, true)}));
+        const QByteArray nextReply =
+            aReply(200, QByteArrayLiteral("application/json"), anOffer());
+        const QByteArray coverReply =
+            aReply(200, QByteArrayLiteral("image/png"), aCover());
+        pretend.answerFor = [pageReply, nextReply, coverReply](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return nextReply;
+            return request.startsWith("GET /series?") ? pageReply : coverReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *band = window->findChild<QQuickItem *>(u"resume-band"_s);
+        QVERIFY(band);
+        QTRY_VERIFY(band->isVisible());
+
+        auto *card = itemNamed(band, u"resume-card"_s);
+        auto *name = itemNamed(band, u"resume-name"_s);
+        auto *where = itemNamed(band, u"resume-where"_s);
+        auto *action = itemNamed(band, u"resume-action"_s);
+        auto *label = itemNamed(band, u"resume-action-text"_s);
+        auto *track = itemNamed(band, u"resume-progress"_s);
+        auto *fill = itemNamed(band, u"resume-progress-fill"_s);
+        auto *cover = itemNamed(band, u"resume-cover"_s);
+        auto *shadow = itemNamed(band, u"cover-shadow-resume"_s);
+        QVERIFY(card);
+        QVERIFY(name);
+        QVERIFY(where);
+        QVERIFY(action);
+        QVERIFY(label);
+        QVERIFY(track);
+        QVERIFY(fill);
+        QVERIFY(cover);
+        QVERIFY(shadow);
+
+        QTRY_COMPARE(name->property("text").toString(), u"Assassination Classroom"_s);
+        QCOMPARE(where->property("text").toString(),
+                 u"Tome 12 · Page 47/190 · Chapitre 98"_s);
+        QCOMPARE(label->property("text").toString(), u"Reprendre"_s);
+        QVERIFY(label->isVisible());
+        QCOMPARE(cover->property("source").toString(),
+                 u"http://127.0.0.1:%1/entries/volume-12/cover"_s.arg(pretend.serverPort()));
+
+        const QFont nameFont = name->property("font").value<QFont>();
+        QCOMPARE(nameFont.family(), Theme().displayFamily());
+        QCOMPARE(nameFont.pixelSize(), 20);
+        QCOMPARE(card->property("radius").toInt(), Theme().cardRadius());
+        // A pill, and not the 12 px button radius the other two radii cover.
+        QCOMPARE(action->property("radius").toDouble(), action->height() / 2);
+        // The pill measures itself from the glyph and the word it was given. A width read
+        // from a `childrenRect` that has collapsed to zero is a circle with a word spilling
+        // out of it, and nothing else in this suite would notice.
+        QVERIFY(action->width() > action->height());
+        QVERIFY(label->x() + label->width() <= action->width());
+
+        QVERIFY(track->isVisible());
+        QCOMPARE(fill->width(), qRound(track->width() * 47.0 / 190.0));
+
+        // Above the first row, and *in* the scroll rather than anchored over it: the band is
+        // the view's header, so it is content, and a hundred pixels of scroll take it a
+        // hundred pixels up. That is the artifact's rule — the band goes, the row stays.
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        auto *appBar = window->findChild<QQuickItem *>(u"app-bar"_s);
+        QVERIFY(grid);
+        QVERIFY(appBar);
+        QTRY_COMPARE(grid->property("count").toInt(), 1);
+        QQuickItem *tile = nullptr;
+        QTRY_VERIFY((tile = itemNamed(grid, u"tile-ac"_s)));
+        QVERIFY(band->height() > 0);
+        QVERIFY(grid->property("headerItem").value<QQuickItem *>());
+        QTRY_COMPARE(band->mapToItem(nullptr, QPointF(0, 0)).y(),
+                     qreal(appBar->height()));
+        QVERIFY(tile->mapToItem(nullptr, QPointF(0, 0)).y()
+                >= appBar->height() + band->height());
+
+        const qreal wasAt = grid->property("contentY").toReal();
+        grid->setProperty("contentY", wasAt + 100);
+        QCOMPARE(band->mapToItem(nullptr, QPointF(0, 0)).y(),
+                 appBar->height() - 100.0);
+    }
+
+    /// Where the band stands in the reading order: before the grid, because it is above it,
+    /// and the grid entered by its **first** cover. The walk inside the grid is the sibling
+    /// test's sentence; this one is about the seam between the two, which is where the defect
+    /// was. The button is in that chain deliberately before the reader it will open exists —
+    /// a control put into the keyboard workflow "later" is a control nobody puts in.
+    void the_band_comes_before_the_grid_in_the_reading_order()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({
+                aSeries(u"ac"_s, u"Assassination Classroom"_s, 21, true),
+                aSeries(u"dn"_s, u"Death Note · Black Edition"_s, 7, false),
+                aSeries(u"kq"_s, u"Koro Quest"_s, 5, false),
+            }));
+        const QByteArray nextReply =
+            aReply(200, QByteArrayLiteral("application/json"), anOffer());
+        const QByteArray coverReply =
+            aReply(200, QByteArrayLiteral("image/png"), aCover());
+        pretend.answerFor = [pageReply, nextReply, coverReply](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return nextReply;
+            return request.startsWith("GET /series?") ? pageReply : coverReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+
+        auto *band = window->findChild<QQuickItem *>(u"resume-band"_s);
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        auto *navigationStart = window->findChild<QQuickItem *>(u"navigation-start"_s);
+        auto *searchField = window->findChild<QQuickItem *>(u"search-field"_s);
+        auto *filterButton = window->findChild<QQuickItem *>(u"filter-button"_s);
+        auto *sortButton = window->findChild<QQuickItem *>(u"sort-button"_s);
+        auto *settingsButton = window->findChild<QQuickItem *>(u"settings-button"_s);
+        QVERIFY(band);
+        QVERIFY(grid);
+        QVERIFY(navigationStart);
+        QVERIFY(searchField);
+        QVERIFY(filterButton);
+        QVERIFY(sortButton);
+        QVERIFY(settingsButton);
+        QTRY_VERIFY(band->isVisible());
+        QTRY_COMPARE(grid->property("count").toInt(), 3);
+        // Asked of the view each time rather than kept: a GridView may build its header
+        // again, and a pointer taken once then names an item nobody is looking at.
+        const auto bandButton = [grid]() -> QQuickItem * {
+            auto *header = grid->property("headerItem").value<QQuickItem *>();
+            return header ? header->property("button").value<QQuickItem *>() : nullptr;
+        };
+        const auto bandRing = [&bandButton]() -> QQuickItem * {
+            auto *one = bandButton();
+            return one ? itemNamed(one, u"resume-action-focus"_s) : nullptr;
+        };
+        auto *action = bandButton();
+        auto *ring = itemNamed(band, u"resume-action-focus"_s);
+        QVERIFY(action);
+        QVERIFY(ring);
+        // Out of Qt's own traversal on purpose: that traversal follows the item tree, and the
+        // order this screen reads in — band, row, covers — cannot be written as a tree, the
+        // band being inside the view and the row outside it. The screen drives it instead,
+        // which is what the walk below asserts.
+        QVERIFY(!action->property("activeFocusOnTab").toBool());
+        QVERIFY(!ring->isVisible());
+
+        // The pointer is parked above the band, to the right of its card, where no tile can
+        // ever be: the cursor belongs to the X server and stays where the previous slot left
+        // it, a window opening under it hovers whatever lands beneath, and a tile that hovers
+        // takes the focus. Then the starting focus is set rather than clicked for — that a
+        // click on bare paper resets the page is the sibling test's sentence, and borrowing
+        // it here would only borrow its dependence on where the pointer happens to be.
+        QTest::mouseMove(window, QPoint(window->width() - 2, 2));
+        navigationStart->forceActiveFocus(Qt::MouseFocusReason);
+        QTRY_VERIFY(navigationStart->hasActiveFocus());
+
+        // The application bar is the page's first region. The band comes next, before the
+        // grid, and its ring says where that shared navigation now stands.
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(searchField->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(filterButton->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(sortButton->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(settingsButton->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(bandButton() && bandButton()->hasActiveFocus());
+        QVERIFY(bandRing() && bandRing()->isVisible());
+
+        // Down enters the grid by its first cover, not its last. The chain wraps — the button
+        // is both the item after the grid and the item before it — and reading the direction
+        // out of it landed on the last cover until the band was named outright.
+        QTest::keyClick(window, Qt::Key_Down);
+        QTRY_COMPARE(grid->property("currentIndex").toInt(), 0);
+        QVERIFY(!bandRing() || !bandRing()->isVisible());
+
+        // And the top row gives the focus back to the band rather than stopping dead.
+        QTest::keyClick(window, Qt::Key_Up);
+        QTRY_VERIFY(bandButton() && bandButton()->hasActiveFocus());
+    }
+
+    /// Hover and focus say different things, so they cannot look the same. The pill is filled
+    /// with emerald already and cannot take a background the way an icon button will: it grows.
+    void the_button_grows_under_the_pointer_and_shrinks_back()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"ac"_s, u"Assassination Classroom"_s, 21, true)}));
+        const QByteArray nextReply =
+            aReply(200, QByteArrayLiteral("application/json"), anOffer());
+        const QByteArray coverReply =
+            aReply(200, QByteArrayLiteral("image/png"), aCover());
+        pretend.answerFor = [pageReply, nextReply, coverReply](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return nextReply;
+            return request.startsWith("GET /series?") ? pageReply : coverReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *band = window->findChild<QQuickItem *>(u"resume-band"_s);
+        QVERIFY(band);
+        QTRY_VERIFY(band->isVisible());
+        auto *action = itemNamed(band, u"resume-action"_s);
+        auto *ring = itemNamed(band, u"resume-action-focus"_s);
+        QVERIFY(action);
+        QVERIFY(ring);
+
+        QCOMPARE(action->scale(), 1.0);
+        QVERIFY(!action->property("hovered").toBool());
+
+        const QPointF middle =
+            action->mapToItem(nullptr, QPointF(action->width() / 2, action->height() / 2));
+        // Twice, and the first one elsewhere in the window: a synthetic move that is the
+        // pointer's *first* position in a window delivers no hover at all, and the test then
+        // waits five seconds for a state nothing will ever set.
+        QTest::mouseMove(window, QPoint(window->width() / 2, window->height() - 4));
+        QTest::mouseMove(window, middle.toPoint());
+        QTRY_VERIFY(action->property("hovered").toBool());
+        QTRY_VERIFY(action->scale() > 1.0);
+        // The pointer is not the keyboard: hovering lights no ring.
+        QVERIFY(!ring->isVisible());
+
+        QTest::mouseMove(window, QPoint(window->width() - 2, window->height() - 2));
+        QTRY_VERIFY(!action->property("hovered").toBool());
+        QTRY_COMPARE(action->scale(), 1.0);
+    }
+
+    /// The bar must not fall back to Basic's white overlays: its hover help and sort choices
+    /// are Leaf surfaces, and the selected sort is the application's emerald radio mark.
+    /// The mark itself is deliberately large enough to remain a brand, not a toolbar glyph.
+    void the_bar_overlays_and_brand_belong_to_leaf()
+    {
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *theme = engine.singletonInstance<Theme *>(
+            qmlTypeId("Leaf", 1, 0, "Theme"));
+        QVERIFY(theme);
+
+        auto *mark = window->findChild<QQuickItem *>(u"leaf-mark"_s);
+        auto *filterButton = window->findChild<QQuickItem *>(u"filter-button"_s);
+        auto *sortButton = window->findChild<QQuickItem *>(u"sort-button"_s);
+        QVERIFY(mark);
+        QVERIFY(filterButton);
+        QVERIFY(sortButton);
+        // The mark is drawn small and the word carries the name: 36 against a 25-pixel word,
+        // which is the balance asked for once both were on screen — a leaf that competes with
+        // its own name reads as two logos.
+        QCOMPARE(mark->width(), 36.0);
+        QCOMPARE(mark->height(), 36.0);
+        auto *word = window->findChild<QQuickItem *>(u"brand-word"_s);
+        QVERIFY(word);
+        QCOMPARE(word->property("font").value<QFont>().pixelSize(), 25);
+        QVERIFY2(word->x() - (mark->x() + mark->width()) >= 10,
+                 "the word is not crowded against the mark");
+        QVERIFY(mark->property("source").toUrl().toString().contains(u"leaf-mark-"_s));
+
+        // And the name is not crowded against the field either. The field is a pill whose
+        // focus ring is drawn outside its edge, so at the row's spacing alone that ring came
+        // to rest on the "f" of Leaf and the two read as one object.
+        auto *field = window->findChild<QQuickItem *>(u"search-field"_s);
+        QVERIFY(field);
+        const qreal wordRight =
+            word->mapToItem(window->contentItem(), QPointF(word->width(), 0)).x();
+        const qreal fieldLeft = field->mapToItem(window->contentItem(), QPointF(0, 0)).x();
+        QVERIFY2(fieldLeft - wordRight >= 30, "the field is crowded against the name");
+
+        auto *tip = filterButton->findChild<QObject *>(u"filter-button-tooltip"_s);
+        QVERIFY(tip);
+        QCOMPARE(tip->property("delay").toInt(), 450);
+        // Open the popup itself here. Hover delivery is a window-system concern and is
+        // already exercised by the button test above; this slot owns the overlay's drawing.
+        QVERIFY(QMetaObject::invokeMethod(tip, "open"));
+        QTRY_VERIFY(tip->property("visible").toBool());
+
+        auto *tipPanel = tip->findChild<QQuickItem *>(u"filter-button-tooltip-panel"_s);
+        QVERIFY(tipPanel);
+        QCOMPARE(tipPanel->property("color").value<QColor>(), theme->surface());
+        QCOMPARE(tipPanel->property("radius").toReal(), 9.0);
+
+        QVERIFY(QMetaObject::invokeMethod(tip, "close"));
+        QTRY_VERIFY(!tip->property("visible").toBool());
+
+        auto *menu = sortButton->findChild<QObject *>(u"sort-menu"_s);
+        QVERIFY(menu);
+        QVERIFY(QMetaObject::invokeMethod(menu, "open"));
+        QTRY_VERIFY(menu->property("opened").toBool());
+
+        auto *menuPanel = menu->findChild<QQuickItem *>(u"sort-menu-panel"_s);
+        auto *selected = menu->findChild<QQuickItem *>(u"sort-option-name"_s);
+        QVERIFY(menuPanel);
+        QVERIFY(selected);
+        QCOMPARE(menuPanel->property("color").value<QColor>(), theme->surface());
+        QCOMPARE(menuPanel->property("radius").toReal(), qreal(theme->buttonRadius()));
+        QVERIFY(selected->property("checked").toBool());
+
+        auto *dot = itemNamed(selected, u"sort-option-name-dot"_s);
+        QVERIFY(dot);
+        QVERIFY(dot->isVisible());
+        QCOMPARE(dot->property("color").value<QColor>(), theme->emerald());
+
+        QVERIFY(QMetaObject::invokeMethod(menu, "close"));
+        QTRY_VERIFY(!menu->property("opened").toBool());
+    }
+
+    /// The row that says what you are looking at: worded and counted in C++, in the order the
+    /// client decided, and staying at the top while the band leaves underneath it. Lighting a
+    /// pill sends the contract's own spelling back, which is the whole of what a chip does.
+    void the_row_says_what_you_are_looking_at_and_stays_while_the_band_goes()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        QJsonArray many;
+        for (int i = 0; i < 12; ++i) {
+            many << aSeries(u"s%1"_s.arg(i), u"Série %1"_s.arg(i), 3, false);
+        }
+        const QByteArray pageReply =
+            aReply(200, QByteArrayLiteral("application/json"), aPage(many));
+        const QByteArray nextReply =
+            aReply(200, QByteArrayLiteral("application/json"), anOffer());
+        const QByteArray filtersReply =
+            aReply(200, QByteArrayLiteral("application/json"), someFilters());
+        const QByteArray coverReply =
+            aReply(200, QByteArrayLiteral("image/png"), aCover());
+        pretend.answerFor = [pageReply, nextReply, filtersReply,
+                             coverReply](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return nextReply;
+            if (request.startsWith("GET /filters"))
+                return filtersReply;
+            return request.startsWith("GET /series?") ? pageReply : coverReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *pills = window->findChild<QQuickItem *>(u"filter-pills"_s);
+        auto *band = window->findChild<QQuickItem *>(u"resume-band"_s);
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(pills);
+        QVERIFY(band);
+        QVERIFY(grid);
+        QTRY_VERIFY(pills->isVisible());
+        QTRY_COMPARE(grid->property("count").toInt(), 12);
+
+        auto *unread = itemNamed(pills, u"chip-UNREAD"_s);
+        auto *read = itemNamed(pills, u"chip-READ"_s);
+        auto *manga = itemNamed(pills, u"chip-manga"_s);
+        auto *bd = itemNamed(pills, u"chip-bd"_s);
+        auto *rule = itemNamed(pills, u"filter-separator"_s);
+        QVERIFY(unread);
+        QVERIFY(read);
+        QVERIFY(manga);
+        QVERIFY(bd);
+        QVERIFY(rule);
+        QVERIFY(rule->isVisible());
+
+        // Worded, counted, and in the order `Words.h` writes down — read status first, then
+        // the kind of book, each left to right.
+        auto *said = itemNamed(pills, u"chip-UNREAD-text"_s);
+        QVERIFY(said);
+        QCOMPARE(said->property("text").toString(), u"Non lues 12"_s);
+        QTRY_VERIFY(unread->x() < read->x());
+        QTRY_VERIFY(read->x() < rule->x());
+        QTRY_VERIFY(rule->x() < manga->x());
+        QTRY_VERIFY(manga->x() < bd->x());
+
+        // Below the band at rest, and above the first cover.
+        QTRY_VERIFY(band->isVisible());
+        const qreal bandBottom =
+            band->mapToItem(nullptr, QPointF(0, band->height())).y();
+        QTRY_COMPARE(pills->mapToItem(nullptr, QPointF(0, 0)).y(), bandBottom);
+
+        // The order the eye reads, which no focus chain can produce on its own: the band is
+        // inside the view and the row is outside it, so the chain puts the row after the
+        // covers whichever way the two are declared. The screen says the order instead.
+        auto *button = itemNamed(band, u"resume-action"_s);
+        auto *navigationStart = window->findChild<QQuickItem *>(u"navigation-start"_s);
+        auto *searchField = window->findChild<QQuickItem *>(u"search-field"_s);
+        auto *filterButton = window->findChild<QQuickItem *>(u"filter-button"_s);
+        auto *sortButton = window->findChild<QQuickItem *>(u"sort-button"_s);
+        auto *settingsButton = window->findChild<QQuickItem *>(u"settings-button"_s);
+        QVERIFY(button);
+        QVERIFY(navigationStart);
+        QVERIFY(searchField);
+        QVERIFY(filterButton);
+        QVERIFY(sortButton);
+        QVERIFY(settingsButton);
+        QTest::mouseMove(window, QPoint(window->width() - 2, 2));
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+        navigationStart->forceActiveFocus(Qt::MouseFocusReason);
+        QTRY_VERIFY(navigationStart->hasActiveFocus());
+
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(searchField->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(filterButton->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(sortButton->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(settingsButton->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(button->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(unread->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Right);
+        QTRY_VERIFY(read->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Down);
+        QTRY_COMPARE(grid->property("currentIndex").toInt(), 0);
+
+        // And back up through the same three, by the row's far end.
+        QTest::keyClick(window, Qt::Key_Up);
+        QTRY_VERIFY(bd->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Left);
+        QTRY_VERIFY(manga->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Up);
+        QTRY_VERIFY(button->hasActiveFocus());
+
+        // And the order is a loop, closed at both ends. Above the band is the bar again, by
+        // its far end; and backwards from the bar's first stop is the shelf's last cover.
+        QTest::keyClick(window, Qt::Key_Up);
+        QTRY_VERIFY(settingsButton->hasActiveFocus());
+
+        searchField->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(searchField->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Backtab);
+        QTRY_COMPARE(grid->property("currentIndex").toInt(), 11);
+
+        // Lighting one sends the contract's spelling to the shelf, and the shelf asks again.
+        auto *shelf = engine.singletonInstance<Shelf *>(qmlTypeId("Leaf", 1, 0, "Shelf"));
+        QVERIFY(shelf);
+        const QPointF middle = bd->mapToItem(nullptr, QPointF(bd->width() / 2,
+                                                             bd->height() / 2));
+        QTest::mouseMove(window, QPoint(window->width() / 2, window->height() - 4));
+        QTest::mouseMove(window, middle.toPoint());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, middle.toPoint());
+        QTRY_COMPARE(shelf->media(), QStringList({u"bd"_s}));
+        QTRY_VERIFY(bd->property("lit").toBool());
+        QVERIFY(!manga->property("lit").toBool());
+        // Asked for, not just remembered: the property is set before the request goes out.
+        QTRY_VERIFY(pretend.heard.contains("medium=bd"));
+
+        // And the rule the artifact gives them: the band leaves with the scroll, the row does
+        // not. Scrolled past the band's own height, the row is at the top and the band is gone.
+        //
+        // After the new list has settled, not during: a filter starts the shelf again, and a
+        // new list is shown from its beginning — scrolling into one that is still arriving is
+        // scrolling something that is about to be put back.
+        QTest::qWait(400);
+        QTest::mouseMove(window, QPoint(window->width() - 2, 2));
+        grid->setProperty("contentY",
+                          grid->property("contentY").toReal() + band->height() + 40);
+        auto *appBar = window->findChild<QQuickItem *>(u"app-bar"_s);
+        QVERIFY(appBar);
+        QTRY_COMPARE(pills->mapToItem(nullptr, QPointF(0, 0)).y(), appBar->height());
+        QVERIFY(band->mapToItem(nullptr, QPointF(0, band->height())).y()
+                < appBar->height());
+    }
+
+    /// The field, end to end: what is typed reaches the shelf as a query and `/search` as a
+    /// question, the files come back as lines above the grid, and the band goes — you are
+    /// looking for something precise, and being told where you were is noise at that moment.
+    /// Thirteen tests cover the model; this one covers that the screen is wired to it.
+    void typing_in_the_bar_searches_the_shelf_and_lists_what_it_found()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"pd"_s, u"Parasite · Édition Deluxe"_s, 8, false)}, 6));
+        const QByteArray nextReply =
+            aReply(200, QByteArrayLiteral("application/json"), anOffer());
+        const QByteArray filtersReply =
+            aReply(200, QByteArrayLiteral("application/json"), someFilters());
+        QJsonArray foundFiles;
+        for (int number = 1; number <= 4; ++number) {
+            foundFiles << QJsonObject{
+                {u"kind"_s, u"ENTRY"_s},
+                {u"id"_s, u"pd-v%1"_s.arg(number)},
+                {u"label"_s, u"Tome %1"_s.arg(number)},
+                {u"seriesId"_s, u"pd"_s},
+                {u"seriesName"_s, u"Parasite · Édition Deluxe"_s},
+                {u"entryId"_s, u"pd-v%1"_s.arg(number)},
+                {u"entryKind"_s, u"VOLUME"_s},
+                {u"entryNumber"_s, double(number)},
+                {u"entryPageCount"_s, 190},
+            };
+        }
+        const QByteArray hitsReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            QJsonDocument(QJsonObject{{u"items"_s, foundFiles},
+                                      // Four are in hand; sixty is the exact tab and heading.
+                                      {u"total"_s, 4},
+                                      {u"fileTotal"_s, 60},
+                                      {u"page"_s, 0},
+                                      {u"size"_s, 50}})
+                .toJson(QJsonDocument::Compact));
+        const QByteArray coverReply =
+            aReply(200, QByteArrayLiteral("image/png"), aCover());
+        pretend.answerFor = [pageReply, nextReply, filtersReply, hitsReply,
+                             coverReply](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return nextReply;
+            if (request.startsWith("GET /filters"))
+                return filtersReply;
+            if (request.startsWith("GET /search"))
+                return hitsReply;
+            return request.startsWith("GET /series?") ? pageReply : coverReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+
+        auto *field = window->findChild<QQuickItem *>(u"search-field"_s);
+        auto *band = window->findChild<QQuickItem *>(u"resume-band"_s);
+        QVERIFY(field);
+        QVERIFY(band);
+        QTRY_VERIFY(band->isVisible());
+
+        auto *shelf = engine.singletonInstance<Shelf *>(qmlTypeId("Leaf", 1, 0, "Shelf"));
+        QVERIFY(shelf);
+
+        QTest::mouseMove(window, QPoint(window->width() - 2, 2));
+        field->forceActiveFocus(Qt::MouseFocusReason);
+        QTRY_VERIFY(field->hasActiveFocus());
+        pretend.heard.clear();
+        // One letter, and the wiring is what this asserts — not how many keys make a word.
+        // Eight of them would put eight searches and eight shelf reloads in flight at once,
+        // and the forty-line server answers one request per connection: the last answer, the
+        // one that matters, would be the one nobody ever sends. That the client asks again on
+        // every keystroke is worth knowing, and is not this test's subject.
+        QTest::keyClick(window, Qt::Key_P);
+
+        QTRY_COMPARE(shelf->query(), u"p"_s);
+        QTRY_VERIFY(pretend.heard.contains("q=p&"));
+        QTRY_VERIFY(pretend.heard.contains("GET /search"));
+
+        // Proposal one: series first in a bounded preview, then four detailed file lines.
+        // Neither action expands those lines in place; each switches to a persistent scope.
+        auto *workspace = window->findChild<QQuickItem *>(u"search-workspace"_s);
+        auto *overview = window->findChild<QQuickItem *>(u"search-overview"_s);
+        auto *results = window->findChild<QQuickItem *>(u"search-overview-files"_s);
+        QVERIFY(workspace);
+        QVERIFY(overview);
+        QVERIFY(results);
+        QTRY_VERIFY(workspace->isVisible());
+        QTRY_VERIFY(overview->isVisible());
+
+        auto *seriesHeading = itemNamed(workspace, u"overview-series-heading"_s);
+        QVERIFY(seriesHeading);
+        QTRY_COMPARE(seriesHeading->property("text").toString(), u"Séries · 6"_s);
+
+        auto *scopeFilters = itemNamed(workspace, u"search-series-filters"_s);
+        QVERIFY(scopeFilters);
+        QVERIFY(!scopeFilters->isVisible());
+
+        // A preview is exactly one row. At a two-column width, six matches therefore leave
+        // one explicit route to the complete scope instead of growing a second row in place.
+        const QSize originalSize = window->size();
+        window->resize(580, originalSize.height());
+        auto *seeAllSeries = itemNamed(workspace, u"see-all-series"_s);
+        QVERIFY(seeAllSeries);
+        QTRY_VERIFY(seeAllSeries->isVisible());
+        QCOMPARE(seeAllSeries->property("label").toString(), u"Voir les 6 séries"_s);
+        window->resize(originalSize);
+
+        workspace->setProperty("mode", 1);
+        QTRY_VERIFY(scopeFilters->isVisible());
+        workspace->setProperty("mode", 0);
+        QTRY_VERIFY(!scopeFilters->isVisible());
+
+        QQuickItem *row = nullptr;
+        QTRY_VERIFY((row = itemNamed(results, u"search-result-pd-v1"_s)));
+        QVERIFY(row->isVisible());
+        auto *context = itemNamed(row, u"search-context-pd-v1"_s);
+        QVERIFY(context);
+        QCOMPARE(context->property("text").toString(),
+                 u"Parasite · Édition Deluxe · 190 pages"_s);
+
+        auto *heading = itemNamed(workspace, u"search-files-heading"_s);
+        QVERIFY(heading);
+        QCOMPARE(heading->property("text").toString(), u"Fichiers · 60"_s);
+
+        auto *overviewTab = itemNamed(workspace, u"search-tab-overview"_s);
+        auto *seriesTab = itemNamed(workspace, u"search-tab-series"_s);
+        auto *filesTab = itemNamed(workspace, u"search-tab-files"_s);
+        QVERIFY(overviewTab);
+        QVERIFY(seriesTab);
+        QVERIFY(filesTab);
+        QCOMPARE(itemNamed(filesTab, u"search-tab-files-text"_s)
+                     ->property("text").toString(),
+                 u"Fichiers · 60"_s);
+
+        // Hover only paints. The field keeps receiving text until a click or a navigation key
+        // deliberately moves the focus elsewhere.
+        const QPoint filesTabCentre = filesTab
+                                          ->mapToItem(window->contentItem(),
+                                                      QPointF(filesTab->width() / 2.0,
+                                                              filesTab->height() / 2.0))
+                                          .toPoint();
+        QTest::mouseMove(window, filesTabCentre, 20);
+        QTRY_VERIFY(field->hasActiveFocus());
+
+        // A keyboard arrival owns the emerald ring. A mouse click may focus the command so
+        // keys keep working from there, but it must not leave a second outline around an
+        // already selected pill.
+        auto *overviewFocus = itemNamed(overviewTab, u"search-tab-overview-focus"_s);
+        QVERIFY(overviewFocus);
+        overviewTab->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(overviewFocus->isVisible());
+        field->forceActiveFocus(Qt::MouseFocusReason);
+        QTRY_VERIFY(field->hasActiveFocus());
+        const QPoint overviewTabCentre = overviewTab
+                                             ->mapToItem(window->contentItem(),
+                                                         QPointF(overviewTab->width() / 2.0,
+                                                                 overviewTab->height() / 2.0))
+                                             .toPoint();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, overviewTabCentre);
+        QTRY_VERIFY(overviewTab->hasActiveFocus());
+        QVERIFY(!overviewFocus->isVisible());
+        QVERIFY(!field->hasActiveFocus());
+
+        // Scrollable content recedes under a quiet paper veil at either edge instead of
+        // ending on a hard cut. Each veil appears only when there is content beyond it.
+        auto *topVeil = itemNamed(workspace, u"overview-scroll-veil-top"_s);
+        auto *bottomVeil = itemNamed(workspace, u"overview-scroll-veil-bottom"_s);
+        QVERIFY(topVeil);
+        QVERIFY(bottomVeil);
+        QTRY_VERIFY(bottomVeil->property("shown").toBool());
+        overview->setProperty("contentY", 24.0);
+        QTRY_VERIFY(topVeil->property("shown").toBool());
+        overview->setProperty("contentY", 0.0);
+
+        auto *seeAll = itemNamed(workspace, u"see-all-files"_s);
+        QVERIFY(seeAll);
+        QVERIFY(seeAll->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(seeAll, "triggered"));
+        auto *allFiles = itemNamed(workspace, u"search-all-files"_s);
+        QVERIFY(allFiles);
+        QTRY_VERIFY(allFiles->isVisible());
+        QVERIFY(!overview->isVisible());
+        QTRY_VERIFY(scopeFilters->isVisible());
+
+        // And the band goes: you are looking for something precise.
+        QTRY_VERIFY(!band->isVisible());
+
+        // Escape clears the field before it means anything else.
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(shelf->query().isEmpty());
+        QTRY_VERIFY(band->isVisible());
+    }
+
+    /// An overview of a single section is that section, with a heading above it and one more
+    /// step to reach it. When only files matched, their scope opens straight away — and the
+    /// moment the reader names a scope themselves, later answers leave them where they are.
+    void a_search_that_found_only_files_opens_their_scope()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        // No series bears the name, so the series scope has nothing and the overview would
+        // be a heading, an emptiness, and a route to the one section that holds anything.
+        const QByteArray emptyPage =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}, 0));
+        const QByteArray nextReply =
+            aReply(200, QByteArrayLiteral("application/json"), anOffer());
+        const QByteArray filtersReply =
+            aReply(200, QByteArrayLiteral("application/json"), someFilters());
+        QJsonArray foundFiles;
+        for (int number = 1; number <= 3; ++number) {
+            foundFiles << QJsonObject{
+                {u"kind"_s, u"ENTRY"_s},
+                {u"id"_s, u"pd-v%1"_s.arg(number)},
+                {u"label"_s, u"Tome %1"_s.arg(number)},
+                {u"seriesId"_s, u"pd"_s},
+                {u"seriesName"_s, u"Parasite · Édition Deluxe"_s},
+                {u"entryId"_s, u"pd-v%1"_s.arg(number)},
+                {u"entryKind"_s, u"VOLUME"_s},
+                {u"entryNumber"_s, double(number)},
+                {u"entryPageCount"_s, 190},
+            };
+        }
+        const QByteArray hitsReply =
+            aReply(200, QByteArrayLiteral("application/json"),
+                   QJsonDocument(QJsonObject{{u"items"_s, foundFiles},
+                                             {u"total"_s, 3},
+                                             {u"fileTotal"_s, 3},
+                                             {u"page"_s, 0},
+                                             {u"size"_s, 50}})
+                       .toJson(QJsonDocument::Compact));
+        const QByteArray coverReply =
+            aReply(200, QByteArrayLiteral("image/png"), aCover());
+        pretend.answerFor = [emptyPage, nextReply, filtersReply, hitsReply,
+                             coverReply](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return nextReply;
+            if (request.startsWith("GET /filters"))
+                return filtersReply;
+            if (request.startsWith("GET /search"))
+                return hitsReply;
+            return request.startsWith("GET /series?") ? emptyPage : coverReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+
+        auto *field = window->findChild<QQuickItem *>(u"search-field"_s);
+        QVERIFY(field);
+        QTest::mouseMove(window, QPoint(window->width() - 2, 2));
+        field->forceActiveFocus(Qt::MouseFocusReason);
+        QTRY_VERIFY(field->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_P);
+
+        auto *workspace = window->findChild<QQuickItem *>(u"search-workspace"_s);
+        QVERIFY(workspace);
+        QTRY_VERIFY(workspace->isVisible());
+
+        auto *allFiles = itemNamed(workspace, u"search-all-files"_s);
+        auto *overview = window->findChild<QQuickItem *>(u"search-overview"_s);
+        QVERIFY(allFiles);
+        QVERIFY(overview);
+        QTRY_COMPARE(workspace->property("mode").toInt(), 2);
+        QTRY_VERIFY(allFiles->isVisible());
+        QVERIFY(!overview->isVisible());
+
+        // The tabs are still the way back, and taking one settles the scope: it is the
+        // reader's choice from then on, not a shape the counts keep deciding.
+        auto *overviewTab = itemNamed(workspace, u"search-tab-overview"_s);
+        QVERIFY(overviewTab);
+        QVERIFY(QMetaObject::invokeMethod(workspace, "selectMode", Q_ARG(QVariant, 0)));
+        QTRY_VERIFY(overview->isVisible());
+        QVERIFY(workspace->property("scopeChosen").toBool());
+        QCOMPARE(workspace->property("mode").toInt(), 0);
+    }
+
+    /// The second click on the criterion in force is the only way to reverse an order, so it
+    /// is clicked here rather than invoked: a signal emitted by hand would pass while the
+    /// real press was being eaten by the menu.
+    void clicking_the_order_in_force_a_second_time_reverses_it()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"ac"_s, u"Assassination Classroom"_s, 21, false)}));
+        const QByteArray emptyNext =
+            aReply(200, QByteArrayLiteral("application/json"), QByteArrayLiteral("[]"));
+        const QByteArray coverReply =
+            aReply(200, QByteArrayLiteral("image/png"), aCover());
+        pretend.answerFor = [pageReply, emptyNext, coverReply](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return emptyNext;
+            return request.startsWith("GET /series?") ? pageReply : coverReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+
+        auto *shelf = engine.singletonInstance<Shelf *>(qmlTypeId("Leaf", 1, 0, "Shelf"));
+        QVERIFY(shelf);
+        QCOMPARE(shelf->sort(), u"name"_s);
+        QCOMPARE(shelf->sortDirection(), u"asc"_s);
+
+        auto *sortButton = window->findChild<QQuickItem *>(u"sort-button"_s);
+        QVERIFY(sortButton);
+        auto *menu = sortButton->findChild<QObject *>(u"sort-menu"_s);
+        QVERIFY(menu);
+
+        const auto clickOption = [&](const QString &name) {
+            QVERIFY(QMetaObject::invokeMethod(menu, "open"));
+            QTRY_VERIFY(menu->property("opened").toBool());
+            QQuickItem *option = nullptr;
+            QTRY_VERIFY((option = window->findChild<QQuickItem *>(name)));
+            QTRY_VERIFY(option->width() > 0);
+            const QPoint centre =
+                option->mapToScene(QPointF(option->width() / 2.0, option->height() / 2.0))
+                    .toPoint();
+            QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centre);
+            QTRY_VERIFY(!menu->property("opened").toBool());
+        };
+
+        // A different criterion first: it is selected, in its own familiar direction.
+        clickOption(u"sort-option-volumes"_s);
+        QTRY_COMPARE(shelf->sort(), u"volumes"_s);
+        QCOMPARE(shelf->sortDirection(), u"desc"_s);
+
+        // And the same one again, which is the reversal.
+        clickOption(u"sort-option-volumes"_s);
+        QTRY_COMPARE(shelf->sortDirection(), u"asc"_s);
+        QVERIFY(shelf->sortReversed());
+
+        // A third time comes back rather than staying reversed for good.
+        clickOption(u"sort-option-volumes"_s);
+        QTRY_COMPARE(shelf->sortDirection(), u"desc"_s);
+    }
+
+    /// Against a server that honours the direction, the tiles on screen come back in the
+    /// other order. Every other test of this stops at the model: a shelf whose rows were
+    /// reordered and whose grid was not looks, to the person holding the mouse, exactly like
+    /// a shelf that ignored the click.
+    void reversing_the_order_reorders_the_tiles_on_screen()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray emptyNext =
+            aReply(200, QByteArrayLiteral("application/json"), QByteArrayLiteral("[]"));
+        const QByteArray coverReply =
+            aReply(200, QByteArrayLiteral("image/png"), aCover());
+        const QByteArray forwards = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"ac"_s, u"Assassination Classroom"_s, 21, false),
+                   aSeries(u"dn"_s, u"Death Note"_s, 6, false),
+                   aSeries(u"kq"_s, u"Koro Quest"_s, 5, false)},
+                  3));
+        const QByteArray backwards = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"kq"_s, u"Koro Quest"_s, 5, false),
+                   aSeries(u"dn"_s, u"Death Note"_s, 6, false),
+                   aSeries(u"ac"_s, u"Assassination Classroom"_s, 21, false)},
+                  3));
+        // The whole of what a server honouring `direction` does, and nothing else: the same
+        // three series, the other way round.
+        pretend.answerFor = [forwards, backwards, emptyNext,
+                             coverReply](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return emptyNext;
+            if (!request.startsWith("GET /series?"))
+                return coverReply;
+            return request.contains("direction=desc") ? backwards : forwards;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(grid);
+        QTRY_COMPARE(grid->property("count").toInt(), 3);
+
+        // Where each tile actually sits, which is the only thing the reader can see. Read
+        // from the scene rather than from the model: the question is whether the grid moved.
+        const auto leftEdgeOf = [grid](const QString &id) {
+            QQuickItem *tile = itemNamed(grid, u"tile-"_s + id);
+            return tile ? tile->mapToScene(QPointF(0, 0)).x() : -1.0;
+        };
+
+        QTRY_VERIFY(leftEdgeOf(u"kq"_s) > 0);
+        QVERIFY(leftEdgeOf(u"ac"_s) < leftEdgeOf(u"dn"_s));
+        QVERIFY(leftEdgeOf(u"dn"_s) < leftEdgeOf(u"kq"_s));
+
+        auto *shelf = engine.singletonInstance<Shelf *>(qmlTypeId("Leaf", 1, 0, "Shelf"));
+        QVERIFY(shelf);
+        // Already on `name`, so this is the second click: the reversal.
+        shelf->sortBy(u"name"_s);
+        QCOMPARE(shelf->sortDirection(), u"desc"_s);
+
+        QTRY_VERIFY(leftEdgeOf(u"kq"_s) < leftEdgeOf(u"ac"_s));
+        QVERIFY(leftEdgeOf(u"kq"_s) < leftEdgeOf(u"dn"_s));
+        QVERIFY(leftEdgeOf(u"dn"_s) < leftEdgeOf(u"ac"_s));
+    }
+
+    /// The filter button opens every axis the library can be narrowed by — the two the row
+    /// draws and the ones it cannot. Narrowing by one of those has to show somewhere: a
+    /// shelf cut to three series with nothing on screen saying why looks broken.
+    void the_filter_button_opens_every_axis_and_a_choice_shows_in_the_row()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"ac"_s, u"Assassination Classroom"_s, 21, false)}, 1));
+        const QByteArray emptyNext =
+            aReply(200, QByteArrayLiteral("application/json"), QByteArrayLiteral("[]"));
+        const QByteArray filtersReply =
+            aReply(200, QByteArrayLiteral("application/json"), someFilters());
+        const QByteArray coverReply =
+            aReply(200, QByteArrayLiteral("image/png"), aCover());
+        pretend.answerFor = [pageReply, emptyNext, filtersReply,
+                             coverReply](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return emptyNext;
+            if (request.startsWith("GET /filters"))
+                return filtersReply;
+            return request.startsWith("GET /series?") ? pageReply : coverReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+
+        auto *button = window->findChild<QQuickItem *>(u"filter-button"_s);
+        QVERIFY(button);
+        auto *panel = window->findChild<QObject *>(u"filter-panel"_s);
+        QVERIFY(panel);
+        QVERIFY(!panel->property("opened").toBool());
+
+        QVERIFY(QMetaObject::invokeMethod(panel, "open"));
+        QTRY_VERIFY(panel->property("opened").toBool());
+
+        // Six axes: the two the row draws, plus genre, universe, language and author. The
+        // panel has the room the row has not, so nothing is dropped for being long.
+        QTRY_COMPARE(panel->property("axes").toList().size(), 6);
+        QQuickItem *page = window->contentItem();
+        for (const QString &axis : {u"read"_s, u"medium"_s, u"genre"_s, u"universe"_s,
+                                    u"language"_s, u"author"_s}) {
+            QVERIFY2(itemNamed(page, u"filter-axis-"_s + axis),
+                     qPrintable(u"no axis "_s + axis));
+        }
+
+        // A short axis is open; a long one is folded and carries a field of its own, so that
+        // fourteen authors are something to search rather than something to hunt through.
+        QQuickItem *genreBody = itemNamed(page, u"filter-axis-body-genre"_s);
+        QQuickItem *authorBody = itemNamed(page, u"filter-axis-body-author"_s);
+        QVERIFY(genreBody);
+        QVERIFY(authorBody);
+        QVERIFY(genreBody->isVisible());
+        QVERIFY(!authorBody->isVisible());
+        QVERIFY(itemNamed(page, u"filter-axis-search-author"_s));
+        QVERIFY(!itemNamed(page, u"filter-axis-search-genre"_s)->isVisible());
+
+        // A language is a word, not a tag: the panel says « Français », not « fr ».
+        auto *french = itemNamed(page, u"filter-value-text-fr"_s);
+        QVERIFY(french);
+        QCOMPARE(french->property("text").toString(), u"Français 9"_s);
+
+        auto *shelf = engine.singletonInstance<Shelf *>(qmlTypeId("Leaf", 1, 0, "Shelf"));
+        QVERIFY(shelf);
+        pretend.heard.clear();
+        QVERIFY(QMetaObject::invokeMethod(panel, "toggle", Q_ARG(QVariant, u"genre"_s),
+                                          Q_ARG(QVariant, u"Horreur"_s)));
+
+        // It goes out under the contract's own name, once the hand has stopped.
+        QTRY_VERIFY(pretend.heard.contains("genre=Horreur"));
+        QCOMPARE(shelf->narrowing().value(u"genre"_s).toStringList(),
+                 QStringList({u"Horreur"_s}));
+
+        // And it is on screen: the row says what you are looking at, whatever axis said it.
+        auto *chip = itemNamed(page, u"chip-Horreur"_s);
+        QVERIFY2(chip, "a filter in force with nothing on screen saying so");
+        QTRY_VERIFY(chip->isVisible());
+        QCOMPARE(chip->property("lit").toBool(), true);
+
+        // The button counts every axis, not the two the row owns.
+        auto *bar = window->findChild<QQuickItem *>(u"app-bar"_s);
+        QVERIFY(bar);
+        QCOMPARE(bar->property("activeFilters").toInt(), 1);
+
+        // « Tout effacer » appears only once there is something to clear, and empties every
+        // axis at once — the only way out of a selection spread across eight of them.
+        auto *clear = itemNamed(page, u"clear-every-filter"_s);
+        QVERIFY(clear);
+        QVERIFY(clear->isVisible());
+        shelf->filterBy({});
+        QTRY_COMPARE(bar->property("activeFilters").toInt(), 0);
+        QTRY_VERIFY(!clear->isVisible());
+    }
+
+    /// Three hundred authors is a list, not a wall three hundred items tall. The axis is as
+    /// tall as five of them and scrolls; without that, one axis of a library this size made
+    /// the panel nine thousand pixels long and built every row to draw the five on screen.
+    void an_axis_of_three_hundred_values_stays_the_height_of_five()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"ac"_s, u"Assassination Classroom"_s, 21, false)}, 1));
+        const QByteArray emptyNext =
+            aReply(200, QByteArrayLiteral("application/json"), QByteArrayLiteral("[]"));
+        const QByteArray filtersReply =
+            aReply(200, QByteArrayLiteral("application/json"), manyFilters(300));
+        const QByteArray coverReply =
+            aReply(200, QByteArrayLiteral("image/png"), aCover());
+        pretend.answerFor = [pageReply, emptyNext, filtersReply,
+                             coverReply](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return emptyNext;
+            if (request.startsWith("GET /filters"))
+                return filtersReply;
+            return request.startsWith("GET /series?") ? pageReply : coverReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+
+        auto *panel = window->findChild<QObject *>(u"filter-panel"_s);
+        QVERIFY(panel);
+        QVERIFY(QMetaObject::invokeMethod(panel, "open"));
+        QTRY_VERIFY(panel->property("opened").toBool());
+
+        QQuickItem *page = window->contentItem();
+        QQuickItem *axis = nullptr;
+        QTRY_VERIFY((axis = itemNamed(page, u"filter-axis-author"_s)));
+        // Folded, because it is long — and it says how many are behind it without opening.
+        QCOMPARE(itemNamed(page, u"filter-axis-tally-author"_s)->property("text").toString(),
+                 u"300"_s);
+        QVERIFY(!itemNamed(page, u"filter-axis-body-author"_s)->isVisible());
+
+        axis->setProperty("open", true);
+        QQuickItem *rows = itemNamed(page, u"filter-axis-rows-author"_s);
+        QVERIFY(rows);
+        QTRY_COMPARE(rows->property("count").toInt(), 300);
+
+        // Seven rows tall whatever the three hundred, and only a handful of them built.
+        QCOMPARE(rows->height(), 5.0 * 30.0);
+        QVERIFY2(itemsNamed(rows, u"filter-value-Auteur 0001"_s).size() == 1,
+                 "the first row was not built");
+        QVERIFY2(itemsNamed(rows, u"filter-value-Auteur 0300"_s).isEmpty(),
+                 "a row three hundred places down was built to draw five");
+
+        // And its own field narrows it, which is the way through a list this long.
+        auto *field = itemNamed(page, u"filter-axis-search-author"_s);
+        QVERIFY(field);
+        QVERIFY(field->isVisible());
+        axis->setProperty("looking", u"0042"_s);
+        QTRY_COMPARE(rows->property("count").toInt(), 1);
+        QCOMPARE(rows->height(), 30.0);
+    }
+
+    /// Clicking the button that opened a popup closes it. The press counted as outside, so
+    /// the popup shut and the release opened it again — a button that looked dead.
+    ///
+    /// Both buttons, because the defect was found on one and fixed on one: the toggle lives
+    /// in `BarButton` now, so a third button opening a third popup gets it without knowing.
+    void a_button_that_opened_a_popup_closes_it()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"ac"_s, u"Assassination Classroom"_s, 21, false)}, 1));
+        const QByteArray emptyNext =
+            aReply(200, QByteArrayLiteral("application/json"), QByteArrayLiteral("[]"));
+        const QByteArray filtersReply =
+            aReply(200, QByteArrayLiteral("application/json"), someFilters());
+        const QByteArray coverReply =
+            aReply(200, QByteArrayLiteral("image/png"), aCover());
+        pretend.answerFor = [pageReply, emptyNext, filtersReply,
+                             coverReply](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return emptyNext;
+            if (request.startsWith("GET /filters"))
+                return filtersReply;
+            return request.startsWith("GET /series?") ? pageReply : coverReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+
+        // Press and release apart, with the window drawing in between: a click delivered as
+        // one event never let the popup see the press, which is exactly the half of the
+        // sequence that used to close it behind the button's back.
+        const auto click = [window](QQuickItem *what) {
+            const QPoint centre =
+                what->mapToItem(window->contentItem(),
+                                QPointF(what->width() / 2.0, what->height() / 2.0))
+                    .toPoint();
+            QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, centre);
+            QTest::qWait(60);
+            QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, centre);
+            QTest::qWait(60);
+        };
+
+        // The sort menu answers to the same rule, through the same button.
+        auto *sortButton = window->findChild<QQuickItem *>(u"sort-button"_s);
+        auto *sortMenu = window->findChild<QObject *>(u"sort-menu"_s);
+        QVERIFY(sortButton);
+        QVERIFY(sortMenu);
+        click(sortButton);
+        QTRY_VERIFY(sortMenu->property("opened").toBool());
+        click(sortButton);
+        QTRY_VERIFY2(!sortMenu->property("opened").toBool(),
+                     "the sort menu reopened behind its own button");
+        click(sortButton);
+        QTRY_VERIFY(sortMenu->property("opened").toBool());
+        QVERIFY(QMetaObject::invokeMethod(sortMenu, "close"));
+        QTRY_VERIFY(!sortMenu->property("opened").toBool());
+
+        auto *button = window->findChild<QQuickItem *>(u"filter-button"_s);
+        auto *panel = window->findChild<QObject *>(u"filter-panel"_s);
+        QVERIFY(button);
+        QVERIFY(panel);
+        const auto clickTheButton = [click, button] { click(button); };
+
+        clickTheButton();
+        QTRY_VERIFY(panel->property("opened").toBool());
+
+        clickTheButton();
+        QTRY_VERIFY2(!panel->property("opened").toBool(),
+                     "the press closed it and the release opened it again");
+
+        // And it still opens on the next one, rather than having learned to refuse.
+        clickTheButton();
+        QTRY_VERIFY(panel->property("opened").toBool());
+
+        // The half of the gesture a synthetic click cannot deliver: on a real desktop the
+        // press outside shuts the popup, and the release that follows lands on a button
+        // that now finds it closed. Played out directly, because no `mouseClick` reproduces
+        // it — press and release reach Qt as one event.
+        QTRY_VERIFY(panel->property("opened").toBool());
+        button->setProperty("popupWasOpen", true);
+        QVERIFY(QMetaObject::invokeMethod(panel, "close"));
+        QTRY_VERIFY(!panel->property("opened").toBool());
+        QVERIFY(QMetaObject::invokeMethod(button, "press",
+                                          Q_ARG(QVariant, QVariant(true))));
+        QTest::qWait(80);
+        QVERIFY2(!panel->property("opened").toBool(),
+                 "the release reopened what the press had just closed");
+
+        // And the next gesture, which starts with the panel closed, opens it.
+        clickTheButton();
+        QTRY_VERIFY(panel->property("opened").toBool());
+    }
+
+    /// Nothing started is not an empty card: the header has to give its height back, or the
+    /// grid keeps a hole where the band would have been.
+    void nothing_started_leaves_no_band_and_no_gap()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"ac"_s, u"Assassination Classroom"_s, 21, false)}));
+        const QByteArray emptyNext =
+            aReply(200, QByteArrayLiteral("application/json"), QByteArrayLiteral("[]"));
+        const QByteArray coverReply =
+            aReply(200, QByteArrayLiteral("image/png"), aCover());
+        pretend.answerFor = [pageReply, emptyNext, coverReply](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return emptyNext;
+            return request.startsWith("GET /series?") ? pageReply : coverReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *band = window->findChild<QQuickItem *>(u"resume-band"_s);
+        QVERIFY(band);
+        QTRY_COMPARE(band->height(), 0.0);
+        QVERIFY(!band->isVisible());
+
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        auto *appBar = window->findChild<QQuickItem *>(u"app-bar"_s);
+        QVERIFY(grid);
+        QVERIFY(appBar);
+        QQuickItem *tile = nullptr;
+        QTRY_VERIFY((tile = itemNamed(grid, u"tile-ac"_s)));
+        QCOMPARE(tile->mapToItem(nullptr, QPointF(0, 0)).y(), qreal(appBar->height()));
+    }
+
+    /// Half a screen: the long line no longer fits beside the button, so the wording shortens
+    /// and the button keeps its arrow and drops its word. The break is Widths', not this file's.
+    void half_a_screen_shortens_the_line_and_keeps_only_the_arrow()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"ac"_s, u"Assassination Classroom"_s, 21, true)}));
+        const QByteArray nextReply =
+            aReply(200, QByteArrayLiteral("application/json"), anOffer());
+        const QByteArray coverReply =
+            aReply(200, QByteArrayLiteral("image/png"), aCover());
+        pretend.answerFor = [pageReply, nextReply, coverReply](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return nextReply;
+            return request.startsWith("GET /series?") ? pageReply : coverReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *band = window->findChild<QQuickItem *>(u"resume-band"_s);
+        QVERIFY(band);
+        QTRY_VERIFY(band->isVisible());
+        auto *where = itemNamed(band, u"resume-where"_s);
+        auto *label = itemNamed(band, u"resume-action-text"_s);
+        auto *action = itemNamed(band, u"resume-action"_s);
+        QVERIFY(where);
+        QVERIFY(label);
+        QVERIFY(action);
+        QTRY_COMPARE(where->property("text").toString(),
+                     u"Tome 12 · Page 47/190 · Chapitre 98"_s);
+
+        window->setWidth(800);
+        QTRY_COMPARE(where->property("text").toString(), u"T12 · Page 47/190"_s);
+        QVERIFY(!label->isVisible());
+        QCOMPARE(action->width(), action->height());
     }
 
     void reaching_the_last_row_asks_for_the_next_page()
@@ -503,7 +1905,9 @@ private slots:
         QVERIFY(pretend.heard.contains("page=1"));
     }
 
-    void the_first_load_is_visible_while_the_server_has_not_answered()
+    /// The shape of the answer, in the grid's own cells, rather than a spinner in the middle
+    /// of an empty page: the first tile lands where its placeholder already was.
+    void the_first_load_shows_the_shape_of_what_is_coming()
     {
         QTcpServer silent;
         QVERIFY(silent.listen(QHostAddress::LocalHost));
@@ -516,9 +1920,28 @@ private slots:
         QCOMPARE(engine.rootObjects().size(), 1);
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
-        auto *waiting = window->findChild<QQuickItem *>(u"shelf-first-load"_s);
+        // Exposed, unlike the spinner this replaced: a placeholder is a measurement, and an
+        // unexposed window measures nothing, so the grid would report one cell of no size.
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *waiting = window->findChild<QQuickItem *>(u"shelf-skeleton"_s);
         QVERIFY(waiting);
         QTRY_VERIFY(waiting->isVisible());
+
+        // Placeholders the size of the covers they stand in for, and more than one of them:
+        // a single centred shape is a spinner wearing a rectangle.
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(grid);
+        // Re-read each time: the repeaters fill after the item is shown, so a list taken
+        // once is a list taken too early.
+        const auto placeholders = [waiting] {
+            return itemsNamed(waiting, u"skeleton-cover"_s);
+        };
+        QTRY_VERIFY2(placeholders().size() > 1,
+                     "one placeholder is not the shape of a shelf");
+        QCOMPARE(placeholders().constFirst()->width(),
+                 grid->property("coverWidth").toReal());
+        QCOMPARE(placeholders().constFirst()->height(),
+                 grid->property("coverHeight").toReal());
     }
 
     void a_first_page_that_fails_is_said_in_the_empty_grid()

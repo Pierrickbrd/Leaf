@@ -58,6 +58,7 @@ QColor Theme::inkSoft() const      { return pick(m_dark, 0x555C56u, 0x99A39Bu); 
 QColor Theme::inkFaint() const     { return pick(m_dark, 0x666C63u, 0x6B756Du); }
 QColor Theme::emerald() const      { return pick(m_dark, 0x0A6A55u, 0x2FB98Bu); }
 QColor Theme::emeraldWash() const  { return pick(m_dark, 0xC9DCD3u, 0x12241Du); }
+QColor Theme::onEmerald() const    { return pick(m_dark, 0xF0ECE3u, 0x08110Du); }
 QColor Theme::alert() const        { return pick(m_dark, 0x96400Au, 0xF59E0Bu); }
 QColor Theme::alertWash() const    { return pick(m_dark, 0xEBDCCCu, 0x2A1C08u); }
 QColor Theme::readerPaper() const  { return pick(m_dark, 0xDCD2BCu, 0x070908u); }

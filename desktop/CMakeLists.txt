@@ -51,7 +51,14 @@ qt_add_executable(leaf-desktop
     src/Navigation.h
     src/Navigation.cpp
     src/Shelf.h
+    src/Rearrange.cpp
     src/Shelf.cpp
+    src/Search.h
+    src/Search.cpp
+    src/Filters.h
+    src/Filters.cpp
+    src/Resume.h
+    src/Resume.cpp
     src/Covers.h
     src/Covers.cpp
 )
@@ -64,7 +71,31 @@ set(LEAF_QML
     qml/Main.qml
     qml/NavigationCursor.qml
     qml/FocusRing.qml
+    qml/ScrollVeil.qml
+    qml/ActionButton.qml
+    qml/BarButton.qml
+    qml/LeafToolTip.qml
+    qml/LeafMenu.qml
+    qml/LeafMenuItem.qml
+    qml/AppBar.qml
+    qml/FilterChip.qml
+    qml/FilterPills.qml
+    qml/SeriesTile.qml
+    qml/ShelfSkeleton.qml
+    qml/FilterPanel.qml
+    qml/FilterAxis.qml
+    qml/FilterValueRow.qml
+    qml/LeafTextAction.qml
+    qml/LeafSearchLine.qml
+    qml/SearchSeriesGrid.qml
+    qml/FileResultRow.qml
+    qml/FileResultsView.qml
+    qml/SearchLink.qml
+    qml/SearchScopeTabs.qml
+    qml/SearchWorkspace.qml
+    qml/SearchResults.qml
     qml/CoverShadow.qml
+    qml/ResumeBand.qml
     qml/ShelfView.qml
 )
 foreach(qml_file IN LISTS LEAF_QML)
@@ -75,11 +106,34 @@ endforeach()
 set(LEAF_IMAGES
     qml/assets/cover-shadow-light.png
     qml/assets/cover-shadow-dark.png
+    qml/assets/icons/search.svg
+    qml/assets/icons/settings.svg
+    qml/assets/icons/sort.svg
+    qml/assets/icons/tune.svg
 )
 foreach(image_file IN LISTS LEAF_IMAGES)
     string(REGEX REPLACE "^qml/" "" alias "${image_file}")
     set_source_files_properties(${image_file} PROPERTIES QT_RESOURCE_ALIAS "${alias}")
 endforeach()
+
+set(LEAF_LOGOS
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/logos/leaf-light.svg
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/logos/leaf-dark.svg
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/logos/leaf-mark-light.svg
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/logos/leaf-mark-dark.svg
+)
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/logos/leaf-light.svg
+    PROPERTIES QT_RESOURCE_ALIAS "assets/logos/leaf-light.svg")
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/logos/leaf-dark.svg
+    PROPERTIES QT_RESOURCE_ALIAS "assets/logos/leaf-dark.svg")
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/logos/leaf-mark-light.svg
+    PROPERTIES QT_RESOURCE_ALIAS "assets/logos/leaf-mark-light.svg")
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/../assets/logos/leaf-mark-dark.svg
+    PROPERTIES QT_RESOURCE_ALIAS "assets/logos/leaf-mark-dark.svg")
 
 qt_add_qml_module(leaf-desktop
     URI Leaf
@@ -90,7 +144,7 @@ qt_add_qml_module(leaf-desktop
     # the one `loadFromModule` resolves to on the versions that have it.
     RESOURCE_PREFIX "/qt/qml"
     QML_FILES ${LEAF_QML}
-    RESOURCES ${LEAF_IMAGES}
+    RESOURCES ${LEAF_IMAGES} ${LEAF_LOGOS}
 )
 
 # The QML type registration Qt generates includes the headers by their bare name.
@@ -194,7 +248,11 @@ qt_add_executable(crosses-the-seam
     src/Widths.h src/Widths.cpp
     src/Navigation.h src/Navigation.cpp
     src/Api.h src/Api.cpp
+    src/Rearrange.h src/Rearrange.cpp
     src/Shelf.h src/Shelf.cpp
+    src/Search.h src/Search.cpp
+    src/Filters.h src/Filters.cpp
+    src/Resume.h src/Resume.cpp
 )
 target_include_directories(crosses-the-seam PRIVATE src)
 qt_add_qml_module(crosses-the-seam
@@ -207,7 +265,7 @@ qt_add_qml_module(crosses-the-seam
     # second module, so only the output path needs to differ.
     OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/crosses-the-seam-qml/Leaf"
     QML_FILES ${LEAF_QML}
-    RESOURCES ${LEAF_IMAGES}
+    RESOURCES ${LEAF_IMAGES} ${LEAF_LOGOS}
 )
 qt_add_resources(crosses-the-seam "leaf-fonts-for-the-seam-test"
     PREFIX "/fonts"
@@ -225,11 +283,59 @@ qt_add_executable(holds-a-shelf
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
     src/Api.h src/Api.cpp src/Words.h src/Words.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
-    src/Shelf.h src/Shelf.cpp)
+    src/Rearrange.h src/Rearrange.cpp src/Shelf.h src/Shelf.cpp)
 target_include_directories(holds-a-shelf PRIVATE src)
 target_link_libraries(holds-a-shelf PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
 add_test(NAME holds-a-shelf COMMAND holds-a-shelf)
+
+# The file rows returned beside the series grid. Like the shelf, this is HTTP state and words,
+# not pixels, so every branch is exercised without constructing a window.
+qt_add_executable(holds-the-search
+    tests/holds_the_search.cpp tests/Pretend.h
+    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
+    src/Rearrange.h src/Rearrange.cpp
+    src/Shelf.h src/Shelf.cpp src/Search.h src/Search.cpp)
+target_include_directories(holds-the-search PRIVATE src)
+target_link_libraries(holds-the-search PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME holds-the-search COMMAND holds-the-search)
+
+# The first card from /next. It owns state and wording, so it stays headless like the shelf.
+qt_add_executable(holds-the-resume
+    tests/holds_the_resume.cpp tests/Pretend.h
+    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
+    src/Resume.h src/Resume.cpp)
+target_include_directories(holds-the-resume PRIVATE src)
+target_link_libraries(holds-the-resume PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME holds-the-resume COMMAND holds-the-resume)
+
+# The two axes the bandeau offers, and the rule that decides whether an axis exists at all.
+# Headless like the shelf: a filter that is not offered is a decision, not a drawing.
+# The decision behind a page replacing another: two lists of names, no Qt models, no server.
+qt_add_executable(holds-the-order
+    tests/holds_the_order.cpp
+    src/Rearrange.h src/Rearrange.cpp)
+target_include_directories(holds-the-order PRIVATE src)
+target_link_libraries(holds-the-order PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME holds-the-order COMMAND holds-the-order)
+
+qt_add_executable(holds-the-filters
+    tests/holds_the_filters.cpp tests/Pretend.h
+    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
+    src/Rearrange.h src/Rearrange.cpp src/Shelf.h src/Shelf.cpp
+    src/Filters.h src/Filters.cpp)
+target_include_directories(holds-the-filters PRIVATE src)
+target_link_libraries(holds-the-filters PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME holds-the-filters COMMAND holds-the-filters)
 
 # The key on the covers QML fetches for itself. Its live half needs two servers at once — the
 # one configured, and another that must never be told the key.
@@ -260,7 +366,8 @@ add_test(NAME bytes-stay-utf8
 # These tests never need a scene graph, so the software-only offscreen platform keeps them
 # independent of a desktop session.
 set_tests_properties(keeps-the-key talks-to-the-server keeps-its-contrast embeds-its-fonts
-    holds-a-shelf puts-the-key-where-it-belongs
+    holds-a-shelf holds-the-search holds-the-resume holds-the-filters
+    puts-the-key-where-it-belongs
     PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # The seam test verifies the rounded shader one pixel at a time. It therefore needs the real
