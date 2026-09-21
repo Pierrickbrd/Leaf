@@ -199,6 +199,11 @@ target_link_libraries(leaf-desktop PRIVATE
 
 enable_testing()
 
+add_test(NAME reports-version COMMAND leaf-desktop --version)
+add_test(NAME checks-startup COMMAND leaf-desktop --check-startup)
+set_tests_properties(reports-version checks-startup
+    PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 qt_add_executable(keeps-the-key tests/keeps_the_key.cpp src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp)
 target_include_directories(keeps-the-key PRIVATE src)
 target_link_libraries(keeps-the-key PRIVATE
