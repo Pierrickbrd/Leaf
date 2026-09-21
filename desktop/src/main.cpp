@@ -9,15 +9,25 @@
 
 #include "Boot.h"
 
+#include <QIcon>
+#include <iostream>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQuickStyle>
 
 int main(int argc, char *argv[])
 {
+    if (argc == 2 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--version")) {
+        std::cout << "leaf-desktop " LEAF_VERSION << '\n';
+        return 0;
+    }
+
     QGuiApplication application(argc, argv);
     QGuiApplication::setOrganizationName(QStringLiteral("Leaf"));
     QGuiApplication::setApplicationName(QStringLiteral("Leaf"));
+    QGuiApplication::setApplicationVersion(QStringLiteral(LEAF_VERSION));
+    QGuiApplication::setDesktopFileName(QStringLiteral("leaf"));
+    QGuiApplication::setWindowIcon(QIcon(QStringLiteral(":/qt/qml/Leaf/assets/logos/leaf-light.svg")));
 
     // Basic, not Fusion and not the native style: the client draws its own palette — a
     // light one and a dark one, both decided — and a style that paints its own controls

@@ -6,7 +6,10 @@
 # that need testing can be tested without a window.
 cmake_minimum_required(VERSION 3.21)
 
-project(leaf-desktop VERSION 0.1.0 LANGUAGES CXX)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../VERSION" LEAF_VERSION LIMIT_COUNT 1)
+project(leaf-desktop VERSION ${LEAF_VERSION} LANGUAGES CXX)
+
+include(GNUInstallDirs)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -170,6 +173,7 @@ qt_add_qml_module(leaf-desktop
 
 # The QML type registration Qt generates includes the headers by their bare name.
 target_include_directories(leaf-desktop PRIVATE src)
+target_compile_definitions(leaf-desktop PRIVATE LEAF_VERSION="${PROJECT_VERSION}")
 
 # The fonts live at the root of the repository, shared, and are not copied here: duplicating
 # font binaries to respect a build boundary would be paying dearly for a principle.
@@ -428,3 +432,10 @@ install(TARGETS leaf-desktop
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../assets/logos/leaf-light.svg
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps
+    RENAME leaf.svg
+)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../packaging/leaf.desktop
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)

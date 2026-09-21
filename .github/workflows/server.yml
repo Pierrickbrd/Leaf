@@ -9,12 +9,16 @@ on:
     paths:
       - 'server/**'
       - 'contract/openapi.yaml'
+      - 'VERSION'
+      - 'install.sh'
       - 'tools/**'
       - '.github/workflows/server.yml'
   pull_request:
     paths:
       - 'server/**'
       - 'contract/openapi.yaml'
+      - 'VERSION'
+      - 'install.sh'
       - 'tools/**'
   workflow_dispatch:
 

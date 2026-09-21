@@ -35,7 +35,13 @@ async fn main() -> Result<()> {
     // touches the environment or `Db::open` touches the disk — a question about how to run
     // this, or a typo in how it was asked to, must not start anything on its way to an
     // answer.
-    let asked = match Invocation::of(std::env::args().skip(1))? {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if arguments.as_slice() == ["--version"] {
+        println!("leaf-server {}", env!("LEAF_VERSION"));
+        return Ok(());
+    }
+
+    let asked = match Invocation::of(arguments)? {
         Outcome::Usage(usage) => {
             println!("{usage}");
             return Ok(());

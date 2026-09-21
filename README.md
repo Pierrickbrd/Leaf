@@ -152,6 +152,59 @@ the tokenizer, and half-typed words already match. It searches titles, authors, 
 genres, tags and summaries; hits are series, entries and chapters, never a universe or a
 work, which are reached through the editions that carry them.
 
+## Installing Leaf
+
+On Ubuntu, install the server, the client, or both with one command. No checkout is
+required:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Pierrickbrd/Leaf/main/install.sh) server
+bash <(curl -fsSL https://raw.githubusercontent.com/Pierrickbrd/Leaf/main/install.sh) client
+bash <(curl -fsSL https://raw.githubusercontent.com/Pierrickbrd/Leaf/main/install.sh) all
+```
+
+The command downloads the Leaf sources into a temporary directory, builds the selected
+component and removes those sources afterwards. The server command creates a 32-character
+client key, starts the service and prints the address and key needed by the client
+installer. The client command asks for those two values without echoing the key. The
+resulting `~/.config/Leaf/leaf.conf` is mode `0600`; the server copy lives in
+`/etc/leaf/server.env`, also mode `0600`.
+
+The safe default listens only on `127.0.0.1`. For a remote server, bind Leaf to a private
+network address reachable from the client:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/Pierrickbrd/Leaf/main/install.sh) server --host 100.64.0.10
+```
+
+For a public hostname, keep Leaf behind a TLS reverse proxy and pass the public URL with
+`--address https://leaf.example.net`. The plain HTTP port should remain private because the
+client key is sent on every request.
+
+Leaf currently has one product version for the two independently installable components.
+The server and client record their installed versions separately and both expose them:
+
+```bash
+leaf-server --version
+leaf-desktop --version
+cat /usr/local/share/leaf/server.version
+cat /usr/local/share/leaf/client.version
+```
+
+Each installation also provides `leaf-install`. During the pre-1.0 phase, an update
+downloads the current `main` branch and replaces only the component installed on that
+machine:
+
+```bash
+leaf-install update server
+leaf-install update client
+leaf-install update all
+```
+
+From a source checkout, the equivalent commands are `./install.sh server`,
+`./install.sh client` and `./install.sh all`. Release notes are kept in
+[`CHANGELOG.md`](CHANGELOG.md).
+
 ## Running it
 
 ```bash
