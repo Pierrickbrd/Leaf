@@ -9,10 +9,12 @@
 use anyhow::Result;
 use rusqlite::types::Value;
 use rusqlite::Row;
+use std::collections::HashMap;
 
 use crate::api::dto::{
-    ArcDto, ChapterDto, EntryDto, FacetDto, FacetsDto, PageDto, SearchHitDto, SearchPageDto,
-    SeriesDto, SeriesFilter, SeriesSort, SortDirection, UNREAD,
+    ArcDto, ChapterDto, EntryDto, FacetDto, FacetsDto, PageDto, ReadingOrderDto, ReadingStepDto,
+    SearchHitDto, SearchPageDto, SeriesDto, SeriesFilter, SeriesSort, SortDirection, UniverseDto,
+    UNREAD,
 };
 use crate::store::text::{composed_name, gaps, nearest, search_key, tolerance};
 use crate::store::{Cx, Db};
@@ -481,6 +483,104 @@ impl<'a> Repository<'a> {
     ///
     /// The expressions are the ones [`Repository::series`] filters on, COALESCE included, so
     /// a value can never be offered that the filter would then fail to match.
+    /// Every universe, with the number of ways through it it declares.
+    pub fn universes(&self) -> Result<Vec<UniverseDto>> {
+        self.db.read(|cx| {
+            cx.query(
+                "SELECT u.id, u.name,
+                        (SELECT COUNT(*) FROM reading_order o WHERE o.universe_id = u.id)
+                          AS order_count
+                 FROM universe u
+                 ORDER BY u.name COLLATE LEAF ASC, u.id ASC",
+                [],
+                |r| {
+                    Ok(UniverseDto {
+                        id: r.get("id")?,
+                        name: r.get("name")?,
+                        order_count: r.get("order_count")?,
+                    })
+                },
+            )
+        })
+    }
+
+    /// The orders of one universe, with their steps.
+    ///
+    /// Two queries whatever the answer holds, and never one per order: a universe with eight
+    /// ways through it is the case this exists for, and asking per order is how a list that
+    /// works on one becomes a list that crawls on eight.
+    pub fn orders_of_universe(&self, universe_id: &str) -> Result<Vec<ReadingOrderDto>> {
+        let orders: Vec<(String, ReadingOrderDto)> = self.db.read(|cx| {
+            cx.query(
+                "SELECT id, declared_id, name, is_default FROM reading_order
+                 WHERE universe_id = ?1 ORDER BY position",
+                [universe_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>("id")?,
+                        ReadingOrderDto {
+                            id: r.get("declared_id")?,
+                            name: r.get("name")?,
+                            default: r.get::<_, i64>("is_default")? != 0,
+                            steps: Vec::new(),
+                        },
+                    ))
+                },
+            )
+        })?;
+        if orders.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let steps: Vec<(String, ReadingStepDto)> = self.db.read(|cx| {
+            cx.query(
+                "SELECT s.order_id, s.work_id, w.name AS work, s.unit,
+                        s.edition_id, e.name AS edition, e.id AS series_id,
+                        s.from_number, s.to_number
+                 FROM reading_order_step s
+                 JOIN reading_order o ON o.id = s.order_id
+                 JOIN work w ON w.id = s.work_id
+                 LEFT JOIN edition e ON e.id = s.edition_id
+                 WHERE o.universe_id = ?1
+                 ORDER BY s.order_id, s.position",
+                [universe_id],
+                |r| {
+                    let edition: Option<String> = r.get("edition")?;
+                    Ok((
+                        r.get::<_, String>("order_id")?,
+                        ReadingStepDto {
+                            work_id: r.get("work_id")?,
+                            work: r.get("work")?,
+                            unit: r.get("unit")?,
+                            series_id: r.get("series_id")?,
+                            // An implicit edition carries no name of its own, so the work's
+                            // is what a reader would call it.
+                            series: match (r.get::<_, Option<String>>("series_id")?, edition) {
+                                (Some(_), Some(name)) => Some(name),
+                                (Some(_), None) => Some(r.get("work")?),
+                                (None, _) => None,
+                            },
+                            from: r.get("from_number")?,
+                            to: r.get("to_number")?,
+                        },
+                    ))
+                },
+            )
+        })?;
+
+        let mut by_order: HashMap<String, Vec<ReadingStepDto>> = HashMap::new();
+        for (order_id, step) in steps {
+            by_order.entry(order_id).or_default().push(step);
+        }
+        Ok(orders
+            .into_iter()
+            .map(|(row_id, mut order)| {
+                order.steps = by_order.remove(&row_id).unwrap_or_default();
+                order
+            })
+            .collect())
+    }
+
     pub fn facets(&self) -> Result<FacetsDto> {
         Ok(FacetsDto {
             read_statuses: self.facet(READ_STATUS)?,
@@ -871,31 +971,26 @@ fn match_expression(terms: &[String]) -> String {
 /// and turned round it opened on the accents. A French library cannot have an alphabet that
 /// puts a fifth of its titles past the end.
 fn search_order(sort: SeriesSort, direction: SortDirection) -> String {
-    // One arm per criterion, like the shelf's own: the direction turns the leading term and
-    // the tie-breakers stay put. See `SeriesSort::sql`, which this has to agree with — a
-    // search and the shelf behind it running different orders is the defect this pairing
-    // exists to prevent.
     let way = direction.sql();
-    let ties = "search.name ASC, search.kind ASC, search.ref ASC";
-    match sort {
-        SeriesSort::Name => {
-            format!("search.name {way}, search.kind {way}, search.ref {way}")
-        }
-        // A file hit carries its own arrival; an edition hit borrows the latest of its
-        // entries, which is what `added` means on the shelf beside it.
-        SeriesSort::Added => format!(
+    // Only the leading value reverses; ties keep their stable alphabetical order.
+    let value = match sort {
+        // A file carries its own arrival; an edition borrows its latest entry's.
+        SeriesSort::Added => {
             "COALESCE(entry.added_at, (SELECT MAX(x.added_at) FROM entry x \
-             WHERE x.edition_id = search.edition_id), 0) {way}, {ties}"
-        ),
-        SeriesSort::Read => format!(
+             WHERE x.edition_id = search.edition_id), 0)"
+        }
+        SeriesSort::Read => {
             "COALESCE((SELECT MAX(p.updated_at) FROM progress p \
-             WHERE p.edition_id = search.edition_id), 0) {way}, {ties}"
-        ),
-        SeriesSort::Volumes => format!(
-            "(SELECT COUNT(*) FROM entry x WHERE x.edition_id = search.edition_id) {way}, \
-             {ties}"
-        ),
-    }
+             WHERE p.edition_id = search.edition_id), 0)"
+        }
+        SeriesSort::Volumes => {
+            "(SELECT COUNT(*) FROM entry x WHERE x.edition_id = search.edition_id)"
+        }
+        SeriesSort::Name => {
+            return format!("search.name {way}, search.kind {way}, search.ref {way}");
+        }
+    };
+    format!("{value} {way}, search.name ASC, search.kind ASC, search.ref ASC")
 }
 
 impl Repository<'_> {

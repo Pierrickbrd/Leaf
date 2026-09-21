@@ -357,6 +357,58 @@ impl SeriesFilter {
 
 /// How a list of series is ordered.
 ///
+/// An universe, and how many ways through it it declares.
+///
+/// Answered apart from the series it holds: a universe is a shelf and not a thing to read,
+/// and a client listing them wants their names, not four hundred editions.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UniverseDto {
+    pub id: String,
+    pub name: String,
+    /// Zero for a universe that declares none, which is most of them.
+    pub order_count: i64,
+}
+
+/// One named way through a universe.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingOrderDto {
+    /// The id the file declares, not the row's — an order is addressed by what its author
+    /// called it, and that survives a rescan where a derived id need not.
+    pub id: String,
+    pub name: String,
+    /// Exactly one order of a universe carries this, or none does.
+    #[serde(skip_serializing_if = "is_false")]
+    pub default: bool,
+    pub steps: Vec<ReadingStepDto>,
+}
+
+/// A stretch of one work, at this point of the order.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingStepDto {
+    pub work_id: String,
+    /// The work's name, so a client can draw the step without a second request per step.
+    pub work: String,
+    /// `CHAPTER`, `VOLUME`, or absent for the whole work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    /// The edition a VOLUME range is counted in — `seriesId` here is what `/series` calls an
+    /// id, because an edition is what that route answers with. Absent on a CHAPTER range,
+    /// whose numbers identify the same story in every edition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub series: Option<String>,
+    /// Inclusive, and open at either end: absent `from` is the beginning, absent `to` is the
+    /// current end and whatever is added after it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<f64>,
+}
+
 /// Ordering happens in SQL rather than after the fact, because a page of fifty out of a
 /// thousand is only the right fifty if the database did the sorting.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

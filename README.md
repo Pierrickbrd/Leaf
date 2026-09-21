@@ -49,7 +49,7 @@ Four files carry the metadata, each holding only what belongs to its level:
 
 | File | Where | Holds |
 |---|---|---|
-| `universe.json` | universe folder | a name, and optionally reading orders |
+| `universe.json` | universe folder | a name, a default order, and named reading orders |
 | `work.json` | work folder | title, authors, artists, status, reading direction, genres, tags, age rating |
 | `edition.json` | edition folder | publisher, collection, volume count, language, chapter label pattern, arcs, colour |
 | `entry.json` | **inside the CBZ** | number, title, chapters, their start pages and the volume they came from |
@@ -69,6 +69,83 @@ most of the time and wrong often enough to matter — a colour insert, a scanlat
 and overriding it should not mean editing the archive.
 
 `ComicInfo.xml` is read as a fallback, so the server runs on an untouched library.
+
+### Universe reading orders
+
+An order belongs to an universe and contains ordered **work segments**, not a flat list of
+editions. The same work may appear more than once, so this can describe “work A, part 1;
+work B, part 1; work A, part 2”.
+
+```json
+{
+  "leaf": 1,
+  "name": "An example universe",
+  "defaultOrder": "recommended",
+  "orders": [
+    {
+      "id": "recommended",
+      "name": "Recommended order",
+      "steps": [
+        { "work": "Series A", "unit": "CHAPTER", "from": 1, "to": 120 },
+        { "work": "Series B", "unit": "CHAPTER", "from": 1, "to": 55 },
+        { "work": "Series A", "unit": "CHAPTER", "from": 121 }
+      ]
+    }
+  ]
+}
+```
+
+A whole work is a step without a range:
+
+```json
+{ "work": "Dragon Ball" }
+```
+
+The rules are:
+- an order lists only works currently present in the universe; a future work is added to
+  the order when it is imported, not predeclared as an unresolved step;
+
+- `work` is the work-folder path relative to the universe, not its display title;
+- ranges are inclusive; an omitted `from` means the start and an omitted `to` means the
+  current and future end;
+- chapter ranges are canonical because chapter numbers identify story content across
+  differently divided editions;
+- a `CHAPTER` step never names an edition;
+- a `VOLUME` step always names its `edition`, because “volumes 1–7” describes different
+  content in a 42-volume edition and a 34-volume edition;
+- a reader's preferred edition is user state, not universe metadata, and progress remains
+  attached to entries and editions;
+- an universe may offer several named orders, with one optional `defaultOrder`;
+- missing references and invalid ranges belong in the scan report and must not prevent
+  unrelated content from being indexed.
+
+`GET /universes` lists them with how many orders each declares, and
+`GET /universes/{id}/orders` answers one universe's orders with their steps — two queries
+whatever the answer holds.
+
+A step that cannot be resolved is **left out and reported**, never guessed at: a work the
+universe does not hold, a volume range naming no edition, a chapter range naming one, a
+range running backwards. The scan report says which order and which step, and everything
+else in the library is indexed regardless. An order that reaches a client is therefore
+always walkable.
+
+The rows are derived and rewritten whole at every scan — `universe.json` is the truth, and
+a half-updated order is an order that reads wrong.
+
+For Dragon Ball, the declaration can remain deliberately simple:
+
+```json
+{
+  "defaultOrder": "main",
+  "orders": [
+    {
+      "id": "main",
+      "name": "Main order",
+      "steps": [{ "work": "Dragon Ball" }]
+    }
+  ]
+}
+```
 
 Search is an FTS5 index inside the same database — ranked by relevance, accents folded in
 the tokenizer, and half-typed words already match. It searches titles, authors, artists,

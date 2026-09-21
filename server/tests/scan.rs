@@ -961,6 +961,8 @@ fn placeholder(field: &str) -> serde_json::Value {
         "genres" | "authors" | "artists" | "tags" => serde_json::json!([""]),
         "colour" => serde_json::json!(true),
         "arcs" => serde_json::json!([{"name": "", "unit": "VOLUME", "from": 1.0, "to": 1.0}]),
+        "orders" => serde_json::json!([{"id": "", "name": "", "steps": [
+            {"work": "", "unit": "VOLUME", "edition": "", "from": 1.0, "to": 1.0}]}]),
         "chapters" => serde_json::json!([{"raw": "", "number": 1.0, "title": "", "startPage": 1,
                                           "after": 1.0, "volume": 1.0, "label": ""}]),
         // Not the value serde would skip, or the field vanishes on the way out.
@@ -1672,4 +1674,299 @@ fn a_universe_holding_a_folder_with_no_archive_in_it_records_no_work() {
 
     assert_eq!(library.count("work"), 1);
     assert_eq!(library.all("SELECT name FROM work"), vec!["Elfes"]);
+}
+
+// ------------------------------------------------------- the ways through a universe
+
+/// A universe with two works and one order over both of them, which is the shape almost
+/// every declaration takes: read this, then that.
+fn an_universe_with_two_works(library: &Library, universe: &str) {
+    for (work, volumes) in [("Series A", 2), ("Series B", 1)] {
+        let folder = library.folder(&format!("{universe}/{work}"));
+        for v in 1..=volumes {
+            archive(&folder.join(format!("Tome {v}.cbz")), 3, None);
+        }
+    }
+}
+
+#[test]
+fn an_order_becomes_steps_in_the_order_they_were_written() {
+    let library = Library::new();
+    an_universe_with_two_works(&library, "Arran");
+    library.write(
+        "Arran/universe.json",
+        r#"{
+          "leaf": 1, "name": "Arran", "defaultOrder": "recommended",
+          "orders": [
+            { "id": "recommended", "name": "Ordre conseillé", "steps": [
+                { "work": "Series A", "unit": "CHAPTER", "from": 1, "to": 120 },
+                { "work": "Series B" },
+                { "work": "Series A", "unit": "CHAPTER", "from": 121 }
+            ]},
+            { "id": "publication", "name": "Ordre de parution", "steps": [
+                { "work": "Series B" }
+            ]}
+          ]
+        }"#,
+    );
+
+    let report = library.scan();
+    assert!(report.disregarded.is_empty(), "{:?}", report.disregarded);
+    assert_eq!(2, library.count("reading_order"));
+    assert_eq!(4, library.count("reading_order_step"));
+
+    // Written first, offered first — and the one named by `defaultOrder` is the default,
+    // which is a different question from being first.
+    assert_eq!(
+        vec!["recommended".to_string(), "publication".to_string()],
+        library.all("SELECT declared_id FROM reading_order ORDER BY position")
+    );
+    assert_eq!(
+        Some("recommended".to_string()),
+        library.one("SELECT declared_id FROM reading_order WHERE is_default = 1")
+    );
+
+    // The same work twice, with another between: the whole reason a step is not an edition.
+    assert_eq!(
+        vec![
+            "Series A".to_string(),
+            "Series B".to_string(),
+            "Series A".to_string()
+        ],
+        library.all(
+            "SELECT w.name FROM reading_order_step s
+             JOIN work w ON w.id = s.work_id
+             JOIN reading_order o ON o.id = s.order_id
+             WHERE o.declared_id = 'recommended' ORDER BY s.position"
+        )
+    );
+
+    // A step with no range is the whole work, and says so by holding no bounds at all
+    // rather than by holding bounds nobody can tell from real ones.
+    assert_eq!(
+        Some(1i64),
+        library.one(
+            "SELECT COUNT(*) FROM reading_order_step s
+             JOIN reading_order o ON o.id = s.order_id
+             WHERE o.declared_id = 'recommended'
+               AND s.unit IS NULL AND s.from_number IS NULL AND s.to_number IS NULL"
+        )
+    );
+    // And an open end is an absent `to`, not a large number standing in for one.
+    assert_eq!(
+        Some(121.0f64),
+        library.one(
+            "SELECT from_number FROM reading_order_step
+             WHERE to_number IS NULL AND from_number IS NOT NULL"
+        )
+    );
+}
+
+/// Volume ranges name their edition and chapter ranges must not, because « volumes 1 to 7 »
+/// is different content in a 42-volume edition and a 34-volume one.
+#[test]
+fn a_volume_range_names_its_edition_and_a_chapter_range_may_not() {
+    let library = Library::new();
+    let deluxe = library.folder("Arran/Series A/Deluxe");
+    let original = library.folder("Arran/Series A/Original");
+    for folder in [&deluxe, &original] {
+        archive(&folder.join("Tome 1.cbz"), 3, None);
+        archive(&folder.join("Tome 2.cbz"), 3, None);
+    }
+    library.write(
+        "Arran/universe.json",
+        r#"{
+          "leaf": 1, "orders": [
+            { "id": "main", "steps": [
+                { "work": "Series A", "unit": "VOLUME", "edition": "Deluxe",
+                  "from": 1, "to": 2 },
+                { "work": "Series A", "unit": "VOLUME", "from": 1, "to": 2 },
+                { "work": "Series A", "unit": "CHAPTER", "edition": "Deluxe", "from": 1 }
+            ]}
+          ]
+        }"#,
+    );
+
+    let report = library.scan();
+    assert_eq!(1, library.count("reading_order_step"), "{report:?}");
+    assert_eq!(
+        Some("Deluxe".to_string()),
+        library.one(
+            "SELECT e.name FROM reading_order_step s
+             JOIN edition e ON e.id = s.edition_id"
+        )
+    );
+
+    // Both refusals are said out loud, and each says which order and which step.
+    assert_eq!(2, report.disregarded.len(), "{:?}", report.disregarded);
+    assert!(
+        report.disregarded[0].contains("step 2"),
+        "{:?}",
+        report.disregarded
+    );
+    assert!(
+        report.disregarded[0].contains("VOLUME range must name its edition"),
+        "{:?}",
+        report.disregarded
+    );
+    assert!(
+        report.disregarded[1].contains("step 3"),
+        "{:?}",
+        report.disregarded
+    );
+}
+
+/// A step naming something the universe does not hold is reported and skipped; the steps
+/// around it are indexed, and so is everything else in the library.
+#[test]
+fn a_step_pointing_at_nothing_is_reported_and_the_rest_is_indexed() {
+    let library = Library::new();
+    an_universe_with_two_works(&library, "Arran");
+    library.write(
+        "Arran/universe.json",
+        r#"{
+          "leaf": 1, "defaultOrder": "nowhere", "orders": [
+            { "id": "main", "steps": [
+                { "work": "Series A" },
+                { "work": "Series Z" },
+                { "unit": "CHAPTER", "from": 1 },
+                { "work": "Series B", "unit": "TOME" },
+                { "work": "Series B", "from": 9, "to": 2 },
+                { "work": "Series B" }
+            ]}
+          ]
+        }"#,
+    );
+
+    let report = library.scan();
+
+    // Two works and their volumes are there whatever the order says.
+    assert_eq!(2, library.count("work"));
+    assert_eq!(3, library.count("entry"));
+
+    // Two steps survive, and their positions are consecutive: a dropped step leaves no hole
+    // for a reader to walk into.
+    assert_eq!(2, library.count("reading_order_step"));
+    assert_eq!(
+        vec!["0".to_string(), "1".to_string()],
+        library.all("SELECT CAST(position AS TEXT) FROM reading_order_step ORDER BY position")
+    );
+
+    assert_eq!(4, report.disregarded.len(), "{:?}", report.disregarded);
+    assert!(report.disregarded[0].contains("\"Series Z\" is not a work"));
+    assert!(report.disregarded[1].contains("no work named"));
+    assert!(report.disregarded[2].contains("is not a unit"));
+    assert!(report.disregarded[3].contains("backwards"));
+
+    // And a default naming an order nobody wrote is a contradiction, not a silence.
+    assert!(
+        report
+            .contradictions
+            .iter()
+            .any(|one| one.contains("defaultOrder")),
+        "{:?}",
+        report.contradictions
+    );
+}
+
+/// Rewritten whole at every scan, because `universe.json` is the truth and these rows are
+/// only what a query can reach. Reconciled instead, a removed step would have survived.
+#[test]
+fn a_rescan_rewrites_the_orders_rather_than_adding_to_them() {
+    let library = Library::new();
+    an_universe_with_two_works(&library, "Arran");
+    library.write(
+        "Arran/universe.json",
+        r#"{"leaf": 1, "orders": [{ "id": "main", "steps": [
+            { "work": "Series A" }, { "work": "Series B" }
+        ]}]}"#,
+    );
+    library.scan();
+    assert_eq!(2, library.count("reading_order_step"));
+
+    library.write(
+        "Arran/universe.json",
+        r#"{"leaf": 1, "orders": [{ "id": "main", "steps": [{ "work": "Series B" }]}]}"#,
+    );
+    library.scan();
+    assert_eq!(1, library.count("reading_order"));
+    assert_eq!(1, library.count("reading_order_step"));
+
+    // And a file that stops declaring orders stops having them.
+    library.write("Arran/universe.json", r#"{"leaf": 1}"#);
+    library.scan();
+    assert_eq!(0, library.count("reading_order"));
+    assert_eq!(0, library.count("reading_order_step"));
+}
+
+/// An universe that goes away takes its orders with it, through the foreign key rather than
+/// through a second pass somebody has to remember to write.
+#[test]
+fn removing_an_universe_removes_the_ways_through_it() {
+    let library = Library::new();
+    an_universe_with_two_works(&library, "Arran");
+    library.write(
+        "Arran/universe.json",
+        r#"{"leaf": 1, "orders": [{ "id": "main", "steps": [{ "work": "Series A" }]}]}"#,
+    );
+    library.scan();
+    assert_eq!(1, library.count("reading_order_step"));
+
+    std::fs::remove_dir_all(library.dir.path().join("library").join("Arran")).unwrap();
+    library.scan();
+    assert_eq!(0, library.count("universe"));
+    assert_eq!(0, library.count("reading_order"));
+    assert_eq!(0, library.count("reading_order_step"));
+}
+
+#[test]
+fn unnamed_and_duplicate_orders_keep_stable_identifiers_and_report_rejected_steps() {
+    let library = Library::new();
+    an_universe_with_two_works(&library, "Arran");
+    library.write(
+        "Arran/universe.json",
+        r#"{"leaf": 1, "orders": [
+            {"name": "Épopée", "steps": [{"work": "Series A"}]},
+            {"id": " ", "name": " ", "steps": [{"work": "Series B"}]},
+            {"id": "epopee", "steps": [{"work": "Series B"}]},
+            {"id": "missing-edition", "steps": [
+                {"work": "Series A", "unit": "VOLUME", "edition": "Absent"}
+            ]}
+        ]}"#,
+    );
+    let report = library.scan();
+    assert_eq!(library.count("reading_order"), 3);
+    assert_eq!(library.count("reading_order_step"), 2);
+    assert_eq!(
+        library.all("SELECT declared_id FROM reading_order ORDER BY position"),
+        vec!["epopee", "2", "missing-edition"]
+    );
+    assert_eq!(
+        library.all("SELECT name FROM reading_order ORDER BY position"),
+        vec!["Épopée", "2", "missing-edition"]
+    );
+    assert!(report
+        .contradictions
+        .iter()
+        .any(|line| line.contains("two orders")));
+    assert!(report
+        .disregarded
+        .iter()
+        .any(|line| line.contains("not an edition")));
+}
+
+#[test]
+fn a_universe_with_unreadable_metadata_still_indexes_its_works_without_orders() {
+    let library = Library::new();
+    an_universe_with_two_works(&library, "Arran");
+    library.write("Arran/universe.json", "{broken");
+    let report = library.scan();
+    assert_eq!(library.count("universe"), 1);
+    assert_eq!(library.count("work"), 2);
+    assert_eq!(library.count("reading_order"), 0);
+    assert_eq!(report.universes, 1);
+    assert_eq!(
+        library.one::<String>("SELECT name FROM universe"),
+        Some("Arran".into())
+    );
 }

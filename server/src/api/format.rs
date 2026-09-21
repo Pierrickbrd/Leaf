@@ -150,13 +150,26 @@ fn fields_of<T: Serialize>(value: &T) -> Vec<String> {
 /// missing from what the server tells the applications the format is. It fails to compile.
 mod filled {
     use crate::metadata::sidecars::{
-        ArcJson, ChapterJson, EditionJson, EntryJson, UniverseJson, WorkJson, FORMAT_VERSION,
+        ArcJson, ChapterJson, EditionJson, EntryJson, OrderJson, StepJson, UniverseJson, WorkJson,
+        FORMAT_VERSION,
     };
 
     pub fn universe() -> UniverseJson {
         UniverseJson {
             leaf: Some(FORMAT_VERSION),
             name: Some(String::new()),
+            default_order: Some(String::new()),
+            orders: vec![OrderJson {
+                id: Some(String::new()),
+                name: Some(String::new()),
+                steps: vec![StepJson {
+                    work: Some(String::new()),
+                    unit: Some(String::new()),
+                    edition: Some(String::new()),
+                    from: Some(0.0),
+                    to: Some(0.0),
+                }],
+            }],
         }
     }
 

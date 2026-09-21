@@ -23,8 +23,9 @@ use http_body_util::BodyExt;
 
 use super::bulk_import::{BulkImport, CleanupRequest, ImportRequest, ReceiveError};
 use super::dto::{
-    ArcDto, ChapterDto, EntryDto, ErrorDto, FacetsDto, HealthDto, PageDto, SeriesFilter,
-    SeriesPageDto, SeriesSort, SortDirection, API_VERSION, FORMAT_VERSION,
+    ArcDto, ChapterDto, EntryDto, ErrorDto, FacetsDto, HealthDto, PageDto, ReadingOrderDto,
+    SeriesFilter, SeriesPageDto, SeriesSort, SortDirection, UniverseDto, API_VERSION,
+    FORMAT_VERSION,
 };
 use super::intake::{Collision, FileRequest, Intake, Proposal};
 use super::keys::{Keys, Permission, HEADER};
@@ -148,6 +149,8 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/series", get(list_series))
         .route("/filters", get(get_filters))
+        .route("/universes", get(list_universes))
+        .route("/universes/{id}/orders", get(list_universe_orders))
         .route("/format", get(get_format))
         .route("/series/{id}/entries", get(list_series_entries))
         .route("/series/{id}/chapters", get(list_series_chapters))
@@ -410,6 +413,30 @@ async fn list_series(
     })
     .await?;
     Ok(Json(page_dto))
+}
+
+/// The universes this library holds, and how many ways through each one it declares.
+async fn list_universes(
+    _: Reader,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<UniverseDto>>, Failure> {
+    Ok(Json(
+        blocking(move || Repository::new(&state.db).universes()).await?,
+    ))
+}
+
+/// The named ways through one universe, in the order its file writes them.
+///
+/// An empty list and not a 404 for a universe that declares none: declaring no order is the
+/// ordinary case, and a client asking has learnt something true either way.
+async fn list_universe_orders(
+    _: Reader,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<ReadingOrderDto>>, Failure> {
+    Ok(Json(
+        blocking(move || Repository::new(&state.db).orders_of_universe(&id)).await?,
+    ))
 }
 
 /// The values the filters can take, so the application can offer them rather than make you
