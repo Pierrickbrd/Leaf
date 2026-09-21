@@ -39,6 +39,14 @@ WATCHED = {
     "Facets": ("whole", ["facets"]),
     "Facet": ("whole", ["facetsUnder"]),
     "UpNext": ("whole", ["upNext"]),
+    # Added the day a search answer grew six fields and nobody noticed: the client parsed
+    # hits, this guard did not watch them, and the contract described neither.
+    "SearchHit": ("whole", ["hit"]),
+    "SearchPage": ("whole", ["hits"]),
+    # The settings screen is the first thing to read either of these, and the first thing
+    # that would silently stop reading a field the server grew.
+    "Health": ("whole", ["health"]),
+    "ScanStatus": ("whole", ["scanStatus"]),
     "Entry": ("part", ["upNext"]),
     "Progress": ("part", ["upNext"]),
     "Chapter": ("part", ["upNext"]),

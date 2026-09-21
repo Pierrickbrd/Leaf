@@ -217,6 +217,68 @@ std::optional<ReadStatus> readStatus(const QString &word)
     return std::nullopt;
 }
 
+Hit::Kind hitKind(const QString &word)
+{
+    using enum Hit::Kind;
+
+    const QString plain = word.toUpper();
+    if (plain == u"EDITION"_s)
+        return Edition;
+    if (plain == u"ENTRY"_s)
+        return Entry;
+    if (plain == u"CHAPTER"_s)
+        return Chapter;
+    return Other;
+}
+
+QString spell(Hit::Kind value)
+{
+    using enum Hit::Kind;
+
+    switch (value) {
+    case Edition:
+        return QStringLiteral("EDITION");
+    case Entry:
+        return QStringLiteral("ENTRY");
+    case Chapter:
+        return QStringLiteral("CHAPTER");
+    case Other:
+        return {};
+    }
+    return {};
+}
+
+Sort sort(const QString &word)
+{
+    using enum Sort;
+
+    const QString plain = word.toLower();
+    if (plain == u"added"_s)
+        return Added;
+    if (plain == u"volumes"_s)
+        return Volumes;
+    if (plain == u"read"_s)
+        return Read;
+    return Name;
+}
+
+QString spell(Sort value)
+{
+    using enum Sort;
+
+    switch (value) {
+    case Added:
+        return QStringLiteral("added");
+    case Volumes:
+        return QStringLiteral("volumes");
+    case Read:
+        return QStringLiteral("read");
+    case Name:
+        return QStringLiteral("name");
+    }
+    return QStringLiteral("name");
+}
+
 QString spell(ReadStatus value)
 {
     using enum ReadStatus;
@@ -319,6 +381,178 @@ Read<Page> page(const QJsonObject &from)
         some.items.append(*one.value);
     }
     return {some, {}};
+}
+
+Read<Hit> hit(const QJsonObject &from)
+{
+    Fields field(from);
+    Hit found;
+    found.id = field.text(u"id"_s);
+    found.label = field.text(u"label"_s);
+    const QString kind = field.text(u"kind"_s);
+    if (field.broken())
+        return refused<Hit>(QStringLiteral("hit"), field.trouble());
+
+    found.kind = hitKind(kind);
+    found.seriesId = field.maybeText(u"seriesId"_s);
+    found.seriesName = field.maybeText(u"seriesName"_s);
+    found.entryId = field.maybeText(u"entryId"_s);
+    if (const std::optional<QString> kindOfEntry = field.maybeText(u"entryKind"_s)) {
+        found.entryKind = (*kindOfEntry == u"CHAPTER"_s) ? UpNext::Kind::Chapter
+                                                         : UpNext::Kind::Volume;
+    }
+    found.entryNumber = field.maybeReal(u"entryNumber"_s);
+    found.entryTitle = field.maybeText(u"entryTitle"_s);
+    found.entryPageCount = field.maybeWhole(u"entryPageCount"_s);
+    found.chapterNumber = field.maybeReal(u"chapterNumber"_s);
+    found.chapterTitle = field.maybeText(u"chapterTitle"_s);
+    // Absent is not approximate: the contract's default is false, and a client reading a
+    // missing field as "maybe" would put a guess mark on every exact hit an older server sent.
+    found.approximate = field.maybeBool(u"approximate"_s).value_or(false);
+
+    return {found, {}};
+}
+
+namespace {
+
+/// A file is an entry or a chapter. An edition is a shelf tile and is counted apart, which is
+/// why a heading over the lines cannot simply say how many hits there were.
+bool isFile(const Hit &one)
+{
+    return !one.approximate
+        && (one.kind == Hit::Kind::Entry || one.kind == Hit::Kind::Chapter);
+}
+
+Read<Hits> fromRows(const QJsonArray &rows, Hits page)
+{
+    for (int i = 0; i < rows.size(); ++i) {
+        const Read<Hit> read = hit(rows.at(i).toObject());
+        if (!read.ok())
+            return refused<Hits>(QStringLiteral("hits[%1]").arg(i), read.trouble);
+        page.items << *read.value;
+    }
+    return {page, {}};
+}
+
+} // namespace
+
+Read<Hits> hits(const QJsonDocument &from)
+{
+    Hits page;
+
+    if (from.isArray()) {
+        const QJsonArray rows = from.array();
+        page.size = int(rows.size());
+        const Read<Hits> read = fromRows(rows, page);
+        if (!read.ok())
+            return read;
+        // Nothing else said how many there are, so what is in hand is all there is known to
+        // be. A count invented larger than the list would put a "see the others" under lines
+        // that are already all of them.
+        Hits counted = *read.value;
+        counted.total = int(counted.items.size());
+        for (const Hit &one : counted.items) {
+            if (isFile(one))
+                ++counted.fileTotal;
+        }
+        return {counted, {}};
+    }
+
+    if (!from.isObject())
+        return refused<Hits>(QStringLiteral("hits"), QStringLiteral("expected a list"));
+
+    const QJsonObject envelope = from.object();
+    Fields field(envelope);
+    page.total = field.whole(u"total"_s);
+    page.fileTotal = field.whole(u"fileTotal"_s);
+    page.page = field.whole(u"page"_s);
+    page.size = field.whole(u"size"_s);
+    if (field.broken())
+        return refused<Hits>(QStringLiteral("hits"), field.trouble());
+
+    const QJsonValue items = envelope.value(u"items"_s);
+    if (!items.isArray())
+        return refused<Hits>(QStringLiteral("hits"), QStringLiteral("items: expected a list"));
+
+    return fromRows(items.toArray(), page);
+}
+
+Read<Health> health(const QJsonObject &from)
+{
+    Fields field(from);
+    Health said;
+
+    said.status = field.text(u"status"_s);
+    said.api = field.whole(u"api"_s);
+    said.format = field.whole(u"format"_s);
+    said.library = field.whole(u"library"_s);
+    if (field.broken())
+        return refused<Health>(QStringLiteral("health"), field.trouble());
+
+    // Absent means no shared folder, which is the ordinary case for a server on another
+    // machine — not a malformed answer.
+    said.localDrop = field.maybeBool(u"localDrop"_s).value_or(false);
+    return {said, {}};
+}
+
+Read<ScanStatus> scanStatus(const QJsonObject &from)
+{
+    Fields field(from);
+    ScanStatus said;
+
+    const QString state = field.text(u"state"_s);
+    if (field.broken())
+        return refused<ScanStatus>(QStringLiteral("scan"), field.trouble());
+
+    // A word this client has not been taught leaves the state `Other` rather than refusing
+    // the answer: the server may grow a fourth, and a screen that cannot name it can still
+    // say when the last scan ran.
+    using enum ScanStatus::State;
+    if (state == u"IDLE"_s)
+        said.state = Idle;
+    else if (state == u"RUNNING"_s)
+        said.state = Running;
+    else if (state == u"DONE"_s)
+        said.state = Done;
+
+    said.startedAt = field.maybeBig(u"startedAt"_s);
+    said.finishedAt = field.maybeBig(u"finishedAt"_s);
+
+    if (field.has(u"report"_s)) {
+        const QJsonObject wrote = from.value(u"report"_s).toObject();
+        ScanFindings found;
+        const QJsonObject counted = wrote.value(u"counts"_s).toObject();
+        Fields count(counted);
+        found.counts.universes = count.whole(u"universes"_s);
+        found.counts.works = count.whole(u"works"_s);
+        found.counts.editions = count.whole(u"editions"_s);
+        found.counts.entries = count.whole(u"entries"_s);
+        found.counts.chapters = count.whole(u"chapters"_s);
+        found.counts.pages = count.whole(u"pages"_s);
+        found.counts.reanalysed = count.whole(u"reanalysed"_s);
+        if (count.broken())
+            return refused<ScanStatus>(QStringLiteral("scan"), count.trouble());
+
+        Fields outer(wrote);
+        found.chaptersWithoutStartPage =
+            outer.maybeWhole(u"chaptersWithoutStartPage"_s).value_or(0);
+        found.failure = outer.maybeText(u"failure"_s).value_or(QString());
+
+        const QJsonArray listed = wrote.value(u"findings"_s).toArray();
+        for (const QJsonValue &one : listed) {
+            const QJsonObject each = one.toObject();
+            Fields at(each);
+            Finding finding;
+            finding.kind = at.text(u"kind"_s);
+            finding.total = at.whole(u"total"_s);
+            if (at.broken())
+                return refused<ScanStatus>(QStringLiteral("scan"), at.trouble());
+            finding.items = at.words(u"items"_s);
+            found.findings.append(finding);
+        }
+        said.report = found;
+    }
+    return {said, {}};
 }
 
 Read<Facets> facets(const QJsonObject &from)

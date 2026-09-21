@@ -98,13 +98,42 @@ paths:
         - { $ref: "#/components/parameters/FilterStatus" }
         - { $ref: "#/components/parameters/FilterLanguage" }
         - { $ref: "#/components/parameters/FilterPublisher" }
+        - name: q
+          description: |
+            The shelf, reduced to what the search finds — same folding, same prefixes and the
+            same ranking rules as `/search`, and the chips still apply, because a search runs
+            inside what is showing.
+
+            **Editions only.** The grid draws series; a chapter whose title matches is a line
+            for `/search` to answer, not a tile here. Nothing matching is an empty shelf and
+            not the whole one, which is the answer a client cannot work out for itself.
+
+            The order stays the shelf's own: `sort` decides it, not relevance. A grid that
+            reshuffled itself as you typed would be a different thing from the one you were
+            reading a second ago.
+          in: query
+          schema: { type: string }
         - name: sort
           in: query
-          description: Unknown values fall back to `name` rather than failing.
+          description: |
+            Unknown values fall back to `name` rather than failing — `updated`, which this
+            shelf once offered, is one of them. `added` orders on the *latest* volume a
+            series received, so adding one tome to a series already held brings it to the
+            front; that is what it was asked for, and it left nothing for `updated` to say.
+            `read` orders on when a volume of the series was last read.
           schema:
             type: string
-            enum: [name, added, updated, volumes]
+            enum: [name, added, volumes, read]
             default: name
+        - name: direction
+          in: query
+          description: |
+            `asc` or `desc`. When omitted, each criterion keeps its familiar direction:
+            names A–Z, dates newest first and volume counts largest first. Unknown values
+            are treated as omitted, so older and later clients still receive a shelf.
+          schema:
+            type: string
+            enum: [asc, desc]
         - name: page
           in: query
           schema: { type: integer, minimum: 0, default: 0 }
@@ -123,6 +152,51 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
 
+  /universes:
+    get:
+      operationId: listUniverses
+      tags: [reading]
+      summary: The universes this library holds.
+      description: |
+        A universe is a shelf and not a thing to read, so this answers names and not the
+        editions inside them — those are reached through `/series?universe=`.
+      responses:
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: Every universe, by name.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Universe" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /universes/{id}/orders:
+    get:
+      operationId: listUniverseOrders
+      tags: [reading]
+      summary: The named ways through one universe.
+      description: |
+        Declared in `universe.json` and derived at every scan, in the order the file writes
+        them. A universe declaring none answers an empty list rather than a 404: declaring
+        no order is the ordinary case, and the answer is true either way.
+
+        A step that could not be resolved — a work the universe does not hold, a volume
+        range naming no edition, a range running backwards — is left out here and reported
+        by the scan instead. An order is therefore always walkable.
+      parameters:
+        - { $ref: "#/components/parameters/Id" }
+      responses:
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The orders, each with its steps.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ReadingOrder" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
   /filters:
     get:
       operationId: getFilters
@@ -132,6 +206,26 @@ paths:
         A client has no way to know that this library holds four authors and eleven
         genres, and guessing would offer choices matching nothing. Counted from the same
         expressions the filter runs over, so a chip can never return an empty shelf.
+      parameters:
+        - name: over
+          in: query
+          description: |
+            What to count. `series` is every edition, and is what an absent value means.
+            `files` counts entries and chapters instead, for a row of pills drawn above a
+            list of files: a pill has to say how many of the rows beneath it would remain.
+            Over files only `readStatuses` and `media` are filled — the rest are names, which
+            belong to the search field rather than to a pill, and counting them over every
+            chapter would be work for a screen that does not exist.
+          schema:
+            type: string
+            enum: [series, files]
+            default: series
+        - name: q
+          in: query
+          description: |
+            Narrows the counts to what a search matches. Meaningful with `over=files`; a
+            count that ignores the query would not describe the list it sits above.
+          schema: { type: string }
       responses:
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
@@ -601,6 +695,31 @@ paths:
         - name: limit
           in: query
           schema: { type: integer, minimum: 1, maximum: 200, default: 40 }
+        - name: page
+          in: query
+          description: |
+            Naming this, or `size`, asks for `SearchPage` instead of the bare list. Two
+            thousand chapters cannot be a screenful, and a list with no total cannot say so.
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: size
+          in: query
+          description: How many hits one page holds. Replaces `limit` when both are given.
+          schema: { type: integer, minimum: 1, maximum: 200, default: 40 }
+        - name: sort
+          in: query
+          description: |
+            Orders every hit before paging, including entries and chapters. When omitted,
+            relevance remains the order for compatibility with older clients.
+          schema:
+            type: string
+            enum: [name, added, volumes, read]
+        - name: direction
+          in: query
+          description: |
+            `asc` or `desc`; meaningful with `sort`. If only this is named, `name` is used.
+          schema:
+            type: string
+            enum: [asc, desc]
         - { $ref: "#/components/parameters/FilterRead" }
         - { $ref: "#/components/parameters/FilterUniverse" }
         - { $ref: "#/components/parameters/FilterAuthor" }
@@ -613,10 +732,17 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
-          description: Hits, by relevance.
+          description: |
+            Hits, by the requested sort or otherwise by relevance — a bare list, or a
+            `SearchPage` when `page` or `size` was named. The shape is the client's choice
+            and not the server's mood.
           content:
             application/json:
-              schema: { type: array, items: { $ref: "#/components/schemas/SearchHit" } }
+              schema:
+                oneOf:
+                  - type: array
+                    items: { $ref: "#/components/schemas/SearchHit" }
+                  - { $ref: "#/components/schemas/SearchPage" }
 
   # ------------------------------------------------------------------- import
 
@@ -1281,6 +1407,63 @@ components:
           description: A filter offering a choice that returns nothing is a bug.
       required: [value, count]
 
+    Universe:
+      type: object
+      required: [id, name, orderCount]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        orderCount:
+          type: integer
+          description: How many named orders this universe declares. Usually zero.
+
+    ReadingOrder:
+      type: object
+      description: |
+        One named way through a universe: ordered stretches of works, not a flat list of
+        editions. The same work may appear more than once, which is what lets an order say
+        "work A, part 1; work B; work A, part 2".
+      required: [id, name, steps]
+      properties:
+        id:
+          type: string
+          description: |
+            What the file calls this order. Addressed by this rather than by a derived id,
+            because the author's name for it survives a rescan.
+        name: { type: string }
+        default:
+          type: boolean
+          description: Absent when false. At most one order of a universe carries it.
+        steps:
+          type: array
+          items: { $ref: "#/components/schemas/ReadingStep" }
+
+    ReadingStep:
+      type: object
+      description: |
+        A stretch of one work. Ranges are inclusive and open at either end: an absent `from`
+        is the beginning, an absent `to` the current end and whatever is added after it.
+      required: [workId, work]
+      properties:
+        workId: { type: string }
+        work:
+          type: string
+          description: The work's name, so a step can be drawn without a request of its own.
+        unit:
+          type: string
+          enum: [CHAPTER, VOLUME]
+          description: Absent for the whole work, which is the common case.
+        seriesId:
+          type: string
+          description: |
+            The edition a VOLUME range is counted in — an id of `/series`. Always present on
+            a VOLUME step and never on a CHAPTER one: "volumes 1 to 7" is different content
+            in a 42-volume edition and a 34-volume one, while a chapter number identifies
+            the same story in both.
+        series: { type: string }
+        from: { type: number }
+        to: { type: number }
+
     Facets:
       type: object
       properties:
@@ -1447,11 +1630,45 @@ components:
           description: So a hit can be opened without a second call.
         seriesName: { type: [string, "null"] }
         entryId: { type: [string, "null"] }
+        entryKind:
+          type: [string, "null"]
+          enum: [VOLUME, CHAPTER, null]
+          description: |
+            The file the hit lives in, when it lives in one. A chapter inside a volume needs
+            both levels on screen: « Chapitre 98 » alone does not say what opening it opens.
+        entryNumber: { type: [number, "null"] }
+        entryTitle: { type: [string, "null"] }
+        entryPageCount: { type: [integer, "null"] }
+        chapterNumber: { type: [number, "null"] }
+        chapterTitle: { type: [string, "null"] }
         approximate:
           type: boolean
           default: false
           description: A guess. It must reach the screen looking like one.
       required: [kind, id, label]
+
+    SearchPage:
+      type: object
+      description: |
+        The same hits, with what a heading needs: how many there are in all, and how many of
+        them are files. A client asks for this shape by naming `page` or `size`; without
+        either, `/search` answers the bare list it always has, byte for byte, so a client
+        written before this envelope existed keeps working.
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/SearchHit" } }
+        total:
+          type: integer
+          description: |
+            Every exact hit at the levels asked for. An approximate suggestion counts only
+            when there was no exact hit at all — a guess is not a result.
+        fileTotal:
+          type: integer
+          description: |
+            ENTRY and CHAPTER only: the number a heading reading « Fichiers » must show, even
+            though the same question also asks for editions so that "did you mean" can exist.
+        page: { type: integer }
+        size: { type: integer }
+      required: [items, total, fileTotal, page, size]
 
     SeriesPatch:
       type: object
@@ -1857,8 +2074,76 @@ components:
         state: { type: string, enum: [IDLE, RUNNING, DONE] }
         startedAt: { type: [integer, "null"] }
         finishedAt: { type: [integer, "null"] }
-        summary: { type: [string, "null"], description: "The last report, once there is one." }
+        report:
+          $ref: "#/components/schemas/ScanFindings"
+          description: The last report, once there is one.
       required: [state]
+
+    ScanFindings:
+      type: object
+      description: |
+        What the last scan found, in counts and named lists rather than in a paragraph.
+
+        A paragraph belongs in a terminal, and the server still writes one there. It does
+        not belong on a screen: a client words its own language, every string of it in one
+        file a typography test can sweep, and a sentence arriving from here would be the
+        one string that file could not reach.
+
+        Each item's own line does cross as written — « Death Note/Tome 1.cbz — no number »
+        is about one file, and turning every one of those into a code with parameters would
+        be a contract the size of the scanner.
+      required: [counts]
+      properties:
+        counts: { $ref: "#/components/schemas/ScanCounts" }
+        findings:
+          type: array
+          items: { $ref: "#/components/schemas/ScanFinding" }
+        chaptersWithoutStartPage:
+          type: integer
+          description: A count and no list, because the list would be every chapter.
+        failure:
+          type: string
+          description: |
+            Set when the scan itself failed, and absent otherwise. A scan that quietly did
+            nothing is worse than one that says why.
+
+    ScanCounts:
+      type: object
+      description: |
+        The library, not the work done on it: an unchanged rescan still reports fifty
+        thousand chapters, because that is how many there are. `reanalysed` is the
+        exception — it counts what was opened and read rather than skipped as unchanged.
+      required: [universes, works, editions, entries, chapters, pages, reanalysed]
+      properties:
+        universes: { type: integer }
+        works: { type: integer }
+        editions: { type: integer }
+        entries: { type: integer }
+        chapters: { type: integer }
+        pages: { type: integer }
+        reanalysed: { type: integer }
+
+    ScanFinding:
+      type: object
+      required: [kind, total, items]
+      properties:
+        kind:
+          type: string
+          enum: [ERRORS, MISSING_METADATA, DISREGARDED, CONTRADICTIONS, IDENTITY,
+                 WITHOUT_METADATA, DUPLICATE_NUMBERS, DUPLICATE_PAGES, DERIVED_ARCS]
+          description: |
+            What kind of thing was found, so a client can say it in its own language. A
+            word a client has not been taught is shown by its items alone rather than
+            dropped: the scan found something either way.
+        total:
+          type: integer
+          description: How many there are, which is not how many are listed.
+        items:
+          type: array
+          items: { type: string }
+          description: |
+            The first sixteen, as whoever met them wrote them. A library with four hundred
+            untitled volumes should not send four hundred lines to say so.
 
     Error:
       type: object
