@@ -27,7 +27,7 @@ int main(int argc, char *argv[])
     QGuiApplication::setApplicationName(QStringLiteral("Leaf"));
     QGuiApplication::setApplicationVersion(QStringLiteral(LEAF_VERSION));
     QGuiApplication::setDesktopFileName(QStringLiteral("leaf"));
-    QGuiApplication::setWindowIcon(QIcon(QStringLiteral(":/qt/qml/Leaf/assets/logos/leaf-light.svg")));
+    QGuiApplication::setWindowIcon(QIcon(QStringLiteral(":/qt/qml/Leaf/assets/logos/leaf-dark.svg")));
 
     // Basic, not Fusion and not the native style: the client draws its own palette — a
     // light one and a dark one, both decided — and a style that paints its own controls
