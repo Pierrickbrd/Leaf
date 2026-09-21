@@ -121,6 +121,18 @@ fn help_prints_usage_and_exits_cleanly_rather_than_starting_a_server() {
 }
 
 #[test]
+fn version_is_the_released_version_and_touches_nothing() {
+    let dir = a_library();
+    let done = leaf(&dir).arg("--version").output().unwrap();
+    assert!(done.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&done.stdout).trim(),
+        format!("leaf-server {}", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(!dir.path().join("index.sqlite").exists());
+}
+
+#[test]
 fn an_unrecognised_argument_is_refused_rather_than_run() {
     // `leaf-server sacn` used to serve the configured library, silently, because any first
     // argument became the command and only `"scan"` was ever compared against it. A typo in

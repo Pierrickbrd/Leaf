@@ -16,6 +16,9 @@ on:
       # client without touching a line under desktop/. Without this path the one guard that
       # would notice never runs.
       - 'contract/openapi.yaml'
+      - 'packaging/**'
+      - 'VERSION'
+      - 'install.sh'
       - 'tools/client_knows_the_contract.py'
       - 'tools/bytes_stay_utf8.py'
       - '.github/workflows/desktop.yml'
@@ -23,6 +26,9 @@ on:
     paths:
       - 'desktop/**'
       - 'contract/openapi.yaml'
+      - 'packaging/**'
+      - 'VERSION'
+      - 'install.sh'
       - 'tools/client_knows_the_contract.py'
       - 'tools/bytes_stay_utf8.py'
   workflow_dispatch:
@@ -38,6 +44,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+
+      - run: bash -n ../install.sh
 
       - name: install Qt 6 and the QML modules
         run: |

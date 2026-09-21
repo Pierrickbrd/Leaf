@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Leaf
+Comment=Lire une bibliothèque de bandes dessinées
+Exec=leaf-desktop
+Icon=leaf
+Terminal=false
+Categories=Graphics;Viewer;
+StartupNotify=true
+StartupWMClass=Leaf
