@@ -174,6 +174,16 @@ def reading(run):
     page = run.check("series", SERIES, SERIES)
     series = page["items"][0]["id"]
     run.check("filters", "/filters", "/filters")
+    # An universe is walked through to its orders, because a route nobody walks is a route
+    # whose schema nobody checks — and these two were written together.
+    universes = run.check("universes", "/universes", "/universes")
+    if universes:
+        universe = universes[0]["id"]
+        run.check(
+            "universe orders",
+            f"/universes/{universe}/orders",
+            "/universes/{id}/orders",
+        )
     run.check("format", "/format", "/format")
     run.check("one series", f"/series/{series}", ONE_SERIES)
     entries = run.check("series entries", f"/series/{series}/entries", "/series/{id}/entries")

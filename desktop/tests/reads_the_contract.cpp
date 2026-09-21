@@ -293,6 +293,136 @@ private slots:
         QVERIFY(got.value->genres.isEmpty());
     }
 
+    /// What the search found, and the three fields the contract insists on.
+    void a_hit_carries_what_it_takes_to_open_it()
+    {
+        const Api::Read<Api::Hit> read = Api::hit(QJsonObject{
+            {u"kind"_s, u"ENTRY"_s},
+            {u"id"_s, u"volume-1"_s},
+            {u"label"_s, u"Assassinat"_s},
+            {u"seriesId"_s, u"ac"_s},
+            {u"seriesName"_s, u"Assassination Classroom"_s},
+            {u"entryId"_s, u"volume-1"_s},
+        });
+        QVERIFY2(read.ok(), qPrintable(read.trouble));
+        QCOMPARE(read.value->kind, Api::Hit::Kind::Entry);
+        QCOMPARE(read.value->label, u"Assassinat"_s);
+        QCOMPARE(read.value->seriesName.value_or(QString()), u"Assassination Classroom"_s);
+        // Absent is not approximate: an older server sending no such field would otherwise
+        // have every one of its exact hits marked as a guess.
+        QVERIFY(!read.value->approximate);
+    }
+
+    /// A chapter found inside a volume carries both levels: its own number and title, and
+    /// the file it lives in. « Chapitre 98 » alone does not say what opening it opens.
+    void a_chapter_hit_carries_the_file_it_lives_in()
+    {
+        const Api::Read<Api::Hit> read = Api::hit(QJsonObject{
+            {u"kind"_s, u"CHAPTER"_s},
+            {u"id"_s, u"ac-v12-c98"_s},
+            {u"label"_s, u"Leçon 099"_s},
+            {u"seriesId"_s, u"ac"_s},
+            {u"entryId"_s, u"ac-v12"_s},
+            {u"entryKind"_s, u"VOLUME"_s},
+            {u"entryNumber"_s, 12.0},
+            {u"entryTitle"_s, u"Shinigami"_s},
+            {u"entryPageCount"_s, 189},
+            {u"chapterNumber"_s, 99.0},
+            {u"chapterTitle"_s, u"Cadeau (2e leçon)"_s},
+        });
+        QVERIFY2(read.ok(), qPrintable(read.trouble));
+        QCOMPARE(read.value->entryKind, Api::UpNext::Kind::Volume);
+        QCOMPARE(read.value->entryNumber.value_or(0), 12.0);
+        QCOMPARE(read.value->entryTitle.value_or(QString()), u"Shinigami"_s);
+        QCOMPARE(read.value->entryPageCount.value_or(0), 189);
+        QCOMPARE(read.value->chapterNumber.value_or(0), 99.0);
+        QCOMPARE(read.value->chapterTitle.value_or(QString()), u"Cadeau (2e leçon)"_s);
+    }
+
+    /// And an edition carries none of them: it is not inside anything.
+    void an_edition_hit_lives_in_no_file()
+    {
+        const Api::Read<Api::Hit> read = Api::hit(QJsonObject{
+            {u"kind"_s, u"EDITION"_s},
+            {u"id"_s, u"ac"_s},
+            {u"label"_s, u"Assassination Classroom"_s},
+        });
+        QVERIFY(read.ok());
+        QVERIFY(!read.value->entryKind.has_value());
+        QVERIFY(!read.value->entryPageCount.has_value());
+        QVERIFY(!read.value->chapterTitle.has_value());
+    }
+
+    /// The envelope, when a page was asked for: the counts a heading needs come with it.
+    void a_page_of_hits_carries_what_a_heading_must_say()
+    {
+        const Api::Read<Api::Hits> read = Api::hits(QJsonDocument(QJsonObject{
+            {u"items"_s,
+             QJsonArray{QJsonObject{{u"kind"_s, u"ENTRY"_s},
+                                    {u"id"_s, u"v1"_s},
+                                    {u"label"_s, u"Tome 1"_s}}}},
+            {u"total"_s, 63},
+            {u"fileTotal"_s, 60},
+            {u"page"_s, 0},
+            {u"size"_s, 40},
+        }));
+        QVERIFY2(read.ok(), qPrintable(read.trouble));
+        QCOMPARE(read.value->items.size(), 1);
+        QCOMPARE(read.value->total, 63);
+        QCOMPARE(read.value->fileTotal, 60);
+        QCOMPARE(read.value->size, 40);
+    }
+
+    /// And the bare list a server that predates the envelope answers: what is in hand is all
+    /// there is known to be, counted here rather than invented larger.
+    void a_bare_list_counts_itself()
+    {
+        const Api::Read<Api::Hits> read = Api::hits(QJsonDocument(QJsonArray{
+            QJsonObject{{u"kind"_s, u"EDITION"_s}, {u"id"_s, u"ac"_s}, {u"label"_s, u"AC"_s}},
+            QJsonObject{{u"kind"_s, u"ENTRY"_s}, {u"id"_s, u"v1"_s}, {u"label"_s, u"Tome 1"_s}},
+            QJsonObject{{u"kind"_s, u"CHAPTER"_s}, {u"id"_s, u"c1"_s}, {u"label"_s, u"Ch. 1"_s}},
+        }));
+        QVERIFY2(read.ok(), qPrintable(read.trouble));
+        QCOMPARE(read.value->total, 3);
+        // Two of the three are files; an edition is a shelf tile and is counted apart.
+        QCOMPARE(read.value->fileTotal, 2);
+    }
+
+    void a_broken_hit_refuses_the_whole_page_by_its_place()
+    {
+        const Api::Read<Api::Hits> read = Api::hits(QJsonDocument(QJsonArray{
+            QJsonObject{{u"kind"_s, u"ENTRY"_s}, {u"id"_s, u"v1"_s}, {u"label"_s, u"Tome 1"_s}},
+            QJsonObject{{u"kind"_s, u"ENTRY"_s}, {u"id"_s, u"v2"_s}},
+        }));
+        QVERIFY(!read.ok());
+        QVERIFY2(read.trouble.contains(u"hits[1]"_s), qPrintable(read.trouble));
+        QVERIFY2(read.trouble.contains(u"label"_s), qPrintable(read.trouble));
+    }
+
+    /// A kind this client has never heard of leaves the hit standing — the screen decides not
+    /// to draw what it cannot place, which is not the same as refusing the whole answer.
+    void a_kind_nobody_knows_leaves_the_hit_standing()
+    {
+        const Api::Read<Api::Hit> read = Api::hit(QJsonObject{
+            {u"kind"_s, u"UNIVERSE"_s},
+            {u"id"_s, u"parasite"_s},
+            {u"label"_s, u"Parasite"_s},
+        });
+        QVERIFY(read.ok());
+        QCOMPARE(read.value->kind, Api::Hit::Kind::Other);
+    }
+
+    /// And a hit without what it takes to be opened is refused, by the name of what is missing.
+    void a_hit_without_a_label_is_refused_by_name()
+    {
+        const Api::Read<Api::Hit> read = Api::hit(QJsonObject{
+            {u"kind"_s, u"EDITION"_s},
+            {u"id"_s, u"ac"_s},
+        });
+        QVERIFY(!read.ok());
+        QVERIFY2(read.trouble.contains(u"label"_s), qPrintable(read.trouble));
+    }
+
     /// Walked rather than trusted: every spelling the contract lists must survive going in and
     /// coming back out. A switch that forgot a case would show up here and nowhere else.
     void the_contract_spellings_survive_the_round_trip()
@@ -300,6 +430,12 @@ private slots:
         for (const QString &word : {u"manga"_s, u"bd"_s, u"comics"_s, u"manhwa"_s, u"manhua"_s,
                                     u"webtoon"_s, u"artbook"_s, u"other"_s})
             QCOMPARE(Api::spell(Api::medium(word)), word);
+
+        for (const QString &word : {u"name"_s, u"added"_s, u"volumes"_s, u"read"_s})
+            QCOMPARE(Api::spell(Api::sort(word)), word);
+
+        for (const QString &word : {u"EDITION"_s, u"ENTRY"_s, u"CHAPTER"_s})
+            QCOMPARE(Api::spell(Api::hitKind(word)), word);
 
         // Asked before it is opened: a rename in `Api.cpp` that stopped one of these being
         // recognised would make this a dereference of an empty optional, and ctest would
@@ -309,6 +445,125 @@ private slots:
             QVERIFY2(read.has_value(), qPrintable(word));
             QCOMPARE(Api::spell(*read), word);
         }
+    }
+
+    /// A report as the server sends one: counts, and one kind of finding with more behind
+    /// it than it lists.
+    static QJsonObject aReport()
+    {
+        return QJsonObject{
+            {u"counts"_s,
+             QJsonObject{{u"universes"_s, 1},
+                         {u"works"_s, 5},
+                         {u"editions"_s, 6},
+                         {u"entries"_s, 59},
+                         {u"chapters"_s, 546},
+                         {u"pages"_s, 0},
+                         {u"reanalysed"_s, 2}}},
+            {u"chaptersWithoutStartPage"_s, 3},
+            {u"findings"_s,
+             QJsonArray{QJsonObject{
+                 {u"kind"_s, u"DISREGARDED"_s},
+                 {u"total"_s, 40},
+                 {u"items"_s, QJsonArray{u"Akira/Tome 1.cbz — sans numéro"_s,
+                                         u"Akira/Tome 2.cbz — sans numéro"_s}}}}},
+        };
+    }
+
+    /// What the server is. Read rather than assumed: a client that guesses its server's
+    /// version is one that will read a field the other end stopped sending.
+    void what_the_server_says_it_is_is_read_in_full()
+    {
+        const QJsonObject said{{u"status"_s, u"ok"_s}, {u"api"_s, 1},
+                               {u"format"_s, 1},       {u"library"_s, 6},
+                               {u"localDrop"_s, true}};
+        const Api::Read<Api::Health> read = Api::health(said);
+        QVERIFY2(read.ok(), qPrintable(read.trouble));
+        QCOMPARE(read.value->status, u"ok"_s);
+        QCOMPARE(read.value->api, 1);
+        QCOMPARE(read.value->format, 1);
+        QCOMPARE(read.value->library, 6);
+        QVERIFY(read.value->localDrop);
+    }
+
+    /// No shared folder is the ordinary case for a server on another machine, not a
+    /// malformed answer.
+    void a_server_with_no_shared_folder_is_not_a_broken_answer()
+    {
+        const QJsonObject said{
+            {u"status"_s, u"ok"_s}, {u"api"_s, 1}, {u"format"_s, 1}, {u"library"_s, 0}};
+        const Api::Read<Api::Health> read = Api::health(said);
+        QVERIFY2(read.ok(), qPrintable(read.trouble));
+        QVERIFY(!read.value->localDrop);
+        // A library of zero is a fact, not an absence: a server answering perfectly over an
+        // unmounted disk answers exactly this.
+        QCOMPARE(read.value->library, 0);
+    }
+
+    void a_health_without_its_version_is_refused_by_name()
+    {
+        const Api::Read<Api::Health> read =
+            Api::health(QJsonObject{{u"status"_s, u"ok"_s}, {u"format"_s, 1}});
+        QVERIFY(!read.ok());
+        QVERIFY2(read.trouble.contains(u"api"_s), qPrintable(read.trouble));
+    }
+
+    void the_scan_says_where_it_is_and_what_the_last_one_found()
+    {
+        using enum Api::ScanStatus::State;
+        const QJsonObject said{{u"state"_s, u"DONE"_s},
+                               {u"startedAt"_s, 1788463365455LL},
+                               {u"finishedAt"_s, 1788463370000LL},
+                               {u"report"_s, aReport()}};
+        const Api::Read<Api::ScanStatus> read = Api::scanStatus(said);
+        QVERIFY2(read.ok(), qPrintable(read.trouble));
+        QCOMPARE(read.value->state, Done);
+        // Milliseconds, and past what an int holds: read as a small number, a scan from
+        // last week becomes one from 1970.
+        QCOMPARE(read.value->startedAt.value_or(0), 1788463365455LL);
+
+        QVERIFY(read.value->report.has_value());
+        QCOMPARE(read.value->report->counts.editions, 6);
+        QCOMPARE(read.value->report->counts.chapters, 546);
+        QCOMPARE(read.value->report->chaptersWithoutStartPage, 3);
+        QCOMPARE(read.value->report->findings.size(), 1);
+        // How many there are is not how many are listed: a library with four hundred of one
+        // mistake sends sixteen lines and the number.
+        QCOMPARE(read.value->report->findings.constFirst().kind, u"DISREGARDED"_s);
+        QCOMPARE(read.value->report->findings.constFirst().total, 40);
+        QCOMPARE(read.value->report->findings.constFirst().items.size(), 2);
+    }
+
+    /// A scan that has never run carries neither a date nor a report, and that is an answer
+    /// rather than a gap.
+    void a_scan_that_never_ran_says_so_without_dates()
+    {
+        using enum Api::ScanStatus::State;
+        const Api::Read<Api::ScanStatus> read =
+            Api::scanStatus(QJsonObject{{u"state"_s, u"IDLE"_s}});
+        QVERIFY2(read.ok(), qPrintable(read.trouble));
+        QCOMPARE(read.value->state, Idle);
+        QVERIFY(!read.value->startedAt.has_value());
+        QVERIFY(!read.value->report.has_value());
+    }
+
+    /// A state this client has not been taught leaves the screen able to say when the last
+    /// scan ran, which is more use than refusing the whole answer.
+    void a_state_nobody_knows_does_not_refuse_the_answer()
+    {
+        using enum Api::ScanStatus::State;
+        const Api::Read<Api::ScanStatus> read = Api::scanStatus(
+            QJsonObject{{u"state"_s, u"PAUSED"_s}, {u"finishedAt"_s, 1788463370000LL}});
+        QVERIFY2(read.ok(), qPrintable(read.trouble));
+        QCOMPARE(read.value->state, Other);
+        QCOMPARE(read.value->finishedAt.value_or(0), 1788463370000LL);
+    }
+
+    void a_scan_without_its_state_is_refused_by_name()
+    {
+        const Api::Read<Api::ScanStatus> read = Api::scanStatus(QJsonObject{});
+        QVERIFY(!read.ok());
+        QVERIFY2(read.trouble.contains(u"state"_s), qPrintable(read.trouble));
     }
 };
 
