@@ -22,6 +22,9 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    const bool checkStartup = argc == 2
+        && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--check-startup");
+
     QGuiApplication application(argc, argv);
     QGuiApplication::setOrganizationName(QStringLiteral("Leaf"));
     QGuiApplication::setApplicationName(QStringLiteral("Leaf"));
@@ -36,6 +39,10 @@ int main(int argc, char *argv[])
 
     QQmlApplicationEngine engine;
     Boot::run(engine, application);
+
+    if (checkStartup) {
+        return 0;
+    }
 
     return QGuiApplication::exec();
 }
