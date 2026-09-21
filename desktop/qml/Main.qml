@@ -25,6 +25,24 @@ ApplicationWindow {
         appNavigationCursor.reset()
     }
 
+    /// Hands the focus from the bar to whatever the Loader is showing, by its first stop
+    /// going forward and its last coming back. A screen that cannot take it — an empty shelf
+    /// has nothing to focus — sends it straight round to the other end of the bar.
+    function moveIntoScreen(forward) {
+        appNavigationCursor.beginKeyboard(forward)
+        const view = screen.item
+        if (view && view.takeFocus && view.takeFocus(forward))
+            return
+        appBar.takeFocus(!forward)
+    }
+
+    /// And back out of it, wrapping: past the last cover is the bar's first stop, before the
+    /// band is the bar's last.
+    function leaveScreen(forward) {
+        appNavigationCursor.beginKeyboard(forward)
+        appBar.takeFocus(forward)
+    }
+
     function returnFocusToPage() {
         clearNavigation()
         navigationStart.forceActiveFocus(Qt.MouseFocusReason)
@@ -72,7 +90,14 @@ ApplicationWindow {
         // qmllint disable unqualified
         sequence: StandardKey.Cancel
         // qmllint enable unqualified
-        onActivated: Navigation.back()
+        onActivated: {
+            // On the shelf Escape first clears the transient question. Only an already-empty
+            // field means "leave this destination".
+            if (Shelf.query.length > 0)
+                Shelf.searchFor("")
+            else
+                Navigation.back()
+        }
     }
 
     // Focus is a page-wide concern. The cursor deliberately lives beside the Loader rather
@@ -110,12 +135,13 @@ ApplicationWindow {
         }
 
         function beginNavigation(forward) {
-            let origin = window.activeFocusItem
+            const origin = window.activeFocusItem
             if (!origin || origin === page || origin === navigationStart) {
-                // After a pointer reset every navigation key restarts at position zero;
-                // direction matters only once the user is already in the focus chain.
-                origin = page
-                forward = true
+                // From nothing, the page starts where the eye starts: the bar. Direction does
+                // not matter here — after a click on bare paper every key restarts there, and
+                // the order runs bar, band, row, covers, and round again from either end.
+                appNavigationCursor.beginKeyboard(true)
+                return appBar.takeFocus(true)
             }
             return window.continueNavigation(origin, forward)
         }
@@ -124,13 +150,22 @@ ApplicationWindow {
             if (!isArrow(event.key) && !isTab(event.key))
                 return
 
+            // Left and Right edit the field. They join global navigation everywhere else,
+            // including Up and Down from that same field.
+            if (window.activeFocusItem
+                    && window.activeFocusItem.objectName === "search-field"
+                    && (event.key === Qt.Key_Left || event.key === Qt.Key_Right))
+                return
+
             // A composite region owns movement inside itself. BeforeItem is important here:
             // it also records Backtab's direction before Qt performs native focus traversal.
             // A pointer cursor is an anchor even while another item still owns active focus.
+            // Keys follow the focus, and only the focus. A pointer resting somewhere used to
+            // claim them too, which is how an arrow pressed while typing went to whatever the
+            // mouse happened to be over instead of to the field it was typed in.
             if (appNavigationCursor.region
-                    && (appNavigationCursor.mode === appNavigationCursor.pointerMode
-                        || window.belongsTo(appNavigationCursor.region,
-                                            window.activeFocusItem))) {
+                    && window.belongsTo(appNavigationCursor.region,
+                                        window.activeFocusItem)) {
                 appNavigationCursor.requestNavigationKey(event.key, event.modifiers)
                 event.accepted = true
                 return
@@ -148,10 +183,36 @@ ApplicationWindow {
             height: 0
         }
 
+        AppBar {
+            id: appBar
+
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            // The highlight goes, the focus stays. Returning the focus to the page here is
+            // what emptied the field of its focus when a pointer merely crossed a button.
+            onPointerLeftTheShelf: window.clearNavigation()
+            // The screen below is the only thing that knows whether a list of files is
+            // showing, and the panel above has to count what that list holds.
+            filtersCountFiles: screen.item && screen.item.showingFiles !== undefined
+                               ? screen.item.showingFiles : false
+            // Out of the bar and into the screen below — or round the other way, the screen
+            // being the only other thing on the page. This is the whole of the order the eye
+            // reads: bar, band, chips, covers, and back to the bar.
+            onWentPast: forward => window.moveIntoScreen(forward)
+            // Nothing, on purpose, until there is a screen to go to. `Navigation` has the
+            // destination and the Loader has one component, so opening it changed the stack
+            // and not the screen: the click did nothing visible, and the next Escape spent
+            // itself popping what nobody had seen — which is worse than a button that waits.
+        }
+
         Loader {
             id: screen
 
-            anchors.fill: parent
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: appBar.bottom
+            anchors.bottom: parent.bottom
             sourceComponent: shelfScreen
         }
     }
@@ -164,8 +225,7 @@ ApplicationWindow {
         // qmllint disable unqualified
         ShelfView {
             navigationCursor: window.navigationCursor
-            onNavigationBoundary: (origin, forward) =>
-                                  window.continueNavigation(origin, forward)
+            onNavigationBoundary: (origin, forward) => window.leaveScreen(forward)
             onPointerNavigationCancelled: window.returnFocusToPage()
         }
         // qmllint enable unqualified

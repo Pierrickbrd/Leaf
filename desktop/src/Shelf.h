@@ -30,6 +30,9 @@
 #include <QQmlEngine>
 #include <QList>
 #include <QString>
+#include <QStringList>
+#include <QVariantMap>
+#include <QTimer>
 
 class Shelf : public QAbstractListModel
 {
@@ -40,6 +43,22 @@ class Shelf : public QAbstractListModel
     Q_PROPERTY(int total READ total NOTIFY changed)
     Q_PROPERTY(bool loading READ loading NOTIFY changed)
     Q_PROPERTY(QString trouble READ trouble NOTIFY changed)
+    /// The lit pills, in the contract's own spelling — "UNREAD", "manga" — because that is
+    /// what goes on the wire and a second spelling here would be a second thing to keep in
+    /// step. Readable so the pills can light themselves from the shelf rather than keep a
+    /// copy of what they asked for.
+    Q_PROPERTY(QStringList readStatuses READ readStatuses NOTIFY changed)
+    Q_PROPERTY(QStringList media READ media NOTIFY changed)
+    /// The order asked for, in the contract's spelling. Reported back so the bar can show the
+    /// value in full — the value is the information, which is why it is not an icon alone.
+    Q_PROPERTY(QVariantMap narrowing READ narrowing NOTIFY changed)
+    Q_PROPERTY(QString sort READ sort NOTIFY changed)
+    Q_PROPERTY(bool sortReversed READ sortReversed NOTIFY changed)
+    Q_PROPERTY(QString sortDirection READ sortDirection NOTIFY changed)
+    /// What is being looked for, or nothing. The shelf carries it rather than a search object
+    /// holding a second list beside this one: the grid shows series either way, and two models
+    /// for one grid is two ways for it to be wrong.
+    Q_PROPERTY(QString query READ query NOTIFY changed)
 
 public:
     /// What a tile shows, one role each. `Q_ENUM` so a test names them rather than counting
@@ -83,8 +102,51 @@ public:
     /// that did not fill.
     QString trouble() const;
 
+    QStringList readStatuses() const { return chosen(u"read"_qs); }
+    QStringList media() const { return chosen(u"medium"_qs); }
+    /// The whole selection, by the contract's own axis names. One value rather than eight
+    /// getters: the panel repeats over it, and a ninth axis costs nothing.
+    QVariantMap narrowing() const { return m_narrowing; }
+    QStringList chosen(const QString &axis) const;
+    QString sort() const { return m_sort; }
+    bool sortReversed() const { return m_reversed.value(m_sort, false); }
+    QString sortDirection() const;
+    QString query() const { return m_query; }
+
+    /// What a row of pills does. The contract settles what it means: repeating a parameter
+    /// widens the choice and naming a second one narrows it, so two lit pills on one axis are
+    /// an "or" and one on each axis is an "and". Nothing here interprets them — they are
+    /// passed through, and blank values are dropped the way the contract says they are.
+    ///
+    /// An unchanged selection asks nothing. A pill that is lit again by a stray binding must
+    /// not cost a page, and a shelf that reloads on every notify is one nobody can read while
+    /// it works.
+    Q_INVOKABLE void filterBy(const QVariantMap &narrowing);
+
+    /// The order, normalised through `Api` on the way in: a word the client does not know
+    /// becomes `name`, which is what the server falls back to. Reporting anything else would
+    /// have the bar name an order nobody is looking at. Asking for the order already in force
+    /// reverses its direction — the second click on a criterion, rather than a fifth entry —
+    /// and every criterion remembers the direction it was left in.
+    Q_INVOKABLE void sortBy(const QString &order);
+
+    /// What was typed. Blank is not a search — a cleared field means the whole shelf, the way
+    /// a cleared chip does — and the lit chips still apply, because a search runs inside what
+    /// is showing rather than beside it.
+    ///
+    /// **What is typed is kept at once; what is asked waits for the typing to stop.** A key at
+    /// a time on a five-hundred-series library is a page of a hundred rows fetched per letter,
+    /// plus a search of its own, and every one of them but the last is read by nobody. The
+    /// field still shows the letter the moment it is pressed — the delay is on the question,
+    /// never on the answer to the reader.
+    ///
+    /// Clearing does not wait. Coming back to the whole shelf is not typing, and a field that
+    /// takes a fifth of a second to empty feels broken in a way that a field that takes a
+    /// fifth of a second to answer does not.
+    Q_INVOKABLE void searchFor(const QString &query);
+
     /// Forget everything and ask again from the first page. Also the retry after a refusal,
-    /// and later what a changed filter does.
+    /// and what a changed filter does.
     Q_INVOKABLE void reload();
 
 signals:
@@ -92,11 +154,39 @@ signals:
     /// them — a `NOTIFY` that only fires sometimes is a binding that is sometimes wrong.
     void changed();
 
+    /// Only the part of changed that alters what a search is allowed to find. Loading a page
+    /// and changing its total must not ask /search again; changing a chip or the field must.
+    /// A search-results model can therefore follow the shelf without guessing which of its
+    /// many transitions mattered.
+    void criteriaChanged();
+
 private:
     void ask(int page);
+    void replaceWith(const QList<Api::Series> &fresh);
     void took(int page, const Server::Answer &answer);
 
     Server *m_server;
+    /// Long enough to swallow a burst of keystrokes, short enough that a pause between two
+    /// words is not felt as a stall. Two hundred milliseconds is the usual answer, and it is
+    /// what a fast typist leaves between letters.
+    static constexpr int Settling = 200;
+
+    QString m_sort = Api::spell(Api::Sort::Name);
+    /// The way each criterion was last being read, by its contract spelling. Held per
+    /// criterion rather than once for the shelf: coming back to « Ajout » from an alphabet
+    /// turned round should give the dates the way they were left, and a single flag made the
+    /// reversal of one order silently become the reversal of the next.
+    QHash<QString, bool> m_reversed;
+    /// Whether the answer in flight replaces the shelf rather than extending it. Held here
+    /// because the reply arrives long after the criteria changed, and what is on screen in
+    /// between is the old shelf, deliberately.
+    bool m_replacing = false;
+    QString m_query;
+    QTimer m_settling;
+    /// Axis name to the values lit on it — `read`, `medium`, `universe`, `genre`, `author`,
+    /// `publisher`, `language`, `status`. Held as one map because it goes out as one query
+    /// and comes back from one panel; two lists could disagree about what is being asked.
+    QVariantMap m_narrowing;
     QList<Api::Series> m_held;
     int m_total = 0;
     /// The page to ask for next, counted here rather than read from the answer's echo: a

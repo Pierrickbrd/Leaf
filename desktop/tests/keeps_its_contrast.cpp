@@ -119,10 +119,35 @@ private slots:
         // size catches a token dropped from the class or a `metaType().id()` filter that
         // stopped matching — neither of which the key comparison could ever see.
         QVERIFY(!pale.isEmpty());
-        QCOMPARE(pale.size(), 13);
+        QCOMPARE(pale.size(), 14);
         for (auto it = pale.constBegin(); it != pale.constEnd(); ++it)
             QVERIFY2(it.value() != deep.value(it.key()),
                      qPrintable(u"%1 is the same colour in both themes"_s.arg(it.key())));
+    }
+
+    /// The one token in the palette that is not read against the page: the resume band's
+    /// button is an emerald pill, and its word sits on the emerald. Measured against the paper
+    /// it would pass at any tone and still be unreadable where it is actually drawn.
+    void the_word_on_the_emerald_is_measured_against_the_emerald()
+    {
+        struct Pair {
+            bool dark;
+            double documented;
+        };
+        static const Pair pairs[] = {{false, 5.56}, {true, 7.69}};
+
+        for (const Pair &pair : pairs) {
+            Theme theme;
+            theme.setDark(pair.dark);
+            const double measured = contrast(theme.onEmerald(), theme.emerald());
+            const QString what = pair.dark ? u"dark onEmerald"_s : u"light onEmerald"_s;
+            QVERIFY2(measured >= 4.5,
+                     qPrintable(u"%1 falls to %2:1, under its 4.5:1 floor"_s
+                                    .arg(what).arg(measured, 0, 'f', 2)));
+            QVERIFY2(std::abs(measured - pair.documented) <= 0.01,
+                     qPrintable(u"%1 is %2:1, not its recorded %3:1"_s
+                                    .arg(what).arg(measured, 0, 'f', 2).arg(pair.documented)));
+        }
     }
 
     /// Qt 6.4 has no QStyleHints::colorScheme, so the window colour is what there is to read.
