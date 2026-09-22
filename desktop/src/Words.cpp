@@ -119,7 +119,7 @@ QString clearEveryFilter()
 
 QString nothingToFilter()
 {
-    return u"Rien à filtrer ici : tout ce que vous avez porte les mêmes réponses."_s;
+    return u"Rien à filtrer ici"_s + Nbsp + u": tout ce que vous avez porte les mêmes réponses."_s;
 }
 
 QString searchWithin(const QString &axisTitle)
@@ -271,6 +271,20 @@ QString reanalysed(int entries)
     return counted(entries, u"tome relu"_s, u"tomes relus"_s);
 }
 
+QString placesCarried(int carried, int lost)
+{
+    if (carried <= 0 && lost <= 0)
+        return {};
+    QStringList said;
+    if (carried > 0) {
+        said << counted(carried, u"reprise de lecture conservée"_s,
+                        u"reprises de lecture conservées"_s);
+    }
+    if (lost > 0)
+        said << counted(lost, u"perdue"_s, u"perdues"_s);
+    return said.join(u" · "_s);
+}
+
 QString finding(const QString &kind)
 {
     if (kind == u"ERRORS"_s)
@@ -304,7 +318,7 @@ QString withoutStartPage(int chapters)
 
 QString scanFailed(const QString &why)
 {
-    return u"Le scan a échoué : %1"_s.arg(why);
+    return u"Le scan a échoué"_s + Nbsp + u": %1"_s.arg(why);
 }
 
 QString andMore(int rest)
@@ -707,6 +721,518 @@ QString readableByOthers(const QString &path)
 {
     return u"%1 est lisible par d’autres que vous, il n’a donc pas été lu "
            u"du tout. Faites-en un chmod 600."_s.arg(path);
+}
+
+QString importing()
+{
+    return u"Importer"_s;
+}
+
+QString dropFilesHere()
+{
+    return u"Déposez vos fichiers ici"_s;
+}
+
+QString dropHow()
+{
+    return u"Depuis votre gestionnaire de fichiers, n’importe où sur la fenêtre"_s;
+}
+
+QString cancel()
+{
+    return u"Annuler"_s;
+}
+
+QString goBack()
+{
+    return u"Revenir en arrière"_s;
+}
+
+QString next()
+{
+    return u"Suivant"_s;
+}
+
+QString startImport()
+{
+    return u"Importer"_s;
+}
+
+QString importStage(Importing stage)
+{
+    using enum Importing;
+
+    switch (stage) {
+    case Asking:
+        return u"Vérification"_s;
+    case Deciding:
+        return u"À vous de dire"_s;
+    case Ready:
+        // « Prêt » and not « En attente »: a folder read, announced and waiting for somebody
+        // to press « Importer » is not the same as one queued behind another, and both said
+        // « En attente ».
+        return u"Prêt"_s;
+    case Sending:
+        return u"Envoi en cours"_s;
+    case Filing:
+        return u"Rangement"_s;
+    case Filed:
+        // « Envoyé » and not « Rangé »: what a reader watched was an upload, and the word
+        // that closes it is the one that named it.
+        return u"Envoyé"_s;
+    case Paused:
+        return u"En pause"_s;
+    case Failed:
+        return u"Échec"_s;
+    }
+    return {};
+}
+
+QString howFar(qint64 sent, qint64 whole)
+{
+    // One vocabulary for sizes: the transfer bar and the import tree say the same thing
+    // about the same bytes, in the same units, rather than each carrying its own.
+    return u"%1 sur %2"_s.arg(size(sent), size(whole));
+}
+
+QString tryingAgainIn(int seconds)
+{
+    return u"Nouvelle tentative dans %1 s"_s.arg(seconds);
+}
+
+QString noSeriesForThisFile()
+{
+    return u"Aucune série ne correspond. Un fichier seul rejoint une série existante"_s +
+           Nbsp + u"; pour en créer une, déposez le dossier."_s;
+}
+
+QString pauseIt()
+{
+    return u"Pause"_s;
+}
+
+QString resumeIt()
+{
+    return u"Reprendre"_s;
+}
+
+QString abandonIt()
+{
+    return u"Abandonner"_s;
+}
+
+QString decisionsWaiting(int many)
+{
+    if (many <= 0)
+        return {};
+    return many == 1 ? u"une décision"_s : u"%1 décisions"_s.arg(many);
+}
+
+QString whatLanded(int installed, int pending, int corrupt, int orphans)
+{
+    QStringList said;
+    said << counted(installed, u"tome envoyé"_s, u"tomes envoyés"_s);
+    if (pending > 0)
+        said << counted(pending, u"encore à venir"_s, u"encore à venir"_s);
+    if (corrupt > 0)
+        said << counted(corrupt, u"mal arrivé"_s, u"mal arrivés"_s);
+    // Never deleted, only reported — and the word says so rather than leaving a count a
+    // reader could take for a loss.
+    if (orphans > 0)
+        said << counted(orphans, u"déjà là et non annoncé"_s, u"déjà là et non annoncés"_s);
+    return said.join(u" · "_s);
+}
+
+QString couldNotBeRead(const QString &name)
+{
+    return u"« %1 » n’a pas pu être lu."_s.arg(name);
+}
+
+QString couldNotCleanUp(const QString &name)
+{
+    return u"Le nettoyage de %1 a échoué"_s.arg(name) + Nbsp
+           + u": ses octets restent sur le serveur."_s;
+}
+
+QString willCreate(const QString &kind, const QString &name)
+{
+    QString what = kind;
+    if (kind == u"UNIVERSE"_s)
+        what = u"l’univers"_s;
+    else if (kind == u"WORK"_s)
+        what = u"la série"_s;
+    else if (kind == u"EDITION"_s)
+        what = u"l’édition"_s;
+    return u"créera %1 « %2 »"_s.arg(what, name);
+}
+
+QString acceptCreations()
+{
+    return u"Accepter"_s;
+}
+
+QString alreadyElsewhere(const QString &name, const QString &folder)
+{
+    if (folder.isEmpty())
+        return u"« %1 » est déjà dans la bibliothèque — le ranger ici l’y déplacera."_s.arg(name);
+    return u"« %1 » est déjà dans « %2 » — le ranger ici l’y déplacera."_s.arg(name, folder);
+}
+
+QString verifyEachFile()
+{
+    return u"Vérifier que chaque tome arrive intact"_s;
+}
+
+QString verifyingMeans()
+{
+    return u"Calcule l’empreinte de chaque tome avant l’envoi et la recompare à l’arrivée. "
+           u"Plus long à préparer"_s +
+           Nbsp + u"; sans elle, un tome abîmé en route s’installe sans que rien le dise."_s;
+}
+
+QString chooseLead()
+{
+    return u"ou choisir"_s;
+}
+
+QString chooseFiles()
+{
+    return u"Des fichiers"_s;
+}
+
+QString chooseFilesTitle()
+{
+    return u"Fichiers à importer"_s;
+}
+
+QString chooseFolder()
+{
+    return u"Un dossier"_s;
+}
+
+QString chooseFolderTitle()
+{
+    return u"Dossier à importer"_s;
+}
+
+QString sameDestination(const QString &one, const QString &other)
+{
+    return u"« %1 » arriverait au même endroit que « %2 ». Déposez-les séparément."_s
+        .arg(one, other);
+}
+
+QString level(Manifest::Level level)
+{
+    using enum Manifest::Level;
+
+    switch (level) {
+    case Universe:
+        return u"univers"_s;
+    case Work:
+        return u"série"_s;
+    case Edition:
+        return u"édition"_s;
+    case Chapter:
+        return u"chapitre"_s;
+    case Volume:
+        return u"tome"_s;
+    }
+    return {};
+}
+
+QString levelTitle(Manifest::Level level)
+{
+    using enum Manifest::Level;
+
+    switch (level) {
+    case Universe:
+        return u"Univers"_s;
+    case Work:
+        return u"Série"_s;
+    case Edition:
+        return u"Édition"_s;
+    case Chapter:
+        return u"Chapitre"_s;
+    case Volume:
+        return u"Tome"_s;
+    }
+    return {};
+}
+
+QString levelIcon(Manifest::Level level)
+{
+    using enum Manifest::Level;
+
+    switch (level) {
+    case Universe:
+        return u"public"_s;
+    case Work:
+        return u"collections_bookmark"_s;
+    case Edition:
+        return u"book_2"_s;
+    case Chapter:
+        return u"bookmark"_s;
+    case Volume:
+        return u"book"_s;
+    }
+    return {};
+}
+
+namespace {
+
+/// Whether the level's own word is feminine — « série », « édition » — so a past participle
+/// standing after it agrees. The other three levels, including a tome and a chapter, are
+/// both masculine, so they never disagree with each other about it.
+bool feminine(Manifest::Level level)
+{
+    return level == Manifest::Level::Work || level == Manifest::Level::Edition;
+}
+
+} // namespace
+
+QString willBeCreated(Manifest::Level level)
+{
+    return feminine(level) ? u"sera créée"_s : u"sera créé"_s;
+}
+
+QString willBeMoved(Manifest::Level level)
+{
+    return feminine(level) ? u"sera déplacée"_s : u"sera déplacé"_s;
+}
+
+QString alreadyInTheLibrary()
+{
+    return u"déjà là"_s;
+}
+
+QString willBeSent()
+{
+    return u"à envoyer"_s;
+}
+
+QString beingSent()
+{
+    return u"envoi"_s;
+}
+
+QString wasFiled(Manifest::Level level)
+{
+    return feminine(level) ? u"envoyée"_s : u"envoyé"_s;
+}
+
+QString failedToSend()
+{
+    return u"échec"_s;
+}
+
+QString wasCreated(Manifest::Level level)
+{
+    return feminine(level) ? u"créée"_s : u"créé"_s;
+}
+
+QString wasMoved(Manifest::Level level)
+{
+    return feminine(level) ? u"déplacée"_s : u"déplacé"_s;
+}
+
+QString wasSent(Manifest::Level level)
+{
+    return feminine(level) ? u"envoyée"_s : u"envoyé"_s;
+}
+
+QString willBeReplaced(Manifest::Level level)
+{
+    return feminine(level) ? u"sera remplacée"_s : u"sera remplacé"_s;
+}
+
+QString levelAnd(Manifest::Level level, const QString &state)
+{
+    // Qualified: the parameter is named after the function it calls, the same way
+    // `willBeCreated`'s own argument is — `Words::level` is unreachable by its bare name
+    // once shadowed.
+    if (state.isEmpty())
+        return Words::levelTitle(level);
+    return u"%1 · %2"_s.arg(Words::levelTitle(level), state);
+}
+
+QString nodeLine(Manifest::Level level, const QString &state, const QString &holds)
+{
+    QStringList said{levelTitle(level)};
+    if (!state.isEmpty())
+        said << state;
+    if (!holds.isEmpty())
+        said << holds;
+    return said.join(u" · "_s);
+}
+
+QString holdsReplacements(int count, int chosen)
+{
+    if (chosen <= 0) {
+        // « remplaçable » and not « à remplacer »: nothing here has to be replaced, and a
+        // line that reads like a task left undone would push somebody to do it.
+        return count == 1 ? u"1 tome remplaçable"_s
+                          : u"%1 tomes remplaçables"_s.arg(count);
+    }
+    return chosen == 1 ? u"1 tome sera remplacé"_s
+                       : u"%1 tomes seront remplacés"_s.arg(chosen);
+}
+
+QString fileNamed(const QString &title, const QString &fileName)
+{
+    if (title.isEmpty())
+        return fileName;
+    return u"%1 · %2"_s.arg(title, fileName);
+}
+
+QString declarationDiffers(const QString &presentName, const QStringList &differs)
+{
+    const QString named = presentName.isEmpty()
+        ? u"la déclaration déjà là"_s
+        : u"la déclaration de « %1 »"_s.arg(presentName);
+    if (differs.isEmpty())
+        return u"%1 diffère"_s.arg(named);
+    return u"%1 diffère · %2"_s.arg(named, differs.join(u", "_s));
+}
+
+QString insteadOf(const QString &title, qint64 bytes, bool read)
+{
+    QStringList said;
+    if (!read)
+        said << u"non relu"_s;
+    else if (!title.isEmpty())
+        said << u"« %1 »"_s.arg(title);
+    said << size(bytes);
+    return u"à la place de %1"_s.arg(said.join(u" · "_s));
+}
+
+QString size(qint64 bytes)
+{
+    // Binary units, correctly named. The only formatter before this one was the lambda
+    // inside `howFar`, dividing by 1024² and writing « Mo » — wrong by five percent, and
+    // the import tree would have said « Gio » right beside it.
+    if (bytes < 1024)
+        return u"%1 o"_s.arg(bytes);
+
+    // Rounded for display before the unit is chosen, not after: comparing the raw value to
+    // 1024 let 1 048 575 bytes (one below a mebibyte) round up to display as « 1024 Kio »
+    // instead of promoting to « 1,0 Mio », and the same gap sat below the next threshold too.
+    const qint64 kio = std::llround(bytes / 1024.0);
+    if (kio < 1024)
+        return u"%1 Kio"_s.arg(kio);
+
+    // Mio, Gio, Tio, Pio — a whole library dropped in one folder crosses every one of these
+    // before a single volume does, which is exactly the drop this screen exists to accept.
+    // The table stops at Pio because nothing this client imports gets there; adding a unit
+    // above it is one more entry here, not a new formula.
+    static const QStringList Units{u"Mio"_s, u"Gio"_s, u"Tio"_s, u"Pio"_s};
+    double value = double(bytes) / (1024.0 * 1024.0);
+    qsizetype unit = 0;
+    while (unit + 1 < Units.size() && std::llround(value * 10.0) >= 10240) {
+        value /= 1024.0;
+        ++unit;
+    }
+    return u"%1 %2"_s.arg(QString::number(value, 'f', 1).replace(u'.', u','), Units.at(unit));
+}
+
+QString nodeHolds(qint64 volumes, qint64 bytes)
+{
+    if (volumes <= 0)
+        return {};
+    return u"%1 · %2"_s.arg(counted(int(volumes), u"tome"_s, u"tomes"_s), size(bytes));
+}
+
+QString checking(qint64 done, qint64 whole)
+{
+    if (whole <= 0)
+        return importStage(Importing::Asking);
+    // Accorded like every other count in this file — « 0/1 tome », not « 0/1 tomes » — the
+    // one line here that never asked `whole` to agree with its own noun.
+    const QString noun = whole == 1 ? u"tome"_s : u"tomes"_s;
+    return u"%1 · %2/%3 %4"_s.arg(importStage(Importing::Asking)).arg(done).arg(whole).arg(noun);
+}
+
+QString waitingToBeChecked()
+{
+    return u"En attente"_s;
+}
+
+QString dropSomethingElse()
+{
+    return u"Déposer autre chose"_s;
+}
+
+QString nothingToSend()
+{
+    return u"Rien à envoyer"_s;
+}
+
+QString announcing()
+{
+    // « Vérifié… » and not « Annonce… »: the announcement is the contract's word for what is
+    // happening, and what a reader is watching for is the thing that just ended. The
+    // ellipsis is what says something is still running — the pendant of the « Vérification ·
+    // 12/68 tomes » that came before it.
+    return u"Vérifié…"_s;
+}
+
+QString couldNotBeOpened()
+{
+    return u"Ce fichier n’a pas pu être ouvert."_s;
+}
+
+QString notAnArchive()
+{
+    return u"Ce fichier n’est pas une archive."_s;
+}
+
+QString archiveTooBig()
+{
+    return u"Cette archive est trop grande pour être lue ici."_s;
+}
+
+QString catalogueMissing()
+{
+    return u"Cette archive annonce un catalogue qui n’y est pas."_s;
+}
+
+QString sidecarTooBig()
+{
+    return u"Le sidecar de cette archive est trop gros pour en être un."_s;
+}
+
+QString sidecarCompressedInAnUnknownWay()
+{
+    return u"Le sidecar de cette archive est compressé d’une façon inconnue."_s;
+}
+
+QString sidecarCouldNotBeInflated()
+{
+    return u"Le sidecar de cette archive n’a pas pu être décompressé."_s;
+}
+
+QString folderTooDeep()
+{
+    // The non-breaking space before the « ? » is why this sentence had to come here: it
+    // spent its whole life in `Manifest.cpp` with an ordinary one, where the guard that
+    // reads `Words.cpp` could never look at it.
+    return u"Ce dossier est trop profond pour être lu — un lien qui boucle"_s + Nbsp + u"?"_s;
+}
+
+QString notAFolder()
+{
+    return u"Ce n’est pas un dossier."_s;
+}
+
+QString stageAnd(const QString &stage, const QString &howFar)
+{
+    if (howFar.isEmpty())
+        return stage;
+    return u"%1 · %2"_s.arg(stage, howFar);
+}
+
+QString concern(const QString &said)
+{
+    return u"· %1"_s.arg(said);
 }
 
 } // namespace Words

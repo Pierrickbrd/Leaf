@@ -48,7 +48,27 @@ public:
             const QByteArray arrived = socket->readAll();
             request += arrived;
             heard += arrived;
-            if (!request.contains("\r\n\r\n")) {
+            const qsizetype headerEnd = request.indexOf("\r\n\r\n");
+            if (headerEnd < 0) {
+                return;
+            }
+            // A body several megabytes wide — the folder send path's own chunk — arrives
+            // in more than the one `readyRead` headers alone would ever need, and the
+            // first of those already contains the blank line the check above looks for.
+            // Answering there closed the connection out from under a client still writing
+            // the rest of it, which read on the client side as the transfer having failed
+            // rather than as this deliberately tiny server jumping the gun. `Content-Length`
+            // is what the request itself says its body is, so waiting for that many bytes
+            // past the header is the one honest way to know it has all arrived.
+            qint64 contentLength = 0;
+            for (const QByteArray &line : request.left(headerEnd).split('\n')) {
+                const QByteArray trimmed = line.trimmed();
+                if (!trimmed.toLower().startsWith("content-length:"))
+                    continue;
+                contentLength = trimmed.mid(trimmed.indexOf(':') + 1).trimmed().toLongLong();
+                break;
+            }
+            if (request.size() < headerEnd + 4 + contentLength) {
                 return;
             }
             answered = true;

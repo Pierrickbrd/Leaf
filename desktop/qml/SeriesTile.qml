@@ -15,6 +15,7 @@ Item {
     required property string medium
     required property string volumes
     required property bool inProgress
+    required property real howFarRead
     required property real cellWidth
     required property real cellHeight
     required property real coverWidth
@@ -81,14 +82,37 @@ Item {
                     fillMode: Image.PreserveAspectCrop
                 }
 
+                // A mark, not a measure. It used to span the cover's whole width in the
+                // emerald the band above draws its progress bar with — the same colour, the
+                // same four pixels, one of them saying « how far » and the other « started
+                // ». Read as a bar it claimed a series was finished the moment it was
+                // opened. A short segment cannot be mistaken for a fraction of anything,
+                // and the shelf has no fraction to show: nothing in a series row says how
+                // many of its volumes have been read.
+                // How far through the series, drawn as the fraction it is.
+                //
+                // It spanned the cover's whole width whenever a series was merely started,
+                // which read as finished — the emerald, the four pixels and the full width
+                // of the band's own progress bar above, saying « started » where that one
+                // says « how far ». It could not say more: the shelf had `readStatus` and
+                // nothing else, and « how far » is a number the server now sends.
                 Rectangle {
                     objectName: "in-progress-" + tile.seriesId
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.bottom: parent.bottom
                     height: 4
-                    color: Theme.emerald
+                    color: Theme.rule
                     opacity: tile.inProgress ? 1 : 0
+
+                    Rectangle {
+                        objectName: "read-so-far-" + tile.seriesId
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: parent.width * tile.howFarRead
+                        color: Theme.emerald
+                    }
                 }
             }
 

@@ -39,6 +39,7 @@ class Scan : public QObject
     /// What the last scan counted, worded here. « 6 séries, 59 tomes, 546 chapitres ».
     Q_PROPERTY(QString counts READ counts NOTIFY changed)
     Q_PROPERTY(QString reanalysed READ reanalysed NOTIFY changed)
+    Q_PROPERTY(QString placesCarried READ placesCarried NOTIFY changed)
     /// One entry per kind of thing found: `{ title, total, items, more }`. The scanner
     /// reports rather than guesses, and until this screen nothing could read what it said.
     Q_PROPERTY(QVariantList findings READ findings NOTIFY changed)
@@ -71,6 +72,7 @@ public:
     qint64 finishedAt() const { return m_finishedAt; }
     QString counts() const;
     QString reanalysed() const;
+    QString placesCarried() const;
     QVariantList findings() const;
     QString withoutStartPage() const;
     QString failure() const;

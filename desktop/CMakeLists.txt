@@ -27,9 +27,11 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-finput-charset=UTF-8 -fexec-charset=UTF-8)
 endif()
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Network Test)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Network Concurrent Test)
 # The session keyring — GNOME's or KDE's, and the code never learns which.
 find_package(Qt6Keychain REQUIRED)
+# The archive reader unpacks one small member of a CBZ and never a page — see Cbz.h.
+find_package(ZLIB REQUIRED)
 
 qt_standard_project_setup(REQUIRES 6.4)
 
@@ -62,6 +64,14 @@ qt_add_executable(leaf-desktop
     src/Scan.h
     src/Scan.cpp
     src/Shelf.cpp
+    src/Cbz.h
+    src/Cbz.cpp
+    src/Manifest.h
+    src/Manifest.cpp
+    src/Imports.h
+    src/Imports.cpp
+    src/ImportCaptions.h
+    src/ImportCaptions.cpp
     src/Search.h
     src/Search.cpp
     src/Captions.h
@@ -81,6 +91,7 @@ qt_add_executable(leaf-desktop
 set(LEAF_QML
     qml/Main.qml
     qml/NavigationCursor.qml
+    qml/CardAction.qml
     qml/FocusRing.qml
     qml/ScrollVeil.qml
     qml/ActionButton.qml
@@ -91,6 +102,11 @@ set(LEAF_QML
     qml/AppBar.qml
     qml/FilterChip.qml
     qml/FilterPills.qml
+    qml/LeafCheck.qml
+    qml/LevelMark.qml
+    qml/ImportDialog.qml
+    qml/ImportNode.qml
+    qml/ImportRow.qml
     qml/SeriesTile.qml
     qml/ShelfSkeleton.qml
     qml/SettingsView.qml
@@ -124,16 +140,23 @@ set(LEAF_IMAGES
     qml/assets/cover-shadow-light.png
     qml/assets/cover-shadow-dark.png
     qml/assets/icons/arrow_back.svg
+    qml/assets/icons/book.svg
+    qml/assets/icons/book_2.svg
+    qml/assets/icons/bookmark.svg
+    qml/assets/icons/close.svg
     qml/assets/icons/cloud_done.svg
     qml/assets/icons/cloud_off.svg
+    qml/assets/icons/collections_bookmark.svg
     qml/assets/icons/contrast.svg
     qml/assets/icons/dark_mode.svg
     qml/assets/icons/light_mode.svg
+    qml/assets/icons/public.svg
     qml/assets/icons/refresh.svg
     qml/assets/icons/search.svg
     qml/assets/icons/settings.svg
     qml/assets/icons/sort.svg
     qml/assets/icons/tune.svg
+    qml/assets/icons/upload.svg
 )
 foreach(image_file IN LISTS LEAF_IMAGES)
     string(REGEX REPLACE "^qml/" "" alias "${image_file}")
@@ -194,6 +217,8 @@ target_link_libraries(leaf-desktop PRIVATE
     Qt6::Quick
     Qt6::QuickControls2
     Qt6::Network
+    Qt6::Concurrent
+    ZLIB::ZLIB
     ${QTKEYCHAIN_LIBRARIES}
 )
 
@@ -226,10 +251,13 @@ target_include_directories(reads-the-contract PRIVATE src)
 target_link_libraries(reads-the-contract PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME reads-the-contract COMMAND reads-the-contract)
 
+# `Cbz` and zlib for a test that reads no archive: `Manifest`'s walk opens one per file to
+# read the title it declares, which the tree shows beside the file name.
 qt_add_executable(writes-french tests/writes_french.cpp
-    src/Api.h src/Words.h src/Words.cpp)
+    src/Api.h src/Words.h src/Words.cpp src/Manifest.h src/Manifest.cpp
+    src/Cbz.h src/Cbz.cpp)
 target_include_directories(writes-french PRIVATE src)
-target_link_libraries(writes-french PRIVATE Qt6::Core Qt6::Qml Qt6::Test)
+target_link_libraries(writes-french PRIVATE Qt6::Core Qt6::Qml Qt6::Test ZLIB::ZLIB)
 add_test(NAME writes-french COMMAND writes-french)
 
 qt_add_executable(keeps-its-contrast tests/keeps_its_contrast.cpp
@@ -270,6 +298,8 @@ qt_add_executable(crosses-the-seam
     tests/crosses_the_seam.cpp tests/Pretend.h
     src/Boot.h src/Boot.cpp
     src/Covers.h src/Covers.cpp
+    src/Imports.h src/Imports.cpp src/ImportCaptions.h src/ImportCaptions.cpp
+    src/Cbz.h src/Cbz.cpp src/Manifest.h src/Manifest.cpp
     src/Settings.h src/Settings.cpp
     src/Server.h src/Server.cpp
     src/Fonts.h src/Fonts.cpp
@@ -306,8 +336,8 @@ qt_add_resources(crosses-the-seam "leaf-fonts-for-the-seam-test"
     BASE "${CMAKE_CURRENT_SOURCE_DIR}/../assets/fonts"
     FILES ${LEAF_FONTS})
 target_link_libraries(crosses-the-seam PRIVATE
-    Qt6::Core Qt6::Gui Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Qml Qt6::Test
-    ${QTKEYCHAIN_LIBRARIES})
+    Qt6::Core Qt6::Gui Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Qml Qt6::Concurrent Qt6::Test
+    ZLIB::ZLIB ${QTKEYCHAIN_LIBRARIES})
 add_test(NAME crosses-the-seam COMMAND crosses-the-seam)
 
 # The shelf's model, against the same forty-line server. It holds rows, pages and says why it
@@ -325,6 +355,41 @@ add_test(NAME holds-a-shelf COMMAND holds-a-shelf)
 
 # The file rows returned beside the series grid. Like the shelf, this is HTTP state and words,
 # not pixels, so every branch is exercised without constructing a window.
+qt_add_executable(holds-the-imports
+    tests/holds_the_imports.cpp tests/Pretend.h
+    src/Imports.h src/Imports.cpp src/Cbz.h src/Cbz.cpp src/Manifest.h src/Manifest.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
+    src/Server.h src/Server.cpp src/Settings.h src/Settings.cpp)
+target_include_directories(holds-the-imports PRIVATE src)
+target_link_libraries(holds-the-imports PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Concurrent Qt6::Test ZLIB::ZLIB ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME holds-the-imports COMMAND holds-the-imports)
+
+# `Words.cpp` and `Qt6::Qml` for a test that draws nothing: the sentences these two
+# modules show a reader live in `Words` like every other, and `Words.h` reaches
+# `Navigation.h`, which is a QML element. The alternative was leaving nine French sentences
+# where `tools/words_stay_french.py` cannot see them — one of them had carried an ordinary
+# space before its « ? » since it was written.
+qt_add_executable(describes-a-folder
+    tests/describes_a_folder.cpp
+    src/Manifest.h src/Manifest.cpp
+    src/Cbz.h src/Cbz.cpp
+    src/Words.h src/Words.cpp)
+target_include_directories(describes-a-folder PRIVATE src)
+target_link_libraries(describes-a-folder PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Test ZLIB::ZLIB)
+add_test(NAME describes-a-folder COMMAND describes-a-folder)
+
+qt_add_executable(opens-an-archive
+    tests/opens_an_archive.cpp
+    src/Cbz.h src/Cbz.cpp
+    src/Words.h src/Words.cpp)
+target_include_directories(opens-an-archive PRIVATE src)
+target_link_libraries(opens-an-archive PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Test ZLIB::ZLIB)
+add_test(NAME opens-an-archive COMMAND opens-an-archive)
+
 qt_add_executable(keeps-a-preference
     tests/keeps_a_preference.cpp
     src/Preferences.h src/Preferences.cpp src/Words.h src/Words.cpp
@@ -412,13 +477,19 @@ target_include_directories(against-the-real-server PRIVATE src)
 target_link_libraries(against-the-real-server PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
 
-# The two Python guards. They run here as well as in continuous integration, because a check
+# The three Python guards. They run here as well as in continuous integration, because a check
 # that only ever runs on a server is a check nobody notices going quiet.
 add_test(NAME knows-the-contract
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/client_knows_the_contract.py)
 
 add_test(NAME bytes-stay-utf8
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/bytes_stay_utf8.py)
+
+add_test(NAME nothing-talks-to-the-console
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/nothing_talks_to_the_console.py)
+
+add_test(NAME words-stay-french
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/words_stay_french.py)
 
 # These tests never need a scene graph, so the software-only offscreen platform keeps them
 # independent of a desktop session.

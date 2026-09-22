@@ -77,6 +77,380 @@ class ReadsTheContract : public QObject
 
 private slots:
     void anyScriptSurvives();
+
+    // ——— L'import ———————————————————————————————————————————————————————————
+
+    /// The shape a file crosses the seam in, three times over: proposed, sent, filed.
+    void a_proposal_arrives_with_everything_it_has_to_ask()
+    {
+        const QJsonObject body{
+            {u"received"_s, u"rcv_1"_s},
+            {u"name"_s, u"Tome 7.cbz"_s},
+            {u"size"_s, 134217728},
+            {u"read"_s,
+             QJsonObject{{u"work"_s, u"Death Note"_s},
+                         {u"edition"_s, u"Black Edition"_s},
+                         {u"type"_s, u"VOLUME"_s},
+                         {u"number"_s, 7},
+                         {u"title"_s, u"Le pari"_s},
+                         {u"chapterCount"_s, 12}}},
+            {u"confidence"_s, u"AMBIGUOUS"_s},
+            {u"reason"_s, u"deux séries portent ce nom"_s},
+            {u"candidates"_s,
+             QJsonArray{QJsonObject{{u"seriesId"_s, u"ed-1"_s}, {u"name"_s, u"Death Note"_s}},
+                        QJsonObject{{u"seriesId"_s, u"ed-2"_s},
+                                    {u"name"_s, u"Death Note · Black Edition"_s}}}},
+            {u"replaces"_s, QJsonValue()},
+            {u"concerns"_s, QJsonArray{u"un marqueur commence après la dernière page"_s}},
+        };
+
+        const Api::Read<Api::Proposal> got = Api::proposal(body);
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        const Api::Proposal &said = *got.value;
+
+        QCOMPARE(said.received, u"rcv_1"_s);
+        QCOMPARE(said.size, 134217728LL);
+        QCOMPARE(said.confidence, Api::Proposal::Confidence::Ambiguous);
+        QCOMPARE(said.read.work, std::optional<QString>(u"Death Note"_s));
+        QCOMPARE(said.read.number, std::optional<double>(7));
+        QCOMPARE(said.read.chapterCount, 12);
+        QCOMPARE(said.candidates.size(), 2);
+        QCOMPARE(said.candidates.at(1).name, u"Death Note · Black Edition"_s);
+        // A JSON null is the contract's way of saying "not recorded", and it is not a
+        // string this client should ever show.
+        QVERIFY(!said.replaces.has_value());
+        QCOMPARE(said.concerns.size(), 1);
+    }
+
+    /// A file that says nothing about itself is an ordinary file from somewhere else. It
+    /// is offered anyway, and every field of its reading is simply absent.
+    void a_file_that_declares_nothing_is_read_without_complaint()
+    {
+        const QJsonObject body{
+            {u"received"_s, u"rcv_2"_s}, {u"name"_s, u"scan.cbz"_s},
+            {u"size"_s, 12},             {u"read"_s, QJsonObject{}},
+            {u"confidence"_s, u"UNKNOWN"_s}, {u"reason"_s, u"rien à quoi le rattacher"_s},
+        };
+
+        const Api::Read<Api::Proposal> got = Api::proposal(body);
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        QVERIFY(!got.value->read.work.has_value());
+        QCOMPARE(got.value->read.chapterCount, 0);
+        QVERIFY(got.value->candidates.isEmpty());
+        QVERIFY(got.value->concerns.isEmpty());
+    }
+
+    /// Structure is strict: a proposal without its reading is not a weaker proposal, it is
+    /// an answer this client cannot act on, and it says which field was missing.
+    void a_proposal_without_its_reading_is_refused_and_names_the_field()
+    {
+        const QJsonObject body{
+            {u"received"_s, u"rcv_3"_s},     {u"name"_s, u"x.cbz"_s},
+            {u"size"_s, 12},                 {u"confidence"_s, u"CERTAIN"_s},
+            {u"reason"_s, u"une seule série"_s},
+        };
+
+        const Api::Read<Api::Proposal> got = Api::proposal(body);
+        QVERIFY(!got.ok());
+        QVERIFY2(got.trouble.contains(u"read"_s), qPrintable(got.trouble));
+    }
+
+    /// Vocabulary is loose. A confidence this client has not learned leaves the item
+    /// standing, shown by the sentence the server wrote — the server may grow a word
+    /// before the client does, and a file vanishing from a list for being described too
+    /// well is the worse answer.
+    void a_confidence_this_client_never_heard_of_leaves_the_file_standing()
+    {
+        const QJsonObject body{
+            {u"received"_s, u"rcv_4"_s},  {u"name"_s, u"x.cbz"_s},
+            {u"size"_s, 12},              {u"read"_s, QJsonObject{}},
+            {u"confidence"_s, u"PERPLEXED"_s}, {u"reason"_s, u"quelque chose de neuf"_s},
+        };
+
+        const Api::Read<Api::Proposal> got = Api::proposal(body);
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        QCOMPARE(got.value->confidence, Api::Proposal::Confidence::Other);
+        QCOMPARE(got.value->reason, u"quelque chose de neuf"_s);
+    }
+
+    /// The place held for a file, and the proposal inside it. A broken proposal breaks the
+    /// reservation: there is nothing to do with an id whose answer cannot be read.
+    void a_reservation_carries_its_proposal_and_falls_with_it()
+    {
+        const QJsonObject inside{
+            {u"received"_s, u"rcv_5"_s},  {u"name"_s, u"Tome 1.cbz"_s},
+            {u"size"_s, 40},              {u"read"_s, QJsonObject{}},
+            {u"confidence"_s, u"CERTAIN"_s}, {u"reason"_s, u"une seule série"_s},
+        };
+        const Api::Read<Api::Reserved> got =
+            Api::reserved(QJsonObject{{u"id"_s, u"rcv_5"_s}, {u"proposal"_s, inside}});
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        QCOMPARE(got.value->id, u"rcv_5"_s);
+        QCOMPARE(got.value->proposal.confidence, Api::Proposal::Confidence::Certain);
+
+        QJsonObject broken = inside;
+        broken.remove(u"read"_s);
+        const Api::Read<Api::Reserved> fell =
+            Api::reserved(QJsonObject{{u"id"_s, u"rcv_5"_s}, {u"proposal"_s, broken}});
+        QVERIFY(!fell.ok());
+    }
+
+    /// Where to resume. Both counts are required and neither may be guessed: a `received`
+    /// read as zero because it was absent would send a whole volume again.
+    void what_the_server_holds_is_read_as_a_number_and_never_guessed()
+    {
+        const Api::Read<Api::Staged> got = Api::staged(QJsonObject{
+            {u"id"_s, u"rcv_6"_s},
+            {u"name"_s, u"Tome 2.cbz"_s},
+            {u"size"_s, 134217728},
+            {u"received"_s, 104857600},
+        });
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        QCOMPARE(got.value->size, 134217728LL);
+        QCOMPARE(got.value->received, 104857600LL);
+
+        const Api::Read<Api::Staged> without = Api::staged(QJsonObject{
+            {u"id"_s, u"rcv_6"_s}, {u"name"_s, u"Tome 2.cbz"_s}, {u"size"_s, 134217728}});
+        QVERIFY(!without.ok());
+    }
+
+    /// A file waiting for a decision, or for its bytes. `received` is what tells the two
+    /// apart, so it cannot be optional here either.
+    void a_waiting_file_says_how_much_of_it_is_actually_there()
+    {
+        const Api::Read<Api::Waiting> got = Api::waiting(QJsonObject{
+            {u"id"_s, u"rcv_7"_s},
+            {u"name"_s, u"Tome 3.cbz"_s},
+            {u"size"_s, 900},
+            {u"lastTouchedAt"_s, 1788463365455LL},
+            {u"origin"_s, u"DROP"_s},
+            {u"onlyCopy"_s, true},
+            {u"received"_s, 0},
+        });
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        QCOMPARE(got.value->lastTouchedAt, 1788463365455LL);
+        QVERIFY(got.value->onlyCopy);
+        QCOMPARE(got.value->received, 0LL);
+    }
+
+    /// Where it went. `renamed` is defaulted in the contract, so a server that leaves it
+    /// out means false rather than nothing.
+    void a_filed_volume_says_where_it_went_and_what_it_cost()
+    {
+        const Api::Read<Api::Filed> got = Api::filed(QJsonObject{
+            {u"entryId"_s, u"en-9"_s},
+            {u"path"_s, u"Death Note/Tome 7.cbz"_s},
+            {u"replacement"_s, true},
+            {u"note"_s, u"le compte déclaré est passé à 7"_s},
+        });
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        QVERIFY(got.value->replacement);
+        QVERIFY(!got.value->renamed);
+        QCOMPARE(got.value->note, std::optional<QString>(u"le compte déclaré est passé à 7"_s));
+    }
+
+    /// The question is about the volumes, never about the file names — which is why all of
+    /// this crosses the wire rather than just the path.
+    void a_collision_carries_what_each_of_the_two_says_about_itself()
+    {
+        const Api::Read<Api::Collision> got = Api::collision(QJsonObject{
+            {u"path"_s, u"Death Note/Tome 7.cbz"_s},
+            {u"entryId"_s, QJsonValue()},
+            {u"occupies"_s, QJsonObject{{u"work"_s, u"Death Note"_s}, {u"number"_s, 7}}},
+            {u"arriving"_s,
+             QJsonObject{{u"work"_s, u"Death Note"_s},
+                         {u"number"_s, 7},
+                         {u"title"_s, u"Le pari"_s}}},
+            {u"sameVolume"_s, true},
+            {u"agrees"_s, QJsonArray{u"work"_s, u"number"_s}},
+            {u"identical"_s, false},
+            {u"wouldBecome"_s, u"Tome 7 (2).cbz"_s},
+        });
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        QVERIFY(got.value->sameVolume);
+        QVERIFY(!got.value->identical);
+        // Absent for a file dropped into the folder and not yet scanned.
+        QVERIFY(!got.value->entryId.has_value());
+        QCOMPARE(got.value->occupies.number, std::optional<double>(7));
+        QCOMPARE(got.value->arriving.title, std::optional<QString>(u"Le pari"_s));
+        QCOMPARE(got.value->agrees, QList<QString>({u"work"_s, u"number"_s}));
+        QCOMPARE(got.value->wouldBecome, u"Tome 7 (2).cbz"_s);
+    }
+
+    /// What a folder would make. The sentence the dialog writes from is here and nowhere
+    /// else: a reader cannot undo « it created a second universe » by deleting a file.
+    void an_opened_folder_says_what_it_would_create()
+    {
+        const Api::Read<Api::Opened> got = Api::opened(QJsonObject{
+            {u"id"_s, u"imp_1"_s},
+            {u"root"_s, u"Terres d’Arran"_s},
+            {u"creates"_s,
+             QJsonArray{QJsonObject{{u"kind"_s, u"UNIVERSE"_s},
+                                    {u"name"_s, u"Terres d’Arran"_s},
+                                    {u"at"_s, u""_s}},
+                        QJsonObject{{u"kind"_s, u"WORK"_s},
+                                    {u"name"_s, u"Elfes"_s},
+                                    {u"at"_s, u"Elfes"_s}}}},
+            {u"toSend"_s, QJsonArray{u"Elfes/Tome 1.cbz"_s}},
+            {u"alreadyThere"_s, QJsonArray{}},
+            {u"bytesToSend"_s, 134217728},
+        });
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        QCOMPARE(got.value->creates.size(), 2);
+        QCOMPARE(got.value->creates.constFirst().kind, u"UNIVERSE"_s);
+        QCOMPARE(got.value->creates.constLast().at, u"Elfes"_s);
+        QCOMPARE(got.value->bytesToSend, 134217728LL);
+        QCOMPARE(got.value->toSend, QList<QString>({u"Elfes/Tome 1.cbz"_s}));
+    }
+
+    /// And what it would *move*: a series the library already holds, that this folder
+    /// declares somewhere else. It is not a creation and the dialog must not word it as one
+    /// — the two are told apart only because a folder's identity travels in its sidecar.
+    void an_opened_folder_says_what_it_would_move()
+    {
+        const Api::Read<Api::Opened> got = Api::opened(QJsonObject{
+            {u"id"_s, u"imp_5"_s},
+            {u"root"_s, u"Terres d’Arran"_s},
+            {u"creates"_s, QJsonArray{}},
+            {u"moves"_s,
+             QJsonArray{QJsonObject{{u"workId"_s, u"w-1"_s},
+                                    {u"name"_s, u"Elfes"_s},
+                                    {u"from"_s, u"/srv/leaf/library/Mangas/Elfes"_s},
+                                    {u"at"_s, u"Elfes"_s}}}},
+            {u"toSend"_s, QJsonArray{}},
+            {u"alreadyThere"_s, QJsonArray{}},
+            {u"bytesToSend"_s, 0},
+        });
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        QCOMPARE(got.value->moves.size(), 1);
+        QCOMPARE(got.value->moves.constFirst().workId, u"w-1"_s);
+        QCOMPARE(got.value->moves.constFirst().name, u"Elfes"_s);
+        QCOMPARE(got.value->moves.constFirst().from, u"/srv/leaf/library/Mangas/Elfes"_s);
+        QCOMPARE(got.value->moves.constFirst().at, u"Elfes"_s);
+
+        // A line missing what a move is aimed with is refused by name: without the identity
+        // the box would be there to tick and would file nothing.
+        const Api::Read<Api::Opened> half = Api::opened(QJsonObject{
+            {u"id"_s, u"imp_6"_s},
+            {u"root"_s, u"Terres d’Arran"_s},
+            {u"creates"_s, QJsonArray{}},
+            {u"moves"_s, QJsonArray{QJsonObject{{u"name"_s, u"Elfes"_s}}}},
+            {u"toSend"_s, QJsonArray{}},
+            {u"alreadyThere"_s, QJsonArray{}},
+            {u"bytesToSend"_s, 0},
+        });
+        QVERIFY(!half.ok());
+        QVERIFY2(half.trouble.contains(u"workId"_s), qPrintable(half.trouble));
+    }
+
+    /// Nothing to create is an ordinary answer — everything announced is already there
+    /// under a name the library knows.
+    void a_folder_that_creates_nothing_reads_fine()
+    {
+        const Api::Read<Api::Opened> got = Api::opened(QJsonObject{
+            {u"id"_s, u"imp_2"_s},   {u"root"_s, u"Bleach"_s},
+            {u"creates"_s, QJsonArray{}}, {u"toSend"_s, QJsonArray{}},
+            {u"alreadyThere"_s, QJsonArray{u"Tome 1.cbz"_s}},
+            {u"bytesToSend"_s, 0},
+        });
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        QVERIFY(got.value->creates.isEmpty());
+        QCOMPARE(got.value->bytesToSend, 0LL);
+    }
+
+    /// Where to resume, per file. The one map that crosses this seam, and a count in it
+    /// that is not a number would send a whole volume again.
+    void a_session_says_how_much_of_each_file_is_there()
+    {
+        const Api::Read<Api::Session> got = Api::session(QJsonObject{
+            {u"id"_s, u"imp_3"_s},
+            {u"root"_s, u"Bleach"_s},
+            {u"received"_s,
+             QJsonObject{{u"Tome 1.cbz"_s, 104857600}, {u"Tome 2.cbz"_s, 0}}},
+            {u"missing"_s, QJsonArray{u"Tome 3.cbz"_s}},
+        });
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        QCOMPARE(got.value->received.value(u"Tome 1.cbz"_s), 104857600LL);
+        QCOMPARE(got.value->received.value(u"Tome 2.cbz"_s), 0LL);
+        QCOMPARE(got.value->missing, QList<QString>({u"Tome 3.cbz"_s}));
+
+        const Api::Read<Api::Session> lying = Api::session(QJsonObject{
+            {u"id"_s, u"imp_4"_s},
+            {u"root"_s, u"Bleach"_s},
+            {u"received"_s, QJsonObject{{u"Tome 1.cbz"_s, u"beaucoup"_s}}},
+        });
+        QVERIFY(!lying.ok());
+        QVERIFY2(lying.trouble.contains(u"Tome 1.cbz"_s), qPrintable(lying.trouble));
+    }
+
+    /// A commit that could not install everything is not a failure: it says what landed,
+    /// what is still coming, what travelled wrong, and what it found that nobody named.
+    void a_commit_says_what_landed_and_what_did_not()
+    {
+        const Api::Read<Api::Installed> got = Api::installed(QJsonObject{
+            {u"root"_s, u"Bleach"_s},
+            {u"installed"_s, 38},
+            {u"orphans"_s, QJsonArray{u"Tome 99.cbz"_s}},
+            {u"corrupt"_s, QJsonArray{u"Tome 12.cbz"_s}},
+            {u"pending"_s, QJsonArray{u"Tome 40.cbz"_s, u"Tome 41.cbz"_s}},
+            {u"open"_s, true},
+        });
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        QCOMPARE(got.value->installed, 38);
+        QCOMPARE(got.value->orphans.size(), 1);
+        QCOMPARE(got.value->pending.size(), 2);
+        QVERIFY(got.value->open);
+        QVERIFY(got.value->moved.isEmpty());
+
+        // And what it filed under the folder it installed, when it was asked to.
+        const Api::Read<Api::Installed> filed = Api::installed(QJsonObject{
+            {u"root"_s, u"Terres d’Arran"_s},
+            {u"installed"_s, 0},
+            {u"orphans"_s, QJsonArray{}},
+            {u"moved"_s, QJsonArray{u"w-1"_s}},
+        });
+        QVERIFY2(filed.ok(), qPrintable(filed.trouble));
+        QCOMPARE(filed.value->moved, QList<QString>({u"w-1"_s}));
+
+        // `open` is defaulted in the contract: a server that leaves it out closed it.
+        const Api::Read<Api::Installed> closed = Api::installed(QJsonObject{
+            {u"root"_s, u"Bleach"_s}, {u"installed"_s, 1}, {u"orphans"_s, QJsonArray{}}});
+        QVERIFY2(closed.ok(), qPrintable(closed.trouble));
+        QVERIFY(!closed.value->open);
+    }
+
+    /// Where a chunk landed, and where the next one goes.
+    void what_the_server_now_holds_of_one_file_is_a_number()
+    {
+        const Api::Read<Api::Received> got = Api::received(
+            QJsonObject{{u"path"_s, u"Tome 1.cbz"_s}, {u"received"_s, 104857600}});
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        QCOMPARE(got.value->received, 104857600LL);
+
+        const Api::Read<Api::BadOffset> refused = Api::badOffset(QJsonObject{
+            {u"error"_s, u"impossible offset"_s}, {u"received"_s, 40000}});
+        QVERIFY2(refused.ok(), qPrintable(refused.trouble));
+        QCOMPARE(refused.value->received, 40000LL);
+
+        // Without the count there is nothing to resume from, and guessing zero would send
+        // the file again from its first byte.
+        QVERIFY(!Api::badOffset(QJsonObject{{u"error"_s, u"x"_s}}).ok());
+    }
+
+    /// `sameVolume` and `identical` decide which answer a screen offers, so neither may be
+    /// read as false for having been left out.
+    void a_collision_missing_what_decides_it_is_refused()
+    {
+        const Api::Read<Api::Collision> got = Api::collision(QJsonObject{
+            {u"path"_s, u"x.cbz"_s},
+            {u"occupies"_s, QJsonObject{}},
+            {u"arriving"_s, QJsonObject{}},
+            {u"identical"_s, false},
+            {u"wouldBecome"_s, u"x (2).cbz"_s},
+        });
+        QVERIFY(!got.ok());
+    }
+
     void a_whole_series_arrives_intact()
     {
         const Api::Read<Api::Series> got = Api::series(aSeries());
@@ -532,6 +906,32 @@ private slots:
         QCOMPARE(read.value->report->findings.constFirst().kind, u"DISREGARDED"_s);
         QCOMPARE(read.value->report->findings.constFirst().total, 40);
         QCOMPARE(read.value->report->findings.constFirst().items.size(), 2);
+    }
+
+    /// Two counts that are nought on every scan but one: the reading positions a scan
+    /// carried onto a new identity, and those it could not.
+    ///
+    /// Read as absent rather than required, and both halves are worth a test. A server that
+    /// sends them must be read; a server that does not must not have its whole answer
+    /// refused over a number that is nought almost always — the settings screen would then
+    /// say nothing at all about a library it can otherwise describe in full.
+    void the_places_a_scan_carried_are_read_and_their_absence_is_not_a_fault()
+    {
+        QJsonObject report = aReport();
+        QJsonObject counts = report.value(u"counts"_s).toObject();
+        counts.insert(u"progressCarried"_s, 42);
+        counts.insert(u"progressLost"_s, 1);
+        report.insert(u"counts"_s, counts);
+
+        auto read = Api::scanStatus({{u"state"_s, u"DONE"_s}, {u"report"_s, report}});
+        QVERIFY2(read.ok(), qPrintable(read.trouble));
+        QCOMPARE(read.value->report->counts.progressCarried, 42);
+        QCOMPARE(read.value->report->counts.progressLost, 1);
+
+        read = Api::scanStatus({{u"state"_s, u"DONE"_s}, {u"report"_s, aReport()}});
+        QVERIFY2(read.ok(), qPrintable(read.trouble));
+        QCOMPARE(read.value->report->counts.progressCarried, 0);
+        QCOMPARE(read.value->report->counts.editions, 6);
     }
 
     /// A scan that has never run carries neither a date nor a report, and that is an answer

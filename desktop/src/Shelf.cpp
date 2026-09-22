@@ -103,6 +103,20 @@ QVariant Shelf::data(const QModelIndex &index, int role) const
         return one.medium ? Words::medium(*one.medium) : QString();
     case Volumes:
         return Words::volumes(one.holding.ownedVolumes, one.medium);
+    case HowFarRead: {
+        // A fraction and not two numbers: a tile draws a bar, and the width of a bar is the
+        // one thing it needs. Zero when nothing is counted, so a series with no entries
+        // recorded draws nothing rather than a full bar out of a division by nought.
+        const int whole = one.counts.entries;
+        if (whole <= 0)
+            return 0.0;
+        // The finished volumes **and** the page somebody stopped on in the one they are in:
+        // « tome 12, page 156 » is eleven whole and 0.82 of a twelfth. Counting only the
+        // whole ones made the bar jump a volume at a time and sit still in between, which
+        // on a twenty-one volume series is most of the time.
+        const double read = one.holding.readEntries + one.holding.partRead;
+        return qBound(0.0, read / whole, 1.0);
+    }
     case InProgress:
         // A tile draws a mark or draws nothing. Read and never-opened are the same answer
         // here — neither carries one — so this is a boolean and not three cases sent to QML.
@@ -127,6 +141,7 @@ QHash<int, QByteArray> Shelf::roleNames() const
     named.insert(qToUnderlying(Medium), "medium");
     named.insert(qToUnderlying(Volumes), "volumes");
     named.insert(qToUnderlying(InProgress), "inProgress");
+    named.insert(qToUnderlying(HowFarRead), "howFarRead");
     return named;
 }
 

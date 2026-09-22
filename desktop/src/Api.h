@@ -17,6 +17,7 @@
 
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QHash>
 #include <QList>
 #include <QString>
 
@@ -41,6 +42,15 @@ struct Holding {
     /// vocabulary.
     std::optional<ReadStatus> readStatus;
     int ownedVolumes = 0;
+    /// How many of this edition's entries are finished, and how far into the ones that are
+    /// not — « eleven volumes, and 0.82 of a twelfth ».
+    ///
+    /// `readStatus` says unread, started or finished and cannot say *how far*: a tile drew
+    /// a full-width mark the moment a series was opened, because "started" was the only
+    /// thing it had. Two numbers and not one, because each is a plain fact and their sum is
+    /// what a reader asks for.
+    int readEntries = 0;
+    double partRead = 0.0;
     QList<double> missingVolumes;
     QList<double> missingChapters;
     std::optional<qint64> addedAt;
@@ -143,6 +153,13 @@ struct ScanCounts {
     /// What was opened and read rather than skipped as unchanged. The only count that
     /// describes the work done; the others describe the library.
     int reanalysed = 0;
+    /// Reading positions carried onto a new identity, and those that could not be.
+    ///
+    /// Nought on every scan but the one after a library stops being identified by the paths
+    /// of its folders. Read as absent rather than required, because a number that is nought
+    /// almost always is not a reason to refuse an answer that otherwise says everything.
+    int progressCarried = 0;
+    int progressLost = 0;
 };
 
 /// One kind of thing a scan found, and the first of them.
@@ -261,6 +278,229 @@ struct Hits {
     int size = 0;
 };
 
+// ——— L'import ———————————————————————————————————————————————————————————————
+
+/// What a file said about itself, from the `entry.json` it carries.
+///
+/// Every field optional because the file may say nothing at all, and a file that says
+/// nothing is an ordinary file from somewhere else rather than a broken one.
+struct FileReading {
+    std::optional<QString> work;
+    std::optional<QString> edition;
+    /// VOLUME or CHAPTER, and absent when the file did not say.
+    std::optional<QString> kind;
+    std::optional<double> number;
+    std::optional<QString> title;
+    int chapterCount = 0;
+};
+
+/// One series a file might belong to.
+struct Candidate {
+    QString seriesId;
+    QString name;
+};
+
+/// Where the server would put a file, and how sure it is.
+struct Proposal {
+    /// How sure, and what the screen has to ask because of it.
+    ///
+    /// `Other` for a word this client has not learned: the item stands and is shown by its
+    /// `reason`, because the server may grow a confidence before the client does — and the
+    /// alternative is a file that vanishes from a list for being described too well.
+    enum class Confidence { Certain, Replacement, Ambiguous, Unknown, Other };
+
+    /// The id to confirm or abandon it by.
+    QString received;
+    QString name;
+    qint64 size = 0;
+    FileReading read;
+    Confidence confidence = Confidence::Other;
+    /// In words, written by the server and shown as it stands.
+    QString reason;
+    QList<Candidate> candidates;
+    /// The entry it would replace, when something occupies the place.
+    std::optional<QString> replaces;
+    /// What the file says about itself that does not hold together. Never a refusal.
+    QList<QString> concerns;
+};
+
+/// A place held for a file, and where it would go — answered before a byte moves.
+struct Reserved {
+    QString id;
+    Proposal proposal;
+};
+
+/// What the server holds of one reserved file. `received` is where to resume.
+struct Staged {
+    QString id;
+    QString name;
+    qint64 size = 0;
+    qint64 received = 0;
+};
+
+/// A file waiting for a decision, or for its bytes.
+struct Waiting {
+    QString id;
+    QString name;
+    qint64 size = 0;
+    qint64 lastTouchedAt = 0;
+    /// UPLOAD or DROP. Kept as the contract's word: only `onlyCopy` changes a decision.
+    QString origin;
+    /// True when abandoning it does not send you back to a file you still have.
+    bool onlyCopy = false;
+    qint64 received = 0;
+};
+
+/// Where a file went, once it was filed.
+struct Filed {
+    QString entryId;
+    QString path;
+    /// A file that was there is gone, whichever way that was decided.
+    bool replacement = false;
+    /// Filed under a name of its own because the one it wanted was taken.
+    bool renamed = false;
+    /// Filled in when the declared count moved, or should have.
+    std::optional<QString> note;
+};
+
+/// A file of that name is already there, and nobody has said which one wins.
+///
+/// It carries what each of the two says about itself so the question put to a person is
+/// about the volumes rather than about the file names — the only level at which it can be
+/// answered.
+struct Collision {
+    QString path;
+    std::optional<QString> entryId;
+    FileReading occupies;
+    FileReading arriving;
+    /// Whether the two describe the same volume. Never decided on the title.
+    bool sameVolume = false;
+    /// The declared fields the two agree on, the title included.
+    QList<QString> agrees;
+    /// The same bytes on both sides. Settles it.
+    bool identical = false;
+    /// The name it would take under RENAME.
+    QString wouldBecome;
+};
+
+/// Something the library does not hold yet and would gain.
+struct Creation {
+    /// UNIVERSE, WORK or EDITION. Kept as the contract's word: the client has a French
+    /// sentence for each and shows an unfamiliar one by its name alone rather than
+    /// dropping it.
+    QString kind;
+    QString name;
+    /// Where under the root, so two works of the same name are told apart.
+    QString at;
+};
+
+/// A folder announced, and what the server makes of it — before a byte moves.
+/// A work the library already holds, that a dropped folder declares somewhere else.
+///
+/// The sixth case of an import: a universe arrives and one of the series it declares is
+/// already on the disk under another parent. It is a **move**, not a creation, and the two
+/// are told apart only because a folder's identity travels with it in its sidecar.
+struct Relocation {
+    /// What a move is aimed with — the identity the library already files it under.
+    QString workId;
+    QString name;
+    /// The folder it is in now, so a reader sees what is about to change.
+    QString from;
+    /// Where under the root it would go, the same way a `Creation` says it.
+    QString at;
+};
+
+/// One file that would land on another, and what the library already holds there.
+///
+/// The size alone says « different » without saying how: two archives six hundred and
+/// eighty-two bytes apart differed entirely inside a declaration neither file listing nor
+/// weight could show. `presentRead` is how the screen tells « it carries no title » from
+/// « the server did not open it » — past a ceiling on one preflight, it does not.
+struct Replacement {
+    QString path;
+    qint64 size = 0;
+    qint64 presentSize = 0;
+    QString presentTitle;
+    std::optional<double> presentNumber;
+    bool presentRead = false;
+};
+
+/// One declaration that would be written over another, and what the two disagree about.
+///
+/// The field names and not the values: a summary is four hundred words and a line of a tree
+/// is one line. « résumé, arcs » says what is at stake, and it is what a reader needs — the
+/// question is never « which of these two strings » but « did I edit this here ».
+struct Declaration {
+    QString path;
+    /// What the library's own declaration calls itself. Empty when it names itself nothing.
+    QString presentName;
+    QList<QString> differs;
+};
+
+struct Opened {
+    QString id;
+    QString root;
+    QList<Creation> creates;
+    /// Empty when nothing this folder declares is already elsewhere. **Nothing here moves
+    /// unless somebody says so**: the dialog asks, one box per line, and the boxes start
+    /// clear.
+    QList<Relocation> moves;
+    /// What would land on a file the library already holds. Their paths are in `toSend`
+    /// too, on purpose: sending them is still what a commit does, and this is the list that
+    /// says doing so replaces something rather than adds it. **Nothing here is replaced
+    /// unless the commit names it**, the same way nothing moves unless it does.
+    QList<Replacement> replaces;
+    /// The declarations this manifest would rewrite. A folder every volume of which the
+    /// library already holds still carries its `work.json`, and installing it over a title
+    /// edited through `PATCH` is a decision, not a side effect of dropping the folder again.
+    QList<Declaration> declarations;
+    QList<QString> toSend;
+    QList<QString> alreadyThere;
+    qint64 bytesToSend = 0;
+};
+
+/// How much of one file the server now holds.
+struct Received {
+    QString path;
+    qint64 received = 0;
+};
+
+/// The offset asked for was past what the server holds, and here is what it holds.
+struct BadOffset {
+    QString error;
+    qint64 received = 0;
+};
+
+/// Where a whole session stands, enough for a broken transfer to pick up.
+struct Session {
+    QString id;
+    QString root;
+    /// Path to the number of bytes held. The only map that crosses this seam, and it has
+    /// to be one: asking per file would be one request per volume of a forty-file folder.
+    QHash<QString, qint64> received;
+    QList<QString> missing;
+};
+
+/// What a commit installed, and what it could not.
+struct Installed {
+    QString root;
+    int installed = 0;
+    /// On the server, absent from the manifest. **Never deleted** — reported, and shown by
+    /// name before anybody decides.
+    QList<QString> orphans;
+    /// Arrived whole and not matching the checksum announced for them. To send again: a
+    /// volume that travelled wrong is worse than one that did not travel, because nothing
+    /// afterwards would say so.
+    QList<QString> corrupt;
+    /// Announced and not here in full. Nothing is wrong with them.
+    QList<QString> pending;
+    /// The session is still there and the rest can go against the same id.
+    bool open = false;
+    /// The works this commit filed under the folder it installed, by identity. Only the
+    /// ones that were asked for.
+    QList<QString> moved;
+};
+
 /// What a parse produced, or what stopped it.
 ///
 /// A `QString` and not a bool: "series[3]: name is missing" is something a person can act on,
@@ -283,6 +523,17 @@ Read<Hit> hit(const QJsonObject &from);
 /// Both shapes, because both cross the wire: the envelope when a page was asked for, the bare
 /// list from a server that predates it.
 Read<Hits> hits(const QJsonDocument &from);
+Read<Proposal> proposal(const QJsonObject &from);
+Read<Reserved> reserved(const QJsonObject &from);
+Read<Staged> staged(const QJsonObject &from);
+Read<Waiting> waiting(const QJsonObject &from);
+Read<Filed> filed(const QJsonObject &from);
+Read<Collision> collision(const QJsonObject &from);
+Read<Opened> opened(const QJsonObject &from);
+Read<Received> received(const QJsonObject &from);
+Read<BadOffset> badOffset(const QJsonObject &from);
+Read<Session> session(const QJsonObject &from);
+Read<Installed> installed(const QJsonObject &from);
 
 /// The contract's spellings, so that a test can walk them rather than trust a switch.
 Medium medium(const QString &word);

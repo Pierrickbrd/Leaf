@@ -55,6 +55,7 @@ Preferences::Preferences(QObject *parent)
     : QObject(parent)
 {
     m_appearance = read(m_file.value(u"appearance"_s).toString());
+    m_lastPlace = QUrl(m_file.value(u"lastPlace"_s).toString());
 }
 
 QString Preferences::appearanceTitle() const
@@ -89,4 +90,14 @@ void Preferences::chooseAppearance(Appearance wanted)
     m_file.sync();
     emit changed();
     emit appearanceChosen(wanted);
+}
+
+void Preferences::rememberPlace(const QUrl &place)
+{
+    if (!place.isValid() || place.isEmpty() || place == m_lastPlace)
+        return;
+    m_lastPlace = place;
+    m_file.setValue(u"lastPlace"_s, place.toString());
+    m_file.sync();
+    emit changed();
 }

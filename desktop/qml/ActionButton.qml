@@ -30,17 +30,26 @@ Rectangle {
 
     default property alias glyph: glyphs.data
 
+    /// What it does. Given here rather than left to each caller's own `TapHandler`, so that
+    /// a keyboard press and a pointer press cannot end up meaning two different things.
+    signal triggered()
+
+    /// A command that cannot do anything yet says so rather than doing nothing when
+    /// pressed — « Importer » with a question still unanswered is exactly that.
+    property bool ready: true
+
     readonly property bool hovered: pointer.hovered
 
     height: 32
     width: compact ? height : 14 + glyphs.width + 8 + word.implicitWidth + 14
     radius: height / 2
-    color: Theme.emerald
+    color: ready ? Theme.emerald : Theme.rule
+    opacity: ready ? 1.0 : 0.7
     activeFocusOnTab: visible
 
     // Six per cent: enough to be felt under the pointer, small enough that a button beside a
     // cover does not appear to jump when the pointer crosses it.
-    scale: hovered ? 1.06 : 1.0
+    scale: hovered && ready ? 1.06 : 1.0
     Behavior on scale {
         NumberAnimation {
             duration: 90
@@ -52,11 +61,27 @@ Rectangle {
     Accessible.name: pill.label
     Accessible.focusable: true
     Accessible.focused: pill.activeFocus
+    Accessible.onPressAction: pill.triggered()
 
     HoverHandler {
         id: pointer
 
-        cursorShape: Qt.PointingHandCursor
+        cursorShape: pill.ready ? Qt.PointingHandCursor : Qt.ArrowCursor
+    }
+
+    TapHandler {
+        enabled: pill.ready
+        onTapped: pill.triggered()
+    }
+
+    Keys.onPressed: event => {
+        if (!pill.ready)
+            return
+        if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                || event.key === Qt.Key_Enter) {
+            pill.triggered()
+            event.accepted = true
+        }
     }
 
     FocusRing {

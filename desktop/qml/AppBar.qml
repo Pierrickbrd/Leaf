@@ -20,6 +20,10 @@ Item {
     /// walked past; where the page goes next is the page's business, not the bar's.
     signal wentPast(bool forward)
 
+    /// The page opens the dialog, not the bar: the queue outlives this row, and a button
+    /// that owned the window onto it would take it down when the bar stopped browsing.
+    signal importRequested()
+
     readonly property bool searchTakesBar: Widths.band === Widths.Narrow
                                             && searchField.activeFocus
     /// Everything in this row exists to browse a shelf: a field that searches it, a filter
@@ -45,7 +49,7 @@ Item {
     /// the bar drops its commands when a narrow window gives the search the whole width.
     function stops() {
         const all = []
-        for (const one of [searchField, sortButton, settingsButton]) {
+        for (const one of [searchField, importButton, sortButton, settingsButton]) {
             if (one && one.visible)
                 all.push(one)
         }
@@ -294,6 +298,26 @@ Item {
                     text: Captions.clearLabel
                 }
             }
+        }
+
+        // The slot the filter left when it went down to the row of pills it fills. An
+        // import is a command about the library rather than about what is shown of it,
+        // which is why it sits with the order and the settings and not with the search.
+        BarButton {
+            id: importButton
+
+            objectName: "import-button"
+            visible: bar.browsing && !bar.searchTakesBar
+            source: "assets/icons/upload.svg"
+            label: ImportCaptions.title
+            // What it says with the dialog shut: a transfer that finished and a question
+            // nobody saw look the same from here, so it can say either.
+            value: Imports.deciding > 0 ? ImportCaptions.waitingLabel
+                                        : (Imports.inFlight > 0 && Widths.band === Widths.Wide
+                                           ? String(Imports.inFlight) : "")
+            held: Imports.inFlight > 0
+            onTriggered: bar.importRequested()
+            onPointerEntered: bar.pointerLeftTheShelf()
         }
 
         BarButton {
