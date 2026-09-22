@@ -380,6 +380,179 @@ async fn an_upload_over_the_ceiling_is_stopped_and_leaves_nothing_behind() {
     assert_eq!(0, left, "the staging folder is cleared");
 }
 
+/// The whole road one dropped volume takes, through the router and not past it.
+///
+/// `proposals.rs` drives `Intake` directly and the bulk tests below drive a folder's road,
+/// so the three handlers a single `.cbz` actually reaches — `/preflight`, `GET /intake/{id}`
+/// and `PUT /intake/{id}/file` — were answered by no test at all. What that leaves unwatched
+/// is not the reserving: it is the `Content-Range` a resume turns on, the number the server
+/// sends back for a client to count against, and the 409 that says where to start again.
+/// Every one of those can stop working without the file road failing loudly.
+#[tokio::test]
+async fn a_file_is_announced_then_sent_in_pieces_and_says_how_much_arrived() {
+    let server = Server::new();
+    a_volume(&server);
+    let sidecar = serde_json::json!({"leaf": 1, "work": "Bleach", "number": 3.0});
+    let bytes = archive_bytes(Some(&EntryJson {
+        leaf: Some(1),
+        work: Some("Bleach".into()),
+        number: Some(3.0),
+        ..Default::default()
+    }));
+    let whole = bytes.len() as u64;
+
+    // The sidecar travels with the announcement rather than with the bytes, which is the
+    // whole reason the proposal can be shown while the transfer is still running: the
+    // client read it out of the archive before sending a byte.
+    let (status, reserved) = server
+        .send(
+            request("POST", "/preflight", IMPORTER)
+                .header("content-type", "application/json")
+                .body(json_body(serde_json::json!({
+                    "name": "Tome 3.cbz",
+                    "size": whole,
+                    "sidecar": sidecar.to_string(),
+                })))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::OK, status);
+    let id = reserved["id"].as_str().expect("an id").to_string();
+    // The place is held before a byte moves, which is the whole point of announcing: the
+    // proposal is already there to be shown while the transfer runs.
+    assert_eq!("Bleach", reserved["proposal"]["read"]["work"]);
+
+    let (status, staged) = server
+        .send(
+            request("GET", &format!("/intake/{id}"), IMPORTER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::OK, status);
+    assert_eq!("Tome 3.cbz", staged["name"]);
+    assert_eq!(whole, staged["size"].as_u64().unwrap());
+    assert_eq!(0, staged["received"].as_u64().unwrap());
+
+    let half = (whole / 2) as usize;
+    let (status, sent) = server
+        .send(
+            request("PUT", &format!("/intake/{id}/file"), IMPORTER)
+                .header("content-range", format!("bytes 0-{}/{whole}", half - 1))
+                .body(Body::from(bytes[..half].to_vec()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::OK, status);
+    assert_eq!(half as u64, sent["received"].as_u64().unwrap());
+
+    // Asked between two pieces, which is the one moment the answer is worth anything: a
+    // client that lost its connection has no other way to learn where to start again.
+    let (_, staged) = server
+        .send(
+            request("GET", &format!("/intake/{id}"), IMPORTER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(half as u64, staged["received"].as_u64().unwrap());
+
+    let (status, _) = server
+        .send(
+            request("PUT", &format!("/intake/{id}/file"), IMPORTER)
+                .header(
+                    "content-range",
+                    format!("bytes {half}-{}/{whole}", whole - 1),
+                )
+                .body(Body::from(bytes[half..].to_vec()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::OK, status);
+    assert_eq!(
+        whole,
+        std::fs::read(
+            server
+                .dir
+                .path()
+                .join("inbox/received")
+                .join(&id)
+                .join("Tome 3.cbz")
+        )
+        .unwrap()
+        .len() as u64,
+        "the two pieces are the file, in order"
+    );
+}
+
+/// A resume that starts past what the server holds is a 409 saying how much that is.
+///
+/// Not a 400 and not a silent hole: the client believed it had sent more than arrived, and
+/// the only answer it can act on is the number. Writing at the offset it asked for would
+/// leave a gap of zeroes inside a volume that looks complete afterwards — a corruption
+/// nothing downstream would call one.
+#[tokio::test]
+async fn a_resume_past_what_arrived_says_where_to_start_again() {
+    let server = Server::new();
+    a_volume(&server);
+    let bytes = archive_bytes(None);
+    let whole = bytes.len() as u64;
+
+    let (_, reserved) = server
+        .send(
+            request("POST", "/preflight", IMPORTER)
+                .header("content-type", "application/json")
+                .body(json_body(
+                    serde_json::json!({"name": "Tome 4.cbz", "size": whole}),
+                ))
+                .unwrap(),
+        )
+        .await;
+    let id = reserved["id"].as_str().expect("an id").to_string();
+
+    let (status, body) = server
+        .send(
+            request("PUT", &format!("/intake/{id}/file"), IMPORTER)
+                .header("content-range", format!("bytes 64-{}/{whole}", whole - 1))
+                .body(Body::from(bytes))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(StatusCode::CONFLICT, status);
+    assert_eq!(0, body["received"].as_u64().unwrap());
+    assert!(body["error"].as_str().unwrap().contains("0 byte"), "{body}");
+}
+
+/// Bytes for a reservation nobody made are a 404, and asking about one is nothing found.
+///
+/// The id is the client's own memory of a transfer, and it outlives the server's: an
+/// abandoned intake, a server restarted against an emptied inbox, a card resumed from a
+/// session that was cleaned up. Answering anything but "there is no such thing" would have
+/// the client go on sending a file into a folder that is not there.
+#[tokio::test]
+async fn an_intake_that_was_never_reserved_is_not_there_either_way() {
+    let server = Server::new();
+
+    let (status, _) = server
+        .send(
+            request("PUT", "/intake/rcv_nothing/file", IMPORTER)
+                .body(Body::from(vec![0u8; 8]))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::NOT_FOUND, status);
+
+    let (status, _) = server
+        .send(
+            request("GET", "/intake/rcv_nothing", IMPORTER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::NOT_FOUND, status);
+}
+
 // --------------------------------------------------------------- bulk import
 
 #[tokio::test]
@@ -1447,6 +1620,15 @@ async fn a_file_over_the_ceiling_is_refused_before_a_place_is_held_for_it() {
             .unwrap_or_default()
             .contains("one upload"),
         "{body}"
+    );
+    // The half this test's name promises and never checked: a refusal that still reserved a
+    // folder would leak one per refused drop, and the inbox is where that shows.
+    assert_eq!(
+        0,
+        std::fs::read_dir(server.dir.path().join("inbox/received"))
+            .map(|d| d.flatten().count())
+            .unwrap_or(0),
+        "nothing may be held for a file that was refused"
     );
 }
 
