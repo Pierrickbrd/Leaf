@@ -124,11 +124,12 @@ fn work_document(
     patch: &SeriesPatch,
     words: &Spelled,
     gets_the_edition: bool,
-) -> Result<Option<WorkJson>> {
+) -> Result<Option<(sidecars::Document, WorkJson)>> {
     if !patch.touches_work() && !gets_the_edition {
         return Ok(None);
     }
-    let mut it: WorkJson = current(file)?;
+    let document = current(file)?;
+    let mut it: WorkJson = document.read();
     it.leaf = Some(FORMAT_VERSION);
     if patch.touches_work() {
         it.title = patch.title.clone().or(it.title);
@@ -163,7 +164,7 @@ fn work_document(
         it.status = words.status.clone().or(it.status);
         it.colour = patch.colour.or(it.colour);
     }
-    Ok(Some(it))
+    Ok(Some((document, it)))
 }
 
 /// What `edition.json` is to become, or `None` when the patch does not reach it — including
@@ -173,11 +174,12 @@ fn edition_document(
     patch: &SeriesPatch,
     words: &Spelled,
     implicit: bool,
-) -> Result<Option<EditionJson>> {
+) -> Result<Option<(sidecars::Document, EditionJson)>> {
     if implicit || !patch.touches_edition() {
         return Ok(None);
     }
-    let mut it: EditionJson = current(file)?;
+    let document = current(file)?;
+    let mut it: EditionJson = document.read();
     it.leaf = Some(FORMAT_VERSION);
     it.name = patch.name.clone().or(it.name);
     it.publisher = patch.publisher.clone().or(it.publisher);
@@ -187,7 +189,7 @@ fn edition_document(
     it.format = patch.format.clone().or(it.format);
     it.language = patch.language.clone().or(it.language);
     it.colour = patch.colour.or(it.colour);
-    Ok(Some(it))
+    Ok(Some((document, it)))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -258,11 +260,11 @@ impl<'a> Records<'a> {
         let work = work_document(&work_file, patch, &words, work_gets_the_edition)?;
         let edition = edition_document(&edition_file, patch, &words, where_.implicit)?;
 
-        if let Some(work) = work {
-            put(&work_file, &work)?;
+        if let Some((document, work)) = work {
+            put(&work_file, &document, &work)?;
         }
-        if let Some(edition) = edition {
-            put(&edition_file, &edition)?;
+        if let Some((document, edition)) = edition {
+            put(&edition_file, &document, &edition)?;
         }
         Ok(true)
     }
@@ -479,33 +481,37 @@ fn merge<T>(file: &Path, transform: impl FnOnce(T) -> T) -> Result<()>
 where
     T: Default + serde::de::DeserializeOwned + serde::Serialize,
 {
-    put(file, &transform(current(file)?))
+    let document = current(file)?;
+    put(file, &document, &transform(document.read()))
 }
 
-/// What the sidecar says now, or its default when there is none.
+/// What the sidecar holds now, whole, or an empty document when there is no file.
 ///
 /// Split out of [`merge`] so a caller writing two files can read both first: an edit refused
 /// halfway leaves one of them changed, and that is not a shape any answer can describe. See
 /// `patch_series`.
-fn current<T>(file: &Path) -> Result<T>
-where
-    T: Default + serde::de::DeserializeOwned,
-{
+///
+/// The whole document and not a typed view of it, because the typed view is what threw away
+/// every field this version has not been taught — see [`sidecars::Document`].
+fn current(file: &Path) -> Result<sidecars::Document> {
     match std::fs::read(file) {
-        Ok(bytes) => Ok(sidecars::read(&bytes).unwrap_or_default()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        Ok(bytes) => Ok(sidecars::Document::of(&bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(sidecars::Document::default()),
         Err(e) => Err(anyhow::Error::new(e).context(format!("reading {}", file.display()))),
     }
 }
 
-fn put<T: serde::Serialize>(file: &Path, value: &T) -> Result<()> {
+fn put<T>(file: &Path, document: &sidecars::Document, value: &T) -> Result<()>
+where
+    T: Default + serde::de::DeserializeOwned + serde::Serialize,
+{
     let parent = file
         .parent()
         .ok_or_else(|| anyhow!("{} has no folder", file.display()))?;
     std::fs::create_dir_all(parent)?;
     // Beside, then renamed: a scan reading this file mid-write would read a prefix,
     // fail to parse it, and report every field in it as missing.
-    crate::store::files::write_whole(file, &sidecars::write(value)?)?;
+    crate::store::files::write_whole(file, &document.written(value)?)?;
     tracing::info!(file = %file.display(), "record written");
     Ok(())
 }

@@ -12,7 +12,7 @@ mod common;
 use common::writable;
 
 use leaf_server::api::bulk_import::{
-    BulkImport, CleanupRequest, ImportRequest, ManifestFile, ReceiveError, Scope,
+    BulkImport, CleanupRequest, ImportRequest, ManifestFile, ManifestSidecar, ReceiveError, Scope,
 };
 use leaf_server::api::intake::{Collision, Confidence, FileRequest, Intake, OnCollision};
 use leaf_server::api::local_drop::{DropRequest, LocalDrop};
@@ -703,13 +703,172 @@ fn manifest(files: &[(&str, u64)], scope: Scope) -> ImportRequest {
             })
             .collect(),
         scope,
+        sidecars: Vec::new(),
     }
+}
+
+/// Down the model and not across the disk. The walk meets sidecars in whatever order the
+/// filesystem lists them — measured on a real folder, « édition, série, édition, univers »,
+/// which is the four levels shuffled and unreadable as a list of what will happen.
+#[test]
+fn what_a_folder_would_create_is_ordered_the_way_the_model_is() {
+    let (_dir, bulk) = a_bulk();
+    let declare = |path: &str, json: &str| ManifestSidecar {
+        path: path.to_string(),
+        json: json.to_string(),
+    };
+    let mut request = manifest(&[], Scope::Addition);
+    request.root = "Dragon Ball".to_string();
+    // Handed over in the order a walk of that folder produces, which is not the model's.
+    request.sidecars = vec![
+        declare(
+            "Dragon Ball/Perfect Edition/edition.json",
+            r#"{"leaf":1,"name":"Perfect Edition"}"#,
+        ),
+        declare(
+            "Dragon Ball/work.json",
+            r#"{"leaf":1,"title":"Dragon Ball"}"#,
+        ),
+        declare(
+            "Dragon Ball/Édition originale/edition.json",
+            r#"{"leaf":1,"name":"Édition originale"}"#,
+        ),
+        declare("universe.json", r#"{"leaf":1,"name":"Dragon Ball"}"#),
+    ];
+
+    let opened = bulk.open(&request).expect("an import");
+
+    let said: Vec<(&str, &str)> = opened
+        .creates
+        .iter()
+        .map(|c| (c.kind.as_str(), c.name.as_str()))
+        .collect();
+    assert_eq!(
+        vec![
+            ("UNIVERSE", "Dragon Ball"),
+            ("WORK", "Dragon Ball"),
+            ("EDITION", "Perfect Edition"),
+            ("EDITION", "Édition originale"),
+        ],
+        said,
+        "universe, then its work, then that work's editions"
+    );
+}
+
+/// An identity is stamped by the scan and belongs to the library: it never travels in an
+/// import.
+///
+/// Measured: a folder prepared on a laptop and never scanned has no `id` in its
+/// `work.json`, and copying that over the library's own made the field come back `null`.
+/// The next scan mints a new one, the prune takes the rows it replaces, and
+/// `ON DELETE CASCADE` takes every reading position of that series with them — the exact
+/// loss `scan::identity` exists to prevent, walked in through the import door.
+#[test]
+fn an_import_never_takes_the_identity_off_what_is_already_there() {
+    let (dir, bulk) = a_bulk();
+    let target = dir.path().join("library").join("Death Note");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(
+        target.join("work.json"),
+        br#"{"leaf":1,"title":"Death Note","id":"2f680fdf43a78c4e"}"#,
+    )
+    .unwrap();
+
+    let mut request = manifest(&[], Scope::Addition);
+    request.root = "Death Note".to_string();
+    request.sidecars = vec![ManifestSidecar {
+        path: "work.json".to_string(),
+        json: r#"{"leaf":1,"title":"DEATH NOTE","genres":["thriller"]}"#.to_string(),
+    }];
+    let opened = bulk.open(&request).expect("an import");
+    // Named, because writing over a declaration the library already holds is the reader's
+    // decision now. What this test is about is what survives when they say yes.
+    assert_eq!(
+        vec!["work.json".to_string()],
+        opened
+            .declarations
+            .iter()
+            .map(|d| d.path.clone())
+            .collect::<Vec<_>>()
+    );
+    bulk.commit(&opened.id, &[], &["work.json".to_string()])
+        .expect("a commit");
+
+    let after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(target.join("work.json")).unwrap()).unwrap();
+    assert_eq!(
+        "2f680fdf43a78c4e", after["id"],
+        "the identity stays the one on disk"
+    );
+    // And everything else is what just arrived: the identity alone is held back.
+    assert_eq!("DEATH NOTE", after["title"]);
+    assert_eq!(serde_json::json!(["thriller"]), after["genres"]);
+}
+
+/// A declaration that cannot be read is refused at the announcement, before a byte moves.
+///
+/// Installing it over one the library can read would replace something useful with
+/// something inert — the scan ignores it — and take the folder's identity with it. Skipping
+/// it quietly at commit would be the other half of the same mistake: the reader would be
+/// told the import worked, and the file would still be wrong.
+#[test]
+fn a_declaration_that_cannot_be_read_is_refused_before_anything_moves() {
+    let (dir, bulk) = a_bulk();
+    let target = dir.path().join("library").join("Death Note");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(
+        target.join("work.json"),
+        br#"{"leaf":1,"title":"Death Note","id":"2f680fdf43a78c4e"}"#,
+    )
+    .unwrap();
+
+    let mut request = manifest(&[], Scope::Addition);
+    request.root = "Death Note".to_string();
+    request.sidecars = vec![ManifestSidecar {
+        path: "work.json".to_string(),
+        // One trailing comma: what a hand-edited file becomes.
+        json: r#"{"leaf":1,"title":"Death Note",}"#.to_string(),
+    }];
+
+    let refused = bulk
+        .open(&request)
+        .expect_err("an unreadable declaration is refused");
+    assert!(
+        refused.to_string().contains("work.json"),
+        "the refusal names the file to fix: {refused}"
+    );
+
+    // And the disk has not moved: that is the whole point of refusing at the announcement.
+    let after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(target.join("work.json")).unwrap()).unwrap();
+    assert_eq!("2f680fdf43a78c4e", after["id"]);
+}
+
+/// A folder that was not there has no identity to keep: the declaration arrives as it came,
+/// and the scan will stamp one onto it.
+#[test]
+fn a_declaration_landing_somewhere_new_arrives_as_it_came() {
+    let (dir, bulk) = a_bulk();
+    let mut request = manifest(&[], Scope::Addition);
+    request.root = "Elfes".to_string();
+    request.sidecars = vec![ManifestSidecar {
+        path: "work.json".to_string(),
+        json: r#"{"leaf":1,"title":"Elfes"}"#.to_string(),
+    }];
+    let opened = bulk.open(&request).expect("an import");
+    bulk.commit(&opened.id, &[], &[]).expect("a commit");
+
+    let landed = dir.path().join("library/Elfes/work.json");
+    let after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&landed).unwrap()).unwrap();
+    assert_eq!("Elfes", after["title"]);
+    assert!(after["id"].is_null());
 }
 
 #[test]
 fn an_import_asks_only_for_what_is_not_already_there() {
     let world = World::new();
-    let bulk = BulkImport::new(&world.inbox(), &world.library());
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
     let there = world.library().join("Terres d'Arran/Nains 01.cbz");
     std::fs::create_dir_all(there.parent().unwrap()).unwrap();
     std::fs::write(&there, vec![0u8; 10]).unwrap();
@@ -724,12 +883,51 @@ fn an_import_asks_only_for_what_is_not_already_there() {
     assert_eq!(vec!["Nains 02.cbz".to_string()], opened.to_send);
     assert_eq!(vec!["Nains 01.cbz".to_string()], opened.already_there);
     assert_eq!(4, opened.bytes_to_send);
+    // Nains 02.cbz is new to the library — nothing sits at that path yet — so asking for it
+    // is not a replacement.
+    assert!(opened.replaces.is_empty(), "{:?}", opened.replaces);
+}
+
+/// A manifest can declare the same path the library already holds under another size — a
+/// retouched volume sent again without a new name. `commit`'s installation is an ordinary
+/// rename, which onto an existing path replaces it, and a reader deciding whether to import
+/// has to be told that before it happens.
+///
+/// Measured: this file used to land in `to_send` and nowhere else — neither `already_there`
+/// nor `creates` — so nothing said it would overwrite what is already on the disk.
+#[test]
+fn a_manifest_that_disagrees_with_what_is_already_home_is_named_as_a_replacement() {
+    let world = World::new();
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
+    let there = world.library().join("Terres d'Arran/Nains 01.cbz");
+    std::fs::create_dir_all(there.parent().unwrap()).unwrap();
+    std::fs::write(&there, vec![0u8; 10]).unwrap();
+
+    let opened = bulk
+        .open(&manifest(&[("Nains 01.cbz", 4)], Scope::Addition))
+        .expect("opening");
+
+    assert_eq!(vec!["Nains 01.cbz".to_string()], opened.to_send);
+    assert!(
+        opened.already_there.is_empty(),
+        "{:?}",
+        opened.already_there
+    );
+    assert_eq!(
+        vec!["Nains 01.cbz".to_string()],
+        opened
+            .replaces
+            .iter()
+            .map(|r| r.path.clone())
+            .collect::<Vec<_>>(),
+        "a size that disagrees with what is already home is a replacement, not a plain addition"
+    );
 }
 
 #[test]
 fn a_transfer_resumes_at_the_byte_it_stopped_on() {
     let world = World::new();
-    let bulk = BulkImport::new(&world.inbox(), &world.library());
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
     let opened = bulk
         .open(&manifest(&[("Nains 01.cbz", 8)], Scope::Addition))
         .expect("opening");
@@ -754,7 +952,7 @@ fn a_transfer_resumes_at_the_byte_it_stopped_on() {
 #[test]
 fn an_offset_past_what_the_server_holds_says_what_it_holds() {
     let world = World::new();
-    let bulk = BulkImport::new(&world.inbox(), &world.library());
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
     let opened = bulk
         .open(&manifest(&[("Nains 01.cbz", 8)], Scope::Addition))
         .expect("opening");
@@ -770,7 +968,7 @@ fn an_offset_past_what_the_server_holds_says_what_it_holds() {
 #[test]
 fn committing_installs_what_arrived_and_leaves_what_did_not() {
     let world = World::new();
-    let bulk = BulkImport::new(&world.inbox(), &world.library());
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
     let opened = bulk
         .open(&manifest(
             &[("Nains 01.cbz", 4), ("Nains 02.cbz", 4)],
@@ -782,7 +980,7 @@ fn committing_installs_what_arrived_and_leaves_what_did_not() {
     bulk.receive(&opened.id, "Nains 02.cbz", 0, b"ab", CEILING)
         .expect("half");
 
-    let result = bulk.commit(&opened.id).expect("committing");
+    let result = bulk.commit(&opened.id, &[], &[]).expect("committing");
 
     assert_eq!(1, result.installed);
     assert!(world.library().join("Terres d'Arran/Nains 01.cbz").exists());
@@ -798,7 +996,7 @@ fn committing_installs_what_arrived_and_leaves_what_did_not() {
     assert_eq!(vec!["Nains 02.cbz".to_string()], state.missing);
     bulk.receive(&opened.id, "Nains 02.cbz", 2, b"cd", CEILING)
         .expect("the rest");
-    let result = bulk.commit(&opened.id).expect("committing again");
+    let result = bulk.commit(&opened.id, &[], &[]).expect("committing again");
     assert_eq!(1, result.installed);
     assert!(result.pending.is_empty());
     assert!(
@@ -812,14 +1010,14 @@ fn committing_installs_what_arrived_and_leaves_what_did_not() {
 #[test]
 fn a_file_that_travelled_wrong_is_left_aside_rather_than_installed() {
     let world = World::new();
-    let bulk = BulkImport::new(&world.inbox(), &world.library());
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
     let mut request = manifest(&[("Nains 01.cbz", 4)], Scope::Addition);
     request.files[0].checksum = Some("not the digest of abcd".into());
     let opened = bulk.open(&request).expect("opening");
     bulk.receive(&opened.id, "Nains 01.cbz", 0, b"abcd", CEILING)
         .expect("whole");
 
-    let result = bulk.commit(&opened.id).expect("committing");
+    let result = bulk.commit(&opened.id, &[], &[]).expect("committing");
 
     // A volume that arrived wrong is worse than one that did not arrive, because nothing
     // afterwards would tell you.
@@ -839,13 +1037,18 @@ fn a_file_that_travelled_wrong_is_left_aside_rather_than_installed() {
     let opened = bulk.open(&request).expect("opening");
     bulk.receive(&opened.id, "Nains 01.cbz", 0, b"abcd", CEILING)
         .expect("whole");
-    assert_eq!(1, bulk.commit(&opened.id).expect("committing").installed);
+    assert_eq!(
+        1,
+        bulk.commit(&opened.id, &[], &[])
+            .expect("committing")
+            .installed
+    );
 }
 
 #[test]
 fn an_addition_says_nothing_about_what_it_did_not_bring() {
     let world = World::new();
-    let bulk = BulkImport::new(&world.inbox(), &world.library());
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
     let stranger = world.library().join("Terres d'Arran/Elfes 01.cbz");
     std::fs::create_dir_all(stranger.parent().unwrap()).unwrap();
     std::fs::write(&stranger, b"xy").unwrap();
@@ -855,7 +1058,7 @@ fn an_addition_says_nothing_about_what_it_did_not_bring() {
         .expect("opening");
     bulk.receive(&opened.id, "Nains 01.cbz", 0, b"abcd", CEILING)
         .expect("whole");
-    let result = bulk.commit(&opened.id).expect("committing");
+    let result = bulk.commit(&opened.id, &[], &[]).expect("committing");
 
     // The desktop is a workbench, not a mirror: a series imported and then deleted locally
     // can no longer be announced in full.
@@ -866,7 +1069,7 @@ fn an_addition_says_nothing_about_what_it_did_not_bring() {
 #[test]
 fn a_complete_manifest_names_the_orphans_and_deletes_nothing() {
     let world = World::new();
-    let bulk = BulkImport::new(&world.inbox(), &world.library());
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
     let stranger = world.library().join("Terres d'Arran/Elfes 01.cbz");
     std::fs::create_dir_all(stranger.parent().unwrap()).unwrap();
     std::fs::write(&stranger, b"xy").unwrap();
@@ -876,7 +1079,7 @@ fn a_complete_manifest_names_the_orphans_and_deletes_nothing() {
         .expect("opening");
     bulk.receive(&opened.id, "Nains 01.cbz", 0, b"abcd", CEILING)
         .expect("whole");
-    let result = bulk.commit(&opened.id).expect("committing");
+    let result = bulk.commit(&opened.id, &[], &[]).expect("committing");
 
     assert_eq!(vec!["Elfes 01.cbz".to_string()], result.orphans);
     // Reported, and still there: a wrong manifest never destroys anything.
@@ -886,7 +1089,7 @@ fn a_complete_manifest_names_the_orphans_and_deletes_nothing() {
 #[test]
 fn deletion_happens_only_on_an_explicit_by_name_order() {
     let world = World::new();
-    let bulk = BulkImport::new(&world.inbox(), &world.library());
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
     let file = world.library().join("Terres d'Arran/Elfes 01.cbz");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, b"xy").unwrap();
@@ -905,7 +1108,7 @@ fn deletion_happens_only_on_an_explicit_by_name_order() {
 #[test]
 fn a_path_that_climbs_out_of_its_root_is_refused() {
     let world = World::new();
-    let bulk = BulkImport::new(&world.inbox(), &world.library());
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
     let opened = bulk
         .open(&manifest(&[("Nains 01.cbz", 4)], Scope::Addition))
         .expect("opening");
@@ -926,7 +1129,7 @@ fn a_path_that_climbs_out_of_its_root_is_refused() {
 #[test]
 fn a_chunk_over_the_ceiling_is_refused() {
     let world = World::new();
-    let bulk = BulkImport::new(&world.inbox(), &world.library());
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
     let opened = bulk
         .open(&manifest(&[("Nains 01.cbz", 4096)], Scope::Addition))
         .expect("opening");
@@ -939,7 +1142,7 @@ fn a_chunk_over_the_ceiling_is_refused() {
 #[test]
 fn an_abandoned_import_is_gone() {
     let world = World::new();
-    let bulk = BulkImport::new(&world.inbox(), &world.library());
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
     let opened = bulk
         .open(&manifest(&[("Nains 01.cbz", 4)], Scope::Addition))
         .expect("opening");
@@ -1227,7 +1430,7 @@ fn a_replacement_cannot_point_at_another_series_file() {
 #[cfg(unix)]
 fn a_link_back_to_a_parent_is_a_leaf_and_not_a_loop() {
     let world = World::new();
-    let bulk = BulkImport::new(&world.inbox(), &world.library());
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
     let root = world.library().join("Terres d'Arran");
     std::fs::create_dir_all(root.join("Nains")).unwrap();
     std::fs::write(root.join("Nains/Tome 1.cbz"), b"abcd").unwrap();
@@ -1238,7 +1441,7 @@ fn a_link_back_to_a_parent_is_a_leaf_and_not_a_loop() {
         .expect("opening");
     // A COMPLETE manifest sweeps the whole target to name what it did not bring, and
     // `is_dir()` follows symlinks: without this it would recurse until the stack gave out.
-    let result = bulk.commit(&opened.id).expect("committing");
+    let result = bulk.commit(&opened.id, &[], &[]).expect("committing");
 
     assert!(result.orphans.is_empty(), "{:?}", result.orphans);
 }
@@ -1360,7 +1563,7 @@ fn a_file_taken_out_of_the_drop_is_marked_as_the_only_copy() {
 #[test]
 fn an_import_left_open_says_what_it_is_holding() {
     let world = World::new();
-    let bulk = BulkImport::new(&world.inbox(), &world.library());
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
     assert!(bulk.waiting().unwrap().is_empty());
 
     let opened = bulk
@@ -1396,7 +1599,7 @@ fn an_import_left_open_says_what_it_is_holding() {
 #[test]
 fn one_transfer_stopping_leaves_the_other_alone_and_offers_both_answers() {
     let world = World::new();
-    let bulk = BulkImport::new(&world.inbox(), &world.library());
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
 
     let of = |root: &str, count: usize| ImportRequest {
         root: root.into(),
@@ -1408,6 +1611,7 @@ fn one_transfer_stopping_leaves_the_other_alone_and_offers_both_answers() {
             })
             .collect(),
         scope: Scope::Addition,
+        sidecars: Vec::new(),
     };
     let bleach = bulk.open(&of("Bleach", 8)).expect("opening");
     let naruto = bulk.open(&of("Naruto", 8)).expect("opening");
@@ -1431,7 +1635,7 @@ fn one_transfer_stopping_leaves_the_other_alone_and_offers_both_answers() {
     assert_eq!((4, 8), (held("Bleach").complete, held("Bleach").of));
 
     // One: stop at the last whole volume. Four are in the library, four are named.
-    let stopped = bulk.commit(&bleach.id).expect("committing");
+    let stopped = bulk.commit(&bleach.id, &[], &[]).expect("committing");
     assert_eq!(4, stopped.installed);
     assert!(stopped.open);
     assert_eq!(
@@ -1452,7 +1656,7 @@ fn one_transfer_stopping_leaves_the_other_alone_and_offers_both_answers() {
         bulk.receive(&bleach.id, &format!("Tome {n:02}.cbz"), 0, b"abcd", CEILING)
             .expect("whole");
     }
-    let finished = bulk.commit(&bleach.id).expect("committing again");
+    let finished = bulk.commit(&bleach.id, &[], &[]).expect("committing again");
     assert_eq!(4, finished.installed);
     assert!(!finished.open);
 
@@ -1476,7 +1680,7 @@ fn one_transfer_stopping_leaves_the_other_alone_and_offers_both_answers() {
 #[test]
 fn a_changed_file_of_the_same_size_is_asked_for_when_a_checksum_says_so() {
     let world = World::new();
-    let bulk = BulkImport::new(&world.inbox(), &world.library());
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
     let there = world.library().join("Terres d'Arran/Nains 01.cbz");
     std::fs::create_dir_all(there.parent().unwrap()).unwrap();
     std::fs::write(&there, b"Tome 1").unwrap();
@@ -1518,6 +1722,7 @@ fn a_bulk() -> (tempfile::TempDir, leaf_server::api::bulk_import::BulkImport) {
     let bulk = leaf_server::api::bulk_import::BulkImport::new(
         &dir.path().join("inbox"),
         &dir.path().join("library"),
+        Arc::new(Db::open(&dir.path().join("index.sqlite")).unwrap()),
     );
     (dir, bulk)
 }
@@ -1536,6 +1741,7 @@ fn a_manifest_path_that_walks_upwards_lands_inside_the_root_anyway() {
                 size: 2,
                 checksum: None,
             }],
+            sidecars: Vec::new(),
         })
         .expect("opened");
 
@@ -1567,6 +1773,7 @@ fn a_write_starting_past_the_ceiling_is_refused_even_though_it_is_a_resume() {
                 size: 9_000_000_000,
                 checksum: None,
             }],
+            sidecars: Vec::new(),
         })
         .expect("opened");
 
@@ -1614,13 +1821,14 @@ fn a_file_already_home_is_done_rather_than_missing() {
                 size: 2,
                 checksum: None,
             }],
+            sidecars: Vec::new(),
         })
         .expect("opened");
 
     let state = bulk.state(&opened.id).unwrap().expect("a state");
     assert_eq!(state.missing.len(), 0, "{state:?}");
     // Nothing left to send: it is there, at the right length.
-    let result = bulk.commit(&opened.id).expect("committed");
+    let result = bulk.commit(&opened.id, &[], &[]).expect("committed");
     assert!(result.pending.is_empty(), "{result:?}");
 }
 
@@ -1647,10 +1855,11 @@ fn a_manifest_that_covers_the_whole_series_reports_what_it_does_not_mention() {
                 size: 2,
                 checksum: None,
             }],
+            sidecars: Vec::new(),
         })
         .expect("opened");
 
-    let result = bulk.commit(&opened.id).expect("committed");
+    let result = bulk.commit(&opened.id, &[], &[]).expect("committed");
     assert_eq!(result.orphans, vec!["Extras/Bonus.cbz".to_string()]);
     // A symlink is a leaf and never a way back up: the sweep does not descend into it, so
     // a link to the folder it sits in is not an infinite tree of orphans.
@@ -1677,10 +1886,11 @@ fn a_tree_deeper_than_the_sweep_follows_stops_rather_than_walking_for_ever() {
             root: "Bleach".into(),
             scope: Scope::Complete,
             files: Vec::new(),
+            sidecars: Vec::new(),
         })
         .expect("opened");
 
-    let result = bulk.commit(&opened.id).expect("committed");
+    let result = bulk.commit(&opened.id, &[], &[]).expect("committed");
     assert!(
         !result.orphans.iter().any(|o| o.contains("Trop loin")),
         "past the ceiling nothing is swept: {:?}",
@@ -1702,6 +1912,7 @@ fn a_target_that_cannot_be_read_sweeps_to_nothing_rather_than_failing() {
             root: "Bleach".into(),
             scope: Scope::Complete,
             files: Vec::new(),
+            sidecars: Vec::new(),
         })
         .expect("opened");
 
@@ -1709,7 +1920,7 @@ fn a_target_that_cannot_be_read_sweeps_to_nothing_rather_than_failing() {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let result = bulk.commit(&opened.id).expect("committed");
+        let result = bulk.commit(&opened.id, &[], &[]).expect("committed");
         writable(&target);
         assert!(result.orphans.is_empty(), "{result:?}");
     }
@@ -1721,6 +1932,7 @@ fn what_is_waiting_in_an_inbox_that_is_not_there_is_nothing() {
     let bulk = leaf_server::api::bulk_import::BulkImport::new(
         &dir.path().join("no-such-inbox"),
         &dir.path().join("library"),
+        Arc::new(Db::open(&dir.path().join("index.sqlite")).unwrap()),
     );
     assert!(bulk.waiting().unwrap().is_empty());
 }
@@ -1742,6 +1954,7 @@ fn a_file_that_cannot_be_read_to_check_its_checksum_is_dropped_like_a_wrong_one(
                 size: 2,
                 checksum: Some("0".repeat(64)),
             }],
+            sidecars: Vec::new(),
         })
         .expect("opened");
 
@@ -1756,7 +1969,7 @@ fn a_file_that_cannot_be_read_to_check_its_checksum_is_dropped_like_a_wrong_one(
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
     }
 
-    let result = bulk.commit(&opened.id).expect("committed");
+    let result = bulk.commit(&opened.id, &[], &[]).expect("committed");
     assert_eq!(result.corrupt, vec!["Tome 1.cbz".to_string()], "{result:?}");
     assert_eq!(result.installed, 0);
     let _ = std::fs::remove_file(&target);
@@ -1777,6 +1990,7 @@ fn a_manifest_path_with_a_dot_in_the_middle_is_the_same_path_without_it() {
                 size: 2,
                 checksum: None,
             }],
+            sidecars: Vec::new(),
         })
         .expect("opened");
 
@@ -1820,6 +2034,7 @@ fn a_file_already_home_is_counted_as_done_in_what_is_waiting() {
                 checksum: None,
             },
         ],
+        sidecars: Vec::new(),
     })
     .expect("opened");
 
@@ -1827,4 +2042,326 @@ fn a_file_already_home_is_counted_as_done_in_what_is_waiting() {
     assert_eq!(waiting.len(), 1);
     assert_eq!(waiting[0].of, 2);
     assert_eq!(waiting[0].complete, 1, "the one already home is done");
+}
+
+// ——— What a folder would add: the diff the library is shown ————————————————
+
+fn declaring(path: &str, json: &str) -> ManifestSidecar {
+    ManifestSidecar {
+        path: path.into(),
+        json: json.into(),
+    }
+}
+
+/// The sentence the dialog has to be able to write: *« créera l'univers Terres d'Arran, et
+/// Elfes dedans »*. Answered before a byte moves, because a folder that went where it was
+/// not meant to looks exactly like one that went where it was.
+#[test]
+fn opening_a_folder_says_what_the_library_would_gain() {
+    let world = World::new();
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
+
+    let mut request = manifest(&[("Elfes/Tome 1.cbz", 10)], Scope::Addition);
+    request.root = "Terres d'Arran".into();
+    request.sidecars = vec![
+        declaring("universe.json", r#"{"leaf":1,"name":"Terres d’Arran"}"#),
+        declaring("Elfes/work.json", r#"{"leaf":1,"title":"Elfes"}"#),
+    ];
+
+    let said = bulk.open(&request).expect("an opening");
+    let kinds: Vec<(&str, &str)> = said
+        .creates
+        .iter()
+        .map(|c| (c.kind.as_str(), c.name.as_str()))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![("UNIVERSE", "Terres d’Arran"), ("WORK", "Elfes")]
+    );
+    // Named from the declaration and not from the folder, because the two are allowed to
+    // differ and the declaration is the one that wins.
+    assert_eq!(said.creates[1].at, "Elfes");
+}
+
+/// A folder already on disk is not a creation. Read off the disk and not the index on
+/// purpose: a folder put there by hand and not yet scanned exists, and answering "no"
+/// would make a second one beside it.
+#[test]
+fn a_folder_that_is_already_there_creates_nothing() {
+    let world = World::new();
+    std::fs::create_dir_all(world.library().join("Bleach")).unwrap();
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
+
+    let mut request = manifest(&[("Tome 3.cbz", 10)], Scope::Addition);
+    request.root = "Bleach".into();
+    request.sidecars = vec![declaring("work.json", r#"{"leaf":1,"title":"Bleach"}"#)];
+
+    assert!(bulk.open(&request).expect("an opening").creates.is_empty());
+}
+
+/// The edition of a series that exists: one creation, not two.
+#[test]
+fn a_new_edition_under_a_work_that_is_there_creates_only_the_edition() {
+    let world = World::new();
+    std::fs::create_dir_all(world.library().join("Parasite")).unwrap();
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
+
+    let mut request = manifest(&[("Deluxe/Tome 1.cbz", 10)], Scope::Addition);
+    request.root = "Parasite".into();
+    request.sidecars = vec![
+        declaring("work.json", r#"{"leaf":1,"title":"Parasite"}"#),
+        declaring(
+            "Deluxe/edition.json",
+            r#"{"leaf":1,"name":"Édition Deluxe"}"#,
+        ),
+    ];
+
+    let said = bulk.open(&request).expect("an opening");
+    assert_eq!(said.creates.len(), 1);
+    assert_eq!(said.creates[0].kind, "EDITION");
+    assert_eq!(said.creates[0].name, "Édition Deluxe");
+}
+
+/// The declarations reach the library with the files. Without this a series lands without
+/// the thing that says what it is, and the scan behind it classifies a folder of archives
+/// as nothing at all.
+#[test]
+fn the_declarations_are_installed_along_with_the_volumes() {
+    let world = World::new();
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
+
+    let mut request = manifest(&[("Tome 1.cbz", 4)], Scope::Addition);
+    request.root = "Koro".into();
+    request.sidecars = vec![declaring("work.json", r#"{"leaf":1,"title":"Koro Quest"}"#)];
+
+    let opened = bulk.open(&request).expect("an opening");
+    // Announced as missing, so it is sent — the sidecar was not, and does not need to be.
+    assert_eq!(opened.to_send, vec!["Tome 1.cbz".to_string()]);
+    {
+        let mut file = leaf_server::api::bulk_import::open_at(
+            &world.inbox().join(&opened.id).join("Tome 1.cbz"),
+            0,
+        )
+        .unwrap();
+        use std::io::Write;
+        file.write_all(b"abcd").unwrap();
+    }
+
+    let result = bulk.commit(&opened.id, &[], &[]).expect("a commit");
+    assert_eq!(result.installed, 1);
+    let landed = world.library().join("Koro").join("work.json");
+    assert!(landed.exists(), "the declaration did not travel");
+    assert!(std::fs::read_to_string(landed)
+        .unwrap()
+        .contains("Koro Quest"));
+}
+
+/// A declaration this server does not understand is still installed, unparsed. A field a
+/// later version writes has to survive a trip through one that does not know it.
+#[test]
+fn a_declaration_carrying_an_unknown_field_keeps_it() {
+    let world = World::new();
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
+
+    let mut request = manifest(&[], Scope::Addition);
+    request.root = "Demain".into();
+    request.sidecars = vec![declaring(
+        "work.json",
+        r#"{"leaf":1,"title":"Demain","champDeDemain":"à garder"}"#,
+    )];
+
+    let opened = bulk.open(&request).expect("an opening");
+    bulk.commit(&opened.id, &[], &[]).expect("a commit");
+    let landed = std::fs::read_to_string(world.library().join("Demain").join("work.json")).unwrap();
+    assert!(landed.contains("champDeDemain"), "{landed}");
+}
+
+/// A declaration with no path of its own is a malformed announcement, and says so.
+///
+/// It used to reach `under` a few statements later, which has nothing to resolve and fails
+/// as an error rather than as a refusal — so a 400's worth of wrong request came back a
+/// 500's worth of wrong server.
+#[test]
+fn a_declaration_without_a_path_is_refused_rather_than_breaking() {
+    let (_dir, bulk) = a_bulk();
+    let mut request = manifest(&[("Nains 01.cbz", 4)], Scope::Addition);
+    request.sidecars = vec![ManifestSidecar {
+        path: String::new(),
+        json: r#"{"leaf":1}"#.into(),
+    }];
+
+    let refused = bulk.open(&request).expect_err("a declaration with no path");
+
+    assert!(
+        refused.to_string().contains("without the path"),
+        "{refused}"
+    );
+}
+
+/// A root that is one plain name is what this accepts, and a name holding two dots is one.
+///
+/// `contains("..")` refused `Terres d'Arran..2`, which is a folder somebody is allowed to
+/// have, while a climb out of the library is a `..` *component* — which is what is refused
+/// now, along with any separator at all.
+#[test]
+fn a_root_with_two_dots_in_its_name_is_not_a_climb_out_of_the_library() {
+    let (_dir, bulk) = a_bulk();
+    let mut request = manifest(&[("Nains 01.cbz", 4)], Scope::Addition);
+    request.root = "Terres d'Arran..2".into();
+
+    let opened = bulk.open(&request).expect("a name, not a climb");
+    assert_eq!("Terres d'Arran..2", opened.root);
+
+    let mut climbing = manifest(&[("Nains 01.cbz", 4)], Scope::Addition);
+    climbing.root = "../etc".into();
+    assert!(
+        bulk.open(&climbing).is_err(),
+        "and a climb is still refused"
+    );
+}
+
+/// Six volumes that could be replaced are six decisions, and a commit takes none of them.
+///
+/// The twin of `move`: nothing lands on a file the library already holds unless the commit
+/// names that path. What is refused stays in the inbox and is reported in `pending` — not
+/// installed, not thrown away, and above all not silently skipped, which would read exactly
+/// like a transfer that worked.
+#[test]
+fn a_commit_replaces_only_the_paths_it_was_told_to() {
+    let (dir, bulk) = a_bulk();
+    let target = dir.path().join("library").join("Terres d'Arran");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("Nains 01.cbz"), b"old one").unwrap();
+    std::fs::write(target.join("Nains 02.cbz"), b"old two").unwrap();
+
+    let opened = bulk
+        .open(&manifest(
+            &[("Nains 01.cbz", 4), ("Nains 02.cbz", 4)],
+            Scope::Addition,
+        ))
+        .expect("opening");
+    assert_eq!(2, opened.replaces.len(), "{:?}", opened.replaces);
+    bulk.receive(&opened.id, "Nains 01.cbz", 0, b"abcd", CEILING)
+        .expect("the first");
+    bulk.receive(&opened.id, "Nains 02.cbz", 0, b"efgh", CEILING)
+        .expect("the second");
+
+    let result = bulk
+        .commit(&opened.id, &["Nains 01.cbz".to_string()], &[])
+        .expect("committing");
+
+    assert_eq!(1, result.installed);
+    assert_eq!(
+        b"abcd".to_vec(),
+        std::fs::read(target.join("Nains 01.cbz")).unwrap(),
+        "the one that was named is replaced"
+    );
+    assert_eq!(
+        b"old two".to_vec(),
+        std::fs::read(target.join("Nains 02.cbz")).unwrap(),
+        "and the one that was not is left exactly as it was"
+    );
+    assert_eq!(
+        vec!["Nains 02.cbz".to_string()],
+        result.pending,
+        "refused is said, not silently skipped"
+    );
+    // And the bytes are still there to install with a later commit that does name it.
+    assert!(result.open);
+    let again = bulk
+        .commit(&opened.id, &["Nains 02.cbz".to_string()], &[])
+        .expect("committing again");
+    assert_eq!(1, again.installed);
+    assert_eq!(
+        b"efgh".to_vec(),
+        std::fs::read(target.join("Nains 02.cbz")).unwrap()
+    );
+}
+
+/// What the library already holds is read out of its own archive, so a reader can tell two
+/// files apart without opening both by hand.
+///
+/// Measured on a real library: two archives six hundred and eighty-two bytes apart, whose
+/// whole difference was a title edited through the API months earlier. A size says
+/// « different » and stops there.
+#[test]
+fn a_replacement_says_what_the_library_already_holds() {
+    let (dir, bulk) = a_bulk();
+    let target = dir.path().join("library").join("Terres d'Arran");
+    std::fs::create_dir_all(&target).unwrap();
+    archive(
+        &target.join("Nains 01.cbz"),
+        Some(&EntryJson {
+            title: Some("Le vieux titre".to_string()),
+            number: Some(1.0),
+            ..EntryJson::default()
+        }),
+    );
+    let held = std::fs::metadata(target.join("Nains 01.cbz"))
+        .unwrap()
+        .len();
+
+    let opened = bulk
+        .open(&manifest(&[("Nains 01.cbz", 4)], Scope::Addition))
+        .expect("opening");
+
+    let said = opened.replaces.first().expect("a replacement");
+    assert_eq!("Nains 01.cbz", said.path);
+    assert_eq!(4, said.size, "what would arrive");
+    assert_eq!(held, said.present_size, "what is there");
+    assert_eq!(Some("Le vieux titre".to_string()), said.present_title);
+    assert_eq!(Some(1.0), said.present_number);
+    assert!(said.present_read, "and the server says it looked");
+}
+
+/// A declaration the library already holds is written over only when the commit names it.
+///
+/// `replace`'s twin one floor up. A series every volume of which the library already holds
+/// still carries its `work.json`, and the commit installed it over whatever was there —
+/// measured on a real library, over a summary and a set of arcs edited through `PATCH`
+/// months earlier, while the card said « déjà là ».
+#[test]
+fn a_declaration_already_in_the_library_is_rewritten_only_when_named() {
+    let (dir, bulk) = a_bulk();
+    let target = dir.path().join("library").join("Terres d'Arran");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(
+        target.join("work.json"),
+        br#"{"leaf":1,"title":"Nains","summary":"ce que j'ai ecrit","id":"aabbccddeeff0011"}"#,
+    )
+    .unwrap();
+
+    let mut request = manifest(&[], Scope::Addition);
+    request.sidecars = vec![ManifestSidecar {
+        path: "work.json".to_string(),
+        json: r#"{"leaf":1,"title":"Nains","summary":"ce que dit le fichier local"}"#.to_string(),
+    }];
+
+    let opened = bulk.open(&request).expect("opening");
+    let said = opened.declarations.first().expect("a declaration");
+    assert_eq!("work.json", said.path);
+    assert_eq!(Some("Nains".to_string()), said.present_name);
+    assert_eq!(vec!["summary".to_string()], said.differs, "and only that");
+
+    bulk.commit(&opened.id, &[], &[]).expect("committing");
+    let kept: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(target.join("work.json")).unwrap()).unwrap();
+    assert_eq!(
+        "ce que j'ai ecrit", kept["summary"],
+        "nobody said to write over it"
+    );
+
+    // A second announcement, because the first commit closed its session: a refused
+    // declaration leaves nothing waiting in the inbox, unlike a refused volume, so there is
+    // nothing for the session to stay open for.
+    let again = bulk.open(&request).expect("opening again");
+    bulk.commit(&again.id, &[], &["work.json".to_string()])
+        .expect("committing again");
+    let now: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(target.join("work.json")).unwrap()).unwrap();
+    assert_eq!("ce que dit le fichier local", now["summary"]);
+    assert_eq!(
+        "aabbccddeeff0011", now["id"],
+        "and the identity is still the library's own"
+    );
 }

@@ -928,6 +928,12 @@ async fn a_patch_that_cannot_finish_writes_nothing_at_all() {
 #[tokio::test]
 async fn naming_an_edition_that_has_no_folder_is_refused_rather_than_ignored() {
     let (server, series, _) = a_library().await;
+    // What the sidecar held before the request. Not "there is no sidecar": the scan puts an
+    // identifier in one, so a folder has a `work.json` long before anybody patches it — see
+    // `scan::identity`.
+    let sidecar = server.library().join("Bleach/work.json");
+    let before = std::fs::read(&sidecar).ok();
+
     let (status, body) = patch(
         &server,
         &format!("/series/{series}"),
@@ -943,8 +949,9 @@ async fn naming_an_edition_that_has_no_folder_is_refused_rather_than_ignored() {
             .contains("no folder of its own"),
         "{body}"
     );
-    assert!(
-        !server.library().join("Bleach/work.json").exists(),
+    assert_eq!(
+        before,
+        std::fs::read(&sidecar).ok(),
         "and nothing was written on the way to refusing"
     );
 }

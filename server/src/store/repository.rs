@@ -192,6 +192,25 @@ impl<'a> Repository<'a> {
                     u.name AS universe,
                     {READ_STATUS} AS read_status,
                     (SELECT COUNT(*) FROM entry   x WHERE x.edition_id = e.id) AS entry_count,
+                    -- How many of them are finished, and how far into the ones that are
+                    -- not. Both in the same statement as the rest and not a question per
+                    -- row: a shelf of two hundred series would be two hundred more reads
+                    -- for one number, which is the shape `store/db.rs` counts statements to
+                    -- make visible.
+                    (SELECT COUNT(*) FROM progress p
+                     WHERE p.edition_id = e.id AND p.finished = 1) AS read_entries,
+                    -- Summed and not taken from the latest: a reader who left volume three
+                    -- at its middle and went on to volume four is somewhere past four
+                    -- volumes, and reading only the last position would put them at one.
+                    -- Bounded at one apiece, because a page number past the last page is a
+                    -- file that was replaced by a shorter one and not a reader who read
+                    -- more of it than it holds.
+                    (SELECT COALESCE(SUM(
+                         CASE WHEN p.finished = 0 AND x.page_count > 0
+                              THEN MIN(1.0, p.page * 1.0 / x.page_count)
+                              ELSE 0 END), 0)
+                     FROM progress p JOIN entry x ON x.id = p.entry_id
+                     WHERE p.edition_id = e.id) AS part_read,
                     (SELECT COUNT(*) FROM chapter c WHERE c.edition_id = e.id) AS chapter_count,
                     (SELECT COUNT(*) FROM arc     a WHERE a.edition_id = e.id) AS arc_count,
                     (SELECT MIN(x.added_at) FROM entry x WHERE x.edition_id = e.id) AS added_at,
@@ -235,6 +254,8 @@ impl<'a> Repository<'a> {
                     missing_volumes: Vec::new(),
                     missing_chapters: Vec::new(),
                     entry_count: r.get("entry_count")?,
+                    read_entries: r.get("read_entries")?,
+                    part_read: r.get("part_read")?,
                     chapter_count: r.get("chapter_count")?,
                     arc_count: r.get("arc_count")?,
                     genres: Vec::new(),

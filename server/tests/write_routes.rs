@@ -36,6 +36,11 @@ async fn a_read_only_key_cannot_reach_a_write_route() {
         ("GET", "/drop".to_string(), Body::empty()),
         (
             "POST",
+            "/works/any/move".to_string(),
+            json_body(serde_json::json!({})),
+        ),
+        (
+            "POST",
             "/import".to_string(),
             json_body(serde_json::json!({"root": "x", "files": []})),
         ),
@@ -145,6 +150,67 @@ async fn the_new_fields_round_trip_through_a_patch_and_a_later_one_does_not_lose
     assert_eq!(body["colour"], false);
 }
 
+/// A sidecar is a file a person edits, and a person puts things in it this server has never
+/// heard of. Serialising a type back over it threw all of them away, silently, at the first
+/// correction of a title — measured on a `work.json` carrying one hand-written key.
+#[tokio::test]
+async fn a_field_this_server_does_not_know_survives_a_patch() {
+    let server = Server::new();
+    a_volume(&server);
+    let series = server.series();
+
+    let sidecar = server.library().join("Bleach/work.json");
+    // The id the first scan already stamped, kept — a person hand-editing a sidecar to add a
+    // field this server has never heard of does not also delete the one field they cannot
+    // read either. Dropping it here made the folder's identity look abandoned rather than
+    // edited: the rescan this patch triggers minted a fresh one for the work, which minted a
+    // fresh one for its implicit edition in turn, and let go of the row filed under the id
+    // this request named — answering "unknown series" for an edit that had just landed.
+    let work_id = serde_json::from_slice::<serde_json::Value>(&std::fs::read(&sidecar).unwrap())
+        .unwrap()["id"]
+        .as_str()
+        .expect("the first scan stamped one")
+        .to_string();
+    std::fs::write(
+        &sidecar,
+        format!(
+            r#"{{"leaf":1,"title":"Bleach","myField":"kept?","status":"ONGOING","id":"{work_id}"}}"#
+        ),
+    )
+    .unwrap();
+
+    let (status, body) = server
+        .send(
+            request("PATCH", &format!("/series/{series}"), IMPORTER)
+                .header("content-type", "application/json")
+                .body(json_body(serde_json::json!({"title": "BLEACH"})))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::OK, status, "{body}");
+
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+    assert_eq!(
+        "kept?", written["myField"],
+        "the unknown field must survive the patch: {written}"
+    );
+    assert_eq!("BLEACH", written["title"]);
+    assert_eq!("ONGOING", written["status"]);
+    // And where its author put it: a write that sorts the keys is a diff across a whole
+    // library for a change nobody made.
+    let keys: Vec<&str> = written
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert!(
+        keys.starts_with(&["leaf", "title", "myField", "status"]),
+        "the keys kept their order, whatever the scan appended after them: {keys:?}"
+    );
+}
+
 #[tokio::test]
 async fn patching_something_that_is_not_there_is_a_404() {
     let server = Server::new();
@@ -226,8 +292,11 @@ async fn a_sidecar_that_cannot_be_read_is_refused_rather_than_replaced() {
     let series = server.series();
 
     // A link to itself: the kernel answers ELOOP, which is neither "there" nor "not there".
-    // The same shape as a permission or a device error, and reachable without either.
+    // The same shape as a permission or a device error, and reachable without either. In
+    // place of the file the scan wrote there to carry the folder's identity — see
+    // `scan::identity` — which is why this removes one before it links one.
     let sidecar = server.library().join("Bleach/work.json");
+    std::fs::remove_file(&sidecar).ok();
     std::os::unix::fs::symlink("work.json", &sidecar).unwrap();
 
     let (status, _) = server
@@ -968,4 +1037,454 @@ async fn a_staged_file_is_reached_at_intake_and_not_at_entries() {
         )
         .await;
     assert_eq!(StatusCode::NO_CONTENT, status);
+}
+
+// ------------------------------------------------------------------- moving
+
+/// The work whose folder a test is about to move, and the universe to move it into.
+fn a_work_and_a_universe(server: &Server) -> (String, String) {
+    a_volume(server);
+    // The universe holds a series of its own, because a universe folder with nothing under
+    // it is not recorded — the model is three floors deep and an empty one has no floor.
+    let arran = server.library().join("Terres d’Arran");
+    std::fs::create_dir_all(arran.join("Elfes")).unwrap();
+    std::fs::write(
+        arran.join("universe.json"),
+        "{\"leaf\":1,\"name\":\"Terres d’Arran\"}".as_bytes(),
+    )
+    .unwrap();
+    std::fs::write(arran.join("Elfes/Tome 1.cbz"), archive_bytes(None)).unwrap();
+    server.scan();
+
+    let work = server
+        .db
+        .read(|cx| {
+            cx.query_one("SELECT id FROM work WHERE name = 'Bleach'", [], |r| {
+                r.get::<_, String>(0)
+            })
+        })
+        .unwrap()
+        .expect("a work");
+    let universe = server
+        .db
+        .read(|cx| cx.query_one("SELECT id FROM universe", [], |r| r.get::<_, String>(0)))
+        .unwrap()
+        .expect("a universe");
+    (work, universe)
+}
+
+async fn move_it(
+    server: &Server,
+    work: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    server
+        .send(
+            request("POST", &format!("/works/{work}/move"), IMPORTER)
+                .header("content-type", "application/json")
+                .body(json_body(body))
+                .unwrap(),
+        )
+        .await
+}
+
+/// The sixth case of the import: a universe arrives, and one of its series is already
+/// somewhere else on the disk. Filing it is a `rename` and a rescan — and it is only that
+/// because an identity no longer comes from a path.
+#[tokio::test]
+async fn moving_a_work_into_a_universe_moves_the_folder_and_keeps_the_reading_position() {
+    let server = Server::new();
+    let (work, universe) = a_work_and_a_universe(&server);
+    server
+        .db
+        .write(|cx| {
+            cx.execute(
+                "INSERT INTO progress (entry_id, edition_id, page, finished, updated_at)
+                 SELECT id, edition_id, 42, 0, 1 FROM entry",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let (status, body) = move_it(&server, &work, serde_json::json!({"universeId": universe})).await;
+
+    assert_eq!(StatusCode::OK, status, "{body}");
+    assert_eq!(true, body["moved"]);
+    assert!(
+        body["path"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with("Terres d’Arran/Bleach"),
+        "{body}"
+    );
+    assert!(server
+        .library()
+        .join("Terres d’Arran/Bleach/Tome 1.cbz")
+        .exists());
+    assert!(!server.library().join("Bleach").exists());
+
+    // The index followed, and so did the place the reader stopped at — which is the whole
+    // reason this route waited for the identity to leave the path.
+    let (universe_of_work, page): (Option<String>, Option<i64>) = server
+        .db
+        .read(|cx| {
+            Ok((
+                cx.query_one(
+                    "SELECT universe_id FROM work WHERE id = ?1",
+                    [work.as_str()],
+                    |r| r.get::<_, Option<String>>(0),
+                )?
+                .flatten(),
+                cx.query_one("SELECT page FROM progress", [], |r| r.get::<_, i64>(0))?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(Some(universe.clone()), universe_of_work);
+    assert_eq!(Some(42), page);
+}
+
+/// And out again. A universe left is a destination like any other, and the root the work
+/// already lives under is the only honest one — a server with two libraries must not move a
+/// series from one to the other because a body said nothing.
+#[tokio::test]
+async fn a_work_with_no_universe_named_goes_back_to_the_root_it_came_from() {
+    let server = Server::new();
+    let (work, universe) = a_work_and_a_universe(&server);
+    let (status, _) = move_it(&server, &work, serde_json::json!({"universeId": universe})).await;
+    assert_eq!(StatusCode::OK, status);
+
+    let (status, body) = move_it(&server, &work, serde_json::json!({})).await;
+
+    assert_eq!(StatusCode::OK, status, "{body}");
+    assert_eq!(true, body["moved"], "{body}");
+    assert!(server.library().join("Bleach/Tome 1.cbz").exists());
+    let universe_of_work: Option<String> = server
+        .db
+        .read(|cx| {
+            cx.query_one(
+                "SELECT universe_id FROM work WHERE id = ?1",
+                [work.as_str()],
+                |r| r.get::<_, Option<String>>(0),
+            )
+        })
+        .unwrap()
+        .flatten();
+    assert_eq!(None, universe_of_work);
+}
+
+/// Asking twice is what a retry looks like, so a work already where it is asked to go is
+/// not a fault. It is said, though: a move that did nothing would otherwise answer exactly
+/// like one that did.
+#[tokio::test]
+async fn a_work_already_where_it_is_asked_to_go_says_it_moved_nothing() {
+    let server = Server::new();
+    let (work, universe) = a_work_and_a_universe(&server);
+    assert_eq!(
+        StatusCode::OK,
+        move_it(&server, &work, serde_json::json!({"universeId": universe}))
+            .await
+            .0
+    );
+
+    let (status, body) = move_it(&server, &work, serde_json::json!({"universeId": universe})).await;
+
+    assert_eq!(StatusCode::OK, status, "{body}");
+    assert_eq!(false, body["moved"], "{body}");
+    assert!(server
+        .library()
+        .join("Terres d’Arran/Bleach/Tome 1.cbz")
+        .exists());
+}
+
+/// A folder of that name already at the destination is refused rather than resolved:
+/// renaming one of the two is a decision about a library, not about a request.
+#[tokio::test]
+async fn a_name_already_taken_at_the_destination_is_refused_and_nothing_moves() {
+    let server = Server::new();
+    let (work, universe) = a_work_and_a_universe(&server);
+    std::fs::create_dir_all(server.library().join("Terres d’Arran/Bleach")).unwrap();
+
+    let (status, body) = move_it(&server, &work, serde_json::json!({"universeId": universe})).await;
+
+    assert_eq!(StatusCode::BAD_REQUEST, status, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Bleach"),
+        "{body}"
+    );
+    assert!(server.library().join("Bleach/Tome 1.cbz").exists());
+}
+
+/// A work that is not there, and a universe that is not there, are both 404 — and the
+/// second says which of the two was missing, or a caller cannot tell a wrong id from a
+/// wrong destination.
+#[tokio::test]
+async fn moving_something_that_is_not_there_is_a_404_that_says_which() {
+    let server = Server::new();
+    let (work, _) = a_work_and_a_universe(&server);
+
+    let (status, body) = move_it(&server, "not-a-work", serde_json::json!({})).await;
+    assert_eq!(StatusCode::NOT_FOUND, status);
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("work"),
+        "{body}"
+    );
+
+    let (status, body) = move_it(
+        &server,
+        &work,
+        serde_json::json!({"universeId": "not-a-universe"}),
+    )
+    .await;
+    assert_eq!(StatusCode::NOT_FOUND, status);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("universe"),
+        "{body}"
+    );
+}
+
+/// The sixth case, end to end: a universe arrives and one of the series it declares is
+/// already on the disk somewhere else. It is a **move** and not a creation, and telling the
+/// two apart is only possible because the folder's identity now travels in its sidecar.
+#[tokio::test]
+async fn a_universe_that_declares_a_series_already_here_offers_to_file_it() {
+    let server = Server::new();
+    a_volume(&server);
+    // What the scan put in Bleach's own sidecar. The client reads it off the disk and sends
+    // it back in the announcement, which is how the server recognises the same work.
+    let carried: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(server.library().join("Bleach/work.json")).unwrap())
+            .unwrap();
+    let work = carried["id"]
+        .as_str()
+        .expect("a stamped identity")
+        .to_string();
+
+    let announce = serde_json::json!({
+        "root": "Terres d’Arran",
+        "files": [],
+        "sidecars": [
+            {"path": "universe.json", "json": "{\"leaf\":1,\"name\":\"Terres d’Arran\"}"},
+            {"path": "Bleach/work.json", "json": carried.to_string()},
+        ],
+    });
+    let (status, body) = server
+        .send(
+            request("POST", "/import", IMPORTER)
+                .header("content-type", "application/json")
+                .body(json_body(announce))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::OK, status, "{body}");
+
+    let moves = body["moves"].as_array().expect("moves");
+    assert_eq!(1, moves.len(), "{body}");
+    assert_eq!(work, moves[0]["workId"]);
+    assert_eq!("Bleach", moves[0]["name"]);
+    assert!(
+        moves[0]["from"].as_str().unwrap().ends_with("Bleach"),
+        "{body}"
+    );
+    // And it is not announced twice, under two verbs.
+    let creates = body["creates"].as_array().expect("creates");
+    assert!(
+        creates.iter().all(|one| one["kind"] != "WORK"),
+        "a work the library already holds is a move, not a creation: {body}"
+    );
+
+    let import = body["id"].as_str().expect("an import").to_string();
+    let (status, body) = server
+        .send(
+            request("POST", &format!("/import/{import}/commit"), IMPORTER)
+                .header("content-type", "application/json")
+                .body(json_body(serde_json::json!({"move": [work]})))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(StatusCode::OK, status, "{body}");
+    assert_eq!(serde_json::json!([work]), body["moved"], "{body}");
+    assert!(server
+        .library()
+        .join("Terres d’Arran/Bleach/Tome 1.cbz")
+        .exists());
+    assert!(!server.library().join("Bleach").exists());
+}
+
+/// And nothing moves unless it was asked for. A commit with no body is the ordinary one,
+/// and rearranging a library that was fine is the one thing this must never do on its own.
+#[tokio::test]
+async fn a_commit_that_names_nothing_moves_nothing() {
+    let server = Server::new();
+    a_volume(&server);
+    let carried = std::fs::read_to_string(server.library().join("Bleach/work.json")).unwrap();
+
+    let (_, body) = server
+        .send(
+            request("POST", "/import", IMPORTER)
+                .header("content-type", "application/json")
+                .body(json_body(serde_json::json!({
+                    "root": "Terres d’Arran",
+                    "files": [],
+                    "sidecars": [
+                        {"path": "universe.json", "json": "{\"leaf\":1}"},
+                        {"path": "Bleach/work.json", "json": carried},
+                    ],
+                })))
+                .unwrap(),
+        )
+        .await;
+    let import = body["id"].as_str().expect("an import").to_string();
+
+    let (status, body) = server
+        .send(
+            request("POST", &format!("/import/{import}/commit"), IMPORTER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(StatusCode::OK, status, "{body}");
+    assert!(body["moved"].is_null(), "{body}");
+    assert!(server.library().join("Bleach/Tome 1.cbz").exists());
+}
+
+/// A move whose source has gone and whose destination already holds this very work is a
+/// resumption, not a collision.
+///
+/// A commit that moved a work and left its session open rescans behind itself, so a client
+/// sending the rest and committing again with the same `move` list arrives here with a path
+/// read before the move. Refusing made that the answer of the whole commit — nothing
+/// installed — for a second commit asking for exactly what the first had already done.
+#[tokio::test]
+async fn a_move_that_has_already_happened_is_a_resumption_and_not_a_collision() {
+    let server = Server::new();
+    let (work, universe) = a_work_and_a_universe(&server);
+    assert_eq!(
+        StatusCode::OK,
+        move_it(&server, &work, serde_json::json!({"universeId": universe}))
+            .await
+            .0
+    );
+    // The index is put back where it was before the move, which is what a rescan running
+    // behind a commit leaves for the next one to read.
+    let back = server
+        .library()
+        .join("Bleach")
+        .to_string_lossy()
+        .to_string();
+    server
+        .db
+        .write(|cx| {
+            cx.execute(
+                "UPDATE work SET path = ?1 WHERE id = ?2",
+                rusqlite::params![back, work],
+            )
+        })
+        .unwrap();
+
+    let (status, body) = move_it(&server, &work, serde_json::json!({"universeId": universe})).await;
+
+    assert_eq!(StatusCode::OK, status, "{body}");
+    assert_eq!(false, body["moved"], "{body}");
+    assert!(server
+        .library()
+        .join("Terres d’Arran/Bleach/Tome 1.cbz")
+        .exists());
+}
+
+/// And a folder that is not this work at the destination is still a collision: only the
+/// identity in its own sidecar tells a move that has already happened from one that cannot.
+#[tokio::test]
+async fn another_folder_at_the_destination_is_still_refused() {
+    let server = Server::new();
+    let (work, universe) = a_work_and_a_universe(&server);
+    std::fs::create_dir_all(server.library().join("Terres d’Arran/Bleach")).unwrap();
+    std::fs::write(
+        server.library().join("Terres d’Arran/Bleach/work.json"),
+        r#"{"id":"0123456789abcdef","leaf":1}"#,
+    )
+    .unwrap();
+    std::fs::remove_dir_all(server.library().join("Bleach")).unwrap();
+
+    let (status, body) = move_it(&server, &work, serde_json::json!({"universeId": universe})).await;
+
+    assert_eq!(StatusCode::BAD_REQUEST, status, "{body}");
+}
+
+/// A file larger than this server takes in one upload is refused at the announcement, not
+/// at its last byte.
+///
+/// The ceiling is the same one the receiving stream enforces. Without this the client
+/// announced the file, was given a place for it, sent it, and was refused at the end — a
+/// whole transfer spent to learn something the first request already said.
+#[tokio::test]
+async fn a_file_over_the_ceiling_is_refused_before_a_place_is_held_for_it() {
+    let server = Server::new();
+    let (status, body) = server
+        .send(
+            request("POST", "/preflight", IMPORTER)
+                .header("content-type", "application/json")
+                .body(json_body(serde_json::json!({
+                    "name": "Tome 1.cbz",
+                    "size": 8_u64 * 1024 * 1024 * 1024,
+                })))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(StatusCode::BAD_REQUEST, status, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("one upload"),
+        "{body}"
+    );
+}
+
+/// A work cannot be moved into a folder that sits inside it.
+///
+/// The rename would take the destination away with the source, and before the refusal an
+/// empty folder was created inside the work first — so the failure arrived as an EINVAL
+/// from the filesystem, after a directory nobody asked for. Untested until now: removing
+/// the refusal left the whole suite green.
+///
+/// Asked of `Relocate` directly, because the route cannot reach it: a universe declared
+/// inside a work's own folder is never recorded — universes do not nest, and the walk reads
+/// that folder as one of the work's editions. The guard is for the day something else calls
+/// this, and a guard nothing exercises is a guard nobody knows is broken.
+#[test]
+fn a_work_cannot_be_moved_into_a_folder_that_sits_inside_it() {
+    let server = Server::new();
+    a_volume(&server);
+    server.scan();
+    let work = server
+        .db
+        .read(|cx| {
+            cx.query_one("SELECT id FROM work WHERE name = 'Bleach'", [], |r| {
+                r.get::<_, String>(0)
+            })
+        })
+        .unwrap()
+        .expect("a work");
+
+    let roots = vec![server.library()];
+    let inside = server.library().join("Bleach/Dedans/Bleach");
+    let refused = leaf_server::api::relocate::Relocate::new(&server.db, &roots)
+        .work(&work, &inside)
+        .expect_err("a destination inside the work being moved");
+
+    assert!(refused.to_string().contains("sits inside it"), "{refused}");
+    assert!(
+        !server.library().join("Bleach/Dedans").exists(),
+        "and nothing was created on the way to refusing"
+    );
 }

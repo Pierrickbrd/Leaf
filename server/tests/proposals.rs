@@ -568,3 +568,158 @@ fn keeping_both_says_what_the_arriving_one_ended_up_called() {
     assert!(said.contains("Tome 1 (2).cbz"), "{said}");
     assert!(said.contains("already there"), "{said}");
 }
+
+// ——— The preflight: proposing before a byte moves ————————————————————————————
+
+/// The same answer as the full offer, from what a client can read cheaply.
+///
+/// This is the whole bet of the import's first phase. If the two ever disagreed, the
+/// reader would be shown a destination and the file would land somewhere else — and they
+/// would have spent the transfer finding out.
+#[test]
+fn a_preflight_proposes_what_the_whole_file_would_have_proposed() {
+    let world = World::new();
+    world.volume("Bleach", "Tome 1.cbz", "Bleach", 1.0);
+    world.scan();
+
+    let entry = EntryJson {
+        leaf: Some(1),
+        work: Some("Bleach".into()),
+        number: Some(2.0),
+        ..Default::default()
+    };
+    let whole = archive_bytes(Some(&entry));
+    let sidecar = sidecars::write(&entry).unwrap();
+
+    let ahead = world
+        .intake()
+        .reserve("Tome 2.cbz", whole.len() as u64, Some(&sidecar))
+        .expect("a reservation");
+    let after = world.offer("Tome 2.cbz", Some(&entry));
+
+    assert_eq!(ahead.proposal.confidence, after.confidence);
+    assert_eq!(ahead.proposal.reason, after.reason);
+    assert_eq!(ahead.proposal.candidates.len(), after.candidates.len());
+    assert_eq!(ahead.proposal.size, whole.len() as u64);
+}
+
+/// A file the client could not open at all still gets a proposal — a weaker one, from its
+/// name. The spec says such a file is offered anyway; this is what "anyway" means.
+#[test]
+fn a_preflight_without_a_sidecar_still_answers() {
+    let world = World::new();
+    world.volume("Bleach", "Tome 1.cbz", "Bleach", 1.0);
+    world.scan();
+
+    let said = world
+        .intake()
+        .reserve("Bleach - Tome 2.cbz", 1_024, None)
+        .expect("a reservation");
+
+    assert!(!said.id.is_empty());
+    assert!(!said.proposal.reason.is_empty());
+}
+
+/// The place is held from the moment it is reserved, so `/intake` shows it and a transfer
+/// has something to resume against.
+#[test]
+fn a_reserved_place_is_listed_and_holds_nothing_yet() {
+    let world = World::new();
+    let intake = world.intake();
+    let held = intake.reserve("Tome 9.cbz", 4_096, None).unwrap();
+
+    let waiting = intake.waiting().unwrap();
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0].id, held.id);
+    assert_eq!(waiting[0].name, "Tome 9.cbz");
+    // What it will weigh, and what is actually here. Without the second, a list cannot
+    // tell a file waiting for a decision from one waiting for its bytes.
+    assert_eq!(waiting[0].size, 4_096);
+    assert_eq!(waiting[0].received, 0);
+}
+
+/// Sent in two goes, resumed at the byte. The reason the single-file path stopped being
+/// the one that could not be paused.
+#[test]
+fn bytes_arrive_from_an_offset_and_the_server_says_how_much_it_holds() {
+    let world = World::new();
+    let intake = world.intake();
+    let whole = archive_bytes(None);
+    let held = intake
+        .reserve("Tome 3.cbz", whole.len() as u64, None)
+        .unwrap();
+
+    let (target, already) = intake.writing_at(&held.id, 0).expect("somewhere to write");
+    assert_eq!(already, 0);
+    let cut = whole.len() / 3;
+    {
+        let mut file = leaf_server::api::bulk_import::open_at(&target, 0).unwrap();
+        file.write_all(&whole[..cut]).unwrap();
+    }
+    assert_eq!(
+        intake.staged(&held.id).unwrap().unwrap().received,
+        cut as u64
+    );
+
+    let (target, already) = intake.writing_at(&held.id, cut as u64).expect("a resume");
+    assert_eq!(already, cut as u64);
+    {
+        let mut file = leaf_server::api::bulk_import::open_at(&target, cut as u64).unwrap();
+        file.write_all(&whole[cut..]).unwrap();
+    }
+
+    let staged = intake.staged(&held.id).unwrap().unwrap();
+    assert_eq!(staged.received, whole.len() as u64);
+    assert_eq!(staged.size, whole.len() as u64);
+    assert_eq!(std::fs::read(&target).unwrap(), whole);
+}
+
+/// An offset past what is held would leave a hole in the middle of a volume, and nothing
+/// afterwards would say so. The answer carries what the server does hold.
+#[test]
+fn an_offset_past_what_is_held_is_refused_and_says_where_to_resume() {
+    let world = World::new();
+    let intake = world.intake();
+    let held = intake.reserve("Tome 4.cbz", 9_000, None).unwrap();
+
+    match intake.writing_at(&held.id, 4_000) {
+        Err(leaf_server::api::bulk_import::ReceiveError::BadOffset(offset)) => {
+            assert_eq!(offset.received, 0);
+        }
+        other => panic!("expected a bad offset, got {other:?}"),
+    }
+}
+
+/// Filing a place that was reserved and never filled would install a truncated archive.
+#[test]
+fn a_file_that_is_not_all_here_cannot_be_filed() {
+    let world = World::new();
+    world.volume("Bleach", "Tome 1.cbz", "Bleach", 1.0);
+    world.scan();
+    let series: String = world
+        .db
+        .read(|cx| cx.query_one("SELECT id FROM edition LIMIT 1", [], |r| r.get(0)))
+        .unwrap()
+        .unwrap();
+
+    let intake = world.intake();
+    let whole = archive_bytes(None);
+    let held = intake
+        .reserve("Tome 5.cbz", whole.len() as u64, None)
+        .unwrap();
+    let (target, _) = intake.writing_at(&held.id, 0).unwrap();
+    {
+        let mut file = leaf_server::api::bulk_import::open_at(&target, 0).unwrap();
+        file.write_all(&whole[..whole.len() / 2]).unwrap();
+    }
+
+    let refused = intake.file(
+        &held.id,
+        &leaf_server::api::intake::FileRequest {
+            series_id: series,
+            replaces_entry_id: None,
+            on_collision: None,
+        },
+    );
+    assert!(refused.is_err(), "a half-received volume was filed");
+}

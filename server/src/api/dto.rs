@@ -84,6 +84,21 @@ pub struct SeriesDto {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub missing_chapters: Vec<f64>,
     pub entry_count: i64,
+    /// How many of those entries are finished.
+    ///
+    /// `read_status` says unread, started or finished; it cannot say *how far*, and a tile
+    /// that drew a full bar the moment a series was opened was answering a question nobody
+    /// asked. Counted in the listing's own statement, never per row.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub read_entries: i64,
+    /// How far into the entries that are *not* finished, in volumes: 0.82 is one volume
+    /// left at page 156 of 189.
+    ///
+    /// Beside `read_entries` rather than folded into it, because each is a plain fact and
+    /// their sum is the reader's business. « Where am I in this series » is the two
+    /// together: eleven finished and 0.82 of a twelfth, out of twenty-one.
+    #[serde(skip_serializing_if = "is_nought")]
+    pub part_read: f64,
     pub chapter_count: i64,
     pub arc_count: i64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -525,6 +540,15 @@ fn is_false(value: &bool) -> bool {
 
 fn is_zero(value: &i64) -> bool {
     *value == 0
+}
+
+/// Nought, for a count that is a fraction of a volume rather than a number of them.
+///
+/// Compared against a tolerance and not against zero: the sum of a few ratios lands on
+/// 0.0000000001 as easily as on nought, and a field that is « absent at zero » must not
+/// reappear because arithmetic drifted.
+fn is_nought(value: &f64) -> bool {
+    value.abs() < 1e-9
 }
 
 fn is_unread(value: &str) -> bool {
