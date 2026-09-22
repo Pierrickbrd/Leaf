@@ -979,6 +979,84 @@ private slots:
         QVERIFY(!read.ok());
         QVERIFY2(read.trouble.contains(u"state"_s), qPrintable(read.trouble));
     }
+
+    /// Every answer of the import road, refused when a field it cannot do without is gone.
+    ///
+    /// `Api.h`'s rule is that structure is strict: a missing required field refuses the
+    /// item and names it. The shelf's readers are held to that one at a time above; the
+    /// eleven between a pre-flight and a commit were not held to it at all. Each has two
+    /// ways to refuse — the field it checks by hand, and the text fields `Fields` gathers
+    /// — and a reader that stopped doing either would hand back a default-constructed
+    /// answer: a commit reading « 0 tome envoyé » over an import that did happen, or a
+    /// session whose `received` is empty, which sends every volume of a folder again.
+    void every_answer_of_the_import_road_refuses_what_it_cannot_read()
+    {
+        const auto refuses = []<typename T>(const Api::Read<T> &read, const char *what) {
+            QVERIFY2(!read.ok(), what);
+            QVERIFY2(!read.trouble.isEmpty(), what);
+        };
+
+        refuses(Api::proposal({}), "a proposal with no size");
+        refuses(Api::proposal({{u"size"_s, 9}, {u"read"_s, QJsonObject{}}}),
+                "a proposal with no name and no confidence");
+        refuses(Api::proposal({{u"size"_s, 9},
+                               {u"read"_s, QJsonObject{}},
+                               {u"received"_s, u"rcv_1"_s},
+                               {u"name"_s, u"Tome 1.cbz"_s},
+                               {u"confidence"_s, u"CERTAIN"_s},
+                               {u"reason"_s, u"une seule série"_s},
+                               {u"candidates"_s, QJsonArray{QJsonObject{}}}}),
+                "a proposal whose candidate names nothing");
+
+        refuses(Api::reserved({}), "a reservation with no id");
+        refuses(Api::staged({{u"size"_s, 1}, {u"received"_s, 0}}), "a staged file with no id");
+
+        refuses(Api::waiting({}), "a waiting file with none of its numbers");
+        refuses(Api::waiting({{u"size"_s, 1},
+                              {u"lastTouchedAt"_s, 1},
+                              {u"received"_s, 0},
+                              {u"onlyCopy"_s, true}}),
+                "a waiting file with no id and no origin");
+
+        refuses(Api::filed({}), "a filing that does not say whether it replaced anything");
+        refuses(Api::filed({{u"replacement"_s, false}}), "a filing with no entry and no path");
+
+        refuses(Api::collision({{u"sameVolume"_s, true},
+                                {u"identical"_s, false},
+                                {u"occupies"_s, QJsonObject{}},
+                                {u"arriving"_s, QJsonObject{}}}),
+                "a collision with no path");
+
+        refuses(Api::opened({}), "an opened import with no weight to send");
+        refuses(Api::opened({{u"bytesToSend"_s, 0}}), "an opened import with no id");
+        const QJsonObject open{{u"id"_s, u"imp_1"_s},
+                               {u"root"_s, u"Koro"_s},
+                               {u"bytesToSend"_s, 0}};
+        QJsonObject broken = open;
+        broken.insert(u"creates"_s, QJsonArray{QJsonObject{}});
+        refuses(Api::opened(broken), "an opened import whose creation names nothing");
+        broken = open;
+        // A number where the volume it would land on is named: the one field of a
+        // replacement that is read and then still refused for the path beside it.
+        broken.insert(u"replaces"_s, QJsonArray{QJsonObject{{u"presentNumber"_s, 3.0}}});
+        refuses(Api::opened(broken), "an opened import whose replacement has no path");
+        broken = open;
+        broken.insert(u"declarations"_s, QJsonArray{QJsonObject{}});
+        refuses(Api::opened(broken), "an opened import whose declaration has no path");
+
+        refuses(Api::received({}), "a chunk answer that does not say how much arrived");
+        refuses(Api::received({{u"received"_s, 0}}), "a chunk answer with no path");
+
+        refuses(Api::badOffset({{u"error"_s, u"x"_s}}),
+                "a refused offset that does not say what the server holds");
+        refuses(Api::badOffset({{u"received"_s, 0}}), "a refused offset with no sentence");
+
+        refuses(Api::session({}), "a session that does not say what it received");
+        refuses(Api::session({{u"received"_s, QJsonObject{}}}), "a session with no id");
+
+        refuses(Api::installed({}), "a commit that does not list its orphans");
+        refuses(Api::installed({{u"orphans"_s, QJsonArray{}}}), "a commit with no root");
+    }
 };
 
 // Any script, from the start.

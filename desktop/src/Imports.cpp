@@ -1115,6 +1115,14 @@ void Imports::pump()
     for (int row = 0; row < m_rows.size(); ++row) {
         if (m_rows.at(row).stage != Stage::Paused)
             continue;
+        // Except one that is counting seconds. `retryLater` parks a failed transfer at
+        // `Paused` too, and this loop could not tell that apart from a reader's own pause
+        // without looking at `retryIn` — so it took the slot back in the same turn the
+        // failure arrived. The countdown on the card was a lie every time, and against a
+        // server answering 500 it was a hot loop: fail, resume, fail, as fast as the
+        // answers came back, with `attempts` climbing and no wait ever served.
+        if (m_rows.at(row).retryIn > 0)
+            continue;
         settle(row, Stage::Ready);
         pump();
         return;
@@ -1372,8 +1380,11 @@ void Imports::retryLater(int row)
         return;
     }
 
-    ++m_rows[row].attempts;
+    // Read before it is raised, so the first wait is the first step. Raised first, the
+    // table began at its second entry: the two seconds it opens with were never served to
+    // anybody, and a cut cable waited five before it tried again.
     m_rows[row].retryIn = waitFor(m_rows.at(row).attempts);
+    ++m_rows[row].attempts;
     m_rows[row].stage = Paused;
     announce(row);
     if (!m_retry.isActive())
