@@ -196,8 +196,6 @@ public:
     Q_INVOKABLE void setDeclaring(int row, const QString &path, bool declaring);
     Q_INVOKABLE bool isDeclaring(int row, const QString &path) const;
 
-    Q_INVOKABLE bool isFolder(int row) const;
-
     /// Unfolds or folds a node. `at` is its path relative to the card, `""` for its own
     /// root.
     Q_INVOKABLE void toggle(int row, const QString &at);
@@ -249,61 +247,85 @@ private:
         int retryIn = 0;
         int attempts = 0;
 
-        // ——— A folder, and nothing else uses these ———————————————————————————
-        Manifest::Folder tree;
-        /// What the server asked for, in its order, and where in that list this is. The
-        /// server decides: it knows what it already holds, and a client that sent the
-        /// whole folder anyway would send a library twice.
-        QList<QString> toSend;
-        /// What would land on a file the library already holds, with what is there.
-        QList<Api::Replacement> replaces;
-        /// The declarations this folder would write over one the library already holds.
-        QList<Api::Declaration> declarations;
-        /// Of those, the ones a reader ticked — cleared with every announcement, like the
-        /// rest.
-        QSet<QString> declaring;
-        /// Of those, the ones a reader ticked. Empty by default and cleared with every
-        /// announcement, exactly like `filing`: six volumes that could be replaced are six
-        /// decisions, and a folder dropped on a library is not a request to overwrite it.
-        QSet<QString> replacing;
-        /// What the server already held among the files this folder announced — the one
-        /// list that actually says "already there". `creates` cannot stand in for it at the
-        /// container level: it is built from sidecars alone (`bulk_import.rs::would_create`),
-        /// so a folder of archives with no sidecar at all — the spec's own "implicit
-        /// edition" — never appears in it, declared or not.
-        QList<QString> alreadyThere;
-        int at = 0;
-        /// How much of the file at `at` has gone up. `sent` counts the whole folder, so
-        /// one progress bar covers forty volumes.
-        qint64 sentInFile = 0;
-        QList<Api::Creation> creates;
-        QList<Api::Relocation> moves;
-        /// Whether the walk over this folder has finished. Between that and the server's
-        /// answer the card is neither being read nor queued, and said « En attente » like
-        /// both — so nothing on screen told a reader a verification was over.
-        bool checked = false;
-        /// The identities of those the reader ticked. Empty until somebody ticks one.
-        QSet<QString> filing;
-        /// What `Manifest::found` saw, before a single checksum. The card is this node —
-        /// present as soon as finding is done, which is what tells a folder being checked
-        /// apart from a folder that found nothing.
-        Manifest::Node node;
-        /// The nodes unfolded, by their `at`, `""` for the card's own root. Empty by
-        /// default: every node starts folded, and a folded node still says what it holds
-        /// through `holds`, so it is never a card that shows only its own name. Unfolding a
-        /// sixty-volume series by default would be a wall — the accordion opens only what a
-        /// reader digs into.
-        QSet<QString> open;
-        /// Whether the checksummed walk (`Manifest::of`) has finished for this folder.
-        /// `describeNext` reads only this — a guard that also looked at `id`, `stage` and
-        /// whether `tree.files` was empty asked the same question three ways, which is
-        /// three ways to get it wrong.
-        bool described = false;
-        /// How many volumes the hash walk has read so far, so that « Vérification » carries
-        /// a count instead of sitting on the one word. Fixed for thirty seconds, the word
-        /// alone once made the application look crashed for long enough that the desktop
-        /// offered to kill it.
-        qint64 hashed = 0;
+        /// The other road, and nothing but a file's twin ever travels it.
+        ///
+        /// A folder is announced whole, sent file by file and committed in one rename, and
+        /// every field below belongs to that journey alone — a dropped `.cbz` leaves all
+        /// seventeen of them at their default and always has. They sat beside `stage` and
+        /// `sent` as one flat list of thirty, where reading the four a file actually uses
+        /// meant reading past the thirteen it never touches; `Row::folder` tells the two
+        /// roads apart everywhere else in this file, and this is the same distinction said
+        /// once in the shape of the data.
+        struct Road {
+            Manifest::Folder tree;
+            /// What the server asked for, in its order, and where in that list this is. The
+            /// server decides: it knows what it already holds, and a client that sent the
+            /// whole folder anyway would send a library twice.
+            QList<QString> toSend;
+            /// What would land on a file the library already holds, with what is there.
+            QList<Api::Replacement> replaces;
+            /// The declarations this folder would write over one the library already holds.
+            QList<Api::Declaration> declarations;
+            /// Of those, the ones a reader ticked — cleared with every announcement, like the
+            /// rest.
+            QSet<QString> declaring;
+            /// Of those, the ones a reader ticked. Empty by default and cleared with every
+            /// announcement, exactly like `filing`: six volumes that could be replaced are six
+            /// decisions, and a folder dropped on a library is not a request to overwrite it.
+            QSet<QString> replacing;
+            /// What the server already held among the files this folder announced — the one
+            /// list that actually says "already there". `creates` cannot stand in for it at the
+            /// container level: it is built from sidecars alone (`bulk_import.rs::would_create`),
+            /// so a folder of archives with no sidecar at all — the spec's own "implicit
+            /// edition" — never appears in it, declared or not.
+            QList<QString> alreadyThere;
+            int at = 0;
+            /// How much of the file at `at` has gone up. `sent` counts the whole folder, so
+            /// one progress bar covers forty volumes.
+            qint64 sentInFile = 0;
+            QList<Api::Creation> creates;
+            QList<Api::Relocation> moves;
+            /// Whether the walk over this folder has finished. Between that and the server's
+            /// answer the card is neither being read nor queued, and said « En attente » like
+            /// both — so nothing on screen told a reader a verification was over.
+            bool checked = false;
+            /// The identities of those the reader ticked. Empty until somebody ticks one.
+            QSet<QString> filing;
+            /// What `Manifest::found` saw, before a single checksum. The card is this node —
+            /// present as soon as finding is done, which is what tells a folder being checked
+            /// apart from a folder that found nothing.
+            Manifest::Node node;
+            /// The nodes unfolded, by their `at`, `""` for the card's own root. Empty by
+            /// default: every node starts folded, and a folded node still says what it holds
+            /// through `holds`, so it is never a card that shows only its own name. Unfolding a
+            /// sixty-volume series by default would be a wall — the accordion opens only what a
+            /// reader digs into.
+            QSet<QString> open;
+            /// Whether the checksummed walk (`Manifest::of`) has finished for this folder.
+            /// `describeNext` reads only this — a guard that also looked at `id`, `stage` and
+            /// whether `tree.files` was empty asked the same question three ways, which is
+            /// three ways to get it wrong.
+            bool described = false;
+            /// How many volumes the hash walk has read so far, so that « Vérification » carries
+            /// a count instead of sitting on the one word. Fixed for thirty seconds, the word
+            /// alone once made the application look crashed for long enough that the desktop
+            /// offered to kill it.
+            qint64 hashed = 0;
+        };
+
+        Road road;
+
+        /// This card's tree, flattened for the screen, each node carrying what becomes of
+        /// it. Here and not in `data()`: building it reads eleven of `Road`'s own fields
+        /// and nothing else, and `data()` carried it inline until the switch it sat in was
+        /// the most tangled function in the client.
+        QVariantList nodes() const;
+
+        /// What this card says about itself while it is still being read — a count of
+        /// volumes hashed, or the word for a wait. `walking` is the queue's
+        /// `m_walkingToken`: only the one folder actually on the pool names a hash in
+        /// progress, and the rest are waiting their turn.
+        QString checking(quint64 walking) const;
 
         qint64 sizeOf(const QString &relative) const;
 
@@ -354,7 +376,14 @@ private:
     void describeNext();
     void tookFolder(const QString &path, const Server::Answer &answer);
     void sendMoreOfFolder(int row);
+    /// One chunk arrived, and what that changes. Out of the callback that used to hold it
+    /// because a lambda long enough to carry its own reasoning is a function that has not
+    /// been given a name.
+    void chunkLanded(int row, qint64 went, qint64 whole);
     void commitFolder(int row);
+    /// What the server answered the commit. Same reason as `chunkLanded`, and it is where
+    /// « ce qui est arrivé » is decided — installed, still coming, corrupt, orphaned.
+    void committed(int row, const Server::Answer &answer);
     void resumeFrom(int row);
     void took(const QString &path, const Server::Answer &answer);
     void pump();

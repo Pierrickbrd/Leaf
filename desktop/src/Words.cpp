@@ -1116,8 +1116,7 @@ QString size(qint64 bytes)
     // Rounded for display before the unit is chosen, not after: comparing the raw value to
     // 1024 let 1 048 575 bytes (one below a mebibyte) round up to display as « 1024 Kio »
     // instead of promoting to « 1,0 Mio », and the same gap sat below the next threshold too.
-    const qint64 kio = std::llround(bytes / 1024.0);
-    if (kio < 1024)
+    if (const qint64 kio = std::llround(bytes / 1024.0); kio < 1024)
         return u"%1 Kio"_s.arg(kio);
 
     // Mio, Gio, Tio, Pio — a whole library dropped in one folder crosses every one of these

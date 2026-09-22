@@ -1,12 +1,9 @@
 #include "ImportCaptions.h"
 
 #include "Imports.h"
-#include "Manifest.h"
 #include "Words.h"
 
 #include <QDebug>
-#include <QDir>
-#include <QFileInfo>
 #include <QQmlEngine>
 
 ImportCaptions *ImportCaptions::create(QQmlEngine *engine, QJSEngine *)
@@ -54,11 +51,6 @@ QString ImportCaptions::cancelLabel() const
 QString ImportCaptions::backLabel() const
 {
     return Words::goBack();
-}
-
-QString ImportCaptions::nextLabel() const
-{
-    return Words::next();
 }
 
 QString ImportCaptions::startLabel() const
@@ -131,66 +123,8 @@ QString ImportCaptions::chooseFolderTitle() const
     return Words::chooseFolderTitle();
 }
 
-QString ImportCaptions::willCreateLabel(const QString &kind, const QString &name) const
-{
-    return Words::willCreate(kind, name);
-}
-
-QString ImportCaptions::alreadyElsewhereLabel(const QString &name, const QString &from) const
-{
-    // The folder it sits in, not the path it sits at. A reader recognises « Mangas » and
-    // reads past « /srv/leaf/library/Mangas », and the dialog is already a wall of words.
-    const QFileInfo about(from);
-    const QString folder = about.dir().dirName();
-    return Words::alreadyElsewhere(name, folder);
-}
-
 QString ImportCaptions::waitingLabel() const
 {
     return Words::decisionsWaiting(m_imports ? m_imports->deciding() : 0);
 }
 
-QString ImportCaptions::stageLabel(int stage) const
-{
-    return Words::importStage(Words::Importing(stage));
-}
-
-QString ImportCaptions::howFar(qint64 sent, qint64 whole) const
-{
-    return Words::howFar(sent, whole);
-}
-
-QString ImportCaptions::stageAnd(int stage, qint64 sent, qint64 whole) const
-{
-    return Words::stageAnd(stageLabel(stage), whole > 0 ? Words::howFar(sent, whole) : QString());
-}
-
-QString ImportCaptions::nodeLine(int level, const QString &state, const QString &holds) const
-{
-    return Words::nodeLine(Manifest::Level(level), state, holds);
-}
-
-QString ImportCaptions::concern(const QString &said) const
-{
-    return Words::concern(said);
-}
-
-QString ImportCaptions::tryingAgainIn(int seconds) const
-{
-    return Words::tryingAgainIn(seconds);
-}
-
-QString ImportCaptions::levelLabel(int level) const
-{
-    return Words::level(Manifest::Level(level));
-}
-
-QString ImportCaptions::levelIcon(int level) const
-{
-    return Words::levelIcon(Manifest::Level(level));
-}
-
-QString ImportCaptions::levelAnd(int level, const QString &state) const
-{
-    return Words::levelAnd(Manifest::Level(level), state);
-}

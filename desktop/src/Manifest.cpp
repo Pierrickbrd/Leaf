@@ -113,11 +113,12 @@ bool beforeNaturally(const QFileInfo &left, const QFileInfo &right)
 /// What a folder declares about itself, in the order `layout::kind` decides.
 std::optional<std::pair<Manifest::Level, QString>> declaredHere(const QString &at)
 {
+    using enum Manifest::Level;
     const QFileInfoList entries = QDir(at).entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
     for (const auto &[name, level] :
-         {std::pair{u"universe.json"_s, Manifest::Level::Universe},
-          std::pair{u"work.json"_s, Manifest::Level::Work},
-          std::pair{u"edition.json"_s, Manifest::Level::Edition}}) {
+         {std::pair{u"universe.json"_s, Universe},
+          std::pair{u"work.json"_s, Work},
+          std::pair{u"edition.json"_s, Edition}}) {
         // Case-insensitive, like `declares()`: a library carried across a filesystem
         // that does not care about case comes back with `Work.json`, and
         // `a_declaration_in_the_wrong_case_is_still_one` already depends on that for
@@ -196,8 +197,7 @@ void walk(const QString &at, const QString &root, int left, Manifest::Folder &in
 
         const QString relative = QDir(root).relativeFilePath(about.absoluteFilePath());
         if (declares(about.fileName())) {
-            QFile file(about.absoluteFilePath());
-            if (file.open(QIODevice::ReadOnly))
+            if (QFile file(about.absoluteFilePath()); file.open(QIODevice::ReadOnly))
                 into.sidecars.append({relative, file.readAll()});
             continue;
         }
@@ -227,6 +227,26 @@ void walk(const QString &at, const QString &root, int left, Manifest::Folder &in
     }
 }
 
+Manifest::Node nodeOf(const QString &at, const QString &root, int left);
+
+/// The node under `about`, when there is one worth keeping.
+///
+/// A folder that declares nothing, holds no archive and has no descendant doing either is
+/// not a thing this model has a level for — `Bleach/tmp`, two thousand loose pages and a
+/// `manifest.json` that is not a sidecar, came back as a series inside Bleach. `found` asks
+/// exactly this question when it chooses the cards; the tree under a card was the one place
+/// that did not.
+std::optional<Manifest::Node> childThatSaysSomething(const QFileInfo &about, const QString &root,
+                                                     int left)
+{
+    if (left <= 0 || isHidden(about.fileName()))
+        return std::nullopt;
+    Manifest::Node child = nodeOf(about.absoluteFilePath(), root, left - 1);
+    if (child.declaration.isEmpty() && child.files.isEmpty() && child.children.isEmpty())
+        return std::nullopt;
+    return child;
+}
+
 /// A node, and what it holds. Recursive: what a declared thing contains is its tree,
 /// never other maps.
 Manifest::Node nodeOf(const QString &at, const QString &root, int left)
@@ -251,20 +271,9 @@ Manifest::Node nodeOf(const QString &at, const QString &root, int left)
         if (about.isSymLink())
             continue;
         if (about.isDir()) {
-            if (isHidden(about.fileName()))
-                continue;
-            if (left > 0) {
-                // Kept only if it says something. A folder that declares nothing, holds no
-                // archive and has no descendant doing either is not a thing this model has
-                // a level for — `Bleach/tmp`, two thousand loose pages and a `manifest.json`
-                // that is not a sidecar, came back as a series inside Bleach. `found` asks
-                // exactly this question when it chooses the cards; the tree under a card was
-                // the one place that did not.
-                const Manifest::Node child = nodeOf(about.absoluteFilePath(), root, left - 1);
-                if (!child.declaration.isEmpty() || !child.files.isEmpty()
-                    || !child.children.isEmpty()) {
-                    node.children.append(child);
-                }
+            if (const std::optional<Manifest::Node> child =
+                    childThatSaysSomething(about, root, left)) {
+                node.children.append(*child);
             }
             continue;
         }

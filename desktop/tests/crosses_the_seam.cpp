@@ -9,6 +9,7 @@
 // really reaches these objects rather than stand-ins compiled beside them.
 
 #include "Boot.h"
+#include "CardCaptions.h"
 #include "ImportCaptions.h"
 #include "Imports.h"
 #include "Preferences.h"
@@ -2415,9 +2416,16 @@ private slots:
             engine.singletonInstance<Imports *>(qmlTypeId("Leaf", 1, 0, "Imports"));
         auto *importCaptions = engine.singletonInstance<ImportCaptions *>(
             qmlTypeId("Leaf", 1, 0, "ImportCaptions"));
+        // Two caption objects and not one since the dialog's own words were told apart from
+        // what a card says about itself, and the tree reads every one of its lines off this
+        // second one: a `CardCaptions` the engine failed to resolve would leave the nodes
+        // blank on screen while every C++ test on `Words` still passed.
+        auto *cardCaptions = engine.singletonInstance<CardCaptions *>(
+            qmlTypeId("Leaf", 1, 0, "CardCaptions"));
         auto *dialog = window->findChild<QObject *>(u"import-dialog"_s);
         QVERIFY(imports);
         QVERIFY(importCaptions);
+        QVERIFY(cardCaptions);
         QVERIFY(dialog);
         dialog->setProperty("visible", true);
         QTRY_VERIFY(dialog->property("visible").toBool());
@@ -2463,7 +2471,7 @@ private slots:
 
         // The tree says what a node becomes, and not only what it is: the level, the
         // server's own answer and what it weighs, joined on one line under one separator.
-        // `ImportCaptions::nodeLine` is what does the joining — proved alone in
+        // `CardCaptions::nodeLine` is what does the joining — proved alone in
         // `writes_french.cpp` — and this is where it is proved to actually reach the screen,
         // which a model-only test cannot show.
         QCOMPARE(textNamed(rows, u"import-row-Koro-node-root-says"_s),
@@ -2499,7 +2507,7 @@ private slots:
         // The word is not in the QML: the elision in front of a vowel is not a rule a
         // binding could apply, and « créera le UNIVERSE » is what leaving it there looks
         // like.
-        QCOMPARE(importCaptions->willCreateLabel(u"UNIVERSE"_s, u"Terres d’Arran"_s),
+        QCOMPARE(cardCaptions->willCreateLabel(u"UNIVERSE"_s, u"Terres d’Arran"_s),
                  u"créera l’univers « Terres d’Arran »"_s);
 
         QQuickItem *accept = itemNamed(rows, u"import-row-Koro-accept"_s);

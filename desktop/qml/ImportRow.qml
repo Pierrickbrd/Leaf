@@ -120,10 +120,10 @@ Item {
                         if (line.checking.length > 0)
                             return line.checking
                         if (line.retryIn > 0)
-                            return ImportCaptions.tryingAgainIn(line.retryIn)
+                            return CardCaptions.tryingAgainIn(line.retryIn)
                         if (line.moving && line.size > 0)
-                            return ImportCaptions.stageAnd(line.stage, line.sent, line.size)
-                        return ImportCaptions.stageLabel(line.stage)
+                            return CardCaptions.stageAnd(line.stage, line.sent, line.size)
+                        return CardCaptions.stageLabel(line.stage)
                     }
                     color: line.stage === line.failed ? Theme.alert
                            : line.moving ? Theme.emerald
@@ -205,7 +205,7 @@ Item {
                 required property string modelData
 
                 width: body.width
-                text: ImportCaptions.concern(modelData)
+                text: CardCaptions.concern(modelData)
                 color: Theme.inkFaint
                 font.family: Theme.textFamily
                 font.pixelSize: 12
@@ -303,7 +303,7 @@ Item {
                 objectName: line.objectName + "-file-" + modelData.workId
                 visible: !line.moving && !line.done
                 width: body.width
-                label: ImportCaptions.alreadyElsewhereLabel(modelData.name, modelData.from)
+                label: CardCaptions.alreadyElsewhereLabel(modelData.name, modelData.from)
                 checked: modelData.filing
                 onToggled: wanted => line.wantsFiling(modelData.workId, wanted)
             }
