@@ -655,3 +655,79 @@ fn found_from_its_beginning_and_not_from_its_middle() {
     assert_eq!(vec!["ハイキュー!!"], f.find("ハイキ"));
     assert!(f.find("キュー").is_empty());
 }
+
+/// The shelf says how far through a series a reader is, not only that they started.
+///
+/// `read_status` has three answers and « how far » is not one of them, so a tile drew a
+/// full-width mark the moment a series was opened — the same emerald, the same four pixels
+/// as the band's own progress bar above it, saying « started » where that one says « how
+/// far ». Counted in the listing's own statement: a shelf of two hundred series must not be
+/// two hundred more reads for one number.
+#[test]
+fn the_shelf_says_how_many_volumes_of_a_series_are_finished() {
+    let f = Fixture::new();
+    let progress = Progress::new(&f.db);
+
+    let shelf = || {
+        Repository::new(&f.db)
+            .series(&SeriesFilter::default(), SeriesSort::Name, 0, 0)
+            .expect("listing")
+    };
+    let far = |rows: &[leaf_server::api::dto::SeriesDto], id: &str| {
+        rows.iter()
+            .find(|s| s.id == id)
+            .expect("a series")
+            .read_entries
+    };
+
+    assert_eq!(0, far(&shelf(), "e"), "nothing read is nothing counted");
+
+    // A page turned is started, and not finished.
+    progress
+        .record(
+            "v1",
+            &ProgressPatch {
+                page: Some(10),
+                ..Default::default()
+            },
+            1,
+        )
+        .unwrap();
+    assert_eq!(0, far(&shelf(), "e"), "opened is not finished");
+    // Not nothing either: the bar used to jump a volume at a time and sit still in between,
+    // which on a twenty-one volume series is most of the time.
+    let part = |rows: &[leaf_server::api::dto::SeriesDto], id: &str| {
+        rows.iter()
+            .find(|s| s.id == id)
+            .expect("a series")
+            .part_read
+    };
+    assert!(
+        part(&shelf(), "e") > 0.0,
+        "a page turned counts for something"
+    );
+
+    progress
+        .record(
+            "v1",
+            &ProgressPatch {
+                finished: Some(true),
+                ..Default::default()
+            },
+            1,
+        )
+        .unwrap();
+    assert_eq!(1, far(&shelf(), "e"));
+    // And a volume finished stops being counted twice: it is whole, not whole plus a part.
+    assert_eq!(0.0, part(&shelf(), "e"), "finished is not also partly read");
+
+    // And it costs nothing per row: the same listing, the same statements.
+    let before = f.db.statements();
+    let rows = shelf();
+    let cost = f.db.statements() - before;
+    assert!(!rows.is_empty());
+    assert!(
+        cost < 12,
+        "listing a shelf took {cost} statements for the count it carries"
+    );
+}

@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::api::bulk_import::{BadOffset, ReceiveError};
 use crate::api::records::{read_entry_json, Records};
 use crate::api::{absent, invalid};
 use crate::metadata::sidecars::EntryJson;
@@ -210,6 +211,60 @@ pub struct Waiting {
     /// True when this is the only copy: it was consumed from the shared folder, so
     /// abandoning it does not send you back to a file you still have.
     pub only_copy: bool,
+    /// How many bytes are actually here. Equal to `size` for a file that arrived whole;
+    /// less for one whose place was reserved by a pre-flight and whose transfer stopped.
+    ///
+    /// Without it a list cannot tell a file waiting for a *decision* from one waiting for
+    /// its *bytes*, and since the pre-flight both of those live here.
+    pub received: u64,
+}
+
+/// A place held for a file, and where the server thinks it will go — before a byte moves.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Reserved {
+    pub id: String,
+    pub proposal: Proposal,
+}
+
+/// What the server holds of one reserved file.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Staged {
+    pub id: String,
+    pub name: String,
+    pub size: u64,
+    pub received: u64,
+}
+
+/// The size a pre-flight announced, kept beside the file it describes.
+///
+/// One number, and it earns its place twice: a listing can say whether a file is waiting
+/// for a decision or still waiting for its bytes, and a confirmation can be refused for a
+/// volume that is not all here. Half a volume installed is worse than none, because
+/// nothing afterwards would tell you.
+const ANNOUNCED: &str = ".leaf-announced";
+
+/// The file a staging folder is holding — never the note beside it.
+fn staged_file(folder: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(folder)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.is_file()
+                && p.file_name()
+                    .is_some_and(|n| n != std::ffi::OsStr::new(ANNOUNCED))
+        })
+}
+
+/// What the pre-flight said the whole file would weigh, when one was made.
+fn announced_size(folder: &Path) -> Option<u64> {
+    std::fs::read_to_string(folder.join(ANNOUNCED))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 pub struct Intake {
@@ -252,7 +307,13 @@ impl Intake {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        if plain.trim().is_empty() || plain.contains("..") {
+        // Only the emptiness, because `file_name` has already taken every path component
+        // off: what is left holds no separator, and `Path::new("..").file_name()` is `None`
+        // rather than `".."`. The `..` this used to also refuse was therefore never a
+        // climb out of the folder — it was `Tome 1..cbz`, a name somebody is allowed to
+        // have. A refusal that can only ever be wrong is worse than no refusal: it teaches
+        // the reader that the guard works.
+        if plain.trim().is_empty() {
             return Err(invalid(format!("invalid file name: {name}")));
         }
         let folder = self
@@ -263,6 +324,95 @@ impl Intake {
             file: folder.join(plain),
             keep: false,
         })
+    }
+
+    /// Holds a place for a file and says where it would go, before a byte has moved.
+    ///
+    /// The whole point of the import's first phase: the reader sees the destination, and
+    /// the question, while it still costs nothing to change their mind. What comes in is
+    /// what the client could read cheaply — the name, the size, and the `entry.json` it
+    /// found inside the archive.
+    ///
+    /// No `concerns` here. They need the page count, which needs the file, and the file is
+    /// exactly what has not arrived. They are filled when it does.
+    pub fn reserve(&self, name: &str, size: u64, sidecar: Option<&[u8]>) -> Result<Reserved> {
+        let staging = self.staging_for(name)?;
+        let folder = staging
+            .path()
+            .parent()
+            .ok_or_else(|| invalid("staging without a folder"))?
+            .to_path_buf();
+        // Created empty and at once: the place is held from this moment, so `/intake`
+        // shows it and an interrupted transfer has something to resume against.
+        std::fs::write(staging.path(), [])?;
+        std::fs::write(folder.join(ANNOUNCED), size.to_string())?;
+
+        let id = folder
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let read: Option<EntryJson> = sidecar.and_then(crate::metadata::sidecars::read);
+        let plain = staging
+            .path()
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let proposal = self.propose(
+            &id,
+            &plain,
+            size,
+            reading_of(read.as_ref()),
+            read.as_ref().and_then(|r| r.id.clone()).as_deref(),
+        )?;
+        staging.keep();
+        Ok(Reserved { id, proposal })
+    }
+
+    /// What is held of one reserved file, so a broken transfer knows where to pick up.
+    pub fn staged(&self, id: &str) -> Result<Option<Staged>> {
+        let Some(folder) = self.received_folder(id)? else {
+            return Ok(None);
+        };
+        let Some(file) = staged_file(&folder) else {
+            return Ok(None);
+        };
+        let received = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+        Ok(Some(Staged {
+            id: id.to_string(),
+            name: file
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+            size: announced_size(&folder).unwrap_or(received),
+            received,
+        }))
+    }
+
+    /// Where the bytes of a reserved file are written, and from which offset.
+    ///
+    /// Returns the path to write into. The caller streams; this only decides where, and
+    /// refuses an offset past what is held — the same answer the bulk path gives, for the
+    /// same reason: a client that guesses wrong would otherwise leave a hole in the middle
+    /// of a volume and nothing would ever say so.
+    pub fn writing_at(
+        &self,
+        id: &str,
+        from: u64,
+    ) -> std::result::Result<(PathBuf, u64), ReceiveError> {
+        let folder = self
+            .received_folder(id)
+            .map_err(ReceiveError::Other)?
+            .ok_or_else(|| ReceiveError::Unknown(format!("unknown intake: {id}")))?;
+        let file = staged_file(&folder)
+            .ok_or_else(|| ReceiveError::Unknown(format!("empty intake: {id}")))?;
+        let held = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+        if from > held {
+            return Err(ReceiveError::BadOffset(BadOffset { received: held }));
+        }
+        Ok((file, held))
     }
 
     /// Streams a file to disk under a ceiling, then proposes where it belongs.
@@ -452,11 +602,18 @@ impl Intake {
         let folder = self
             .received_folder(received_id)?
             .ok_or_else(|| absent(format!("unknown intake: {received_id}")))?;
-        let source = std::fs::read_dir(&folder)?
-            .flatten()
-            .map(|e| e.path())
-            .find(|p| p.is_file())
-            .ok_or_else(|| absent(format!("empty intake: {received_id}")))?;
+        let source =
+            staged_file(&folder).ok_or_else(|| absent(format!("empty intake: {received_id}")))?;
+        // A place reserved by a pre-flight and never filled is not a volume. Filing it
+        // would install a truncated archive, and nothing afterwards would tell anyone.
+        if let Some(announced) = announced_size(&folder) {
+            let held = std::fs::metadata(&source).map(|m| m.len()).unwrap_or(0);
+            if held < announced {
+                return Err(invalid(format!(
+                    "{held} of {announced} bytes received; the file is not all here yet"
+                )));
+            }
+        }
 
         let series = self
             .db
@@ -543,7 +700,13 @@ impl Intake {
         move_or_copy(&source, &target)?;
         let _ = std::fs::remove_dir_all(&folder);
 
-        let entry_id = crate::scan::scanner::id_of(&target, "");
+        // The same derivation the scan uses, and not the hash of the path it used to be:
+        // a file stamped with one identity and indexed under another is a stamp that names
+        // nothing. « This file, in this edition » — see `scan::identity`.
+        let entry_id = crate::scan::identity::under(
+            &request.series_id,
+            &target.file_name().unwrap_or_default().to_string_lossy(),
+        );
         let read = read_entry_json(&target);
         let number = read.as_ref().and_then(|r| r.number);
         if let Err(e) = self.records().stamp(
@@ -668,10 +831,7 @@ impl Intake {
             let Some(origin) = Origin::of(&id) else {
                 continue;
             };
-            let Some(file) = std::fs::read_dir(folder.path())
-                .ok()
-                .and_then(|mut d| d.find_map(|e| e.ok().map(|e| e.path()).filter(|p| p.is_file())))
-            else {
+            let Some(file) = staged_file(&folder.path()) else {
                 continue;
             };
             let meta = std::fs::metadata(&file)?;
@@ -682,10 +842,11 @@ impl Intake {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string(),
-                size: meta.len(),
+                size: announced_size(&folder.path()).unwrap_or(meta.len()),
                 last_touched_at: modified_at(&meta),
                 origin,
                 only_copy: origin == Origin::Drop,
+                received: meta.len(),
             });
         }
         out.sort_by_key(|w| w.last_touched_at);

@@ -27,6 +27,7 @@ use crate::metadata::sidecars::{
 };
 use crate::scan::checks;
 use crate::scan::covers;
+use crate::scan::identity;
 use crate::scan::layout::{self, Kind};
 use crate::scan::report::ScanReport;
 use crate::store::text::search_key;
@@ -46,6 +47,19 @@ struct Seen {
     works: HashSet<String>,
     editions: HashSet<String>,
     entries: HashSet<String>,
+    /// Which folder is already using which identifier. Two carrying the same one is a
+    /// contradiction, and it happens by copying a folder with its sidecar — see
+    /// [`identity::of`].
+    claimed: identity::Claimed,
+}
+
+/// The edition one file is being read into: what identifies it, and how it labels a chapter.
+///
+/// Two arguments in a struct rather than beside each other, because the reader of one entry
+/// takes six things already and the two that follow the edition belong together.
+struct Within<'a> {
+    edition_id: &'a str,
+    chapter_pattern: Option<&'a str>,
 }
 
 /// The fields a work hands down to an edition that does not declare its own.
@@ -105,6 +119,14 @@ struct ReadEntry {
     /// `None` when the entry was unchanged and therefore not opened.
     pages: Option<Vec<cbz::ArchivePage>>,
     unchanged: bool,
+    /// The identity the index still files this file under, when it is not this one.
+    ///
+    /// The whole of the migration, in one field. A library indexed before identities left
+    /// the path holds every entry under the hash of its path; the reading position is filed
+    /// against that, and `ON DELETE CASCADE` takes it away the moment the prune removes the
+    /// row. So the row is found by the file it holds — which did not change — and the
+    /// position is carried before anything is removed. See [`Scanner::reattach`].
+    stale: Option<String>,
     file_order: usize,
     cover_file: Option<String>,
     legacy_arc: Option<String>,
@@ -188,7 +210,9 @@ impl Scanner {
         // to be unreadable for a moment — and progress is the one thing a rescan cannot
         // bring back.
         if complete {
-            self.db.write(|cx| self.prune(cx, &seen))?;
+            let mut lost = 0;
+            self.db.write(|cx| self.prune(cx, &seen, &mut lost))?;
+            report.progress_lost = lost;
         } else {
             tracing::warn!("part of the library could not be read: nothing removed from the index");
         }
@@ -215,13 +239,12 @@ impl Scanner {
         }
 
         self.db.write(|cx| {
-            let universe_id: Option<String> = cx
-                .query_one(
-                    "SELECT universe_id FROM work WHERE path = ?1",
-                    [path.as_str()],
-                    |r| r.get::<_, Option<String>>(0),
-                )?
-                .flatten();
+            // Which universe this folder is **in**, read from where it sits rather than from
+            // the row that describes it. The row was the answer until an identity stopped
+            // coming from a path: a work that moved keeps its row, so the row still names
+            // the universe it left, and an aimed rescan would file it back there — or, going
+            // the other way, leave it at the root it no longer sits in.
+            let universe_id = self.universe_over(cx, work_folder)?;
 
             if layout::holds_archives(work_folder) {
                 let name = match &universe_id {
@@ -236,18 +259,55 @@ impl Scanner {
                     &mut seen,
                     &mut report,
                 )?;
-                self.prune_within(cx, &path, &seen)
+                self.prune_within(cx, &path, &seen, &mut report.progress_lost)
             } else if work_folder.exists() && layout::readable(work_folder).is_err() {
                 // There, and shut. Not the same thing as gone, and the difference is a
                 // series disappearing from the shelf because a permission changed.
                 anyhow::bail!("{} cannot be listed", work_folder.display())
             } else {
                 // The folder is gone, or holds nothing any more: drop what it left behind.
+                // Every position under it goes too, and is counted before it does — this is
+                // the heaviest loss an aimed rescan can cause and it was the quietest.
+                report.progress_lost += cx
+                    .query_one(
+                        "SELECT COUNT(*) FROM progress WHERE entry_id IN \
+                         (SELECT entry.id FROM entry \
+                          JOIN edition ON edition.id = entry.edition_id \
+                          JOIN work ON work.id = edition.work_id WHERE work.path = ?1)",
+                        [path.as_str()],
+                        |r| r.get::<_, i64>(0),
+                    )?
+                    .unwrap_or(0) as u32;
                 cx.execute("DELETE FROM work WHERE path = ?1", [path.as_str()])?;
                 Ok(())
             }
         })?;
         Ok(report)
+    }
+
+    /// The universe a folder sits under, by walking up from it.
+    ///
+    /// Against the index rather than the disk, because the index is what has to agree: an
+    /// ancestor that declares a universe was scanned, so it is in there. The walk stops at
+    /// the first one found, and at `MAX_SHELVES` ancestors — above a library there is
+    /// nothing to find and no reason to climb to the filesystem root looking for it.
+    fn universe_over(&self, cx: &Cx<'_>, folder: &Path) -> Result<Option<String>> {
+        let mut at = folder.to_path_buf();
+        for _ in 0..layout::MAX_SHELVES {
+            let Some(parent) = at.parent().map(Path::to_path_buf) else {
+                return Ok(None);
+            };
+            let found: Option<String> = cx.query_one(
+                "SELECT id FROM universe WHERE path = ?1",
+                [absolute(&parent).as_str()],
+                |r| r.get(0),
+            )?;
+            if found.is_some() {
+                return Ok(found);
+            }
+            at = parent;
+        }
+        Ok(None)
     }
 
     // ------------------------------------------------------------------ levels
@@ -329,7 +389,7 @@ impl Scanner {
         seen: &mut Seen,
         report: &mut ScanReport,
     ) -> Result<()> {
-        let (id, meta) = self.record_universe(cx, folder, seen, report)?;
+        let (id, meta, stale_universe) = self.record_universe(cx, folder, seen, report)?;
         let name = self.universe_name(cx, &id)?;
         for work in layout::sub_folders(folder) {
             // Universes do not nest: the model is universe, work, edition, and a fourth
@@ -350,6 +410,9 @@ impl Scanner {
         // Last, and in the same transaction as the works it points at: an order names works
         // by folder, and a step cannot be resolved against a work nobody has recorded yet.
         self.record_orders(cx, folder, &id, meta.as_ref(), report)?;
+        // Only now: every work of this universe has had its chance to carry off whatever it
+        // collided with — see `make_way`.
+        self.let_go(cx, "universe", stale_universe.as_deref())?;
         Ok(())
     }
 
@@ -400,7 +463,11 @@ impl Scanner {
             }
             declared_ids.push(declared.clone());
 
-            let order_id = id_of(&folder.join(&declared), "order");
+            // Under its universe, never under the folder's path: on the scan that moves a
+            // library off path identities the universe gets a new one, so the `DELETE … WHERE
+            // universe_id` above misses the old rows, and an order rebuilt under the same
+            // path-derived identifier collides with the one still there.
+            let order_id = identity::under(universe_id, &declared);
             let name = order
                 .name
                 .clone()
@@ -423,8 +490,7 @@ impl Scanner {
 
             let mut position = 0i64;
             for (step_at, step) in order.steps.iter().enumerate() {
-                let complaint =
-                    self.record_step(cx, folder, &order_id, position, step, &declared)?;
+                let complaint = self.record_step(cx, folder, &order_id, position, step)?;
                 match complaint {
                     Some(why) => report.disregarded.push(format!(
                         "{here}/universe.json — order \"{declared}\", step {}: {why}",
@@ -454,7 +520,6 @@ impl Scanner {
         order_id: &str,
         position: i64,
         step: &StepJson,
-        declared: &str,
     ) -> Result<Option<String>> {
         let Some(work) = step
             .work
@@ -547,7 +612,7 @@ impl Scanner {
                                              edition_id, from_number, to_number)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
             rusqlite::params![
-                id_of(&folder.join(declared), &format!("step{position}")),
+                identity::under(order_id, &position.to_string()),
                 order_id,
                 position,
                 work_id,
@@ -573,15 +638,28 @@ impl Scanner {
         if !layout::holds_archives(folder) {
             return Ok(());
         }
+        let id = identity::of(
+            folder,
+            layout::WORK_FILE,
+            &id_of(folder, ""),
+            &mut seen.claimed,
+            report,
+        );
         let meta: Option<WorkJson> = read_json(folder, layout::WORK_FILE);
-        let id = id_of(folder, "");
         seen.works.insert(id.clone());
+        let stale_work = self.make_way(cx, "work", &id, &absolute(folder))?;
 
         cx.execute(
             "INSERT INTO work (id, universe_id, name, path, title, medium, status,
                                reading_direction, summary, age_rating)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
              ON CONFLICT(id) DO UPDATE SET
+               -- The place follows the identity. It did not have to before: a folder
+               -- that moved got a new identity, so it got a new row, and this one was
+               -- pruned. Now the identity is in the sidecar and travels with the
+               -- folder, so the row that survives is the one holding the old path —
+               -- and every route that reaches a work by its path would reach nothing.
+               path=excluded.path,
                universe_id=excluded.universe_id, name=excluded.name, title=excluded.title,
                medium=excluded.medium, status=excluded.status,
                reading_direction=excluded.reading_direction, summary=excluded.summary,
@@ -690,28 +768,30 @@ impl Scanner {
         }
 
         // Whatever work.json does not say yet, we take from what is still in the files.
-        let Some(found) = inherited.into_iter().find(|i| {
+        if let Some(found) = inherited.into_iter().find(|i| {
             !i.authors.is_empty() || i.reading_direction.is_some() || !i.genres.is_empty()
-        }) else {
-            return Ok(());
-        };
-        cx.execute(
-            "UPDATE work SET reading_direction = COALESCE(reading_direction, ?1) WHERE id = ?2",
-            rusqlite::params![found.reading_direction, id],
-        )?;
-        // The writer goes the same way as genres below — the files first, the legacy
-        // metadata only when work.json is silent about every one of them.
-        let declared_authors = meta.as_ref().map(WorkJson::authors).unwrap_or_default();
-        if declared_authors.is_empty() && !found.authors.is_empty() {
-            self.record_authors(cx, &id, &found.authors)?;
+        }) {
+            cx.execute(
+                "UPDATE work SET reading_direction = COALESCE(reading_direction, ?1) WHERE id = ?2",
+                rusqlite::params![found.reading_direction, id],
+            )?;
+            // The writer goes the same way as genres below — the files first, the legacy
+            // metadata only when work.json is silent about every one of them.
+            let declared_authors = meta.as_ref().map(WorkJson::authors).unwrap_or_default();
+            if declared_authors.is_empty() && !found.authors.is_empty() {
+                self.record_authors(cx, &id, &found.authors)?;
+            }
+            // Genres go the same way as the rest — the files first, the legacy metadata
+            // only when work.json is silent. They used to take a second route, into a
+            // column of their own, and so were shown without ever being filterable.
+            let declared_genres = meta.as_ref().map(|m| m.genres.clone()).unwrap_or_default();
+            if declared_genres.is_empty() && !found.genres.is_empty() {
+                self.record_genres(cx, &id, &found.genres)?;
+            }
         }
-        // Genres go the same way as the rest — the files first, the legacy metadata only
-        // when work.json is silent. They used to take a second route, into a column of their
-        // own, and so were shown without ever being filterable.
-        let declared_genres = meta.as_ref().map(|m| m.genres.clone()).unwrap_or_default();
-        if declared_genres.is_empty() && !found.genres.is_empty() {
-            self.record_genres(cx, &id, &found.genres)?;
-        }
+        // Only now: every edition and entry this work holds has had its chance to carry its
+        // reading position off whatever it collided with — see `make_way`.
+        self.let_go(cx, "work", stale_work.as_deref())?;
         Ok(())
     }
 
@@ -728,9 +808,22 @@ impl Scanner {
         seen: &mut Seen,
         report: &mut ScanReport,
     ) -> Result<Inherited> {
+        // An implicit edition has no folder of its own, so it has nowhere to keep an
+        // identifier: it takes its work's, which a rename of the folder no longer changes.
+        let id = if implicit {
+            identity::under(work_id, "edition")
+        } else {
+            identity::of(
+                folder,
+                layout::EDITION_FILE,
+                &id_of(folder, "edition"),
+                &mut seen.claimed,
+                report,
+            )
+        };
         let meta: Option<EditionJson> = read_json(folder, layout::EDITION_FILE);
-        let id = id_of(folder, "edition");
         seen.editions.insert(id.clone());
+        let stale_edition = self.make_way(cx, "edition", &id, &absolute(folder))?;
 
         let name = if implicit {
             None
@@ -750,6 +843,7 @@ impl Scanner {
                                   collection, colour)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
              ON CONFLICT(id) DO UPDATE SET
+               path=excluded.path,
                work_id=excluded.work_id, name=excluded.name, implicit=excluded.implicit,
                publisher=excluded.publisher, status=excluded.status, medium=excluded.medium,
                cover_file=excluded.cover_file, reading_direction=excluded.reading_direction,
@@ -834,7 +928,11 @@ impl Scanner {
         sorted.sort();
         let mut entries: Vec<ReadEntry> = Vec::new();
         for (order, file) in sorted.iter().enumerate() {
-            match self.read_entry(cx, file, order, pattern.as_deref(), seen, report) {
+            let within = Within {
+                edition_id: &id,
+                chapter_pattern: pattern.as_deref(),
+            };
+            match self.read_entry(cx, file, order, &within, seen, report) {
                 Ok(Some(entry)) => entries.push(entry),
                 Ok(None) => {}
                 Err(e) => {
@@ -914,6 +1012,12 @@ impl Scanner {
         };
         self.write_arcs(cx, &id, where_, declared, &entries, report)?;
 
+        // Only now: `write_entries` above is what gives every entry still on disk its
+        // chance to carry its reading position off the id this edition collided with — see
+        // `make_way`. An entry that did not get that chance because its file is gone goes
+        // with this row, the same loss a complete sweep's prune would otherwise report.
+        self.let_go(cx, "edition", stale_edition.as_deref())?;
+
         Ok(entries
             .iter()
             .find_map(|e| e.inherited.clone())
@@ -927,11 +1031,17 @@ impl Scanner {
         cx: &Cx<'_>,
         file: &Path,
         order: usize,
-        chapter_pattern: Option<&str>,
+        within: &Within<'_>,
         seen: &mut Seen,
         report: &mut ScanReport,
     ) -> Result<Option<ReadEntry>> {
-        let id = id_of(file, "");
+        let Within {
+            edition_id,
+            chapter_pattern,
+        } = *within;
+        // « This file, in this edition », and nothing about where either of them sits.
+        // Nothing is written into an archive to hold an identifier — see [`identity::under`].
+        let id = identity::under(edition_id, &name_of(file));
         seen.entries.insert(id.clone());
 
         let meta = std::fs::metadata(file)?;
@@ -942,13 +1052,26 @@ impl Scanner {
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
 
-        let unchanged = cx
-            .query_one(
-                "SELECT 1 FROM entry WHERE id = ?1 AND size = ?2 AND modified_at = ?3",
-                rusqlite::params![id, size, modified_at],
-                |r| r.get::<_, i64>(0),
-            )?
-            .is_some();
+        // Asked by **file** and not by identity, which is what makes one query answer two
+        // questions: whether this file changed since it was last read, and — when the row
+        // holding it is filed under another identity — which identity that is. `file` is
+        // UNIQUE, so there is at most one such row, and it is where this file's reading
+        // position is.
+        let held = cx.query_one(
+            "SELECT id, size, modified_at FROM entry WHERE file = ?1",
+            [absolute(file).as_str()],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        let unchanged = held
+            .as_ref()
+            .is_some_and(|(held, s, m)| *held == id && *s == size && *m == modified_at);
+        let stale = held.map(|(held, _, _)| held).filter(|held| *held != id);
 
         let content = cbz::read(file, self.all_dimensions && !unchanged)?;
         if !unchanged {
@@ -1034,6 +1157,7 @@ impl Scanner {
             chapters,
             pages: if unchanged { None } else { Some(content.pages) },
             unchanged,
+            stale,
             file_order: order,
             cover_file: covers::beside_archive(file).map(|p| p.to_string_lossy().to_string()),
             declared: own.or_else(|| legacy.as_ref().map(|l| l.entry.clone())),
@@ -1183,6 +1307,82 @@ impl Scanner {
 
     // ----------------------------------------------------------------- writing
 
+    /// Clears the way for a row about to describe a place another row still describes, and
+    /// returns that row's id so the caller can remove it once it is safe to.
+    ///
+    /// A folder changes level — `Elfes` holds volumes and is a work, then a `work.json`
+    /// appears on the folder above it and `Elfes` becomes one of its editions. The two
+    /// identities used to be the same hash of the same path; they are two different things
+    /// now, and `path` is UNIQUE, so the insert fails. The commonest cause is not a folder
+    /// changing level, though: it is the migration off path identities, where every row of
+    /// an unmigrated library collides on exactly this path with the identity its sidecar
+    /// now carries.
+    ///
+    /// **Parked here, deleted by [`Scanner::let_go`] — not "never deleted".** Deleting it on
+    /// the spot would take its entries with it, and `ON DELETE CASCADE` would take their
+    /// reading positions before the scan has had the chance to carry them off. So its path
+    /// becomes its own id — sixteen hexadecimal characters, which no folder is — for exactly
+    /// as long as it takes the caller to finish with what it held, and `let_go` removes it
+    /// before this transaction commits.
+    ///
+    /// It used to stay parked instead, on the theory that "nothing meets it again": the
+    /// prune that finally removed it ran only at the end of a *complete* sweep, and an aimed
+    /// rescan (`prune_within`) never called it at all. Measured, on a library still indexed
+    /// by path and rescanned one work at a time: the index held two works, two editions and
+    /// two entries for one folder, one of the `work` rows carrying `path =
+    /// "45fee9857437a8eb"`. `Intake::file` read that column as a real path, as every other
+    /// caller does, and filed a volume into the server's own working directory.
+    fn make_way(&self, cx: &Cx<'_>, table: &str, id: &str, path: &str) -> Result<Option<String>> {
+        let stale: Option<String> = cx.query_one(
+            &format!("SELECT id FROM {table} WHERE path = ?1 AND id <> ?2"),
+            rusqlite::params![path, id],
+            |r| r.get(0),
+        )?;
+        if let Some(stale_id) = &stale {
+            cx.execute(
+                &format!("UPDATE {table} SET path = id WHERE id = ?1"),
+                [stale_id.as_str()],
+            )?;
+        }
+        Ok(stale)
+    }
+
+    /// Removes a row [`Scanner::make_way`] parked, now that whatever it held has had its
+    /// chance to move off it. `None` is the ordinary case — no collision, nothing to do.
+    fn let_go(&self, cx: &Cx<'_>, table: &str, stale: Option<&str>) -> Result<()> {
+        let Some(id) = stale else { return Ok(()) };
+        cx.execute(&format!("DELETE FROM {table} WHERE id = ?1"), [id])?;
+        Ok(())
+    }
+
+    /// Moves a reading position from an identity a file used to have onto the one it has
+    /// now.
+    ///
+    /// **During the scan, not after it.** At the moment the scan meets a file it knows both
+    /// identities — the one its path would give, which is the one the index holds, and the
+    /// one it now has. After the scan there is nothing left to match them by: the prune has
+    /// removed the old row and `ON DELETE CASCADE` has taken the position with it. This is
+    /// the one place in this change where doing nothing would be better than doing it late.
+    ///
+    /// Idempotent: a second scan finds nothing filed under the old identity and moves
+    /// nothing. `OR IGNORE` rather than `OR REPLACE`, because a position already filed under
+    /// the new identity is the more recent of the two, and the old row is about to go.
+    fn reattach(
+        &self,
+        cx: &Cx<'_>,
+        was: &str,
+        now: &str,
+        edition_id: &str,
+        report: &mut ScanReport,
+    ) -> Result<()> {
+        let moved = cx.execute(
+            "UPDATE OR IGNORE progress SET entry_id = ?1, edition_id = ?2 WHERE entry_id = ?3",
+            rusqlite::params![now, edition_id, was],
+        )?;
+        report.progress_carried += moved as u32;
+        Ok(())
+    }
+
     fn write_entries(
         &self,
         cx: &Cx<'_>,
@@ -1207,12 +1407,26 @@ impl Scanner {
                     .unwrap_or(0),
             };
 
+            // The row that holds this file is about to be replaced by one under another
+            // identity, and `file` is UNIQUE. Moved aside rather than deleted, because
+            // deleting it takes the reading position with it before the line below has
+            // carried it — see `make_way`.
+            if e.stale.is_some() {
+                cx.execute(
+                    "UPDATE entry SET file = id WHERE file = ?1 AND id <> ?2",
+                    rusqlite::params![absolute(&e.path), e.id],
+                )?;
+            }
+
             cx.execute(
                 "INSERT INTO entry (id, edition_id, type, file, size, modified_at, added_at,
                                     cover_file, volume_number, title, sort_key, page_count,
                                     isbn, published_on, summary)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
                  ON CONFLICT(id) DO UPDATE SET
+                   -- The file follows the identity, for the reason `work` gives above: a
+                   -- folder renamed keeps its entries, and they are still in it.
+                   file=excluded.file,
                    edition_id=excluded.edition_id, type=excluded.type, size=excluded.size,
                    modified_at=excluded.modified_at,
                    -- Set once, on arrival, and never touched again: it is the one fact a
@@ -1241,6 +1455,13 @@ impl Scanner {
                 ],
             )?;
             report.entries += 1;
+
+            // After the row exists and before the prune removes the old one: the position
+            // points at an entry, so it cannot be moved onto one that is not there yet, and
+            // what it is moved off is about to be deleted with the position still on it.
+            if let Some(stale) = &e.stale {
+                self.reattach(cx, stale, &e.id, edition_id, report)?;
+            }
 
             let names: Vec<String> = [e.title.clone(), Some(stem_of(&e.path))]
                 .into_iter()
@@ -1472,8 +1693,8 @@ impl Scanner {
             )?;
             report.derived_arcs.push(format!(
                 "{name} (volumes {} to {})",
-                short(*from),
-                short(*to)
+                plain(*from),
+                plain(*to)
             ));
         }
         Ok(())
@@ -1529,19 +1750,29 @@ impl Scanner {
         Ok(())
     }
 
+    #[allow(clippy::type_complexity)]
     fn record_universe(
         &self,
         cx: &Cx<'_>,
         folder: &Path,
         seen: &mut Seen,
         report: &mut ScanReport,
-    ) -> Result<(String, Option<UniverseJson>)> {
+    ) -> Result<(String, Option<UniverseJson>, Option<String>)> {
+        let id = identity::of(
+            folder,
+            layout::UNIVERSE_FILE,
+            &id_of(folder, "universe"),
+            &mut seen.claimed,
+            report,
+        );
+        // Read after the stamp, not before: the stamp writes the file, and a view taken
+        // first would be a view of the version without it.
         let meta: Option<UniverseJson> = read_json(folder, layout::UNIVERSE_FILE);
-        let id = id_of(folder, "universe");
         seen.universes.insert(id.clone());
+        let stale = self.make_way(cx, "universe", &id, &absolute(folder))?;
         cx.execute(
             "INSERT INTO universe (id, name, path) VALUES (?1,?2,?3)
-             ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, path = excluded.path",
             rusqlite::params![
                 id,
                 meta.as_ref()
@@ -1552,8 +1783,9 @@ impl Scanner {
         )?;
         report.universes += 1;
         // Handed back rather than read again: the orders in it name works, and no work of
-        // this universe is in the database yet.
-        Ok((id, meta))
+        // this universe is in the database yet. The stale id travels the same way, for
+        // `visit_universe` to let go of once every work has had its turn — see `make_way`.
+        Ok((id, meta, stale))
     }
 
     fn universe_name(&self, cx: &Cx<'_>, id: &str) -> Result<Option<String>> {
@@ -1567,25 +1799,52 @@ impl Scanner {
     /// Through a temporary table rather than an inlined IN clause: at three thousand entries
     /// that clause would be a fifty-kilobyte statement, and SQLite has limits on how deep an
     /// expression may go. A table has none, and the query stops growing with the library.
-    fn prune(&self, cx: &Cx<'_>, seen: &Seen) -> Result<()> {
-        let clean = |table: &str, keep: &HashSet<String>| -> Result<()> {
-            if keep.is_empty() {
-                cx.execute(&format!("DELETE FROM {table}"), [])?;
-                return Ok(());
-            }
+    fn prune(&self, cx: &Cx<'_>, seen: &Seen, lost: &mut u32) -> Result<()> {
+        let fill = |keep: &HashSet<String>| -> Result<()> {
             cx.run("DROP TABLE IF EXISTS temp.kept")?;
             cx.run("CREATE TEMP TABLE kept (id TEXT PRIMARY KEY)")?;
             for id in keep {
                 cx.execute("INSERT INTO temp.kept (id) VALUES (?1)", [id.as_str()])?;
             }
+            Ok(())
+        };
+        let delete_missing = |table: &str| -> Result<()> {
             cx.execute(
                 &format!("DELETE FROM {table} WHERE id NOT IN (SELECT id FROM temp.kept)"),
                 [],
-            )?;
+            )
+            .map(|_| ())
+        };
+        let clean = |table: &str, keep: &HashSet<String>| -> Result<()> {
+            if keep.is_empty() {
+                cx.execute(&format!("DELETE FROM {table}"), [])?;
+                return Ok(());
+            }
+            fill(keep)?;
+            delete_missing(table)?;
             cx.run("DROP TABLE temp.kept")?;
             Ok(())
         };
-        clean("entry", &seen.entries)?;
+        // Counted before the entries go, because `ON DELETE CASCADE` takes the positions
+        // with them and there is nothing left to count afterwards. Lost either way — the
+        // file is gone — but a reading position going quiet is the one thing a scan cannot
+        // rebuild, so it is said rather than left to vanish.
+        //
+        // Counted and cleaned against **one** filling of `temp.kept`, not two. Counting used
+        // to build the table, drop it, and let `clean` build the same set again a statement
+        // later: on the 57 686 entries this module's own header cites, 115 372 inserts where
+        // 57 686 do, inside the single transaction the whole prune runs in.
+        if seen.entries.is_empty() {
+            *lost = cx
+                .query_one("SELECT COUNT(*) FROM progress", [], |r| r.get::<_, i64>(0))?
+                .unwrap_or(0) as u32;
+            cx.execute("DELETE FROM entry", [])?;
+        } else {
+            fill(&seen.entries)?;
+            *lost = self.positions_about_to_go(cx)?;
+            delete_missing("entry")?;
+            cx.run("DROP TABLE temp.kept")?;
+        }
         clean("edition", &seen.editions)?;
         clean("work", &seen.works)?;
         clean("universe", &seen.universes)?;
@@ -1596,7 +1855,33 @@ impl Scanner {
         self.prune_search(cx)
     }
 
-    fn prune_within(&self, cx: &Cx<'_>, work_path: &str, seen: &Seen) -> Result<()> {
+    /// How many reading positions point at an entry the scan did not meet.
+    ///
+    /// Through the same temporary table the prune uses, and for the same reason: an inlined
+    /// `IN` clause of three thousand identifiers is a fifty-kilobyte statement.
+    /// How many reading positions the entries about to be deleted carry, read from the
+    /// `temp.kept` its caller has already filled.
+    ///
+    /// Takes no set of its own: it used to build `temp.kept`, count, and drop it, only for
+    /// the delete a statement later to build the identical set again. The caller fills once
+    /// and both read it.
+    fn positions_about_to_go(&self, cx: &Cx<'_>) -> Result<u32> {
+        Ok(cx
+            .query_one(
+                "SELECT COUNT(*) FROM progress WHERE entry_id NOT IN (SELECT id FROM temp.kept)",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?
+            .unwrap_or(0) as u32)
+    }
+
+    fn prune_within(
+        &self,
+        cx: &Cx<'_>,
+        work_path: &str,
+        seen: &Seen,
+        lost: &mut u32,
+    ) -> Result<()> {
         let Some(work_id) =
             cx.query_one("SELECT id FROM work WHERE path = ?1", [work_path], |r| {
                 r.get::<_, String>(0)
@@ -1611,6 +1896,17 @@ impl Scanner {
             |r| r.get::<_, String>(0),
         )?;
         for id in editions.iter().filter(|id| !seen.editions.contains(*id)) {
+            // An edition goes with every entry under it, and every entry with its reading
+            // position: counted here for the same reason as below, one query for the whole
+            // edition rather than one per entry about to disappear with it.
+            *lost += cx
+                .query_one(
+                    "SELECT COUNT(*) FROM progress WHERE entry_id IN \
+                     (SELECT id FROM entry WHERE edition_id = ?1)",
+                    [id.as_str()],
+                    |r| r.get::<_, i64>(0),
+                )?
+                .unwrap_or(0) as u32;
             cx.execute("DELETE FROM edition WHERE id = ?1", [id.as_str()])?;
         }
         for edition in &seen.editions {
@@ -1620,6 +1916,19 @@ impl Scanner {
                 |r| r.get::<_, String>(0),
             )?;
             for id in entries.iter().filter(|id| !seen.entries.contains(*id)) {
+                // Counted before the delete, for `prune`'s own reason: `ON DELETE CASCADE`
+                // takes the positions with the entry and there is nothing left to count
+                // afterwards. `progress_lost` used to be filled by `prune` alone — which a
+                // rescan aimed at one work never calls — so every position an aimed rescan
+                // dropped was dropped in silence, and the report said nought because it had
+                // not looked.
+                *lost += cx
+                    .query_one(
+                        "SELECT COUNT(*) FROM progress WHERE entry_id = ?1",
+                        [id.as_str()],
+                        |r| r.get::<_, i64>(0),
+                    )?
+                    .unwrap_or(0) as u32;
                 cx.execute("DELETE FROM entry WHERE id = ?1", [id.as_str()])?;
             }
         }
@@ -1722,13 +2031,22 @@ fn digest_of(name: &str, detail: &str, label: &str) -> String {
     digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
-/// The identity of a folder or a file: its path, and nothing else.
+/// The identity a folder or a file has from its path alone.
 ///
-/// Stable across scans, so an entry keeps its progress when the library is reindexed, and
-/// distinct per level, so a work and its implicit edition do not collide on one path.
+/// **No longer what identifies a folder** — see [`super::identity`], which is where the
+/// reading position stopped being destroyed by a `mv`. This is still what identifies one
+/// whose sidecar cannot answer, and it is still the identity a folder *used* to have, which
+/// is what the scan reattaches progress from on the first pass after the change.
+///
+/// Distinct per level, so a work and its implicit edition do not collide on one path.
 pub fn id_of(path: &Path, suffix: &str) -> String {
-    let digest = Sha256::digest(format!("{}{suffix}", absolute(path)).as_bytes());
-    digest
+    short(&format!("{}{suffix}", absolute(path)))
+}
+
+/// Sixteen hexadecimal characters of the SHA-256 of a string: the one shape an identifier
+/// has in this server, whatever it was made from.
+pub fn short(of: &str) -> String {
+    Sha256::digest(of.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>()
@@ -1756,7 +2074,8 @@ fn stem_of(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn short(value: f64) -> String {
+/// A number written the way a reader writes it: « 7 » and not « 7.0 », « 7.5 » when it is.
+fn plain(value: f64) -> String {
     if value.fract() == 0.0 {
         format!("{}", value as i64)
     } else {

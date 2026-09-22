@@ -10,6 +10,7 @@ pub mod local_drop;
 pub mod pages;
 pub mod progress;
 pub mod records;
+pub mod relocate;
 pub mod routes;
 pub mod throttle;
 

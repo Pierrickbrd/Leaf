@@ -40,6 +40,17 @@ pub struct ScanReport {
     pub pages: u32,
     /// How many entries were opened and read rather than skipped as unchanged.
     pub reanalysed: u32,
+    /// How many reading positions were carried onto a new identity.
+    ///
+    /// Nought on every scan but the first one after a folder moved — which is exactly when
+    /// it is worth reading, because a number here is the whole reason the identity left the
+    /// path. See `scan::identity`.
+    pub progress_carried: u32,
+    /// And how many were not, because what they pointed at is no longer in the library.
+    ///
+    /// Lost either way — the file went. Counted rather than left to vanish, because a
+    /// reading position going quiet is the one thing a scan cannot rebuild.
+    pub progress_lost: u32,
 }
 
 /// What a scan found, in numbers and named lists rather than in a paragraph.
@@ -63,6 +74,12 @@ pub struct ScanCounts {
     pub chapters: u32,
     pub pages: u32,
     pub reanalysed: u32,
+    /// Nought on every scan but the one after a library stops being identified by its
+    /// paths. A number here is the whole reason the identity moved into the sidecars.
+    pub progress_carried: u32,
+    /// And what could not be carried, because the file it pointed at is gone. Said rather
+    /// than left to vanish: a reading position is the one thing a scan cannot rebuild.
+    pub progress_lost: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -113,6 +130,8 @@ impl ScanReport {
                 chapters: self.chapters,
                 pages: self.pages,
                 reanalysed: self.reanalysed,
+                progress_carried: self.progress_carried,
+                progress_lost: self.progress_lost,
             },
             chapters_without_start_page: self.chapters_without_start_page.len(),
             ..Findings::default()
@@ -153,6 +172,14 @@ impl ScanReport {
             self.pages,
             self.reanalysed
         );
+        // Only when there is something to say. On every scan but one of them these are
+        // nought, and a line of two zeroes teaches a reader to stop reading the paragraph.
+        if self.progress_carried > 0 || self.progress_lost > 0 {
+            out.push_str(&format!(
+                "\n{} reading position(s) carried, {} lost",
+                self.progress_carried, self.progress_lost
+            ));
+        }
         let mut section = |title: &str, items: &[String]| {
             if items.is_empty() {
                 return;

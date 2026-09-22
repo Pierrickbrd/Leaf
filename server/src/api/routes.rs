@@ -33,6 +33,7 @@ use super::local_drop::{DropListing, DropRequest, LocalDrop};
 use super::pages::{Pages, ServedImage};
 use super::progress::{Progress, ProgressDto, ProgressPatch, UpNextDto};
 use super::records::{EntryPatch, Records, SeriesPatch};
+use super::relocate::{MoveRequest, Relocate};
 use super::throttle::Throttle;
 use crate::metadata::sidecars::ArcJson;
 use crate::scan::layout;
@@ -99,7 +100,11 @@ impl AppState {
             scanner: Arc::new(Scanner::new(Arc::clone(&db), true)),
             runner: Arc::new(ScanRunner::default()),
             roots: Arc::new(Vec::new()),
-            bulk: Arc::new(BulkImport::new(&inbox, std::path::Path::new("library"))),
+            bulk: Arc::new(BulkImport::new(
+                &inbox,
+                std::path::Path::new("library"),
+                Arc::clone(&db),
+            )),
             drop: Arc::new(LocalDrop::new(None, Arc::clone(&intake))),
             max_upload_bytes: 2048 * 1024 * 1024,
             trust_proxy: false,
@@ -120,7 +125,7 @@ impl AppState {
         max_upload_bytes: u64,
     ) -> Self {
         let intake = Arc::new(Intake::new(inbox, Arc::clone(&self.db)));
-        self.bulk = Arc::new(BulkImport::new(inbox, library));
+        self.bulk = Arc::new(BulkImport::new(inbox, library, Arc::clone(&self.db)));
         self.drop = Arc::new(LocalDrop::new(drop_folder, Arc::clone(&intake)));
         self.intake = intake;
         self.max_upload_bytes = max_upload_bytes;
@@ -169,14 +174,21 @@ pub fn router(state: AppState) -> Router {
         // A staged file is not an entry: it is a proposal awaiting a confirmation, and
         // /intake/{id} says so. The old spelling shared a shape with /entries/{id}/file,
         // which only ever worked by the router matching the literal segment first.
-        .route("/intake/{id}", axum::routing::delete(abandon_entry))
-        .route("/intake/{id}/file", post(file_entry))
+        .route("/intake/{id}", get(staged_entry).delete(abandon_entry))
+        // POST confirms, PUT carries bytes — the same pair the bulk path uses, so that one
+        // reading of either explains the other.
+        .route(
+            "/intake/{id}/file",
+            post(file_entry).put(receive_staged_file),
+        )
+        .route("/preflight", post(preflight))
         .route("/import", get(list_imports).post(open_import))
         .route("/intake", get(list_intake))
         .route("/import/{id}", get(import_state).delete(abandon_import))
         .route("/import/{id}/file", axum::routing::put(receive_import_file))
         .route("/import/{id}/commit", post(commit_import))
         .route("/cleanup", post(cleanup))
+        .route("/works/{id}/move", post(move_work))
         .route("/search", get(search))
         .route("/next", get(up_next))
         .route("/series/{id}/progress", get(series_progress))
@@ -1000,6 +1012,38 @@ async fn patch_entry(
     or_missing(entry, "unknown entry")
 }
 
+/// Moves a work's folder into a universe, or out to the library root it lives under.
+///
+/// A `rename` and a rescan. It is only that because an identity no longer comes from a path
+/// — see [`super::relocate`] — and the rescan is aimed at the work rather than swept over the
+/// library, which would cost as much as the library is big.
+async fn move_work(
+    _: Importer,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<MoveRequest>,
+) -> Result<Response, Failure> {
+    let moved = blocking(move || {
+        let relocate = Relocate::new(&state.db, &state.roots);
+        let Some(to) = relocate.into_universe(&id, request.universe_id.as_deref())? else {
+            return Ok(None);
+        };
+        let Some(moved) = relocate.work(&id, &to)? else {
+            return Ok(None);
+        };
+        // Only what moved is read again. A work asked to go where it already is has changed
+        // nothing on the disk, and rescanning it would be a second answer to a first one.
+        if moved.moved {
+            state
+                .scanner
+                .rescan_work(std::path::Path::new(&moved.path))?;
+        }
+        Ok(Some(moved))
+    })
+    .await?;
+    or_missing(moved, "unknown work")
+}
+
 // ------------------------------------------------ the short path, same machine
 
 /// What is sitting in the shared folder, waiting to be taken in.
@@ -1018,6 +1062,104 @@ async fn take_from_drop(
 }
 
 // -------------------------------------------- one file at a time: where does it go?
+
+/// What the client could read cheaply, so the server can propose before the bytes move.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreflightRequest {
+    name: String,
+    size: u64,
+    /// The `entry.json` found inside the archive, as it stands. Absent when the client
+    /// could not open the file — the proposal is then weaker, and the screen says so.
+    #[serde(default)]
+    sidecar: Option<String>,
+}
+
+/// Holds a place for a file and says where it would go, before a byte has moved.
+async fn preflight(
+    _: Importer,
+    State(state): State<AppState>,
+    Json(request): Json<PreflightRequest>,
+) -> Result<Json<super::intake::Reserved>, Failure> {
+    let bytes = request.sidecar.map(String::into_bytes);
+    // Refused here rather than at the last byte. The ceiling is the same one `stream_to`
+    // enforces while receiving; without this the client announced a file, held a place for
+    // it, sent it, and was refused at the end — a whole transfer spent to learn something
+    // the first request already said.
+    if request.size > state.max_upload_bytes {
+        return Err(Failure::Unhandled(super::invalid(format!(
+            "{} is larger than this server accepts in one upload",
+            request.name
+        ))));
+    }
+    Ok(Json(
+        blocking(move || {
+            state
+                .intake
+                .reserve(&request.name, request.size, bytes.as_deref())
+        })
+        .await?,
+    ))
+}
+
+/// How much of a reserved file the server holds. Enough for a broken transfer to resume.
+async fn staged_entry(
+    _: Importer,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<super::intake::Staged>, Failure> {
+    blocking(move || state.intake.staged(&id))
+        .await?
+        .map(Json)
+        .ok_or_else(|| Failure::Unhandled(crate::api::absent("unknown intake".to_string())))
+}
+
+/// The bytes of a reserved file, from an offset.
+async fn receive_staged_file(
+    _: Importer,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+    body: Body,
+) -> Result<Response, Failure> {
+    let from = headers
+        .get(axum::http::header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(range_start)
+        .unwrap_or(0);
+
+    let target = {
+        let state = state.clone();
+        match blocking(move || Ok(state.intake.writing_at(&id, from))).await? {
+            Ok((path, _)) => path,
+            Err(ReceiveError::BadOffset(offset)) => {
+                return Ok((
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "impossible offset, the server holds {} byte(s)",
+                            offset.received
+                        ),
+                        "received": offset.received,
+                    })),
+                )
+                    .into_response())
+            }
+            Err(ReceiveError::Unknown(what)) => {
+                return Err(Failure::Unhandled(crate::api::absent(what)))
+            }
+            Err(ReceiveError::Other(e)) => return Err(Failure::Unhandled(e)),
+        }
+    };
+
+    let name = target
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let received = stream_to(body, target, from, state.max_upload_bytes).await?;
+    Ok(Json(serde_json::json!({ "path": name, "received": received })).into_response())
+}
 
 /// Drop it, the server proposes a destination. Nothing has moved yet.
 async fn receive_entry(
@@ -1203,14 +1345,45 @@ async fn commit_import(
     _: Importer,
     State(state): State<AppState>,
     Path(id): Path<String>,
+    request: Option<Json<CommitRequest>>,
 ) -> Result<Response, Failure> {
+    let asked = request.map(|Json(it)| it).unwrap_or_default();
+    let wanted = asked.move_these;
+    let replacing = asked.replace_these;
+    let declaring = asked.declare_these;
     let result = blocking(move || {
-        let result = state.bulk.commit(&id)?;
+        // **Before the install, not after.** The commit writes the folder's declarations
+        // into the library, so the place a work is being filed under exists by the time it
+        // finishes — and a move onto a folder that is already there is refused, rightly.
+        // Moving first is also what the announcement promised: install this *here*.
+        //
+        // Only what the request named. Moving what nobody asked to move rearranges a
+        // library that was fine, and it is the one thing this route must never decide by
+        // itself.
+        let relocate = Relocate::new(&state.db, &state.roots);
+        let mut filed = Vec::new();
+        for work_id in &wanted {
+            let Some(to) = state.bulk.place_for(&id, work_id)? else {
+                continue;
+            };
+            if let Some(moved) = relocate.work(work_id, &to)? {
+                if moved.moved {
+                    filed.push(work_id.clone());
+                }
+            }
+        }
+
+        let mut result = state.bulk.commit(&id, &replacing, &declaring)?;
+        result.moved = filed;
+
         // Aimed at what has just arrived rather than at the whole library. A full scan here
         // costs as much as the library is big — fifteen seconds at two hundred series — and
         // the request held the connection open for all of it, to index one folder.
+        //
+        // Never aimed once something moved: a work filed under the folder that just arrived
+        // is a second place that changed, and one aimed rescan cannot read both.
         let target = state.bulk.target_of(&result.root);
-        if can_be_aimed_at(&target) {
+        if result.moved.is_empty() && can_be_aimed_at(&target) {
             state.scanner.rescan_work(&target)?;
             state.pages.warm_covers();
         } else {
@@ -1221,6 +1394,28 @@ async fn commit_import(
     })
     .await?;
     Ok(Json(result).into_response())
+}
+
+/// What a commit may be told to do besides installing. Optional: a commit with no body is
+/// the ordinary one, and was the only one there was.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CommitRequest {
+    /// The works to file under the folder being installed, by identity — the ones the
+    /// announcement listed under `moves` and a reader ticked.
+    #[serde(rename = "move")]
+    pub move_these: Vec<String>,
+    /// The paths this commit may install on top of a file the library already holds — the
+    /// ones the announcement listed under `replaces` and a reader ticked. Its twin above,
+    /// and for the same reason: overwriting a volume somebody already has is a decision,
+    /// and a commit must never take it on its own.
+    #[serde(rename = "replace")]
+    pub replace_these: Vec<String>,
+    /// The sidecars this commit may write over one the library already holds — the ones the
+    /// announcement listed under `declarations` and a reader ticked. A declaration with no
+    /// counterpart is installed whatever this says: `creates` announced it.
+    #[serde(rename = "declare")]
+    pub declare_these: Vec<String>,
 }
 
 async fn abandon_import(

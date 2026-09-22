@@ -101,6 +101,96 @@ impl Library {
             .read(|cx| cx.query(sql, [], |r| r.get::<_, String>(0)))
             .unwrap()
     }
+
+    /// A reader stopped here, on every entry there is. Written into the table rather than
+    /// through the route, because what is under test is what a **scan** does to it.
+    fn stopped_at(&self, page: i64) {
+        self.db
+            .write(|cx| {
+                cx.execute(
+                    "INSERT INTO progress (entry_id, edition_id, page, finished, updated_at)
+                     SELECT id, edition_id, ?1, 0, 1 FROM entry",
+                    [page],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// Where the reader stopped, as the index holds it now.
+    fn place(&self) -> Option<i64> {
+        self.one::<i64>("SELECT page FROM progress")
+    }
+
+    /// The index as it was before an identity stopped being a path: every work, edition and
+    /// entry filed under the hash of its own path, and the reading positions pointing at
+    /// that.
+    ///
+    /// The fixture for the migration, and the only way to build one — the scanner cannot
+    /// write the old shape any more. All three levels at once, because a real first scan on
+    /// an unmigrated library re-keys the work, its editions and their entries together, in
+    /// one transaction — not the entries alone. A fixture that only re-keyed entries left
+    /// `progress.edition_id` pointing at the edition's *current* id, which a scan of the
+    /// real shape does not: `reattach` carrying only `entry_id` and dropping `edition_id`
+    /// left every assertion here green regardless, because the edition row the position
+    /// pointed at was never the one the prune removed. Foreign keys deferred to the commit,
+    /// because a parent is being re-keyed here before its children have caught up.
+    fn as_it_was_before(&self) {
+        self.db
+            .write(|cx| {
+                cx.run("PRAGMA defer_foreign_keys = ON")?;
+
+                let works = cx.query("SELECT id, path FROM work", [], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?;
+                for (id, path) in works {
+                    let was = leaf_server::scan::scanner::id_of(Path::new(&path), "");
+                    for sql in [
+                        "UPDATE work SET id = ?1 WHERE id = ?2",
+                        "UPDATE edition SET work_id = ?1 WHERE work_id = ?2",
+                        "UPDATE reading_order_step SET work_id = ?1 WHERE work_id = ?2",
+                    ] {
+                        cx.execute(sql, rusqlite::params![was, id])?;
+                    }
+                }
+
+                // An implicit edition's path is its work's own folder, so the same formula
+                // that names a folder-backed edition's old identity names this one too.
+                let editions = cx.query("SELECT id, path FROM edition", [], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?;
+                for (id, path) in editions {
+                    let was = leaf_server::scan::scanner::id_of(Path::new(&path), "edition");
+                    for sql in [
+                        "UPDATE edition SET id = ?1 WHERE id = ?2",
+                        "UPDATE entry SET edition_id = ?1 WHERE edition_id = ?2",
+                        "UPDATE arc SET edition_id = ?1 WHERE edition_id = ?2",
+                        "UPDATE chapter SET edition_id = ?1 WHERE edition_id = ?2",
+                        "UPDATE progress SET edition_id = ?1 WHERE edition_id = ?2",
+                        "UPDATE reading_order_step SET edition_id = ?1 WHERE edition_id = ?2",
+                    ] {
+                        cx.execute(sql, rusqlite::params![was, id])?;
+                    }
+                }
+
+                let entries = cx.query("SELECT id, file FROM entry", [], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?;
+                for (id, file) in entries {
+                    let was = leaf_server::scan::scanner::id_of(Path::new(&file), "");
+                    for sql in [
+                        "UPDATE entry SET id = ?1 WHERE id = ?2",
+                        "UPDATE progress SET entry_id = ?1 WHERE entry_id = ?2",
+                        "UPDATE page SET entry_id = ?1 WHERE entry_id = ?2",
+                        "UPDATE chapter SET entry_id = ?1 WHERE entry_id = ?2",
+                    ] {
+                        cx.execute(sql, rusqlite::params![was, id])?;
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
 }
 
 // ------------------------------------------------------------------ levels
@@ -1968,5 +2058,450 @@ fn a_universe_with_unreadable_metadata_still_indexes_its_works_without_orders() 
     assert_eq!(
         library.one::<String>("SELECT name FROM universe"),
         Some("Arran".into())
+    );
+}
+
+// ----------------------------------------------------------------- identity
+//
+// What a folder is called stopped being what identifies it. The tests below are the reason
+// that changed and the shape of what replaced it — see `scan::identity`.
+
+/// The defect, and the only test here that would have failed before any of this existed.
+///
+/// Measured: a volume read to page 42, the folder renamed, the library rescanned, and the
+/// place gone. Progress is the one thing a scan does not rebuild, and renaming a folder is
+/// less effort than any of the accidents the server already guards against.
+#[test]
+fn renaming_a_folder_keeps_the_place_a_reader_stopped_at() {
+    let library = Library::new();
+    archive(&library.folder("Death Note").join("Tome 1.cbz"), 3, None);
+    library.scan();
+    library.stopped_at(42);
+
+    std::fs::rename(
+        library.folder("Death Note"),
+        library.folder("").join("Death Note (VF)"),
+    )
+    .unwrap();
+    library.scan();
+
+    assert_eq!(1, library.count("entry"));
+    assert_eq!(Some(42), library.place());
+    // And the row knows where the folder went. It did not have to before — a folder that
+    // moved got a new row — and every route reaching a work by its path would now reach a
+    // folder that is not there.
+    assert_eq!(
+        Some(library.folder("Death Note (VF)").display().to_string()),
+        library.one::<String>("SELECT path FROM work")
+    );
+    assert!(library
+        .one::<String>("SELECT file FROM entry")
+        .unwrap()
+        .contains("Death Note (VF)"));
+}
+
+/// The identity is carried by every level, so renaming the folder above works too — the
+/// series below it keeps both its own identifier and its reader's place.
+#[test]
+fn renaming_a_universe_keeps_it_too() {
+    let library = Library::new();
+    library.write("Arran/universe.json", r#"{"leaf":1,"name":"Arran"}"#);
+    archive(&library.folder("Arran/Elfes").join("Tome 1.cbz"), 3, None);
+    library.scan();
+    library.stopped_at(12);
+    let universe = library.one::<String>("SELECT id FROM universe").unwrap();
+
+    std::fs::rename(
+        library.folder("Arran"),
+        library.folder("").join("Terres d’Arran"),
+    )
+    .unwrap();
+    library.scan();
+
+    assert_eq!(1, library.count("universe"));
+    assert_eq!(
+        Some(universe),
+        library.one::<String>("SELECT id FROM universe"),
+        "the universe is the same one, under another name"
+    );
+    assert_eq!(
+        Some(library.folder("Terres d’Arran").display().to_string()),
+        library.one::<String>("SELECT path FROM universe")
+    );
+    assert_eq!(Some(12), library.place());
+}
+
+/// The gesture the import asked for, and the reason this document came before it: a work
+/// filed under a universe is a work that moved, and moving it used to cost its reader's
+/// place.
+#[test]
+fn moving_a_work_into_a_universe_keeps_it() {
+    let library = Library::new();
+    archive(&library.folder("Elfes").join("Tome 1.cbz"), 3, None);
+    library.scan();
+    library.stopped_at(7);
+    let work = library.one::<String>("SELECT id FROM work").unwrap();
+
+    library.write("Arran/universe.json", r#"{"leaf":1,"name":"Arran"}"#);
+    std::fs::rename(
+        library.folder("Elfes"),
+        library.folder("Arran").join("Elfes"),
+    )
+    .unwrap();
+    library.scan();
+
+    assert_eq!(1, library.count("work"));
+    assert_eq!(Some(work), library.one::<String>("SELECT id FROM work"));
+    assert_eq!(Some(7), library.place());
+    // And it is a work *of* that universe now, at its new place.
+    assert_eq!(
+        library.one::<String>("SELECT id FROM universe"),
+        library.one::<String>("SELECT universe_id FROM work")
+    );
+    assert_eq!(
+        Some(library.folder("Arran/Elfes").display().to_string()),
+        library.one::<String>("SELECT path FROM work")
+    );
+}
+
+/// And a file renamed is another file. Written down rather than left implicit: following a
+/// file through its rename would mean identifying it by its contents, and the same volume
+/// scanned twice is not byte for byte the same file.
+#[test]
+fn renaming_a_file_loses_it_and_that_is_what_it_means() {
+    let library = Library::new();
+    let folder = library.folder("Bleach");
+    archive(&folder.join("Tome 1.cbz"), 3, None);
+    library.scan();
+    library.stopped_at(30);
+
+    std::fs::rename(folder.join("Tome 1.cbz"), folder.join("Tome 01.cbz")).unwrap();
+    let report = library.scan();
+
+    assert_eq!(1, library.count("entry"));
+    assert_eq!(None, library.place());
+    assert_eq!(1, report.progress_lost, "and it is counted, not hushed");
+}
+
+/// The stamping: a folder that declares nothing is given an identifier, in a file beside it,
+/// once. Twice would mean a library that changes identity every time it is read.
+#[test]
+fn a_folder_that_declares_nothing_is_given_an_identifier_once() {
+    let library = Library::new();
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 3, None);
+    library.scan();
+
+    let sidecar = library.folder("Bleach").join("work.json");
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+    let id = written["id"].as_str().expect("an identifier").to_string();
+    assert_eq!(16, id.len());
+    assert_eq!(
+        Some(id.clone()),
+        library.one::<String>("SELECT id FROM work")
+    );
+
+    library.scan();
+    let again: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+    assert_eq!(id, again["id"].as_str().unwrap());
+    assert_eq!(Some(id), library.one::<String>("SELECT id FROM work"));
+}
+
+/// Stamped, never corrected. A sidecar that carries one keeps it whatever it looks like:
+/// another installation of Leaf may have written it, and rewriting it would part a library
+/// from its own reading positions.
+#[test]
+fn an_identifier_already_there_is_never_rewritten() {
+    let library = Library::new();
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 3, None);
+    library.write(
+        "Bleach/work.json",
+        r#"{"leaf":1,"title":"Bleach","id":"une-autre-installation"}"#,
+    );
+    library.scan();
+
+    assert_eq!(
+        Some("une-autre-installation".to_string()),
+        library.one::<String>("SELECT id FROM work")
+    );
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(library.folder("Bleach").join("work.json")).unwrap())
+            .unwrap();
+    assert_eq!("une-autre-installation", written["id"]);
+}
+
+/// A `work.json` that cannot be parsed is left exactly as it was on disk. `identity::of`
+/// reads it looking for an identifier and used to stamp one on top of it regardless of what
+/// it found there, because a parse failure and an empty file looked the same to it.
+///
+/// Measured: a hand-written `work.json` with a trailing comma — title, authors and genres
+/// all present — came back as `{"id":"…","leaf":1}` with every one of those gone, and
+/// neither `disregarded` nor `contradictions` said a word. This is the counterpart of
+/// `an_identifier_already_there_is_never_rewritten`, on the branch that cannot be read at
+/// all rather than the one that disagrees.
+#[test]
+fn a_sidecar_that_cannot_be_parsed_is_never_overwritten() {
+    let library = Library::new();
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 3, None);
+    let malformed = r#"{"leaf":1,"title":"Bleach","authors":["Tite Kubo"],"genres":["shonen"],}"#;
+    library.write("Bleach/work.json", malformed);
+
+    let report = library.scan();
+
+    assert_eq!(
+        malformed,
+        std::fs::read_to_string(library.folder("Bleach").join("work.json")).unwrap(),
+        "unreadable, so untouched"
+    );
+    assert_eq!(1, library.count("work"));
+    assert!(
+        report
+            .disregarded
+            .iter()
+            .any(|one| one.contains("work.json")),
+        "{:?}",
+        report.disregarded
+    );
+}
+
+/// Two folders carrying the same identifier is a contradiction, not a choice — and it
+/// happens by copying a folder with its sidecar, which is the most ordinary gesture there
+/// is. The second one met keeps its path as its identity, and both are named.
+#[test]
+fn two_folders_carrying_the_same_identifier_are_both_named() {
+    let library = Library::new();
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 3, None);
+    archive(
+        &library.folder("Bleach (copie)").join("Tome 1.cbz"),
+        3,
+        None,
+    );
+    for folder in ["Bleach", "Bleach (copie)"] {
+        library.write(
+            &format!("{folder}/work.json"),
+            r#"{"leaf":1,"id":"le-meme-des-deux-cotes"}"#,
+        );
+    }
+    let report = library.scan();
+
+    // Both indexed, because refusing would index the library by halves over a duplicate
+    // nobody has seen.
+    assert_eq!(2, library.count("work"));
+    assert_eq!(
+        1,
+        library
+            .all("SELECT id FROM work")
+            .iter()
+            .filter(|id| *id == "le-meme-des-deux-cotes")
+            .count()
+    );
+    let said = report.contradictions.join(" ");
+    assert!(said.contains("Bleach"), "{:?}", report.contradictions);
+    assert!(
+        said.contains("le-meme-des-deux-cotes"),
+        "{:?}",
+        report.contradictions
+    );
+}
+
+/// A library mounted read-only has to stay readable. The folder keeps the identity it had,
+/// it is indexed like any other, and it is said once.
+#[cfg(unix)]
+#[test]
+fn a_folder_that_cannot_be_written_to_is_indexed_anyway_and_said() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let library = Library::new();
+    let folder = library.folder("Bleach");
+    archive(&folder.join("Tome 1.cbz"), 3, None);
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let report = library.scan();
+    writable(&folder);
+
+    assert_eq!(1, library.count("work"));
+    assert_eq!(1, library.count("entry"));
+    assert!(!folder.join("work.json").exists());
+    assert!(
+        report
+            .disregarded
+            .iter()
+            .any(|one| one.contains("work.json")),
+        "{:?}",
+        report.disregarded
+    );
+}
+
+/// An edition implied by its volumes has no folder of its own and so nowhere to keep an
+/// identifier. It takes its work's, which a rename no longer changes.
+#[test]
+fn an_implicit_edition_follows_its_work() {
+    let library = Library::new();
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 3, None);
+    library.scan();
+    let edition = library.one::<String>("SELECT id FROM edition").unwrap();
+    assert!(!library.folder("Bleach").join("edition.json").exists());
+
+    std::fs::rename(
+        library.folder("Bleach"),
+        library.folder("").join("Bleach (VF)"),
+    )
+    .unwrap();
+    library.scan();
+
+    assert_eq!(
+        Some(edition),
+        library.one::<String>("SELECT id FROM edition")
+    );
+}
+
+/// The migration, which is the only place in this change where doing nothing would have been
+/// better than doing it late: at the first scan after the update every identifier changes at
+/// once, and the prune would take every reading position with the rows it replaces.
+#[test]
+fn the_first_scan_carries_the_places_readers_stopped_at() {
+    let library = Library::new();
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 3, None);
+    library.scan();
+    library.stopped_at(42);
+    library.as_it_was_before();
+
+    let report = library.scan();
+
+    assert_eq!(1, report.progress_carried);
+    assert_eq!(0, report.progress_lost);
+    assert_eq!(Some(42), library.place());
+    // And onto the identity the scan gives it now, not left dangling beside it.
+    assert_eq!(
+        library.one::<String>("SELECT id FROM entry"),
+        library.one::<String>("SELECT entry_id FROM progress")
+    );
+}
+
+/// And a second one has nothing left to carry. Without that the number in the report would
+/// be noise, and a scan that keeps rewriting the same rows is a scan doing work twice.
+#[test]
+fn a_second_scan_has_nothing_left_to_carry() {
+    let library = Library::new();
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 3, None);
+    library.scan();
+    library.stopped_at(42);
+    library.as_it_was_before();
+    library.scan();
+
+    let report = library.scan();
+
+    assert_eq!(0, report.progress_carried);
+    assert_eq!(0, report.progress_lost);
+    assert_eq!(Some(42), library.place());
+}
+
+/// A field nobody here understands survives the stamping — the whole reason a sidecar is
+/// edited as a document and never as a type.
+#[test]
+fn a_field_nobody_here_understands_survives_the_stamping() {
+    let library = Library::new();
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 3, None);
+    library.write(
+        "Bleach/work.json",
+        r#"{"leaf":1,"title":"Bleach","monChamp":"gardé ?"}"#,
+    );
+    library.scan();
+
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(library.folder("Bleach").join("work.json")).unwrap())
+            .unwrap();
+    assert_eq!("gardé ?", written["monChamp"]);
+    assert_eq!("Bleach", written["title"]);
+    assert!(written["id"].is_string());
+}
+
+/// The prune fills its temporary table once, and the counting and the deleting both read
+/// that one filling.
+///
+/// A cost, not a speed. The counting used to build `temp.kept`, drop it, and let the delete
+/// build the identical set a statement later: two inserts per entry where one does, inside
+/// the single transaction the whole prune runs in. On the 57 686 entries `scanner.rs` cites
+/// that is 115 372 inserts for 57 686 entries' worth of work, and nothing failed — which is
+/// exactly the kind of defect this repository counts statements to see.
+#[test]
+fn pruning_fills_its_temporary_table_once_and_not_twice() {
+    let library = Library::new();
+    let folder = library.folder("Bleach");
+    for volume in 1..=12 {
+        archive(&folder.join(format!("Tome {volume}.cbz")), 4, None);
+    }
+    library.scan();
+
+    // One volume goes, so the prune has something to remove and cannot take a short way out.
+    std::fs::remove_file(folder.join("Tome 12.cbz")).unwrap();
+
+    let before = library.db.statements();
+    let second = library.scan();
+    let cost = library.db.statements() - before;
+
+    assert_eq!(11, second.entries);
+    // Measured both ways, which is the only reason this bound means anything: 91 statements
+    // as it stands, 105 with the second filling put back. A bound that both shapes passed
+    // would attest nothing at all.
+    assert!(
+        cost < 100,
+        "a prune of eleven kept entries took {cost} statements"
+    );
+}
+
+/// A rescan aimed at one work counts what it cost a reader, the same as a full sweep does.
+///
+/// `progress_lost` was filled by `prune` alone, and `prune` runs only at the end of a
+/// complete sweep. Every route that touches one work — a commit, a file landing, a patch, a
+/// move — aims a rescan instead, and every reading position those dropped went in silence:
+/// the report said nought because it had never looked, which reads exactly like nothing
+/// having been lost.
+#[test]
+fn a_rescan_aimed_at_one_work_counts_the_positions_it_drops() {
+    let library = Library::new();
+    let folder = library.folder("Bleach");
+    archive(&folder.join("Tome 1.cbz"), 3, None);
+    library.scan();
+    library.stopped_at(30);
+
+    std::fs::remove_file(folder.join("Tome 1.cbz")).unwrap();
+    let report = Scanner::new(Arc::clone(&library.db), true)
+        .rescan_work(&folder)
+        .expect("aiming at a work whose only volume is gone");
+
+    assert_eq!(None, library.place());
+    assert_eq!(1, report.progress_lost, "and it is counted, not hushed");
+}
+
+/// An `id` that is there but is not a string is left exactly as it is.
+///
+/// `Document::text` answers `None` for it precisely as it does for a field that is not
+/// there at all, so the stamping took it for absent and wrote over it — the one case
+/// "stamped, never corrected" did not cover, and the one where correcting is least
+/// defensible: a field this version does not understand may be one a later version does, or
+/// one another installation wrote.
+#[test]
+fn an_identity_that_is_not_a_string_is_left_alone_and_said() {
+    let library = Library::new();
+    let folder = library.folder("Bleach");
+    archive(&folder.join("Tome 1.cbz"), 2, None);
+    std::fs::write(folder.join("work.json"), br#"{"leaf":1,"id":42}"#).unwrap();
+
+    let report = library.scan();
+
+    assert_eq!(
+        r#"{"leaf":1,"id":42}"#,
+        std::fs::read_to_string(folder.join("work.json")).unwrap(),
+        "the file is untouched"
+    );
+    assert!(
+        report
+            .contradictions
+            .iter()
+            .any(|said| said.contains("not a string")),
+        "{:?}",
+        report.contradictions
     );
 }

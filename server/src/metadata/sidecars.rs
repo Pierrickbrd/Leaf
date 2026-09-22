@@ -371,6 +371,140 @@ pub fn read<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
 }
 
 /// Writes one back, in the shape the format documents.
+///
+/// For a file this server owns end to end — an `entry.json` it wrote itself into an archive.
+/// A sidecar a person may have edited goes through [`Document`] instead, which is the whole
+/// point of that type.
 pub fn write<T: Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec_pretty(value)
+}
+
+/// A sidecar as what it is on disk: a JSON document, of which this server understands some
+/// fields and a library may hold others.
+///
+/// **Serialising a type back over a file loses every field that type does not know.**
+/// Measured on a `work.json` carrying one hand-written key:
+///
+/// ```text
+/// before  {"leaf":1,"title":"Death Note","myField":"kept?","status":"completed"}
+/// after   {"leaf":1,"title":"Death Note","status":"completed"}
+/// ```
+///
+/// Which is not a risk for later: `PATCH /series/{id}` went through that path, so correcting
+/// a title from a client quietly threw away anything a human — or a later version of Leaf —
+/// had put beside it in the same file.
+///
+/// So a sidecar is edited as a document: the typed view is read out of it, changed, and
+/// written back into it. What this version has never heard of is copied through untouched,
+/// and stays where its author put it.
+#[derive(Debug, Clone, Default)]
+pub struct Document(serde_json::Map<String, serde_json::Value>);
+
+impl Document {
+    /// What a file holds. Anything that is not a JSON object — an array, a number, a stray
+    /// comma — is an empty document, which is exactly what [`read`] already made of it.
+    ///
+    /// The right read for a **reader**: [`Document::read`]'s callers default whatever is
+    /// missing, and unreadable bytes are nothing worse than bytes with nothing in them. The
+    /// wrong one for a **writer** — see [`Document::parse`], which is what a caller about to
+    /// write has to ask instead.
+    pub fn of(bytes: &[u8]) -> Self {
+        match serde_json::from_slice(bytes) {
+            Ok(serde_json::Value::Object(map)) => Self(map),
+            _ => Self::default(),
+        }
+    }
+
+    /// What a file holds, or why it could not be read as this format's shape at all.
+    ///
+    /// `Err` on anything [`Document::of`] would quietly turn into an empty document: invalid
+    /// JSON, or valid JSON that is not an object. The distinction matters to exactly one
+    /// caller — `scan::identity::of` — which stamps an identifier onto whatever this returns
+    /// and writes it back. Fed [`Document::of`]'s emptiness, it wrote `{"id":…,"leaf":1}`
+    /// over a hand-written `work.json` that had a trailing comma: title, authors, genres,
+    /// gone, and the report said nothing, because emptiness read as "nothing was here" is
+    /// indistinguishable from emptiness that means "this could not be read". `parse` keeps
+    /// the two apart so the caller can refuse to write instead.
+    pub fn parse(bytes: &[u8]) -> Result<Self, String> {
+        match serde_json::from_slice::<serde_json::Value>(bytes) {
+            Ok(serde_json::Value::Object(map)) => Ok(Self(map)),
+            Ok(_) => Err("not a JSON object".to_string()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// The typed view, defaulted wherever the document says nothing.
+    pub fn read<T: Default + serde::de::DeserializeOwned>(&self) -> T {
+        serde_json::from_value(serde_json::Value::Object(self.0.clone())).unwrap_or_default()
+    }
+
+    /// Every key it holds, in the order the file wrote them.
+    pub fn keys(&self) -> Vec<String> {
+        self.0.keys().cloned().collect()
+    }
+
+    /// What it holds under `key`, whatever the shape — for comparing two documents without
+    /// a type standing between them, which is the only way to compare fields no type knows.
+    pub fn value(&self, key: &str) -> Option<&serde_json::Value> {
+        self.0.get(key)
+    }
+
+    /// Whether the document holds that key at all — asked of a key this server may not have
+    /// a field for.
+    pub fn has(&self, key: &str) -> bool {
+        self.0.contains_key(key)
+    }
+
+    /// What the document holds under `key`, when it is a string. Asked of a key this server
+    /// reads without owning a field for it.
+    pub fn text(&self, key: &str) -> Option<&str> {
+        self.0.get(key)?.as_str()
+    }
+
+    /// Sets one key, leaving the rest of the document alone. An existing key keeps its place
+    /// in the file; a new one goes at the end.
+    pub fn set(&mut self, key: &str, value: serde_json::Value) {
+        self.0.insert(key.to_string(), value);
+    }
+
+    /// The document's own bytes, for a change made key by key rather than through a type.
+    pub fn bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec_pretty(&serde_json::Value::Object(self.0.clone()))
+    }
+
+    /// The bytes to write: this document with `value`'s fields set into it.
+    ///
+    /// A key `T` used to produce and no longer does is removed — a field cleared has to
+    /// clear — and every key `T` knows nothing about is left exactly where it was found.
+    ///
+    /// Only what disappeared is removed, never all of `T`'s keys and then back: emptying the
+    /// type's fields and appending them again pushes every key this server does not know to
+    /// the front of the file, which is a diff on a line nobody touched.
+    pub fn written<T>(&self, value: &T) -> Result<Vec<u8>, serde_json::Error>
+    where
+        T: Default + serde::de::DeserializeOwned + Serialize,
+    {
+        let now = fields_of(value)?;
+        let mut whole = self.0.clone();
+        for key in fields_of(&self.read::<T>())?.keys() {
+            if !now.contains_key(key) {
+                whole.shift_remove(key);
+            }
+        }
+        for (key, one) in now {
+            whole.insert(key, one);
+        }
+        serde_json::to_vec_pretty(&serde_json::Value::Object(whole))
+    }
+}
+
+/// The keys a value serialises to, which is how the fields a type owns are known without
+/// listing them anywhere. A type that is not an object owns none.
+fn fields_of<T: Serialize>(
+    value: &T,
+) -> Result<serde_json::Map<String, serde_json::Value>, serde_json::Error> {
+    match serde_json::to_value(value)? {
+        serde_json::Value::Object(map) => Ok(map),
+        _ => Ok(serde_json::Map::new()),
+    }
 }
