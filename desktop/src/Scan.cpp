@@ -72,6 +72,13 @@ QString Scan::reanalysed() const
     return m_found ? Words::reanalysed(m_found->counts.reanalysed) : QString();
 }
 
+QString Scan::placesCarried() const
+{
+    return m_found ? Words::placesCarried(m_found->counts.progressCarried,
+                                          m_found->counts.progressLost)
+                   : QString();
+}
+
 QString Scan::withoutStartPage() const
 {
     return m_found ? Words::withoutStartPage(m_found->chaptersWithoutStartPage) : QString();

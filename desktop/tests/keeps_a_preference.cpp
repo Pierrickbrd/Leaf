@@ -8,6 +8,8 @@
 
 #include "Preferences.h"
 
+#include <QUrl>
+
 #include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
@@ -51,6 +53,34 @@ private slots:
         const QSettings file(QSettings::IniFormat, QSettings::UserScope, u"Leaf"_s,
                              u"preferences"_s);
         QCOMPARE(file.value(u"appearance"_s).toString(), u"dark"_s);
+    }
+
+    /// The pickers open where they were last used, and that survives the application.
+    ///
+    /// A library lives in one place and a reader imports from it over and over: opening on
+    /// the home folder every time meant walking the same four levels down before every
+    /// single import.
+    void the_place_a_picker_was_last_used_outlives_the_run()
+    {
+        {
+            Preferences first;
+            QCOMPARE(first.lastPlace(), QUrl());
+            first.rememberPlace(QUrl(u"file:///home/pierrick/Documents/Lecture"_s));
+            QCOMPARE(first.lastPlace(),
+                     QUrl(u"file:///home/pierrick/Documents/Lecture"_s));
+        }
+
+        Preferences later;
+        QCOMPARE(later.lastPlace(), QUrl(u"file:///home/pierrick/Documents/Lecture"_s));
+    }
+
+    /// Nothing is remembered from a picker somebody closed without choosing.
+    void a_place_that_says_nothing_is_not_remembered()
+    {
+        Preferences chosen;
+        chosen.rememberPlace(QUrl(u"file:///somewhere"_s));
+        chosen.rememberPlace(QUrl());
+        QCOMPARE(chosen.lastPlace(), QUrl(u"file:///somewhere"_s));
     }
 
     /// A word and never a number. A file holding `2` is a file nobody can read, and an

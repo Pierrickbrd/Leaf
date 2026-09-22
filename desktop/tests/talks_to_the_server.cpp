@@ -390,6 +390,53 @@ private slots:
         QCOMPARE(answered, 1);
         QVERIFY2(!trouble.isEmpty(), "a request that will not be held has to say so");
     }
+
+    /// The verb the import's transfers ride on: octets, and the offset they start at.
+    ///
+    /// The range is what makes a transfer resumable, and it is inclusive at both ends — a
+    /// last byte written as the sum rather than one before it would tell the server one
+    /// byte more had arrived than did, every single time.
+    void bytes_go_up_with_the_range_they_start_at()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answers(200, QByteArrayLiteral(R"({"path":"Tome 1.cbz","received":300})"));
+        m_settings->setAddress(
+            QStringLiteral("http://127.0.0.1:%1").arg(pretend.serverPort()));
+
+        Server server(m_settings);
+        Server::Answer got;
+        server.put(QStringLiteral("/intake/rcv_1/file"), QByteArray(100, 'x'), 200, 300, nullptr,
+                   [&](const Server::Answer &answer) { got = answer; });
+        QTRY_VERIFY(got.status != 0);
+
+        QVERIFY2(got.went(), qPrintable(got.trouble));
+        QVERIFY2(pretend.heard.contains("PUT /intake/rcv_1/file"), pretend.heard.constData());
+        QVERIFY2(pretend.heard.contains("Content-Range: bytes 200-299/300"),
+                 pretend.heard.constData());
+        // Part of a file is never JSON, and a server told otherwise would try to parse it.
+        QVERIFY2(pretend.heard.contains("Content-Type: application/octet-stream"),
+                 pretend.heard.constData());
+        QVERIFY2(pretend.heard.contains("X-Leaf-Key"), pretend.heard.constData());
+    }
+
+    /// There is no such thing as a range of nothing, and the server reads its absence as
+    /// "from zero". Sending `bytes 0--1/0` would be neither.
+    void an_empty_body_carries_no_range_at_all()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answers(200, QByteArrayLiteral(R"({"path":"x","received":0})"));
+        m_settings->setAddress(
+            QStringLiteral("http://127.0.0.1:%1").arg(pretend.serverPort()));
+
+        Server server(m_settings);
+        Server::Answer got;
+        server.put(QStringLiteral("/intake/rcv_2/file"), {}, 0, 0, nullptr,
+                   [&](const Server::Answer &answer) { got = answer; });
+        QTRY_VERIFY(got.status != 0);
+        QVERIFY(!pretend.heard.contains("Content-Range"));
+    }
 };
 
 QTEST_MAIN(TalksToTheServer)

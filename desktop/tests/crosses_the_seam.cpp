@@ -9,6 +9,8 @@
 // really reaches these objects rather than stand-ins compiled beside them.
 
 #include "Boot.h"
+#include "ImportCaptions.h"
+#include "Imports.h"
 #include "Preferences.h"
 #include "Navigation.h"
 #include "Pretend.h"
@@ -19,6 +21,8 @@
 #include <QAccessible>
 #include <QBuffer>
 #include <QColor>
+#include <QDir>
+#include <QFile>
 #include <QFont>
 #include <QGuiApplication>
 #include <QImage>
@@ -33,6 +37,7 @@
 #include <QStandardPaths>
 #include <QTcpServer>
 #include <QMutex>
+#include <QTemporaryDir>
 #include <QTest>
 
 using Qt::Literals::StringLiterals::operator""_s;
@@ -549,6 +554,7 @@ private slots:
 
         auto *searchField = window->findChild<QQuickItem *>(u"search-field"_s);
         auto *filterButton = window->findChild<QQuickItem *>(u"filter-button"_s);
+        auto *importButton = window->findChild<QQuickItem *>(u"import-button"_s);
         auto *sortButton = window->findChild<QQuickItem *>(u"sort-button"_s);
         auto *settingsButton = window->findChild<QQuickItem *>(u"settings-button"_s);
         QVERIFY(searchField);
@@ -559,6 +565,9 @@ private slots:
         QTest::keyClick(window, Qt::Key_Right);
         QTRY_VERIFY(searchField->hasActiveFocus());
         QCOMPARE(grid->property("currentIndex").toInt(), -1);
+        // The import took the slot the filter left when it went down to the pills.
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(importButton->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(sortButton->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
@@ -574,6 +583,7 @@ private slots:
         QCOMPARE(grid->property("currentIndex").toInt(), -1);
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(searchField->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab);
         QTest::keyClick(window, Qt::Key_Tab);
         QTest::keyClick(window, Qt::Key_Tab);
         QTest::keyClick(window, Qt::Key_Tab);
@@ -787,6 +797,7 @@ private slots:
         auto *navigationStart = window->findChild<QQuickItem *>(u"navigation-start"_s);
         auto *searchField = window->findChild<QQuickItem *>(u"search-field"_s);
         auto *filterButton = window->findChild<QQuickItem *>(u"filter-button"_s);
+        auto *importButton = window->findChild<QQuickItem *>(u"import-button"_s);
         auto *sortButton = window->findChild<QQuickItem *>(u"sort-button"_s);
         auto *settingsButton = window->findChild<QQuickItem *>(u"settings-button"_s);
         QVERIFY(band);
@@ -833,6 +844,8 @@ private slots:
         // grid, and its ring says where that shared navigation now stands.
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(searchField->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(importButton->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(sortButton->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
@@ -1069,6 +1082,7 @@ private slots:
         auto *navigationStart = window->findChild<QQuickItem *>(u"navigation-start"_s);
         auto *searchField = window->findChild<QQuickItem *>(u"search-field"_s);
         auto *filterButton = window->findChild<QQuickItem *>(u"filter-button"_s);
+        auto *importButton = window->findChild<QQuickItem *>(u"import-button"_s);
         auto *sortButton = window->findChild<QQuickItem *>(u"sort-button"_s);
         auto *settingsButton = window->findChild<QQuickItem *>(u"settings-button"_s);
         QVERIFY(button);
@@ -1085,6 +1099,8 @@ private slots:
 
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(searchField->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(importButton->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(sortButton->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
@@ -2297,6 +2313,205 @@ private slots:
         QVERIFY(!theme->dark());
         preferences->chooseAppearance(Preferences::Appearance::System);
         QVERIFY(theme->dark());
+    }
+
+    /// The import's first phase, which is the only one a reader reaches without a server
+    /// answering: the box, the two pickers, and the one answer that has to be given before
+    /// anything is chosen.
+    ///
+    /// Checked here and not in `holds_the_imports` because the cost is the point: the
+    /// checksums are computed while the manifest is built, so a reader who says it after
+    /// dropping says it too late. That is a fact about where the checkbox sits on the
+    /// screen, and only a test that looks at the screen can hold it.
+    void what_is_verified_is_answered_before_anything_is_chosen()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answers(200, QByteArrayLiteral(R"({"items":[],"total":0})"));
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+
+        auto *imports =
+            engine.singletonInstance<Imports *>(qmlTypeId("Leaf", 1, 0, "Imports"));
+        auto *dialog = window->findChild<QObject *>(u"import-dialog"_s);
+        auto *button = window->findChild<QQuickItem *>(u"import-button"_s);
+        QVERIFY(imports);
+        QVERIFY(dialog);
+        QVERIFY(button);
+        QVERIFY(!dialog->property("visible").toBool());
+
+        const QPointF at = button->mapToItem(nullptr, QPointF(button->width() / 2,
+                                                              button->height() / 2));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, at.toPoint());
+        QTRY_VERIFY(dialog->property("visible").toBool());
+
+        auto *check = window->findChild<QQuickItem *>(u"import-verify"_s);
+        auto *chooseFiles = window->findChild<QQuickItem *>(u"import-choose-files"_s);
+        auto *chooseFolder = window->findChild<QQuickItem *>(u"import-choose-folder"_s);
+        QVERIFY(check);
+        QVERIFY(chooseFiles);
+        QVERIFY(chooseFolder);
+        QVERIFY(check->isVisible());
+        QVERIFY(chooseFiles->isVisible());
+        QVERIFY(chooseFolder->isVisible());
+
+        // On by default, and off by one click — a verified transfer is what a reader gets
+        // without knowing the option is there, and the cost is theirs to refuse.
+        QVERIFY(imports->verifying());
+        QVERIFY(check->property("checked").toBool());
+        const QPointF box = check->mapToItem(nullptr, QPointF(8, 8));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, box.toPoint());
+        QTRY_VERIFY(!imports->verifying());
+        QVERIFY(!check->property("checked").toBool());
+    }
+
+    /// A folder's card shows the tree of what it holds — a root node named after the
+    /// folder itself — and goes no further until somebody has said yes. The sentence a
+    /// later task will place on that tree is checked directly here, since this step does
+    /// not yet draw it. Creating a universe is the one thing a reader cannot undo by
+    /// deleting a file.
+    void a_folder_shows_its_tree_before_it_creates_anything()
+    {
+        QTemporaryDir library;
+        QVERIFY(library.isValid());
+        QVERIFY(QDir().mkpath(library.filePath(u"Koro"_s)));
+        QFile volume(library.filePath(u"Koro/Tome 1.cbz"_s));
+        QVERIFY(volume.open(QIODevice::WriteOnly));
+        volume.write(QByteArray(64, 'a'));
+        volume.close();
+
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("POST /import")) {
+                return aReply(200, QByteArrayLiteral("application/json"),
+                              QByteArrayLiteral(
+                                  R"({"id":"imp_1","root":"Koro",)"
+                                  R"("creates":[{"kind":"WORK","name":"Koro Quest",)"
+                                  R"("at":""}],"toSend":["Tome 1.cbz"],)"
+                                  R"("alreadyThere":[],"bytesToSend":64})"));
+            }
+            return aReply(200, QByteArrayLiteral("application/json"),
+                          QByteArrayLiteral(R"({"items":[],"total":0})"));
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *imports =
+            engine.singletonInstance<Imports *>(qmlTypeId("Leaf", 1, 0, "Imports"));
+        auto *importCaptions = engine.singletonInstance<ImportCaptions *>(
+            qmlTypeId("Leaf", 1, 0, "ImportCaptions"));
+        auto *dialog = window->findChild<QObject *>(u"import-dialog"_s);
+        QVERIFY(imports);
+        QVERIFY(importCaptions);
+        QVERIFY(dialog);
+        dialog->setProperty("visible", true);
+        QTRY_VERIFY(dialog->property("visible").toBool());
+
+        // Through the dialog's own `take`, rather than by reaching past it: turning a URL
+        // into a path is the step that decides whether the phase moves at all.
+        const QVariantList dropped{QUrl::fromLocalFile(library.filePath(u"Koro"_s))};
+        QVERIFY(QMetaObject::invokeMethod(dialog, "take",
+                                          Q_ARG(QVariant, QVariant(dropped))));
+        QTRY_COMPARE(dialog->property("phase").toInt(),
+                     dialog->property("proposing").toInt());
+        QTRY_COMPARE(imports->rowCount({}), 1);
+
+        // Asked for until it is there: the model has its row before the view has built the
+        // delegate that draws it. And walked down the view rather than asked of the window: a delegate has no QObject
+        // parent — the delegate model owns it — so `findChild` goes straight past every
+        // row the list ever draws and finds the list itself, looking like an empty queue.
+        auto *rows = window->findChild<QQuickItem *>(u"import-rows"_s);
+        QVERIFY(rows);
+
+        // Looked up again on every poll rather than captured once and read back later: the
+        // tree rebuilds its delegates whenever the row's `nodes` role changes, and a
+        // `QQuickItem *` held across a further `QTRY_*` is exactly the SIGSEGV `textNamed`'s
+        // own note below already names — this block used to hold `root`, `rootName` and
+        // `accept` that way, and once the card's header stopped repeating the tree's own
+        // name (fewer, differently-timed re-layouts of the same row) it started losing that
+        // race on nearly every run instead of rarely.
+        //
+        // `accept` visible is waited for **before** either text is read, not after: it is
+        // what guarantees the server's answer — `creates`, and so the state a node's own
+        // line names — has actually landed, and reading a node's `state` any earlier is
+        // reading it while it is still empty, which is a real failure and not a flake.
+        QTRY_VERIFY(itemNamed(rows, u"import-row-Koro-node-root"_s)
+                    && itemNamed(rows, u"import-row-Koro-node-root"_s)->isVisible());
+        QTRY_VERIFY(itemNamed(rows, u"import-row-Koro-accept"_s)
+                    && itemNamed(rows, u"import-row-Koro-accept"_s)->isVisible());
+        QCOMPARE(textNamed(rows, u"import-row-Koro-node-root-name"_s), u"Koro"_s);
+
+        // The card's own header does not say the name a second time: it is the tree's root
+        // node, and the spec is explicit that no header repeats what that row already says.
+        QQuickItem *header = itemNamed(rows, u"import-row-Koro-name"_s);
+        QVERIFY2(!header || !header->isVisible(), "the folder's name is drawn twice");
+
+        // The tree says what a node becomes, and not only what it is: the level, the
+        // server's own answer and what it weighs, joined on one line under one separator.
+        // `ImportCaptions::nodeLine` is what does the joining — proved alone in
+        // `writes_french.cpp` — and this is where it is proved to actually reach the screen,
+        // which a model-only test cannot show.
+        QCOMPARE(textNamed(rows, u"import-row-Koro-node-root-says"_s),
+                 u"Série · sera créée · 1 tome · 64 o"_s);
+
+        // Closing the window decides nothing, and this is asserted **while the card is
+        // still being prepared** — which is the only moment it proves anything, since
+        // `giveUpPreparing` never touches a transfer that has started. The cross used to
+        // call it, so closing during a verification threw away the reading of a whole
+        // library with nothing saying that was what it meant. Giving up is what
+        // « Revenir en arrière » and « Abandonner » are for, and both say so.
+        QQuickItem *cross = itemNamed(window->contentItem(), u"import-close"_s);
+        QVERIFY(cross);
+        QMetaObject::invokeMethod(cross, "triggered");
+        QTRY_VERIFY(!dialog->property("visible").toBool());
+        QCOMPARE(imports->rowCount({}), 1);
+        dialog->setProperty("visible", true);
+        QTRY_VERIFY(dialog->property("visible").toBool());
+
+        // And the card carries the one command that can stop what is moving. Asked on the
+        // screen and not of the model: `Pause` is a `visible` binding, and a binding that
+        // silently evaluates to false is exactly what no model test can see.
+        imports->accept(0);
+        imports->send();
+        QTRY_COMPARE(imports->data(imports->index(0), int(Imports::Role::Stage_)).toInt(),
+                     int(Imports::Stage::Sending));
+        QTRY_VERIFY2(itemNamed(rows, u"import-row-Koro-pause"_s)
+                         && itemNamed(rows, u"import-row-Koro-pause"_s)->isVisible(),
+                     "nothing on the card could stop a transfer that had started");
+
+
+
+        // The word is not in the QML: the elision in front of a vowel is not a rule a
+        // binding could apply, and « créera le UNIVERSE » is what leaving it there looks
+        // like.
+        QCOMPARE(importCaptions->willCreateLabel(u"UNIVERSE"_s, u"Terres d’Arran"_s),
+                 u"créera l’univers « Terres d’Arran »"_s);
+
+        QQuickItem *accept = itemNamed(rows, u"import-row-Koro-accept"_s);
+        QVERIFY(accept);
+        const QPointF on = accept->mapToItem(nullptr, QPointF(accept->width() / 2,
+                                                              accept->height() / 2));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, on.toPoint());
+        // Accepting is the only answer this card asks for now that the scope question is
+        // gone, so there is nothing left to check once the accept action itself is hidden.
+        // Looked up fresh once more, for the same reason as above.
+        QTRY_VERIFY(!itemNamed(rows, u"import-row-Koro-accept"_s)
+                    || !itemNamed(rows, u"import-row-Koro-accept"_s)->isVisible());
     }
 
     void theme_resolves_and_follows_the_desktop_palette()

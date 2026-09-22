@@ -40,7 +40,8 @@ Server::Server(Settings *settings, QObject *parent) : QObject(parent), m_setting
             if (!one.caller) {
                 continue;
             }
-            send(one.verb, one.path, QUrlQuery(one.encodedQuery), one.body, one.caller,
+            send(one.verb, one.path, QUrlQuery(one.encodedQuery), one.body, one.range,
+                 one.caller,
                  one.then);
         }
     });
@@ -97,17 +98,46 @@ void Server::get(const QString &path, const QObject *caller,
 void Server::post(const QString &path, const QByteArray &body, const QObject *caller,
                   std::function<void(const Answer &)> then)
 {
-    send("POST", path, QUrlQuery(), body, caller, std::move(then));
+    send("POST", path, QUrlQuery(), body, {}, caller, std::move(then));
 }
 
 void Server::get(const QString &path, const QUrlQuery &query, const QObject *caller,
                  std::function<void(const Answer &)> then)
 {
-    send("GET", path, query, {}, caller, std::move(then));
+    send("GET", path, query, {}, {}, caller, std::move(then));
+}
+
+void Server::remove(const QString &path, const QObject *caller,
+                    std::function<void(const Answer &)> then)
+{
+    send("DELETE", path, QUrlQuery(), {}, {}, caller, std::move(then));
+}
+
+void Server::put(const QString &path, const QByteArray &body, qint64 from, qint64 whole,
+                 const QObject *caller, std::function<void(const Answer &)> then)
+{
+    put(path, QUrlQuery(), body, from, whole, caller, std::move(then));
+}
+
+void Server::put(const QString &path, const QUrlQuery &query, const QByteArray &body,
+                 qint64 from, qint64 whole, const QObject *caller,
+                 std::function<void(const Answer &)> then)
+{
+    // `bytes 104857600-134217727/134217728` — inclusive at both ends, which is why the last
+    // byte is one before the sum and not the sum. An empty body carries no range at all:
+    // there is no such thing as a range of nothing, and the server reads its absence as
+    // "from zero".
+    QByteArray range;
+    if (!body.isEmpty()) {
+        range = "bytes " + QByteArray::number(from) + '-'
+                + QByteArray::number(from + body.size() - 1) + '/'
+                + QByteArray::number(whole);
+    }
+    send("PUT", path, query, body, range, caller, std::move(then));
 }
 
 void Server::send(const QByteArray &verb, const QString &path, const QUrlQuery &query,
-                  const QByteArray &body, const QObject *caller,
+                  const QByteArray &body, const QByteArray &range, const QObject *caller,
                   std::function<void(const Answer &)> then)
 {
     // Nothing given is this client itself: the answer then stands for as long as the thing
@@ -144,7 +174,7 @@ void Server::send(const QByteArray &verb, const QString &path, const QUrlQuery &
         // Encoded here and parsed back on the way out — see `Waiting::encodedQuery` for why
         // it is not the `QUrlQuery` itself. `FullyEncoded` is the only form that survives the
         // round trip: a `PrettyDecoded` query hands its own ampersands back to the parser.
-        m_waiting.append({verb, path, query.toString(QUrl::FullyEncoded), body, alive,
+        m_waiting.append({verb, path, query.toString(QUrl::FullyEncoded), body, range, alive,
                           std::move(then)});
         return;
     }
@@ -175,8 +205,13 @@ void Server::send(const QByteArray &verb, const QString &path, const QUrlQuery &
     // body is empty: `POST /scan` carries nothing, and a POST with no length at all is one
     // some proxies hold open waiting for it.
     if (verb != "GET") {
+        // A PUT in this client is always part of a file, and part of a file is never JSON.
         request.setHeader(QNetworkRequest::ContentTypeHeader,
-                          QByteArrayLiteral("application/json"));
+                          verb == "PUT" ? QByteArrayLiteral("application/octet-stream")
+                                        : QByteArrayLiteral("application/json"));
+    }
+    if (!range.isEmpty()) {
+        request.setRawHeader("Content-Range", range);
     }
     QNetworkReply *reply = verb == "GET" ? m_network.get(request)
                                          : m_network.sendCustomRequest(request, verb, body);

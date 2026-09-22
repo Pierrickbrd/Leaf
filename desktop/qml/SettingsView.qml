@@ -180,6 +180,15 @@ Item {
                         strong: true
                     }
 
+                    // Above the chapters without a start page, because a reading position
+                    // that moved is the one line of this card worth reading twice.
+                    SettingsNote {
+                        objectName: "settings-scan-places"
+                        width: parent.width
+                        visible: Scan.placesCarried.length > 0
+                        text: Scan.placesCarried
+                    }
+
                     SettingsNote {
                         objectName: "settings-scan-pages"
                         width: parent.width

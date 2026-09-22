@@ -88,6 +88,24 @@ public:
     void post(const QString &path, const QByteArray &body, const QObject *caller,
               std::function<void(const Answer &)> then);
 
+    /// Bytes, from an offset — the verb the import's transfers ride on.
+    ///
+    /// `from` and `whole` become the `Content-Range` the resumable paths read, and the body
+    /// is sent as octets rather than as JSON. Those two facts are the only difference from
+    /// `post`, and they are a rule here rather than an argument: a PUT in this client is
+    /// always part of a file, and part of a file is never JSON.
+    ///
+    /// `whole` is what the *file* weighs, not what this call carries. A server told the
+    /// wrong total would believe the transfer finished early.
+    void put(const QString &path, const QByteArray &body, qint64 from, qint64 whole,
+             const QObject *caller, std::function<void(const Answer &)> then);
+
+    /// The same, for a route that names which file inside a session the bytes belong to.
+    /// Separately from the path and never spliced into it, for the reason `get` gives at
+    /// length: a file called « Tome 1 & 2.cbz » loses half its name to an unencoded `&`.
+    void put(const QString &path, const QUrlQuery &query, const QByteArray &body, qint64 from,
+             qint64 whole, const QObject *caller, std::function<void(const Answer &)> then);
+
     /// Whether anything more will be sent.
     ///
     /// A refused key is not a hiccup: it stays refused until somebody changes a file, and the
@@ -98,7 +116,17 @@ public:
     /// So one refusal stops the client for good, and a 429 stops it until Retry-After. The
     /// distinction is the whole reason there is no generic "something went wrong, try again".
     bool stopped() const { return !m_stopped.isEmpty(); }
+
+    /// Why it stopped, in the words the server used. Empty while it will still send.
     QString whyStopped() const { return m_stopped; }
+
+    /// Takes something back off the server. No body either way.
+    ///
+    /// The import needs it: abandoning a file has to reach the server, because the server
+    /// keeps what nobody named — a proposal made and never answered holds the library's
+    /// own space for good.
+    void remove(const QString &path, const QObject *caller,
+                std::function<void(const Answer &)> then);
 
     /// The address with its edges filed off: a scheme if none was given, no trailing slash.
     /// Typing `leaf.local:8081` into a box is not a mistake anybody should be corrected for.
@@ -139,6 +167,10 @@ private:
         /// equal to the query it came from, ampersand included.
         QString encodedQuery;
         QByteArray body;
+        /// What a PUT carries beyond the key: the range its body starts at. Held with the
+        /// rest, because a transfer replayed after the keyring answers and stripped of its
+        /// offset would write the middle of a volume over its beginning.
+        QByteArray range;
         QPointer<const QObject> caller;
         std::function<void(const Answer &)> then;
     };
@@ -150,7 +182,7 @@ private:
                   "a held request has to move without throwing: QList relocates them");
 
     void send(const QByteArray &verb, const QString &path, const QUrlQuery &query,
-              const QByteArray &body, const QObject *caller,
+              const QByteArray &body, const QByteArray &range, const QObject *caller,
               std::function<void(const Answer &)> then);
 
     Settings *m_settings;

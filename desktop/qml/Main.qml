@@ -201,6 +201,7 @@ ApplicationWindow {
             // reads: bar, band, chips, covers, and back to the bar.
             onWentPast: forward => window.moveIntoScreen(forward)
             onSettingsRequested: Navigation.open(Navigation.Settings)
+            onImportRequested: importDialog.show()
         }
 
         // Built once and hidden, never destroyed. Inside the Loader it was torn down on the
@@ -241,6 +242,24 @@ ApplicationWindow {
                 }
             }
         }
+    }
+
+    // Dropped anywhere in the window, not only on the dialog. Letting a volume go over the
+    // shelf and having nothing happen is the kind of silence a reader reads as "it does not
+    // work here", and the answer is one line: open the dialog with it inside.
+    DropArea {
+        objectName: "window-drop"
+        anchors.fill: parent
+        onDropped: drop => {
+            if (Imports.offerUrls(drop.urls) > 0) {
+                importDialog.phase = importDialog.proposing
+                importDialog.open()
+            }
+        }
+    }
+
+    ImportDialog {
+        id: importDialog
     }
 
     Component {

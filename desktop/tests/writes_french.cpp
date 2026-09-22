@@ -4,6 +4,7 @@
 // space in particular cannot be seen in a diff, cannot be seen in the source, and can only be
 // seen on screen once the window is narrow enough to break the line in front of the colon.
 
+#include "Manifest.h"
 #include "Words.h"
 
 #include <QSet>
@@ -379,7 +380,64 @@ private slots:
                           Words::nothingConfigured(u"leaf.conf"_s),
                           Words::noAddress(u"leaf.conf"_s),
                           Words::noKey(u"leaf.conf"_s),
-                          Words::readableByOthers(u"leaf.conf"_s)};
+                          Words::readableByOthers(u"leaf.conf"_s),
+                          Words::importing(),
+                          Words::dropFilesHere(),
+                          Words::dropHow(),
+                          Words::cancel(),
+                          Words::goBack(),
+                          Words::next(),
+                          Words::startImport(),
+                          Words::pauseIt(),
+                          Words::resumeIt(),
+                          Words::abandonIt(),
+                          Words::noSeriesForThisFile(),
+                          Words::decisionsWaiting(1),
+                          Words::decisionsWaiting(4),
+                          Words::howFar(12 * 1024 * 1024, 134217728),
+                          Words::tryingAgainIn(8),
+                          Words::couldNotBeRead(u"Tome 7.cbz"_s),
+                          Words::couldNotCleanUp(u"Koro"_s),
+                          Words::sameDestination(u"Vieux/Death Note"_s, u"Death Note"_s),
+                          Words::size(4404019200LL),
+                          Words::nodeHolds(34, 4404019200LL),
+                          Words::checking(12, 68),
+                          Words::checking(0, 1),
+                          Words::checking(0, 0),
+                          Words::waitingToBeChecked(),
+                          Words::willBeCreated(Manifest::Level::Universe),
+                          Words::willBeCreated(Manifest::Level::Work),
+                          Words::willBeMoved(Manifest::Level::Universe),
+                          Words::willBeMoved(Manifest::Level::Work),
+                          Words::alreadyInTheLibrary(),
+                          Words::willBeSent(),
+                          Words::beingSent(),
+                          Words::wasFiled(Manifest::Level::Universe),
+                          Words::wasFiled(Manifest::Level::Work),
+                          Words::failedToSend(),
+                          Words::announcing(),
+                          Words::nothingToSend(),
+                          Words::dropSomethingElse(),
+                          Words::declarationDiffers(u"Death Note"_s, {u"résumé"_s}),
+                          Words::declarationDiffers(QString(), {}),
+                          Words::fileNamed(u"Assassinat"_s, u"Tome 1.cbz"_s),
+                          Words::holdsReplacements(1, 0),
+                          Words::holdsReplacements(6, 0),
+                          Words::holdsReplacements(6, 2),
+                          Words::insteadOf(u"Assassinat"_s, 1024, true),
+                          Words::insteadOf(QString(), 1024, false),
+                          Words::willBeReplaced(Manifest::Level::Universe),
+                          Words::willBeReplaced(Manifest::Level::Work),
+                          Words::levelTitle(Manifest::Level::Universe),
+                          Words::levelTitle(Manifest::Level::Work),
+                          Words::levelTitle(Manifest::Level::Edition),
+                          Words::levelAnd(Manifest::Level::Work,
+                                          Words::willBeCreated(Manifest::Level::Work)),
+                          Words::levelAnd(Manifest::Level::Edition, QString())};
+        for (int i = 0; i <= int(Manifest::Level::Volume); ++i)
+            every << Words::level(Manifest::Level(i));
+        for (int i = 0; i <= int(Words::Importing::Failed); ++i)
+            every << Words::importStage(Words::Importing(i));
         for (int i = 0; i <= int(Words::Asking::State); ++i)
             every << Words::notSetUp(Words::Asking(i));
         for (int i = 0; i <= int(Api::Medium::Other); ++i)
@@ -443,6 +501,7 @@ private slots:
         QVERIFY(Words::band(static_cast<Widths::Band>(99)).isEmpty());
         QVERIFY(Words::resumeAction(static_cast<Api::UpNext::Reason>(99)).isEmpty());
         QVERIFY(Words::notSetUp(static_cast<Words::Asking>(99)).isEmpty());
+        QVERIFY(Words::importStage(static_cast<Words::Importing>(99)).isEmpty());
     }
 
     /// Every sentence Leaf says when something is wrong was a `tr(...)` literal at its call
@@ -491,6 +550,21 @@ private slots:
         QVERIFY(Words::reanalysed(0).isEmpty());
         QCOMPARE(Words::reanalysed(1), u"1 tome relu"_s);
         QCOMPARE(Words::reanalysed(7), u"7 tomes relus"_s);
+        // Silent at nought on both halves, because on every scan but one both are nought
+        // and a line of two zeroes teaches a reader to stop reading the card.
+        // The folder is named, not described « ailleurs »: a reader has to recognise the
+        // place before agreeing to leave it.
+        QCOMPARE(Words::alreadyElsewhere(u"Elfes"_s, u"Mangas"_s),
+                 u"« Elfes » est déjà dans « Mangas » — le ranger ici l’y "
+                 u"déplacera."_s);
+        QVERIFY(Words::alreadyElsewhere(u"Elfes"_s, QString())
+                    .contains(u"déjà dans la bibliothèque"_s));
+        QVERIFY(Words::placesCarried(0, 0).isEmpty());
+        QCOMPARE(Words::placesCarried(1, 0), u"1 reprise de lecture conservée"_s);
+        QCOMPARE(Words::placesCarried(42, 0), u"42 reprises de lecture conservées"_s);
+        QCOMPARE(Words::placesCarried(42, 1),
+                 u"42 reprises de lecture conservées · 1 perdue"_s);
+        QCOMPARE(Words::placesCarried(0, 2), u"2 perdues"_s);
         QVERIFY(Words::withoutStartPage(0).isEmpty());
         QCOMPARE(Words::withoutStartPage(1), u"1 chapitre sans page de départ"_s);
         QCOMPARE(Words::withoutStartPage(3), u"3 chapitres sans page de départ"_s);
@@ -514,6 +588,154 @@ private slots:
         QCOMPARE(Words::where(Api::UpNext::Kind::Volume, 12.0, 47, 190,
                               std::optional<QString>(QString())),
                  u"Tome 12 · Page 47/190"_s);
+    }
+
+    /// The levels of the model, said in the reader's language — and their icon, which is
+    /// the same sign everywhere the application names them.
+    void every_level_of_the_model_is_said_and_marked()
+    {
+        using enum Manifest::Level;
+
+        QCOMPARE(Words::level(Universe), u"univers"_s);
+        QCOMPARE(Words::level(Work), u"série"_s);
+        QCOMPARE(Words::level(Edition), u"édition"_s);
+        QCOMPARE(Words::level(Chapter), u"chapitre"_s);
+        QCOMPARE(Words::level(Volume), u"tome"_s);
+
+        QCOMPARE(Words::levelIcon(Universe), u"public"_s);
+        QCOMPARE(Words::levelIcon(Work), u"collections_bookmark"_s);
+        QCOMPARE(Words::levelIcon(Edition), u"book_2"_s);
+        QCOMPARE(Words::levelIcon(Chapter), u"bookmark"_s);
+        QCOMPARE(Words::levelIcon(Volume), u"book"_s);
+    }
+
+    /// What becomes of a node, in seven sentences and not one more — and the two forms of
+    /// the three that end in a past participle. A tree of sixty lines each worded
+    /// differently is a tree nobody reads: the same thing has to be said with the same word
+    /// wherever it arrives, and « série · sera créé » is the wrong word repeated once per
+    /// row.
+    void what_becomes_of_a_node_is_said_the_same_way_everywhere()
+    {
+        using enum Manifest::Level;
+
+        QCOMPARE(Words::willBeCreated(Universe), u"sera créé"_s);
+        QCOMPARE(Words::willBeCreated(Work), u"sera créée"_s);
+        QCOMPARE(Words::willBeMoved(Universe), u"sera déplacé"_s);
+        QCOMPARE(Words::willBeMoved(Work), u"sera déplacée"_s);
+        QCOMPARE(Words::wasFiled(Universe), u"envoyé"_s);
+        QCOMPARE(Words::wasFiled(Work), u"envoyée"_s);
+        QCOMPARE(Words::willBeReplaced(Universe), u"sera remplacé"_s);
+        QCOMPARE(Words::willBeReplaced(Work), u"sera remplacée"_s);
+
+        // A tome and a chapter never disagree: both are masculine.
+        QCOMPARE(Words::wasFiled(Chapter), u"envoyé"_s);
+        QCOMPARE(Words::wasFiled(Volume), u"envoyé"_s);
+
+        QCOMPARE(Words::alreadyInTheLibrary(), u"déjà là"_s);
+        QCOMPARE(Words::willBeSent(), u"à envoyer"_s);
+        QCOMPARE(Words::beingSent(), u"envoi"_s);
+        QCOMPARE(Words::failedToSend(), u"échec"_s);
+        // A container says what will really happen under it, and counts it.
+        // A question while nobody has answered it, an answer once somebody has — the two
+        // are not the same fact, and saying the second in both cases made the box under it
+        // look like it did nothing.
+        // A volume says what it declares itself to be, beside what it is called on disk —
+        // and its file name alone when it declares nothing, because an archive without a
+        // title is not one titled after its own file name.
+        QCOMPARE(Words::fileNamed(u"Assassinat"_s, u"Tome 1.cbz"_s),
+                 u"Assassinat · Tome 1.cbz"_s);
+        QCOMPARE(Words::fileNamed(QString(), u"Tome 1.cbz"_s), u"Tome 1.cbz"_s);
+
+        // A declaration says what the two disagree about, by field name — the values do
+        // not fit on a line and are not the question anyway.
+        QVERIFY(Words::declarationDiffers(u"Death Note"_s, {u"résumé"_s, u"arcs"_s})
+                    .contains(u"résumé, arcs"_s));
+        QVERIFY(Words::declarationDiffers(u"Death Note"_s, {u"résumé"_s})
+                    .contains(u"Death Note"_s));
+        // One that names itself nothing still says that it differs.
+        QVERIFY(!Words::declarationDiffers(QString(), {u"titre"_s}).isEmpty());
+
+        QCOMPARE(Words::holdsReplacements(1, 0), u"1 tome remplaçable"_s);
+        QCOMPARE(Words::holdsReplacements(6, 0), u"6 tomes remplaçables"_s);
+        QCOMPARE(Words::holdsReplacements(1, 1), u"1 tome sera remplacé"_s);
+        QCOMPARE(Words::holdsReplacements(6, 2), u"2 tomes seront remplacés"_s);
+        // And a volume says what it would land on — the title it declares, or the fact
+        // that the server did not open it, which is not the same as having none.
+        QVERIFY(Words::insteadOf(u"Assassinat"_s, 1024, true).contains(u"Assassinat"_s));
+        QVERIFY(Words::insteadOf(u"Assassinat"_s, 1024, true).contains(u"1 Kio"_s));
+        QVERIFY(Words::insteadOf(QString(), 1024, false).contains(u"non relu"_s));
+    }
+
+    /// The level and the state joined the one way French joins them — and the level alone
+    /// when there is no state yet, because a trailing « · » on nothing reads as broken
+    /// rather than as not yet known.
+    void a_node_says_its_level_and_what_it_becomes_together()
+    {
+        using enum Manifest::Level;
+
+        QCOMPARE(Words::levelAnd(Work, Words::willBeCreated(Work)), u"Série · sera créée"_s);
+        QCOMPARE(Words::levelAnd(Universe, Words::willBeCreated(Universe)),
+                 u"Univers · sera créé"_s);
+        // The level alone still begins like a label: it is one.
+        QCOMPARE(Words::levelAnd(Edition, QString()), u"Édition"_s);
+        // And the lower-case form is still what a sentence inside another one needs.
+        QCOMPARE(Words::level(Edition), u"édition"_s);
+    }
+
+    /// One vocabulary for sizes, in binary units correctly named — not the lambda inside
+    /// `howFar` that divided by 1024² and called the result « Mo »: wrong by five percent,
+    /// and this tree would have said « Gio » right beside it.
+    void sizes_share_one_binary_vocabulary()
+    {
+        QCOMPARE(Words::size(0), u"0 o"_s);
+        QCOMPARE(Words::size(512), u"512 o"_s);
+        QCOMPARE(Words::size(1048576), u"1,0 Mio"_s);
+        QCOMPARE(Words::size(4404019200LL), u"4,1 Gio"_s);
+        // A whole library dropped in one folder crosses Gio before a single volume does —
+        // the drop this screen exists to accept, and `size` stopped one unit short of it.
+        QCOMPARE(Words::size(3298534883328LL), u"3,0 Tio"_s);
+        QCOMPARE(Words::size(2251799813685248LL), u"2,0 Pio"_s);
+
+        // `howFar` says the same thing about the same bytes now, in `size`'s own units.
+        QCOMPARE(Words::howFar(12 * 1024 * 1024, 134217728), u"12,0 Mio sur 128,0 Mio"_s);
+    }
+
+    /// A card once read « 1024 Kio »: comparing the raw byte count to a threshold and
+    /// rounding for display afterwards left a window of about a thousand bytes below each
+    /// power of 1024 where the value had already rounded up to it but the unit had not
+    /// promoted yet.
+    void a_value_just_under_a_power_of_1024_promotes_rather_than_rounds_up_to_it()
+    {
+        QCOMPARE(Words::size(1048575), u"1,0 Mio"_s);              // one byte under 1 Mio
+        QCOMPARE(Words::size(1073741823), u"1,0 Gio"_s);           // one byte under 1 Gio
+        QCOMPARE(Words::size(1099511627775LL), u"1,0 Tio"_s);      // one byte under 1 Tio
+        QCOMPARE(Words::size(1125899906842623LL), u"1,0 Pio"_s);   // one byte under 1 Pio
+    }
+
+    /// What a node holds, and how far its checking has got. The count is what tells a wait
+    /// from a freeze: « Vérification » alone, fixed for thirty seconds, has already made
+    /// the application look crashed.
+    void what_a_node_holds_and_where_its_checking_is_are_counted()
+    {
+        QCOMPARE(Words::nodeHolds(34, 4404019200LL), u"34 tomes · 4,1 Gio"_s);
+        QCOMPARE(Words::nodeHolds(1, 1048576), u"1 tome · 1,0 Mio"_s);
+        QVERIFY(Words::nodeHolds(0, 0).isEmpty());
+
+        QCOMPARE(Words::checking(12, 68), u"Vérification · 12/68 tomes"_s);
+        // A single volume does not pluralise — the file already has what it takes to
+        // accord a count, and "0/1 tomes" was the one line here that never asked it to.
+        QCOMPARE(Words::checking(0, 1), u"Vérification · 0/1 tome"_s);
+        // Nothing to check is not "0/0": it is the word alone.
+        QCOMPARE(Words::checking(0, 0), u"Vérification"_s);
+
+        QCOMPARE(Words::waitingToBeChecked(), u"En attente"_s);
+        // Three moments, three words. « En attente » used to say all of them, so nothing
+        // told a reader whether a verification had finished — the one thing they watch for
+        // on a folder of twenty-seven gigabytes.
+        QCOMPARE(Words::announcing(), u"Vérifié…"_s);
+        QCOMPARE(Words::importStage(Words::Importing::Ready), u"Prêt"_s);
+        QVERIFY(Words::announcing() != Words::waitingToBeChecked());
+        QVERIFY(Words::importStage(Words::Importing::Ready) != Words::waitingToBeChecked());
     }
 };
 

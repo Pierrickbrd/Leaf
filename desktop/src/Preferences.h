@@ -15,6 +15,7 @@
 #include <QObject>
 #include <QQmlEngine>
 #include <QSettings>
+#include <QUrl>
 #include <QString>
 #include <QVariantList>
 
@@ -31,6 +32,14 @@ class Preferences : public QObject
     /// `[{ value, label, icon }]`, in the order they are offered.
     Q_PROPERTY(QVariantList appearances READ appearances CONSTANT)
 
+    /// Where the file and folder pickers open, which is where they were last used.
+    ///
+    /// A library lives in one place and a reader imports from it over and over. Opening on
+    /// the home folder every time meant walking the same four levels down before every
+    /// single import. Empty until a picker has been used once, and the picker then keeps
+    /// whatever default the desktop gives it.
+    Q_PROPERTY(QUrl lastPlace READ lastPlace NOTIFY changed)
+
 public:
     enum class Appearance { System, Light, Dark };
     Q_ENUM(Appearance)
@@ -45,6 +54,11 @@ public:
 
     Q_INVOKABLE void chooseAppearance(Appearance wanted);
 
+    QUrl lastPlace() const { return m_lastPlace; }
+    /// Remembers where a picker was used. Takes the folder itself, or the folder a chosen
+    /// file sits in — what a reader wants next time is the place, not the thing.
+    Q_INVOKABLE void rememberPlace(const QUrl &place);
+
 signals:
     void changed();
     /// The choice moved. `Theme` listens: it is the one that knows what a palette is, and
@@ -57,4 +71,5 @@ private:
     QSettings m_file{QSettings::IniFormat, QSettings::UserScope, QStringLiteral("Leaf"),
                      QStringLiteral("preferences")};
     Appearance m_appearance = Appearance::System;
+    QUrl m_lastPlace;
 };

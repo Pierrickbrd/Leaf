@@ -71,6 +71,7 @@ public:
         Medium,
         Volumes,
         InProgress,
+        HowFarRead,
     };
     Q_ENUM(Role)
 

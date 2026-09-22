@@ -14,6 +14,7 @@
 // never "Bd" — which is why this cannot be a `toUpper` on the first letter and nothing else.
 
 #include "Api.h"
+#include "Manifest.h"
 #include "Navigation.h"
 #include "Widths.h"
 
@@ -72,7 +73,7 @@ enum class Scanning { Unknown, Idle, Running, Done, Other };
 QString theServer();
 QString theKey();
 QString theScan();
-/// « Ce qu'il a trouvé » — the card beside the scan, which is what the scan is for.
+/// « Ce qu’il a trouvé » — the card beside the scan, which is what the scan is for.
 QString whatItFound();
 
 /// « Apparence », and the three answers to it. A fourth vocabulary of its own for the
@@ -95,7 +96,7 @@ QString backTo(const QString &destination);
 QString generalSettings();
 QString librarySettings();
 
-/// Where the key came from — « Dans l'environnement », « Dans le trousseau », « Dans un
+/// Where the key came from — « Dans l’environnement », « Dans le trousseau », « Dans un
 /// fichier protégé ». Worth showing rather than hiding: somebody told their key sits in a
 /// file can decide to move it, and somebody who is not, cannot.
 QString keyStorage(KeyFrom where);
@@ -111,6 +112,10 @@ QString startAScan();
 QString scanCounts(const Api::ScanCounts &counted);
 /// « 3 tomes relus » — the one count that describes the work, and absent when it is zero.
 QString reanalysed(int entries);
+/// « 42 reprises de lecture conservées · 1 perdue » — said only when a scan had any to
+/// carry, which is the one after a library stops being identified by its folder names.
+/// A line of two zeroes on every other scan teaches a reader to stop reading the card.
+QString placesCarried(int carried, int lost);
 /// What one kind of finding is called. A word this client has not been taught comes back
 /// empty, and the screen shows the items without a heading rather than dropping them.
 QString finding(const QString &kind);
@@ -195,7 +200,7 @@ QString seeAllFiles(int count);
 /// facts omitted. A chapter called « Assaut » is not useful without « Tome 8 » beside it.
 QString fileContext(const Api::Hit &hit);
 
-/// « Voir les 12 autres », and « Voir l'autre » when there is one. It unfolds in place, so
+/// « Voir les 12 autres », and « Voir l’autre » when there is one. It unfolds in place, so
 /// the wording says how many are hidden rather than where they would be.
 QString seeTheOthers(int remaining);
 
@@ -248,7 +253,7 @@ QString band(Widths::Band value);
 /// who typed in the field are owed different halves of it.
 enum class Asking { Shelf, Search, Filters, Resume, State };
 
-/// « Leaf n'a pas pu s'installer : il n'y a rien à afficher. »
+/// « Leaf n’a pas pu s’installer : il n’y a rien à afficher. »
 QString notSetUp(Asking what);
 
 /// « Leaf ne sait pas où est votre bibliothèque. » — no address at all, which is a setup
@@ -259,7 +264,7 @@ QString noLibrary();
 /// network error, which Qt does translate; only Leaf's half of the sentence was English.
 QString unreachable(const QString &why);
 
-/// « Le serveur a répondu quelque chose d'illisible. » — an answer that is not the JSON its
+/// « Le serveur a répondu quelque chose d’illisible. » — an answer that is not the JSON its
 /// own contract promises.
 QString unreadableAnswer();
 
@@ -270,7 +275,7 @@ QString keyRefused(const QString &said);
 /// `Retry-After`, said rather than counted down, because nothing here ticks.
 QString tooManyWrongKeys(const QString &seconds);
 
-/// « Il n'y a rien de tel ici. » — a 404 the server did not word itself.
+/// « Il n’y a rien de tel ici. » — a 404 the server did not word itself.
 QString noSuchThing();
 
 /// « Le serveur a répondu 500. », with its own sentence after the code when it sent one.
@@ -294,9 +299,353 @@ QString nothingConfigured(const QString &file);
 QString noAddress(const QString &file);
 QString noKey(const QString &file);
 
-/// « … est lisible par d'autres que vous, il n'a donc pas été lu du tout. » A key file
+/// « … est lisible par d’autres que vous, il n’a donc pas été lu du tout. » A key file
 /// anyone can read is a key already given away; Leaf refuses it rather than use it, and
 /// says the one command that fixes it.
 QString readableByOthers(const QString &path);
+
+// ——— L'import ———————————————————————————————————————————————————————————————
+
+/// Where one file is on its way in. Its own enumeration rather than `Imports::Stage`, for
+/// the reason at the top of this file: this is a leaf, and it does not know what owns a
+/// queue or a socket.
+enum class Importing { Asking, Deciding, Ready, Sending, Filing, Filed, Paused, Failed };
+
+/// « Importer » — the dialog's own name, and the bar button's.
+QString importing();
+/// « Déposez vos fichiers ici », and underneath, how. The second line exists because the
+/// first one alone leaves a reader wondering whether the window is the target or the box is.
+QString dropFilesHere();
+QString dropHow();
+/// The four commands along the bottom, in the order they appear and change.
+QString cancel();
+QString goBack();
+QString next();
+QString startImport();
+
+/// « En attente », « Envoi », « Rangé »… — one word per stage, for the row that shows it.
+QString importStage(Importing stage);
+
+/// « 12,0 Mio sur 128,0 Mio » — how far one file has got, in `size`'s own units rather
+/// than a vocabulary of its own.
+QString howFar(qint64 sent, qint64 whole);
+
+/// « Nouvelle tentative dans 8 s » — said, because a queue that retries in silence is a
+/// queue that looks stuck.
+QString tryingAgainIn(int seconds);
+
+/// « Aucune série ne correspond. Un fichier seul rejoint une série existante ; pour en
+/// créer une, déposez le dossier. » The honest answer, and the one that teaches the model
+/// rather than pretending a single file can create anything.
+QString noSeriesForThisFile();
+
+/// « Pause », « Reprendre », « Abandonner » — the three things a row can be told. The
+/// third is worded apart on purpose: it is the only one that throws something away.
+QString pauseIt();
+QString resumeIt();
+QString abandonIt();
+
+/// « 3 décisions » / « une décision » — what the bar's button says while the dialog is
+/// shut. A transfer that finished and a question nobody saw look the same from there.
+QString decisionsWaiting(int many);
+
+/// « 38 tomes envoyés · 2 encore à venir · 1 mal arrivé » — what a commit did, and what it
+/// could not. Said even when everything went home, because « rien à signaler » and a row
+/// that simply stopped saying anything look the same.
+QString whatLanded(int installed, int pending, int corrupt, int orphans);
+
+/// « « Tome 7.cbz » n'a pas pu être lu. » — the local file went away, or turned
+/// unreadable, between the moment it was chosen and the moment its bytes were wanted.
+QString couldNotBeRead(const QString &name);
+
+/// « Le nettoyage de Koro a échoué : ses octets restent sur le serveur. » — `abandon()`'s
+/// own `Row::trouble`, on the rare occasion its `DELETE` got a refusal rather than the 204
+/// the contract otherwise promises. The row is reinserted, `Stage::Failed`, to carry it —
+/// this card's own fact, said on this card alone, rather than a queue-wide `trouble` that
+/// would stop every other row from sending over one session the server would not drop.
+QString couldNotCleanUp(const QString &name);
+
+/// « créera la série « Elfes » » — one line per container a dropped folder would bring into
+/// being, from the contract's own word. A kind this version has never heard of is shown by
+/// its name alone rather than dropped: the server may learn a word before the client does,
+/// and a silent line is a container created that nobody was told about.
+QString willCreate(const QString &kind, const QString &name);
+/// « Accepter » — the answer to that announcement, and the only way past it. Nothing is
+/// created until somebody has read the list.
+QString acceptCreations();
+
+/// « « Elfes » est déjà dans « Mangas » — le ranger ici l'y déplacera » — the sixth case of
+/// an import, said in full because every part of it matters: what is already there, where
+/// it is, and what ticking the box would do to it. The folder is named rather than described
+/// « ailleurs » — a reader has to recognise the place before agreeing to leave it.
+QString alreadyElsewhere(const QString &name, const QString &folder);
+
+/// « Vérifier que chaque tome arrive intact », and what that means in full.
+///
+/// The label said « Vérifier chaque fichier », which does not say **against what** — and the
+/// person who asked for the option had to ask what it did. A checkbox whose own author
+/// cannot read it from its label is a checkbox that will be left at whatever it came with.
+/// So the label names the outcome, and the line under it names the mechanism and the cost.
+///
+/// Checked by default: a volume that travelled wrong is worse than one that did not travel,
+/// because nothing afterwards would say so.
+QString verifyEachFile();
+QString verifyingMeans();
+
+/// « ou choisir » — the verb, said once and in faint ink, for the two pickers under it.
+///
+/// Two buttons each carrying their own verb read as two unrelated commands competing under
+/// the invitation to drop. One verb and two objects read as one idea with two doors, which
+/// is what they are: the desktop has a window for files and a window for a folder.
+QString chooseLead();
+
+/// « Des fichiers » — the other way in, for a reader who does not drag. The title is the
+/// picker window's own, which on this desktop is the only place it shows.
+QString chooseFiles();
+QString chooseFilesTitle();
+/// And the folder, which is a second picker and not a mode of the first: the desktop offers
+/// one window for files and one for a folder, and a single button would quietly do half the
+/// job. Dropping does both at once, which is why it is what the box invites.
+QString chooseFolder();
+QString chooseFolderTitle();
+
+/// « « Vieux/Death Note » arriverait au même endroit que « Death Note ». Déposez-les
+/// séparément. » — two folders of one name in a single drop aim at the same folder of the
+/// library, and the second would overwrite the first.
+///
+/// Both are named, and by what tells them apart: « Death Note » twice would help nobody, so
+/// it is the path from the dropped folder that is shown.
+QString sameDestination(const QString &one, const QString &other);
+
+// ——— The levels of the model, and what a node of the import tree says it holds ————————
+
+/// The name of a level of the model, and the icon that marks it.
+///
+/// Both live here because they serve everywhere the application names these levels — the
+/// scan report, the search, the import tree — and a universe drawn one way on one screen
+/// and another way elsewhere is a vocabulary nobody learns.
+///
+/// **An icon, and not an emoji.** An emoji is in colour, different on every platform, and
+/// does not tint: it would be the one thing in the interface that does not follow the
+/// theme. It is the reason `FilterValueRow` already gives for drawing its own mark rather
+/// than taking it from a font, pushed one notch further.
+QString level(Manifest::Level level);
+
+/// The same level as a label begins: « Univers », « Série », « Édition ». Written out rather
+/// than computed from `level`, for the reason this whole file exists — a capital put on by
+/// code is a capital nobody sweeps, and « édition » would have to become « Édition » with its
+/// accent intact.
+QString levelTitle(Manifest::Level level);
+/// The file's own name, without `.svg` or a path — `LevelMark.qml` composes the two.
+QString levelIcon(Manifest::Level level);
+
+/// What becomes of one node of an import's tree, in seven sentences and not one more.
+///
+/// A tree of sixty lines each carrying a different wording is a tree nobody reads: the same
+/// thing has to be said with the same word wherever it happens. They are written here rather
+/// than composed at the point of use for the reason every other string in this file is.
+///
+/// Three of the six take the level they describe, because they end in a past participle and
+/// a past participle agrees with its subject: « série » and « édition » are feminine, so a
+/// series or an edition « sera créée », while « univers », « tome » and « chapitre » are
+/// masculine and « sera créé ». Left invariable, every line of a sixty-line tree would read
+/// « série · sera créé » — a wrong letter repeated once per row. The other four — « déjà là »,
+/// « à envoyer », « envoi », « échec » — do not inflect, so they take nothing.
+QString willBeCreated(Manifest::Level level);
+QString willBeMoved(Manifest::Level level);
+QString alreadyInTheLibrary();
+QString willBeSent();
+QString beingSent();
+QString wasFiled(Manifest::Level level);
+
+/// What a container says once its card is done: « créée », « déplacée », « envoyée ».
+///
+/// The tree kept saying « sera créé » under a card whose badge already read « Envoyé » —
+/// seventy-six volumes in the library and a line still promising they would arrive. A state
+/// is what is about to happen or what has happened, never both, and the card knowing which
+/// is no use if the tree under it does not.
+QString wasCreated(Manifest::Level level);
+QString wasMoved(Manifest::Level level);
+QString wasSent(Manifest::Level level);
+/// « échec » — the volume the queue tried to send and could not. Without a word for it, the
+/// node kept saying « à envoyer » at the exact moment somebody looked at it to see what had
+/// gone wrong; the row's own `trouble` says why, but the node still said something untrue.
+QString failedToSend();
+
+/// « sera remplacé » — the volume the library already holds under this path, which the
+/// arriving one does not match. It agrees with its level for the reason the three above it
+/// do.
+///
+/// A commit installs by renaming, and a rename onto an existing path replaces it. The server
+/// names these in `replaces`; before it did, they fell into `toSend` like any other and the
+/// tree said « à envoyer » over a volume about to be overwritten — the one word that had to
+/// be right, because it is the last thing shown before somebody accepts.
+QString willBeReplaced(Manifest::Level level);
+
+/// « série · sera créée » — a node's level and what becomes of it, joined the one way French
+/// joins them. Composed here rather than in `.qml`, for `pill`'s own reason: a `.qml` file
+/// that puts a word beside another is a `.qml` file writing French, and the next one will
+/// put them in the other order.
+///
+/// `state` empty gives the level alone, with no dangling middle dot: before the server has
+/// answered, no node knows what it will become, and « série · » trailing on nothing would
+/// read as broken rather than as not yet known.
+QString levelAnd(Manifest::Level level, const QString &state);
+
+/// « Série · déjà là · 21 tomes · 2,2 Gio » — everything one line of the tree says about
+/// itself, on one line and under one separator.
+///
+/// It was two: the level and the state right-aligned in a column of their own, the count and
+/// the weight under the name. Two columns of small grey text down a twenty-one volume series
+/// read as two unrelated lists, and the right-hand one had no left edge to line up against.
+/// Whatever is empty drops out with its separator — a node before the server has answered
+/// says « Série · 21 tomes », not « Série ·  · 21 tomes ».
+QString nodeLine(Manifest::Level level, const QString &state, const QString &holds);
+
+/// « Assassinat · Tome 1.cbz » — what a volume declares itself to be, beside what it is
+/// called on disk.
+///
+/// A container shows the title its sidecar declares; a volume showed its file name alone, so
+/// a shelf of « Tome 1.cbz » said nothing a folder listing did not. The title first, because
+/// it is what somebody recognises, and the file name kept because it is what they will see
+/// on disk afterwards. The file name alone when the archive declares no title, and when
+/// nothing has opened it yet — the instant tree opens nothing.
+QString fileNamed(const QString &title, const QString &fileName);
+
+/// « à la place de « Assassinat » · 102,2 Mio » — what the library already holds where this
+/// volume would land.
+///
+/// The one sentence that turns « sera remplacé » from a warning into a decision somebody can
+/// take. Measured on a real library: two archives 682 bytes apart, whose whole difference was
+/// a title edited through the API months earlier — and the only way to find that out was to
+/// open both by hand.
+///
+/// `read` false is the server saying it did not open the file, which is not the same as an
+/// archive that declares no title: past a ceiling on one preflight it stops opening them, and
+/// a sentence that quietly dropped the title would read as « it has none ».
+QString insteadOf(const QString &title, qint64 bytes, bool read);
+
+/// « la déclaration de « Assassination Classroom » diffère · résumé, arcs » — the sidecar the
+/// library already holds, and what the two disagree about.
+///
+/// The field names and not the values: a summary is four hundred words and a line of a tree
+/// is one line. And they are what a reader needs, because the question is never « which of
+/// these two strings » but « did I edit this here ».
+QString declarationDiffers(const QString &presentName, const QStringList &differs);
+
+/// What a container says instead of « déjà là » when something under it would be overwritten
+/// — and whether that is still a question or already an answer.
+///
+/// « 1 tome remplaçable » while nobody has ticked it, « 1 tome sera remplacé » once somebody
+/// has. Remplaçable and not « à remplacer »: nothing here has to be replaced, and a line
+/// reading like a task left undone would push somebody into doing it. The two are not the same fact and the line said the first one in both cases, so the
+/// box under it looked like it did nothing: the only thing that changed was three lines
+/// down, folded.
+///
+/// A series every volume of which the library already holds, minus one, used to read
+/// « Série · déjà là » — true of twenty volumes out of twenty-one, and the twenty-first is
+/// the point.
+QString holdsReplacements(int count, int chosen);
+
+/// « 4,1 Gio » — sizes, in binary units correctly named. The only formatter before this
+/// one was a lambda inside `howFar` dividing by 1024² and writing « Mo » — wrong by five
+/// percent, and the import tree would have said « Gio » right beside it.
+QString size(qint64 bytes);
+
+/// « 34 tomes · 4,1 Gio » — what a node holds. Empty when it holds nothing, because a line
+/// reading « 0 tome · 0 o » says nothing a reader needs.
+QString nodeHolds(qint64 volumes, qint64 bytes);
+
+/// « Vérification · 12/68 tomes ». The count is what tells a wait from a freeze: the word
+/// alone, fixed for thirty seconds, has already made the application look crashed for long
+/// enough that the desktop offered to kill it.
+QString checking(qint64 done, qint64 whole);
+
+/// « En attente » — a folder at `Stage::Asking` that is not the one the pool is actually
+/// walking: still queued behind another one (`describeNext` reads a single folder at a
+/// time), or being read without a checksum, where `describe()` never sets the walking token
+/// at all. « Vérification » names a hash in progress, and the spec is explicit that neither
+/// of these is one.
+QString waitingToBeChecked();
+
+/// « Vérifié… » — the folder has been read to the last byte and the server is being told
+/// what is in it.
+///
+/// Named after what just ended rather than after what is running, because the end of the
+/// verification is what a reader is watching for. The ellipsis carries the rest.
+///
+/// Its own word because « En attente » already meant two other things: queued behind another
+/// folder, and announced and waiting for somebody to press « Importer ». Three moments under
+/// one word left a reader with no way to know whether a verification had finished — which is
+/// the one thing they are watching for on a folder of twenty-seven gigabytes.
+QString announcing();
+
+/// « Rien à envoyer » — a folder the library already holds whole, with nothing ticked.
+///
+/// Said rather than left reading « Prêt », which promised a transfer that would move no
+/// byte. A card in this state goes when « Importer » is pressed: it has nothing to do, and
+/// leaving it in a list of things being sent is one more thing to read for nothing.
+QString nothingToSend();
+
+/// « Déposer autre chose » — the way from watching a transfer back to the drop zone.
+///
+/// Its own sentence rather than `chooseLead`'s « ou choisir », which is a fragment written
+/// to sit in front of the two pickers and says nothing standing alone. Worded from the drop
+/// zone it leads to — « Déposez vos fichiers ici » — so the two read as the same place.
+QString dropSomethingElse();
+
+// ——— What a file or a folder could not say about itself ——————————————————————————————
+//
+// Nine sentences that used to sit in `Cbz.cpp` and `Manifest.cpp`, beside the code that
+// produces them. They reach the screen — `Imports::ask` puts a `Cbz` trouble on the card's
+// own line, `Manifest` puts its own under the tree — so they are French an interface shows,
+// and French an interface shows lives here or it lives untested. One of them carried an
+// ordinary space before its « ? » the whole time, and `tools/words_stay_french.py` could not
+// see it: the guard reads `Words.cpp` and nothing else, which is exactly the point of
+// keeping none of this anywhere else.
+
+/// The archive would not open at all — a permission, a vanished file, a device gone.
+QString couldNotBeOpened();
+
+/// It opened, and there is no zip in it. A `.cbz` that is a renamed `.rar` reaches here.
+QString notAnArchive();
+
+/// Bigger than this client reads in one go. Said rather than attempted, because attempting
+/// it is what fills a laptop's memory.
+QString archiveTooBig();
+
+/// A zip whose central directory points past its own end: written by something that stopped
+/// halfway, or truncated in transit.
+QString catalogueMissing();
+
+/// The declaration inside the archive is too large to be one. A sidecar is a few hundred
+/// bytes; anything else is a file that happens to share its name.
+QString sidecarTooBig();
+
+/// Compressed by a method this reader does not implement. Deflate and stored are what a
+/// `.cbz` uses; the rest exists and is not worth carrying.
+QString sidecarCompressedInAnUnknownWay();
+
+/// Deflate said no. The archive is readable, this one member is not.
+QString sidecarCouldNotBeInflated();
+
+/// The walk stopped: a folder deeper than the model goes, which on a real disk means a
+/// symbolic link pointing back at a parent.
+QString folderTooDeep();
+
+/// Asked of something that is not a folder at all.
+QString notAFolder();
+
+/// « Envoi · 412 Mio sur 1,2 Gio » — a stage and how far it has got, joined the one way
+/// French joins them, and the stage alone when there is nothing to measure yet.
+///
+/// Here for `pill`'s own reason. `ImportRow.qml` built it with `stageLabel(…) + " · " +
+/// howFar(…)`, which is a `.qml` file writing French, and nothing tested the separator it
+/// chose.
+QString stageAnd(const QString &stage, const QString &howFar);
+
+/// « · une page manquante » — one concern of an archive, marked as one of a list. The dot
+/// belongs to the sentence, not to the delegate that draws it.
+QString concern(const QString &said);
 
 } // namespace Words

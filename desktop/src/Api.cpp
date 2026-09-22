@@ -129,7 +129,11 @@ private:
         return {};
     }
 
-    const QJsonObject &m_from;
+    /// Held by value, and that is not an oversight. A reference here dangles the moment
+    /// somebody writes `Fields one(value.toObject())` — the temporary dies at the end of
+    /// the declaration and the fields read as absent, which looks exactly like a server
+    /// that left them out. `QJsonObject` is implicitly shared, so the copy is a pointer.
+    const QJsonObject m_from;
     QString m_trouble;
 };
 
@@ -326,6 +330,8 @@ Read<Series> series(const QJsonObject &from)
     one.holding.addedAt = field.maybeBig(u"addedAt"_s);
     one.holding.lastAddedAt = field.maybeBig(u"lastAddedAt"_s);
     one.holding.ownedVolumes = field.maybeWhole(u"ownedVolumes"_s).value_or(0);
+    one.holding.readEntries = field.maybeWhole(u"readEntries"_s).value_or(0);
+    one.holding.partRead = field.maybeReal(u"partRead"_s).value_or(0.0);
     one.holding.missingVolumes = field.reals(u"missingVolumes"_s);
     one.holding.missingChapters = field.reals(u"missingChapters"_s);
 
@@ -530,6 +536,8 @@ Read<ScanStatus> scanStatus(const QJsonObject &from)
         found.counts.chapters = count.whole(u"chapters"_s);
         found.counts.pages = count.whole(u"pages"_s);
         found.counts.reanalysed = count.whole(u"reanalysed"_s);
+        found.counts.progressCarried = count.maybeWhole(u"progressCarried"_s).value_or(0);
+        found.counts.progressLost = count.maybeWhole(u"progressLost"_s).value_or(0);
         if (count.broken())
             return refused<ScanStatus>(QStringLiteral("scan"), count.trouble());
 
@@ -609,6 +617,337 @@ Read<UpNext> upNext(const QJsonObject &from)
     }
 
     return {card, {}};
+}
+
+// ——— L'import ———————————————————————————————————————————————————————————————
+
+namespace {
+
+/// What a file said about itself. Absent everywhere, because the file may say nothing —
+/// and a file that says nothing is an ordinary file from elsewhere, not a broken answer.
+FileReading readingIn(const QJsonObject &from)
+{
+    Fields field(from);
+    FileReading said;
+    said.work = field.maybeText(u"work"_s);
+    said.edition = field.maybeText(u"edition"_s);
+    said.kind = field.maybeText(u"type"_s);
+    said.number = field.maybeReal(u"number"_s);
+    said.title = field.maybeText(u"title"_s);
+    said.chapterCount = field.maybeWhole(u"chapterCount"_s).value_or(0);
+    return said;
+}
+
+Proposal::Confidence confidenceOf(const QString &word)
+{
+    using enum Proposal::Confidence;
+
+    if (word == u"CERTAIN"_s)
+        return Certain;
+    if (word == u"REPLACEMENT"_s)
+        return Replacement;
+    if (word == u"AMBIGUOUS"_s)
+        return Ambiguous;
+    if (word == u"UNKNOWN"_s)
+        return Unknown;
+    // Vocabulary is loose, structure is strict: the item stands and is shown by its
+    // reason. A file that vanished from a list for being described too well would be the
+    // worse answer.
+    return Other;
+}
+
+} // namespace
+
+Read<Proposal> proposal(const QJsonObject &from)
+{
+    Fields field(from);
+    Proposal said;
+
+    said.received = field.text(u"received"_s);
+    said.name = field.text(u"name"_s);
+    said.size = field.maybeBig(u"size"_s).value_or(-1);
+    said.confidence = confidenceOf(field.text(u"confidence"_s));
+    said.reason = field.text(u"reason"_s);
+    if (said.size < 0)
+        return refused<Proposal>(QStringLiteral("proposal"), QStringLiteral("size is missing"));
+    if (!field.has(u"read"_s))
+        return refused<Proposal>(QStringLiteral("proposal"), QStringLiteral("read is missing"));
+    if (field.broken())
+        return refused<Proposal>(QStringLiteral("proposal"), field.trouble());
+
+    said.read = readingIn(field.object(u"read"_s));
+    for (const QJsonValue &value : from.value(u"candidates"_s).toArray()) {
+        Fields one(value.toObject());
+        Candidate candidate;
+        candidate.seriesId = one.text(u"seriesId"_s);
+        candidate.name = one.text(u"name"_s);
+        if (one.broken())
+            return refused<Proposal>(QStringLiteral("proposal"), one.trouble());
+        said.candidates << candidate;
+    }
+    said.replaces = field.maybeText(u"replaces"_s);
+    said.concerns = field.words(u"concerns"_s);
+    return {said, {}};
+}
+
+Read<Reserved> reserved(const QJsonObject &from)
+{
+    Fields field(from);
+    Reserved said;
+
+    said.id = field.text(u"id"_s);
+    if (field.broken())
+        return refused<Reserved>(QStringLiteral("reserved"), field.trouble());
+    if (!field.has(u"proposal"_s)) {
+        return refused<Reserved>(QStringLiteral("reserved"),
+                                 QStringLiteral("proposal is missing"));
+    }
+
+    const Read<Proposal> inside = proposal(field.object(u"proposal"_s));
+    if (!inside.ok())
+        return refused<Reserved>(QStringLiteral("reserved"), inside.trouble);
+    said.proposal = *inside.value;
+    return {said, {}};
+}
+
+Read<Staged> staged(const QJsonObject &from)
+{
+    Fields field(from);
+    Staged said;
+
+    said.id = field.text(u"id"_s);
+    said.name = field.text(u"name"_s);
+    said.size = field.maybeBig(u"size"_s).value_or(-1);
+    said.received = field.maybeBig(u"received"_s).value_or(-1);
+    if (said.size < 0 || said.received < 0) {
+        return refused<Staged>(QStringLiteral("staged"),
+                               QStringLiteral("size and received are both required"));
+    }
+    if (field.broken())
+        return refused<Staged>(QStringLiteral("staged"), field.trouble());
+    return {said, {}};
+}
+
+Read<Waiting> waiting(const QJsonObject &from)
+{
+    Fields field(from);
+    Waiting said;
+
+    said.id = field.text(u"id"_s);
+    said.name = field.text(u"name"_s);
+    said.origin = field.text(u"origin"_s);
+    said.size = field.maybeBig(u"size"_s).value_or(-1);
+    said.lastTouchedAt = field.maybeBig(u"lastTouchedAt"_s).value_or(-1);
+    said.received = field.maybeBig(u"received"_s).value_or(-1);
+    const std::optional<bool> only = field.maybeBool(u"onlyCopy"_s);
+    if (said.size < 0 || said.lastTouchedAt < 0 || said.received < 0 || !only.has_value()) {
+        return refused<Waiting>(QStringLiteral("waiting"),
+                                QStringLiteral("a required field is missing"));
+    }
+    if (field.broken())
+        return refused<Waiting>(QStringLiteral("waiting"), field.trouble());
+    said.onlyCopy = *only;
+    return {said, {}};
+}
+
+Read<Filed> filed(const QJsonObject &from)
+{
+    Fields field(from);
+    Filed said;
+
+    said.entryId = field.text(u"entryId"_s);
+    said.path = field.text(u"path"_s);
+    const std::optional<bool> over = field.maybeBool(u"replacement"_s);
+    if (!over.has_value()) {
+        return refused<Filed>(QStringLiteral("filed"),
+                              QStringLiteral("replacement is missing"));
+    }
+    if (field.broken())
+        return refused<Filed>(QStringLiteral("filed"), field.trouble());
+
+    said.replacement = *over;
+    // Defaulted in the contract, so a server that leaves it out means false.
+    said.renamed = field.maybeBool(u"renamed"_s).value_or(false);
+    said.note = field.maybeText(u"note"_s);
+    return {said, {}};
+}
+
+Read<Collision> collision(const QJsonObject &from)
+{
+    Fields field(from);
+    Collision said;
+
+    said.path = field.text(u"path"_s);
+    said.wouldBecome = field.text(u"wouldBecome"_s);
+    const std::optional<bool> same = field.maybeBool(u"sameVolume"_s);
+    const std::optional<bool> identical = field.maybeBool(u"identical"_s);
+    if (!same.has_value() || !identical.has_value() || !field.has(u"occupies"_s)
+        || !field.has(u"arriving"_s)) {
+        return refused<Collision>(QStringLiteral("collision"),
+                                  QStringLiteral("a required field is missing"));
+    }
+    if (field.broken())
+        return refused<Collision>(QStringLiteral("collision"), field.trouble());
+
+    said.entryId = field.maybeText(u"entryId"_s);
+    said.occupies = readingIn(field.object(u"occupies"_s));
+    said.arriving = readingIn(field.object(u"arriving"_s));
+    said.sameVolume = *same;
+    said.agrees = field.words(u"agrees"_s);
+    said.identical = *identical;
+    return {said, {}};
+}
+
+Read<Opened> opened(const QJsonObject &from)
+{
+    Fields field(from);
+    Opened said;
+
+    said.id = field.text(u"id"_s);
+    said.root = field.text(u"root"_s);
+    said.bytesToSend = field.maybeBig(u"bytesToSend"_s).value_or(-1);
+    if (said.bytesToSend < 0) {
+        return refused<Opened>(QStringLiteral("opened"),
+                               QStringLiteral("bytesToSend is missing"));
+    }
+    if (field.broken())
+        return refused<Opened>(QStringLiteral("opened"), field.trouble());
+
+    for (const QJsonValue &value : from.value(u"creates"_s).toArray()) {
+        const QJsonObject one = value.toObject();
+        Fields made(one);
+        Creation creation;
+        creation.kind = made.text(u"kind"_s);
+        creation.name = made.text(u"name"_s);
+        creation.at = made.text(u"at"_s);
+        if (made.broken())
+            return refused<Opened>(QStringLiteral("opened"), made.trouble());
+        said.creates << creation;
+    }
+    for (const QJsonValue &value : from.value(u"moves"_s).toArray()) {
+        const QJsonObject one = value.toObject();
+        Fields filed(one);
+        Relocation relocation;
+        relocation.workId = filed.text(u"workId"_s);
+        relocation.name = filed.text(u"name"_s);
+        relocation.from = filed.text(u"from"_s);
+        relocation.at = filed.text(u"at"_s);
+        if (filed.broken())
+            return refused<Opened>(QStringLiteral("opened"), filed.trouble());
+        said.moves << relocation;
+    }
+    for (const QJsonValue &value : from.value(u"replaces"_s).toArray()) {
+        const QJsonObject one = value.toObject();
+        Fields held(one);
+        Replacement replacement;
+        replacement.path = held.text(u"path"_s);
+        replacement.size = held.maybeBig(u"size"_s).value_or(0);
+        replacement.presentSize = held.maybeBig(u"presentSize"_s).value_or(0);
+        replacement.presentTitle = one.value(u"presentTitle"_s).toString();
+        if (one.value(u"presentNumber"_s).isDouble())
+            replacement.presentNumber = one.value(u"presentNumber"_s).toDouble();
+        replacement.presentRead = one.value(u"presentRead"_s).toBool();
+        if (held.broken())
+            return refused<Opened>(QStringLiteral("opened"), held.trouble());
+        said.replaces << replacement;
+    }
+    for (const QJsonValue &value : from.value(u"declarations"_s).toArray()) {
+        const QJsonObject one = value.toObject();
+        Fields said_(one);
+        Declaration declaration;
+        declaration.path = said_.text(u"path"_s);
+        declaration.presentName = one.value(u"presentName"_s).toString();
+        declaration.differs = said_.words(u"differs"_s);
+        if (said_.broken())
+            return refused<Opened>(QStringLiteral("opened"), said_.trouble());
+        said.declarations << declaration;
+    }
+    said.toSend = field.words(u"toSend"_s);
+    said.alreadyThere = field.words(u"alreadyThere"_s);
+    return {said, {}};
+}
+
+Read<Received> received(const QJsonObject &from)
+{
+    Fields field(from);
+    Received said;
+
+    said.path = field.text(u"path"_s);
+    said.received = field.maybeBig(u"received"_s).value_or(-1);
+    if (said.received < 0) {
+        return refused<Received>(QStringLiteral("received"),
+                                 QStringLiteral("received is missing"));
+    }
+    if (field.broken())
+        return refused<Received>(QStringLiteral("received"), field.trouble());
+    return {said, {}};
+}
+
+Read<BadOffset> badOffset(const QJsonObject &from)
+{
+    Fields field(from);
+    BadOffset said;
+
+    said.error = field.text(u"error"_s);
+    said.received = field.maybeBig(u"received"_s).value_or(-1);
+    if (said.received < 0) {
+        return refused<BadOffset>(QStringLiteral("badOffset"),
+                                  QStringLiteral("received is missing"));
+    }
+    if (field.broken())
+        return refused<BadOffset>(QStringLiteral("badOffset"), field.trouble());
+    return {said, {}};
+}
+
+Read<Session> session(const QJsonObject &from)
+{
+    Fields field(from);
+    Session said;
+
+    said.id = field.text(u"id"_s);
+    said.root = field.text(u"root"_s);
+    if (!field.has(u"received"_s)) {
+        return refused<Session>(QStringLiteral("session"),
+                                QStringLiteral("received is missing"));
+    }
+    if (field.broken())
+        return refused<Session>(QStringLiteral("session"), field.trouble());
+
+    const QJsonObject held = field.object(u"received"_s);
+    for (auto one = held.constBegin(); one != held.constEnd(); ++one) {
+        // A count that is not a number is not a count. Read as zero it would send a whole
+        // volume again; refused, it says which path the server described badly.
+        if (!one.value().isDouble()) {
+            return refused<Session>(QStringLiteral("session"),
+                                    one.key() + QStringLiteral(" is not a number"));
+        }
+        said.received.insert(one.key(), one.value().toInteger());
+    }
+    said.missing = field.words(u"missing"_s);
+    return {said, {}};
+}
+
+Read<Installed> installed(const QJsonObject &from)
+{
+    Fields field(from);
+    Installed said;
+
+    said.root = field.text(u"root"_s);
+    said.installed = field.whole(u"installed"_s);
+    if (!field.has(u"orphans"_s)) {
+        return refused<Installed>(QStringLiteral("installed"),
+                                  QStringLiteral("orphans is missing"));
+    }
+    if (field.broken())
+        return refused<Installed>(QStringLiteral("installed"), field.trouble());
+
+    said.orphans = field.words(u"orphans"_s);
+    said.corrupt = field.words(u"corrupt"_s);
+    said.pending = field.words(u"pending"_s);
+    // Defaulted in the contract: a server that leaves it out closed the session.
+    said.open = field.maybeBool(u"open"_s).value_or(false);
+    said.moved = field.words(u"moved"_s);
+    return {said, {}};
 }
 
 } // namespace Api
