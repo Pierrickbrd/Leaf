@@ -42,6 +42,11 @@ desktop/coverage/
 /.superpowers/
 /notes/
 
+# La note qui dit d'où viennent les icônes reste à côté d'elles et hors du dépôt, par
+# décision du 21/09/2026. Nommée ici plutôt que laissée au hasard : elle a déjà disparu
+# une fois dans un squash, et une suppression silencieuse est ce que cette liste évite.
+desktop/qml/assets/icons/PROVENANCE.md
+
 # Le graphe de connaissance est dérivé du dépôt et se reconstruit d'une commande :
 # 5 Mo de JSON et de HTML qui décrivent le code plutôt que d'en faire partie. Ignoré
 # ici, avant qu'il existe, pour la même raison que ce qui précède — `git add -A`.

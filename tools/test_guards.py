@@ -1,8 +1,9 @@
-"""The two guards that stand between the client and the contract, tested as functions.
+"""The three guards that stand between the client and the contract, and the client and its
+own French, tested as functions.
 
 They run under ctest as well, as whole programs. That is where they earn their keep and it
-is also why nothing measured them: a subprocess is invisible to coverage, so 91 lines of
-guard read as 91 lines nobody exercises.
+is also why nothing measured them: a subprocess is invisible to coverage, so a guard's lines
+read as lines nobody exercises.
 
     python3 -m unittest discover -s tools -p 'test_*.py'
 """
@@ -16,6 +17,8 @@ import unittest
 
 import bytes_stay_utf8
 import client_knows_the_contract as contract
+import nothing_talks_to_the_console as console
+import words_stay_french
 
 
 def in_a_file(text: str, suffix: str = ".cpp"):
@@ -196,6 +199,210 @@ Read<Page> page(const QJsonObject &from)
         with contextlib.redirect_stdout(said):
             self.assertEqual(contract.main(), 0)
         self.assertIn("The client knows the contract.", said.getvalue())
+
+
+class KeepsFrenchTypography(unittest.TestCase):
+    def against(self, source: str):
+        """`main`, reading a `Words.cpp` written for the occasion."""
+        with tempfile.TemporaryDirectory() as folder:
+            folder = pathlib.Path(folder)
+            (folder / "Words.cpp").write_text(source, encoding="utf-8")
+            was = (words_stay_french.SOURCE, words_stay_french.ROOT)
+            try:
+                words_stay_french.SOURCE = folder / "Words.cpp"
+                words_stay_french.ROOT = folder
+                said = io.StringIO()
+                with contextlib.redirect_stdout(said):
+                    return words_stay_french.main(), said.getvalue()
+            finally:
+                words_stay_french.SOURCE, words_stay_french.ROOT = was
+
+    def test_a_straight_apostrophe_is_refused(self):
+        code, said = self.against('auto a = u"c\'est prêt"_s;\n')
+        self.assertEqual(code, 1)
+        self.assertIn("a straight apostrophe", said)
+
+    def test_an_ordinary_space_before_the_colon_is_refused(self):
+        code, said = self.against('auto a = u"Titre : Sous-titre"_s;\n')
+        self.assertEqual(code, 1)
+        self.assertIn("an ordinary space before : ; ! ?", said)
+
+    def test_the_composition_that_starts_the_literal_on_the_sign_goes_through(self):
+        # `label + Words::Nbsp + u": valeur"_s` is the idiom Words.cpp actually uses: the
+        # non-breaking space lives outside the literal, so the literal itself starts on the
+        # colon and never has a space of its own in front of it to catch.
+        code, said = self.against('auto a = label + Nbsp + u": valeur"_s;\n')
+        self.assertEqual(code, 0, said)
+
+    def test_a_guillemet_with_no_non_breaking_space_is_refused(self):
+        code, said = self.against('auto a = u"« Elfes » trouvé"_s;\n')
+        self.assertEqual(code, 1)
+        self.assertIn("« or » without its non-breaking space", said)
+
+    def test_a_guillemet_with_its_non_breaking_space_goes_through(self):
+        code, said = self.against('auto a = u"« Elfes » trouvé"_s;\n')
+        self.assertEqual(code, 0, said)
+
+    def test_a_fault_in_the_first_fragment_of_a_split_literal_is_refused(self):
+        # A literal spread across several adjacent `u"…"` tokens, with only the last one
+        # carrying `_s`, is one string once the compiler concatenates them in translation
+        # phase 6 — the same shape `noSeriesForThisFile()` and `verifyingMeans()` are built
+        # from. A straight apostrophe sitting in the first fragment is exactly what an
+        # earlier version of this guard, matching only the suffixed token, could not see.
+        code, said = self.against('auto a = u"c\'est "\n          u"prêt"_s;\n')
+        self.assertEqual(code, 1)
+        self.assertIn("a straight apostrophe", said)
+
+    def test_a_well_composed_literal_split_across_tokens_goes_through(self):
+        code, said = self.against('auto a = u"Ceci "\n          u"est prêt."_s;\n')
+        self.assertEqual(code, 0, said)
+
+    def test_a_guillemet_split_across_the_seam_is_read_as_one_literal(self):
+        # A « ending one fragment with its own content starting the next is invisible to a
+        # rule that checks each fragment alone; recombining the run before checking the
+        # rule is what makes the seam itself checkable.
+        code, said = self.against('auto a = u"«"\n          u" Elfes » trouvé"_s;\n')
+        self.assertEqual(code, 0, said)
+        code, said = self.against('auto a = u"«"\n          u"Elfes » trouvé"_s;\n')
+        self.assertEqual(code, 1)
+        self.assertIn("« or » without its non-breaking space", said)
+
+    def test_a_guard_that_recombines_no_literal_says_so_about_itself(self):
+        # The one failure that must never be reported as Words.cpp's. The shape of a literal
+        # in this client has already been rewritten three times (`_L1` → `_ascii` →
+        # `u"…"_s`); the first time, a guard's pattern was not renamed with it and matched
+        # nothing while reporting everything as fine. This is that case, caught before it
+        # can repeat.
+        code, said = self.against('QString empty() { return QString(); }\n')
+        self.assertEqual(code, 2)
+        self.assertIn("this guard is broken, not", said)
+
+    def test_a_raw_token_left_out_of_every_run_says_the_guard_is_broken(self):
+        # The narrower form of the same blind-pattern failure: not every literal missed,
+        # just a fragment of one — an ordinary space before `;` hid exactly this way, in a
+        # fragment with no `_s` of its own, in `noSeriesForThisFile()` and
+        # `verifyingMeans()`, until this check existed to catch a leftover token rather
+        # than silently drop it.
+        code, said = self.against(
+            'auto ok = u"fine"_s;\n'
+            'auto bad = u"c\'est "\n'
+            '           u"cassé"_ascii;\n'
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("this guard is broken, not", said)
+        self.assertIn("joined no literal ending in `_s`", said)
+
+    def test_the_client_as_it_stands_keeps_its_french_typography(self):
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            self.assertEqual(words_stay_french.main(), 0)
+        self.assertIn("keeps its French typography", said.getvalue())
+
+
+class NothingTalksToTheConsole(unittest.TestCase):
+    """The guard that exists because a debugging line reached somebody's terminal."""
+
+    def against(self, files: dict[str, str]):
+        """`main`, reading three blocks written for the occasion."""
+        with tempfile.TemporaryDirectory() as folder:
+            folder = pathlib.Path(folder)
+            # Every block must hold something, or the guard refuses for the right reason
+            # and the case under test never runs.
+            laid = {
+                "desktop/qml/Placeholder.qml": "Item { }\n",
+                "desktop/src/placeholder.cpp": "int placeholder() { return 0; }\n",
+                "server/src/placeholder.rs": "pub fn placeholder() {}\n",
+            }
+            laid.update(files)
+            for name, body in laid.items():
+                at = folder / name
+                at.parent.mkdir(parents=True, exist_ok=True)
+                at.write_text(body, encoding="utf-8")
+
+            was = (console.ROOT, [b.where for b in console.BLOCKS])
+            try:
+                console.ROOT = folder
+                for block in console.BLOCKS:
+                    block.where = folder / block.where.relative_to(was[0])
+                said = io.StringIO()
+                with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
+                    return console.main(), said.getvalue()
+            finally:
+                console.ROOT = was[0]
+                for block, where in zip(console.BLOCKS, was[1]):
+                    block.where = where
+
+    def test_three_quiet_blocks_pass(self):
+        code, said = self.against({})
+        self.assertEqual(code, 0)
+        self.assertIn("none of them talks to the console", said)
+
+    def test_the_line_that_actually_shipped_is_refused(self):
+        code, said = self.against(
+            {"desktop/qml/ImportRow.qml":
+             'Item {\n  onStageChanged: console.warn("SONDE", stage)\n}\n'}
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("ImportRow.qml:2", said)
+
+    def test_every_way_of_reaching_the_console_is_refused(self):
+        for call in ("console.log(1)", "console.debug(1)", "console.trace()",
+                     "console . warn(1)"):
+            with self.subTest(call=call):
+                code, _ = self.against(
+                    {"desktop/qml/A.qml": "Item { Component.onCompleted: %s }\n" % call})
+                self.assertEqual(code, 1, call)
+
+    def test_a_developers_line_in_the_client_is_refused(self):
+        for call in ("qDebug() << x;", "qInfo() << x;"):
+            with self.subTest(call=call):
+                code, _ = self.against({"desktop/src/A.cpp": "void a() { %s }\n" % call})
+                self.assertEqual(code, 1, call)
+
+    def test_the_diagnostics_the_program_means_to_emit_are_left_alone(self):
+        # `qWarning` is how this client says a singleton could not be resolved. A rule that
+        # swept it away would be a rule with exceptions, and an exception is a judgement
+        # somebody has to make every time.
+        code, said = self.against(
+            {"desktop/src/A.cpp": 'void a() { qWarning() << "no singleton"; }\n'})
+        self.assertEqual(code, 0, said)
+
+    def test_a_developers_line_in_the_server_is_refused(self):
+        for call in ("dbg!(x);", "println!(\"{x}\");", "eprintln!(\"{x}\");"):
+            with self.subTest(call=call):
+                code, _ = self.against({"server/src/a.rs": "fn a() { %s }\n" % call})
+                self.assertEqual(code, 1, call)
+
+    def test_the_command_line_says_its_version_and_is_left_alone(self):
+        # `main.rs` has a terminal to write to; nothing else in the server does.
+        code, said = self.against({"server/src/main.rs": 'fn main() { println!("leaf"); }\n'})
+        self.assertEqual(code, 0, said)
+
+    def test_a_guard_that_reads_nothing_says_so_rather_than_passing(self):
+        # The failure this shape exists to prevent, and the one `client_knows_the_contract`
+        # names: a path that stops matching passes in silence and goes on passing.
+        with tempfile.TemporaryDirectory() as folder:
+            folder = pathlib.Path(folder)
+            was = (console.ROOT, [b.where for b in console.BLOCKS])
+            try:
+                console.ROOT = folder
+                for block in console.BLOCKS:
+                    block.where = folder / block.where.relative_to(was[0])
+                said = io.StringIO()
+                with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
+                    code = console.main()
+            finally:
+                console.ROOT = was[0]
+                for block, where in zip(console.BLOCKS, was[1]):
+                    block.where = where
+        self.assertEqual(code, 2)
+        self.assertIn("this guard is broken, not the client", said.getvalue())
+
+    def test_the_three_blocks_as_they_stand_say_nothing(self):
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            self.assertEqual(console.main(), 0)
+        self.assertIn("none of them talks to the console", said.getvalue())
 
 
 if __name__ == "__main__":

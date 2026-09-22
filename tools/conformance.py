@@ -224,6 +224,13 @@ def importing(run):
     print("— import —")
     run.check("drop listing", "/drop", "/drop")
     run.check("waiting intake", "/intake", "/intake")
+    # Reserved, followed, and abandoned. A route nobody walks is a route whose schema
+    # nobody checks, and these three were written together.
+    held = run.check("preflight", "/preflight", "/preflight", "POST",
+                     {"name": "Tome 1.cbz", "size": 4})
+    if held:
+        run.check("staged file", f"/intake/{held['id']}", "/intake/{id}")
+        run.check("abandon staged", f"/intake/{held['id']}", "/intake/{id}", "DELETE")
     run.check("open imports", IMPORT, IMPORT)
     opened = run.check("open import", IMPORT, IMPORT, "POST",
                        {"root": "Essai", "files": [{"path": "Tome 1.cbz", "size": 4}]})
