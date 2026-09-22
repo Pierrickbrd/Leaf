@@ -72,6 +72,8 @@ qt_add_executable(leaf-desktop
     src/Imports.cpp
     src/ImportCaptions.h
     src/ImportCaptions.cpp
+    src/CardCaptions.h
+    src/CardCaptions.cpp
     src/Search.h
     src/Search.cpp
     src/Captions.h
@@ -299,6 +301,7 @@ qt_add_executable(crosses-the-seam
     src/Boot.h src/Boot.cpp
     src/Covers.h src/Covers.cpp
     src/Imports.h src/Imports.cpp src/ImportCaptions.h src/ImportCaptions.cpp
+    src/CardCaptions.h src/CardCaptions.cpp
     src/Cbz.h src/Cbz.cpp src/Manifest.h src/Manifest.cpp
     src/Settings.h src/Settings.cpp
     src/Server.h src/Server.cpp

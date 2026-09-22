@@ -16,6 +16,8 @@
 #include <QUrlQuery>
 #include <QVariantMap>
 
+#include <array>
+
 using namespace Qt::StringLiterals;
 
 namespace {
@@ -31,8 +33,8 @@ constexpr qint64 ChunkBytes = 4 * 1024 * 1024;
 /// already honoured by `Server` for a 429; this is for the cut cable, which nobody times.
 int waitFor(int attempts)
 {
-    static constexpr int Steps[] = {2, 5, 10, 30, 60};
-    const int at = qMin(attempts, int(std::size(Steps)) - 1);
+    static constexpr std::array Steps{2, 5, 10, 30, 60};
+    const std::size_t at = qMin(std::size_t(attempts), Steps.size() - 1);
     return Steps[at];
 }
 
@@ -355,39 +357,41 @@ int Imports::rowCount(const QModelIndex &parent) const
 
 QHash<int, QByteArray> Imports::roleNames() const
 {
+    using enum Role;
     return {
-        {std::to_underlying(Role::Name), "name"},         {std::to_underlying(Role::Stage_), "stage"},
-        {std::to_underlying(Role::Sent), "sent"},         {std::to_underlying(Role::Size), "size"},
-        {std::to_underlying(Role::Reason), "reason"},     {std::to_underlying(Role::Confidence), "confidence"},
-        {std::to_underlying(Role::Candidates), "candidates"}, {std::to_underlying(Role::Concerns), "concerns"},
-        {std::to_underlying(Role::Chosen), "chosen"},     {std::to_underlying(Role::Trouble), "trouble"},
-        {std::to_underlying(Role::RetryIn), "retryIn"},   {std::to_underlying(Role::Folder), "folder"},
-        {std::to_underlying(Role::Creates), "creates"},   {std::to_underlying(Role::Moves), "moves"},
-        {std::to_underlying(Role::Nodes), "nodes"},       {std::to_underlying(Role::Checking), "checking"},
+        {std::to_underlying(Name), "name"},         {std::to_underlying(Stage_), "stage"},
+        {std::to_underlying(Sent), "sent"},         {std::to_underlying(Size), "size"},
+        {std::to_underlying(Reason), "reason"},     {std::to_underlying(Confidence), "confidence"},
+        {std::to_underlying(Candidates), "candidates"}, {std::to_underlying(Concerns), "concerns"},
+        {std::to_underlying(Chosen), "chosen"},     {std::to_underlying(Trouble), "trouble"},
+        {std::to_underlying(RetryIn), "retryIn"},   {std::to_underlying(Folder), "folder"},
+        {std::to_underlying(Creates), "creates"},   {std::to_underlying(Moves), "moves"},
+        {std::to_underlying(Nodes), "nodes"},       {std::to_underlying(Checking), "checking"},
     };
 }
 
 QVariant Imports::data(const QModelIndex &index, int role) const
 {
+    using enum Role;
     if (index.row() < 0 || index.row() >= m_rows.size())
         return {};
     const Row &one = m_rows.at(index.row());
 
     switch (Role(role)) {
-    case Role::Name:
+    case Name:
         return one.name;
-    case Role::Stage_:
+    case Stage_:
         return QVariant::fromValue(one.stage);
-    case Role::Sent:
+    case Sent:
         return one.sent;
-    case Role::Size:
+    case Size:
         return one.size;
-    case Role::Reason:
+    case Reason:
         return one.proposal ? one.proposal->reason : QString();
-    case Role::Confidence:
+    case Confidence:
         return one.proposal ? std::to_underlying(one.proposal->confidence)
                             : std::to_underlying(Api::Proposal::Confidence::Other);
-    case Role::Candidates: {
+    case Candidates: {
         QVariantList all;
         if (one.proposal) {
             for (const Api::Candidate &candidate : one.proposal->candidates) {
@@ -397,72 +401,24 @@ QVariant Imports::data(const QModelIndex &index, int role) const
         }
         return all;
     }
-    case Role::Concerns:
+    case Concerns:
         return one.proposal ? QVariant::fromValue(one.proposal->concerns) : QVariant();
-    case Role::Chosen:
+    case Chosen:
         return one.chosen;
-    case Role::Trouble:
+    case Trouble:
         return one.trouble;
-    case Role::RetryIn:
+    case RetryIn:
         return one.retryIn;
-    case Role::Folder:
+    case Folder:
         return one.folder;
-    case Role::Creates:
+    case Creates:
         return createsOf(index.row());
-    case Role::Moves:
+    case Moves:
         return movesOf(index.row());
-    case Role::Nodes: {
-        Answered answered;
-        for (const Api::Creation &created : one.creates)
-            answered.creates.insert(created.at);
-        for (const Api::Relocation &moved : one.moves)
-            answered.moves.insert(moved.at);
-        answered.toSend = one.toSend;
-        for (const Api::Replacement &landing : one.replaces)
-            answered.replaces.insert(landing.path, landing);
-        answered.replacing = one.replacing;
-        for (const Api::Declaration &said : one.declarations) {
-            const QString at = QFileInfo(said.path).path();
-            answered.declarations.insert(at == u"."_s ? QString() : at, said);
-        }
-        answered.declaring = one.declaring;
-        answered.holdsAlready = containersOf(one.alreadyThere);
-        answered.at = one.at;
-        answered.moving = one.stage == Stage::Sending;
-        answered.done = one.stage == Stage::Filed;
-        answered.failed = one.stage == Stage::Failed;
-        answered.announced = !one.id.isEmpty();
-
-        QVariantList out;
-        flatten(one.node, one.open, 0, out, answered);
-        return out;
-    }
-    case Role::Checking:
-        // A card that would move nothing says so, instead of reading « Prêt » over a
-        // transfer that will not happen.
-        if (one.stage == Stage::Ready && one.nothingToDo())
-            return Words::nothingToSend();
-        // Only while finding is still the folder's own present tense: past `Asking` — to
-        // `Deciding` or `Ready`, `tookFolder`'s own two destinations — the count belongs
-        // to a wait that is already over.
-        if (one.stage != Stage::Asking || !one.folder)
-            return QString();
-        // Read to the last byte, and the server not answered yet. Its own word because
-        // « En attente » meant two other things already, and a reader watching twenty-seven
-        // gigabytes go past has no other way to know the verification is over.
-        if (one.checked)
-            return Words::announcing();
-        // And only for the one folder actually on the pool does the word name a hash in
-        // progress. Everything else reaching here is « en attente », for one of two
-        // reasons that read the same from this side: a shelf of a dozen series queues
-        // every one of them at `Asking` and only walks one at a time, so the eleven still
-        // waiting their turn are not stuck — showing them a count frozen at zero would say
-        // they were; and a walk with `verifying` off never sets `m_walkingToken` at all
-        // (see `describe()`), because a stat-only pass is over before a second progress
-        // report could matter, which is also exactly why the spec is explicit that without
-        // checksums no card passes through « Vérification » — the finding alone suffices.
-        return one.token == m_walkingToken ? Words::checking(one.hashed, one.node.volumes())
-                                            : Words::waitingToBeChecked();
+    case Nodes:
+        return one.nodes();
+    case Checking:
+        return one.checking(m_walkingToken);
     }
     return {};
 }
@@ -499,7 +455,7 @@ int Imports::reading() const
         // A file always counts: each one is a live request of its own. A folder counts once
         // its walk is done and it is only the server's answer being waited on — before that
         // it is either the one `m_describing` already counted, or still queued.
-        if (!one.folder || one.described)
+        if (!one.folder || one.road.described)
             ++total;
     }
     return total;
@@ -562,19 +518,77 @@ bool Imports::Row::nothingToDo() const
         return false;
     // Everything still to send is something to do, unless it would land on a file the
     // library holds and nobody said to.
-    for (const QString &wanted : toSend) {
-        const bool lands = std::ranges::any_of(replaces, [&wanted](const Api::Replacement &one) {
-            return one.path == wanted;
-        });
-        if (!lands || replacing.contains(wanted))
+    for (const QString &wanted : road.toSend) {
+        const bool lands =
+            std::ranges::any_of(road.replaces, [&wanted](const Api::Replacement &one) {
+                return one.path == wanted;
+            });
+        if (!lands || road.replacing.contains(wanted))
             return false;
     }
-    return creates.isEmpty() && filing.isEmpty() && declaring.isEmpty();
+    return road.creates.isEmpty() && road.filing.isEmpty() && road.declaring.isEmpty();
+}
+
+QVariantList Imports::Row::nodes() const
+{
+    Answered answered;
+    for (const Api::Creation &created : road.creates)
+        answered.creates.insert(created.at);
+    for (const Api::Relocation &moved : road.moves)
+        answered.moves.insert(moved.at);
+    answered.toSend = road.toSend;
+    for (const Api::Replacement &landing : road.replaces)
+        answered.replaces.insert(landing.path, landing);
+    answered.replacing = road.replacing;
+    for (const Api::Declaration &said : road.declarations) {
+        const QString at = QFileInfo(said.path).path();
+        answered.declarations.insert(at == u"."_s ? QString() : at, said);
+    }
+    answered.declaring = road.declaring;
+    answered.holdsAlready = containersOf(road.alreadyThere);
+    answered.at = road.at;
+    answered.moving = stage == Stage::Sending;
+    answered.done = stage == Stage::Filed;
+    answered.failed = stage == Stage::Failed;
+    answered.announced = !id.isEmpty();
+
+    QVariantList out;
+    flatten(road.node, road.open, 0, out, answered);
+    return out;
+}
+
+QString Imports::Row::checking(quint64 walking) const
+{
+    // A card that would move nothing says so, instead of reading « Prêt » over a
+    // transfer that will not happen.
+    if (stage == Stage::Ready && nothingToDo())
+        return Words::nothingToSend();
+    // Only while finding is still the folder's own present tense: past `Asking` — to
+    // `Deciding` or `Ready`, `tookFolder`'s own two destinations — the count belongs
+    // to a wait that is already over.
+    if (stage != Stage::Asking || !folder)
+        return QString();
+    // Read to the last byte, and the server not answered yet. Its own word because
+    // « En attente » meant two other things already, and a reader watching twenty-seven
+    // gigabytes go past has no other way to know the verification is over.
+    if (road.checked)
+        return Words::announcing();
+    // And only for the one folder actually on the pool does the word name a hash in
+    // progress. Everything else reaching here is « en attente », for one of two
+    // reasons that read the same from this side: a shelf of a dozen series queues
+    // every one of them at `Asking` and only walks one at a time, so the eleven still
+    // waiting their turn are not stuck — showing them a count frozen at zero would say
+    // they were; and a walk with `verifying` off never sets `m_walkingToken` at all
+    // (see `describe()`), because a stat-only pass is over before a second progress
+    // report could matter, which is also exactly why the spec is explicit that without
+    // checksums no card passes through « Vérification » — the finding alone suffices.
+    return token == walking ? Words::checking(road.hashed, road.node.volumes())
+                            : Words::waitingToBeChecked();
 }
 
 qint64 Imports::Row::sizeOf(const QString &relative) const
 {
-    for (const Manifest::Entry &entry : tree.files) {
+    for (const Manifest::Entry &entry : road.tree.files) {
         if (entry.path == relative)
             return entry.size;
     }
@@ -627,7 +641,7 @@ void Imports::offer(const QStringList &paths)
                 // Posed all the same rather than dropped: hiding the second card would
                 // look like a drop that missed something. Marked described so
                 // `describeNext` never queues it — a refused card has nothing to read.
-                m_rows[row].described = true;
+                m_rows[row].road.described = true;
                 const QString here = QDir(path).relativeFilePath(at);
                 const QString there = QDir(path).relativeFilePath(m_rows.at(collidesWith).path);
                 settle(row, Stage::Failed, Words::sameDestination(here, there));
@@ -640,7 +654,7 @@ void Imports::offer(const QStringList &paths)
             const QString prefix = node.at;
             rebase(node, prefix);
             appendRow(at, node.name, true, node.size);
-            m_rows.last().node = node;
+            m_rows.last().road.node = node;
         }
     }
     describeNext();
@@ -665,7 +679,7 @@ void Imports::describeNext()
     if (m_describing)
         return;
     for (int row = 0; row < m_rows.size(); ++row) {
-        if (m_rows.at(row).folder && !m_rows.at(row).described) {
+        if (m_rows.at(row).folder && !m_rows.at(row).road.described) {
             m_describing = true;
             describe(row);
             return;
@@ -717,7 +731,7 @@ void Imports::describe(int row)
     connect(watcher, &QFutureWatcherBase::progressValueChanged, this,
             [this, token](int done) { hashedSoFar(token, done); });
 
-    const qint64 total = m_rows.at(row).node.volumes();
+    const qint64 total = m_rows.at(row).road.node.volumes();
     watcher->setFuture(QtConcurrent::run(
         [path, total](QPromise<Manifest::Folder> &promise) {
             promise.setProgressRange(0, int(total));
@@ -735,7 +749,7 @@ void Imports::hashedSoFar(quint64 token, qint64 done)
     const int at = rowOfToken(token);
     if (at < 0)
         return;
-    m_rows[at].hashed = done;
+    m_rows[at].road.hashed = done;
     // Only the one role, not `announce()`'s full `dataChanged`: that would invalidate
     // every role the card reads, and `Role::Nodes` rebuilds the whole flattened tree from
     // scratch — turning the count that was meant to prove the wait is alive into rebuilding
@@ -764,12 +778,12 @@ void Imports::described(quint64 token, const Manifest::Folder &tree)
     }
     // Whatever the walk found, it is over: from here the card is waiting on the server and
     // not on the disk, and until this flag existed nothing on screen said so.
-    m_rows[at].checked = true;
-    m_rows[at].described = true;
+    m_rows[at].road.checked = true;
+    m_rows[at].road.described = true;
     if (!tree.read()) {
         settle(at, Stage::Failed, tree.trouble);
     } else {
-        m_rows[at].tree = tree;
+        m_rows[at].road.tree = tree;
         m_rows[at].size = tree.bytes();
         announceFolder(at, tree);
     }
@@ -826,23 +840,23 @@ void Imports::tookFolder(const QString &path, const Server::Answer &answer)
     }
 
     m_rows[row].id = read.value->id;
-    m_rows[row].toSend = read.value->toSend;
-    m_rows[row].replaces = read.value->replaces;
+    m_rows[row].road.toSend = read.value->toSend;
+    m_rows[row].road.replaces = read.value->replaces;
     // Cleared with the announcement for `filing`'s own reason: a re-announced folder may
     // answer differently, and a tick against a volume it no longer names would overwrite
     // something for a reason nobody could see.
-    m_rows[row].replacing.clear();
-    m_rows[row].declarations = read.value->declarations;
-    m_rows[row].declaring.clear();
-    m_rows[row].alreadyThere = read.value->alreadyThere;
-    m_rows[row].creates = read.value->creates;
-    m_rows[row].moves = read.value->moves;
+    m_rows[row].road.replacing.clear();
+    m_rows[row].road.declarations = read.value->declarations;
+    m_rows[row].road.declaring.clear();
+    m_rows[row].road.alreadyThere = read.value->alreadyThere;
+    m_rows[row].road.creates = read.value->creates;
+    m_rows[row].road.moves = read.value->moves;
     // Cleared with the announcement, never carried across one: a re-announced folder may
     // answer differently, and a tick against a work it no longer names would move it for
     // no reason a reader could see.
-    m_rows[row].filing.clear();
-    m_rows[row].at = 0;
-    m_rows[row].sentInFile = 0;
+    m_rows[row].road.filing.clear();
+    m_rows[row].road.at = 0;
+    m_rows[row].road.sentInFile = 0;
     // What is already there costs nothing and is not sent again, so the bar measures what
     // will actually travel rather than what the folder weighs.
     m_rows[row].size = read.value->bytesToSend;
@@ -859,12 +873,12 @@ QVariantList Imports::movesOf(int row) const
     QVariantList all;
     if (row < 0 || row >= m_rows.size())
         return all;
-    for (const Api::Relocation &one : m_rows.at(row).moves) {
+    for (const Api::Relocation &one : m_rows.at(row).road.moves) {
         all << QVariantMap{{u"workId"_s, one.workId},
                            {u"name"_s, one.name},
                            {u"from"_s, one.from},
                            {u"at"_s, one.at},
-                           {u"filing"_s, m_rows.at(row).filing.contains(one.workId)}};
+                           {u"filing"_s, m_rows.at(row).road.filing.contains(one.workId)}};
     }
     return all;
 }
@@ -880,9 +894,9 @@ void Imports::setFiling(int row, const QString &workId, bool filing)
         return;
     }
     if (filing)
-        m_rows[row].filing.insert(workId);
+        m_rows[row].road.filing.insert(workId);
     else
-        m_rows[row].filing.remove(workId);
+        m_rows[row].road.filing.remove(workId);
     announce(row);
 }
 
@@ -890,7 +904,7 @@ bool Imports::isFiling(int row, const QString &workId) const
 {
     if (row < 0 || row >= m_rows.size())
         return false;
-    return m_rows.at(row).filing.contains(workId);
+    return m_rows.at(row).road.filing.contains(workId);
 }
 
 void Imports::setReplacing(int row, const QString &path, bool replacing)
@@ -904,9 +918,9 @@ void Imports::setReplacing(int row, const QString &path, bool replacing)
         return;
     }
     if (replacing)
-        m_rows[row].replacing.insert(path);
+        m_rows[row].road.replacing.insert(path);
     else
-        m_rows[row].replacing.remove(path);
+        m_rows[row].road.replacing.remove(path);
     announce(row);
 }
 
@@ -914,7 +928,7 @@ bool Imports::isReplacing(int row, const QString &path) const
 {
     if (row < 0 || row >= m_rows.size())
         return false;
-    return m_rows.at(row).replacing.contains(path);
+    return m_rows.at(row).road.replacing.contains(path);
 }
 
 void Imports::setDeclaring(int row, const QString &path, bool declaring)
@@ -926,9 +940,9 @@ void Imports::setDeclaring(int row, const QString &path, bool declaring)
         return;
     }
     if (declaring)
-        m_rows[row].declaring.insert(path);
+        m_rows[row].road.declaring.insert(path);
     else
-        m_rows[row].declaring.remove(path);
+        m_rows[row].road.declaring.remove(path);
     announce(row);
 }
 
@@ -936,7 +950,7 @@ bool Imports::isDeclaring(int row, const QString &path) const
 {
     if (row < 0 || row >= m_rows.size())
         return false;
-    return m_rows.at(row).declaring.contains(path);
+    return m_rows.at(row).road.declaring.contains(path);
 }
 
 QVariantList Imports::createsOf(int row) const
@@ -944,7 +958,7 @@ QVariantList Imports::createsOf(int row) const
     QVariantList all;
     if (row < 0 || row >= m_rows.size())
         return all;
-    for (const Api::Creation &one : m_rows.at(row).creates) {
+    for (const Api::Creation &one : m_rows.at(row).road.creates) {
         all << QVariantMap{{u"kind"_s, one.kind}, {u"name"_s, one.name},
                            {u"at"_s, one.at}};
     }
@@ -959,19 +973,14 @@ void Imports::setVerifying(bool verifying)
     emit changed();
 }
 
-bool Imports::isFolder(int row) const
-{
-    return row >= 0 && row < m_rows.size() && m_rows.at(row).folder;
-}
-
 void Imports::toggle(int row, const QString &at)
 {
     if (row < 0 || row >= m_rows.size())
         return;
-    if (m_rows.at(row).open.contains(at))
-        m_rows[row].open.remove(at);
+    if (m_rows.at(row).road.open.contains(at))
+        m_rows[row].road.open.remove(at);
     else
-        m_rows[row].open.insert(at);
+        m_rows[row].road.open.insert(at);
     announce(row);
 }
 
@@ -998,9 +1007,10 @@ int Imports::offerUrls(const QList<QUrl> &urls)
 
 void Imports::giveUpPreparing()
 {
+    using enum Stage;
     for (int row = int(m_rows.size()) - 1; row >= 0; --row) {
         if (const Stage stage = m_rows.at(row).stage;
-            stage == Stage::Asking || stage == Stage::Deciding || stage == Stage::Ready) {
+            stage == Asking || stage == Deciding || stage == Ready) {
             abandon(row);
         }
     }
@@ -1163,35 +1173,35 @@ void Imports::sendMoreOfFolder(int row)
         return;
     const Row &one = m_rows.at(row);
 
-    if (one.at >= one.toSend.size()) {
+    if (one.road.at >= one.road.toSend.size()) {
         commitFolder(row);
         return;
     }
-    const QString relative = one.toSend.at(one.at);
+    const QString relative = one.road.toSend.at(one.road.at);
     const qint64 whole = one.sizeOf(relative);
 
     QFile file(one.path + u'/' + relative);
-    if (!file.open(QIODevice::ReadOnly) || !file.seek(one.sentInFile)) {
+    if (!file.open(QIODevice::ReadOnly) || !file.seek(one.road.sentInFile)) {
         settle(row, Stage::Failed, Words::couldNotBeRead(relative));
         pump();
         return;
     }
-    const QByteArray chunk = file.read(qMin(ChunkBytes, whole - one.sentInFile));
+    const QByteArray chunk = file.read(qMin(ChunkBytes, whole - one.road.sentInFile));
     if (chunk.isEmpty()) {
         // Nothing left of this one. On to the next, without a request that would carry no
         // bytes and no range.
-        m_rows[row].at += 1;
-        m_rows[row].sentInFile = 0;
+        m_rows[row].road.at += 1;
+        m_rows[row].road.sentInFile = 0;
         sendMoreOfFolder(row);
         return;
     }
 
     const QString path = one.path;
-    const qint64 from = one.sentInFile;
+    const qint64 from = one.road.sentInFile;
     QUrlQuery query;
     query.addQueryItem(u"path"_s, relative);
     m_server->put(u"/import/"_s + one.id + u"/file"_s, query, chunk, from, whole, this,
-                  [this, path, chunk, whole](const Server::Answer &answer) {
+                  [this, path, went = chunk.size(), whole](const Server::Answer &answer) {
                       const int at = rowOf(path);
                       if (at < 0 || m_rows.at(at).stage != Stage::Sending)
                           return;
@@ -1206,30 +1216,33 @@ void Imports::sendMoreOfFolder(int row)
                           retryLater(at);
                           return;
                       }
-                      m_rows[at].attempts = 0;
-                      m_rows[at].sent += chunk.size();
-                      m_rows[at].sentInFile += chunk.size();
-                      // Only the roles this chunk actually changed, not `announce()`'s full
-                      // `dataChanged` — the same fix `2614544` made for the hash tick, left
-                      // on this path: a 7.9 GiB folder is about two thousand chunks, and an
-                      // unscoped signal here invalidated `Role::Nodes` on every one of them,
-                      // rebuilding the whole flattened tree — `node.volumes()` walked afresh
-                      // per node — and handing the `Repeater` a new `QVariantList` that
-                      // destroyed and recreated every `ImportNode`, every chevron `Canvas`,
-                      // every level `Image`, once per chunk rather than once per volume.
-                      QList roles{std::to_underlying(Role::Sent)};
-                      if (m_rows.at(at).sentInFile >= whole) {
-                          m_rows[at].at += 1;
-                          m_rows[at].sentInFile = 0;
-                          // The tree's own state moves here, not on every chunk:
-                          // `stateOfVolume` reads `Row::at` to say which node is « envoi »
-                          // rather than « à envoyer » or « rangé », and that only changes
-                          // once a whole file is done.
-                          roles.append(std::to_underlying(Role::Nodes));
-                      }
-                      emit dataChanged(index(at), index(at), roles);
+                      chunkLanded(at, went, whole);
                       sendMoreOfFolder(at);
                   });
+}
+
+void Imports::chunkLanded(int row, qint64 went, qint64 whole)
+{
+    m_rows[row].attempts = 0;
+    m_rows[row].sent += went;
+    m_rows[row].road.sentInFile += went;
+    // Only the roles this chunk actually changed, not `announce()`'s full `dataChanged` —
+    // the same fix `2614544` made for the hash tick, left on this path: a 7.9 GiB folder is
+    // about two thousand chunks, and an unscoped signal here invalidated `Role::Nodes` on
+    // every one of them, rebuilding the whole flattened tree — `node.volumes()` walked
+    // afresh per node — and handing the `Repeater` a new `QVariantList` that destroyed and
+    // recreated every `ImportNode`, every chevron `Canvas`, every level `Image`, once per
+    // chunk rather than once per volume.
+    QList roles{std::to_underlying(Role::Sent)};
+    if (m_rows.at(row).road.sentInFile >= whole) {
+        m_rows[row].road.at += 1;
+        m_rows[row].road.sentInFile = 0;
+        // The tree's own state moves here, not on every chunk: `stateOfVolume` reads
+        // `Road::at` to say which node is « envoi » rather than « à envoyer » or « rangé »,
+        // and that only changes once a whole file is done.
+        roles.append(std::to_underlying(Role::Nodes));
+    }
+    emit dataChanged(index(row), index(row), roles);
 }
 
 void Imports::resumeFrom(int row)
@@ -1247,10 +1260,10 @@ void Imports::resumeFrom(int row)
                           retryLater(at);
                           return;
                       }
-                      const Row &one = m_rows.at(at);
-                      if (one.at < one.toSend.size()) {
-                          m_rows[at].sentInFile =
-                              read.value->received.value(one.toSend.at(one.at), 0);
+                      if (const Row &one = m_rows.at(at);
+                          one.road.at < one.road.toSend.size()) {
+                          m_rows[at].road.sentInFile =
+                              read.value->received.value(one.road.toSend.at(one.road.at), 0);
                       }
                       announce(at);
                       sendMoreOfFolder(at);
@@ -1269,19 +1282,19 @@ void Imports::commitFolder(int row)
     // filed under the one that is being installed, and until that install runs there is no
     // "here" to file anything under.
     QJsonArray filing;
-    for (const Api::Relocation &one : m_rows.at(row).moves) {
-        if (m_rows.at(row).filing.contains(one.workId))
+    for (const Api::Relocation &one : m_rows.at(row).road.moves) {
+        if (m_rows.at(row).road.filing.contains(one.workId))
             filing << one.workId;
     }
     // And what may land on something already there. Only what was ticked: the server
     // installs over nothing it was not told to, and a path left out comes back in `pending`
     // rather than being quietly skipped.
     QJsonArray replacing;
-    for (const QString &path : m_rows.at(row).replacing)
-        replacing << path;
+    for (const QString &landing : m_rows.at(row).road.replacing)
+        replacing << landing;
     QJsonArray declaring;
-    for (const QString &path : m_rows.at(row).declaring)
-        declaring << path;
+    for (const QString &said : m_rows.at(row).road.declaring)
+        declaring << said;
     const QByteArray body =
         QJsonDocument(QJsonObject{{u"move"_s, filing},
                         {u"replace"_s, replacing},
@@ -1289,30 +1302,32 @@ void Imports::commitFolder(int row)
             .toJson(QJsonDocument::Compact);
     m_server->post(u"/import/"_s + m_rows.at(row).id + u"/commit"_s, body, this,
                    [this, path](const Server::Answer &answer) {
-                       const int at = rowOf(path);
-                       if (at < 0)
-                           return;
-                       if (!answer.went()) {
-                           settle(at, Stage::Failed, answer.trouble);
-                           pump();
-                           return;
-                       }
-                       const Api::Read<Api::Installed> read =
-                           Api::installed(answer.body.object());
-                       if (!read.ok()) {
-                           settle(at, Stage::Failed, read.trouble);
-                           pump();
-                           return;
-                       }
-                       // A commit that could not install everything is not a failure and
-                       // does not lose the session: what is still coming is said out loud,
-                       // and the row keeps the id it would be sent against.
-                       settle(at, Stage::Filed, Words::whatLanded(read.value->installed,
-                                                 int(read.value->pending.size()),
-                                                 int(read.value->corrupt.size()),
-                                                 int(read.value->orphans.size())));
-                       pump();
+                       committed(rowOf(path), answer);
                    });
+}
+
+void Imports::committed(int row, const Server::Answer &answer)
+{
+    if (row < 0 || row >= m_rows.size())
+        return;
+    if (!answer.went()) {
+        settle(row, Stage::Failed, answer.trouble);
+        pump();
+        return;
+    }
+    const Api::Read<Api::Installed> read = Api::installed(answer.body.object());
+    if (!read.ok()) {
+        settle(row, Stage::Failed, read.trouble);
+        pump();
+        return;
+    }
+    // A commit that could not install everything is not a failure and does not lose the
+    // session: what is still coming is said out loud, and the row keeps the id it would be
+    // sent against.
+    settle(row, Stage::Filed,
+           Words::whatLanded(read.value->installed, int(read.value->pending.size()),
+                             int(read.value->corrupt.size()), int(read.value->orphans.size())));
+    pump();
 }
 
 void Imports::confirm(int row)
@@ -1342,6 +1357,7 @@ void Imports::confirm(int row)
 
 void Imports::retryLater(int row)
 {
+    using enum Stage;
     if (row < 0 || row >= m_rows.size())
         return;
     // The key lost its right to import, or was refused: that is not this file's fault and
@@ -1349,8 +1365,8 @@ void Imports::retryLater(int row)
     if (m_server && m_server->stopped()) {
         m_trouble = m_server->whyStopped();
         for (int at = 0; at < m_rows.size(); ++at) {
-            if (m_rows.at(at).stage == Stage::Sending || m_rows.at(at).stage == Stage::Ready)
-                settle(at, Stage::Failed);
+            if (m_rows.at(at).stage == Sending || m_rows.at(at).stage == Ready)
+                settle(at, Failed);
         }
         emit changed();
         return;
@@ -1358,7 +1374,7 @@ void Imports::retryLater(int row)
 
     ++m_rows[row].attempts;
     m_rows[row].retryIn = waitFor(m_rows.at(row).attempts);
-    m_rows[row].stage = Stage::Paused;
+    m_rows[row].stage = Paused;
     announce(row);
     if (!m_retry.isActive())
         m_retry.start();
@@ -1369,20 +1385,22 @@ void Imports::retryLater(int row)
 
 void Imports::pause(int row)
 {
+    using enum Stage;
     if (row < 0 || row >= m_rows.size())
         return;
     if (const Stage stage = m_rows.at(row).stage;
-        stage != Stage::Sending && stage != Stage::Ready) {
+        stage != Sending && stage != Ready) {
         return;
     }
 
-    settle(row, Stage::Paused);
+    settle(row, Paused);
     pump();
 }
 
 void Imports::resume(int row)
 {
-    if (row < 0 || row >= m_rows.size() || m_rows.at(row).stage != Stage::Paused)
+    using enum Stage;
+    if (row < 0 || row >= m_rows.size() || m_rows.at(row).stage != Paused)
         return;
 
     m_rows[row].retryIn = 0;
@@ -1391,8 +1409,8 @@ void Imports::resume(int row)
     // waits". A transfer interrupted this way loses nothing: the server keeps what
     // arrived, and the next attempt starts past it.
     if (const int held = holding(); held >= 0)
-        settle(held, Stage::Paused);
-    settle(row, Stage::Ready);
+        settle(held, Paused);
+    settle(row, Ready);
     pump();
 }
 

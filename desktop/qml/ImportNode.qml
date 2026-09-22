@@ -192,7 +192,7 @@ Item {
             objectName: line.objectName + "-says"
             width: parent.width
             visible: text.length > 0
-            text: ImportCaptions.nodeLine(line.node.level,
+            text: CardCaptions.nodeLine(line.node.level,
                                           line.node.state === undefined ? "" : line.node.state,
                                           line.node.holds === undefined ? "" : line.node.holds)
             color: line.node.tone === line.attention ? Theme.alert

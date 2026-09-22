@@ -27,13 +27,13 @@ Item {
     height: implicitHeight
 
     Accessible.role: Accessible.Graphic
-    Accessible.name: ImportCaptions.levelLabel(mark.level)
+    Accessible.name: CardCaptions.levelLabel(mark.level)
 
     Image {
         id: glyph
 
         anchors.fill: parent
-        source: "assets/icons/" + ImportCaptions.levelIcon(mark.level) + ".svg"
+        source: "assets/icons/" + CardCaptions.levelIcon(mark.level) + ".svg"
         sourceSize.width: mark.size * 2
         sourceSize.height: mark.size * 2
         fillMode: Image.PreserveAspectFit

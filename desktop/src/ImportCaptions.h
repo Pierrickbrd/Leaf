@@ -2,6 +2,12 @@
 
 // What the import dialog says, as opposed to what it is doing to a file.
 //
+// The dialog, and only the dialog: what one card of the queue and one line of its tree say
+// about themselves is `CardCaptions`, split off when this class in its turn reached
+// forty-one methods — the very defect the paragraph below describes, repeated one floor
+// down. Everything left here is a constant read once when the screen is built, plus the one
+// count that moves; everything there is an answer about one thing being imported.
+//
 // These twenty-eight methods used to hang off `Imports` itself, beside the transfer queue,
 // under a block of `Q_PROPERTY` that only ever called `Words`. Measured before this split:
 // `Imports.h` declared a hundred and five members and `Imports.cpp` ran to nearly thirteen
@@ -42,7 +48,6 @@ class ImportCaptions final : public QObject
     Q_PROPERTY(QString dropHowLabel READ dropHowLabel CONSTANT)
     Q_PROPERTY(QString cancelLabel READ cancelLabel CONSTANT)
     Q_PROPERTY(QString backLabel READ backLabel CONSTANT)
-    Q_PROPERTY(QString nextLabel READ nextLabel CONSTANT)
     Q_PROPERTY(QString startLabel READ startLabel CONSTANT)
     Q_PROPERTY(QString pauseLabel READ pauseLabel CONSTANT)
     Q_PROPERTY(QString resumeLabel READ resumeLabel CONSTANT)
@@ -71,7 +76,6 @@ public:
     QString dropHowLabel() const;
     QString cancelLabel() const;
     QString backLabel() const;
-    QString nextLabel() const;
     QString startLabel() const;
     QString pauseLabel() const;
     QString resumeLabel() const;
@@ -87,36 +91,6 @@ public:
     QString chooseFolderLabel() const;
     QString chooseFolderTitle() const;
     QString waitingLabel() const;
-
-    /// One word per stage, and how far one file has got. Invokable rather than a property
-    /// because a row asks them about itself.
-    Q_INVOKABLE QString stageLabel(int stage) const;
-    Q_INVOKABLE QString howFar(qint64 sent, qint64 whole) const;
-    /// The stage and how far it has got, joined here and never in a `.qml` file.
-    Q_INVOKABLE QString stageAnd(int stage, qint64 sent, qint64 whole) const;
-    /// Everything one line of the tree says about itself, under one separator.
-    Q_INVOKABLE QString nodeLine(int level, const QString &state, const QString &holds) const;
-    /// One concern of an archive, with the mark that makes it one of a list.
-    Q_INVOKABLE QString concern(const QString &said) const;
-    Q_INVOKABLE QString tryingAgainIn(int seconds) const;
-
-    /// The word for a level of the tree, and the name of the icon that marks it — both from
-    /// `Words`, so `LevelMark` composes the path and nothing French leaves it.
-    Q_INVOKABLE QString levelLabel(int level) const;
-    Q_INVOKABLE QString levelIcon(int level) const;
-
-    /// « série · sera créée » — the level and what becomes of the node, joined once here
-    /// rather than in a `.qml` file putting two French words beside each other.
-    Q_INVOKABLE QString levelAnd(int level, const QString &state) const;
-
-    /// « créera la série « Elfes » ». Said here rather than in the QML for the reason
-    /// `Words.h` gives: the elision in front of a vowel is not a rule QML could apply.
-    Q_INVOKABLE QString willCreateLabel(const QString &kind, const QString &name) const;
-
-    /// « « Elfes » est déjà dans « Mangas » — le ranger ici l'y déplacera ». `from` is the
-    /// whole path the server sent; only the folder it sits in is shown, because a reader
-    /// recognises « Mangas » and reads past `/srv/leaf/library/Mangas`.
-    Q_INVOKABLE QString alreadyElsewhereLabel(const QString &name, const QString &from) const;
 
 signals:
     void changed();
