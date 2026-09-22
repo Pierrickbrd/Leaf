@@ -18,6 +18,7 @@
 #include "Shelf.h"
 #include "Theme.h"
 #include "Widths.h"
+#include "Words.h"
 
 #include <QAccessible>
 #include <QBuffer>
@@ -2509,6 +2510,19 @@ private slots:
         // like.
         QCOMPARE(cardCaptions->willCreateLabel(u"UNIVERSE"_s, u"Terres d’Arran"_s),
                  u"créera l’univers « Terres d’Arran »"_s);
+
+        // The path the server sent, cut down to the folder a reader recognises. It is the
+        // one caption that does work of its own rather than handing `Words` its arguments,
+        // and the cutting is the point: a card already crowded with words gains nothing
+        // from « /srv/leaf/library/Mangas » where « Mangas » says it.
+        QCOMPARE(cardCaptions->alreadyElsewhereLabel(u"Elfes"_s,
+                                                     u"/srv/leaf/library/Mangas/Elfes"_s),
+                 Words::alreadyElsewhere(u"Elfes"_s, u"Mangas"_s));
+        // And the two a row asks about its own numbers, proved to reach `Words` at all:
+        // they are what the stage badge and the concern list under a card are made of.
+        QCOMPARE(cardCaptions->tryingAgainIn(8), Words::tryingAgainIn(8));
+        QCOMPARE(cardCaptions->concern(u"page manquante"_s),
+                 Words::concern(u"page manquante"_s));
 
         QQuickItem *accept = itemNamed(rows, u"import-row-Koro-accept"_s);
         QVERIFY(accept);

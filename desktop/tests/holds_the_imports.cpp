@@ -90,6 +90,33 @@ private:
         return at;
     }
 
+
+    /// A universe that declares itself, holding two series that declare themselves too.
+    ///
+    /// The one shape the flat folders above never make: a card with containers under it,
+    /// which is what every recursion in this file — the rebase, the flatten, the count of
+    /// what would be landed on — exists for.
+    QString aUniverse()
+    {
+        const QString at = m_folder.filePath(u"Terres"_s);
+        [&] { QVERIFY(QDir().mkpath(at)); }();
+        QFile declaration(at + u"/universe.json"_s);
+        [&] { QVERIFY(declaration.open(QIODevice::WriteOnly)); }();
+        declaration.write(R"({"leaf":1,"title":"Terres d’Arran"})");
+        declaration.close();
+        for (const QString &series : {u"Elfes"_s, u"Mages"_s}) {
+            [&] { QVERIFY(QDir().mkpath(at + u'/' + series)); }();
+            QFile said(at + u'/' + series + u"/work.json"_s);
+            [&] { QVERIFY(said.open(QIODevice::WriteOnly)); }();
+            said.write(R"({"leaf":1,"title":")" + series.toUtf8() + R"("})");
+            said.close();
+            QFile volume(at + u'/' + series + u"/Tome 1.cbz"_s);
+            [&] { QVERIFY(volume.open(QIODevice::WriteOnly)); }();
+            volume.write(QByteArray(9, 'x'));
+        }
+        return at;
+    }
+
     int stageOf(int row) const
     {
         return m_imports->data(m_imports->index(row), int(Imports::Role::Stage_)).toInt();
@@ -1403,6 +1430,338 @@ private slots:
             m_imports->data(m_imports->index(0, 0), int(Imports::Role::Nodes)).toList();
         QCOMPARE(nodes.constFirst().toMap().value(u"state"_s).toString(),
                  Words::willBeCreated(Manifest::Level::Work));
+    }
+
+    /// The names every `.qml` file binds to, and the roles a card actually reads back.
+    ///
+    /// `roleNames()` is the whole contract between this model and the screen, and it is a
+    /// contract nothing enforces: a role added to the enum and forgotten here, or renamed
+    /// here and not in the delegate, is a binding that evaluates to `undefined` — no
+    /// warning, no failure, a card with a blank where the word was. The same silence
+    /// `client_knows_the_contract.py` exists to break one layer up, one layer down.
+    void the_model_answers_to_the_names_the_screen_binds_to()
+    {
+        const QHash<int, QByteArray> named = m_imports->roleNames();
+        const QList<QByteArray> expected{"name",     "stage",      "sent",     "size",
+                                         "reason",   "confidence", "candidates", "concerns",
+                                         "chosen",   "trouble",    "retryIn",  "folder",
+                                         "creates",  "moves",      "nodes",    "checking"};
+        QCOMPARE(named.size(), expected.size());
+        for (const QByteArray &one : expected) {
+            QVERIFY2(named.key(one, -1) != -1,
+                     QByteArray("no role answers to " + one).constData());
+        }
+
+        m_pretend->answerFor = [](const QByteArray &) {
+            return aReply(200,
+                          R"({"id":"imp_roles","root":"Koro","creates":)"
+                          R"([{"kind":"WORK","name":"Koro Quest","at":""}],)"
+                          R"("toSend":["Tome 1.cbz"],"alreadyThere":[],"bytesToSend":9,)"
+                          R"("moves":[{"workId":"w-1","name":"Koro Quest","from":"M/Koro",)"
+                          R"("at":""}]})");
+        };
+        m_imports->offer({aFolder()});
+        QTRY_COMPARE(stageOf(0), int(Imports::Stage::Deciding));
+
+        // Each one read the way a delegate reads it — by the name, through the model — and
+        // not by calling the method behind it. `creates` and `moves` are the two that had a
+        // `Q_INVOKABLE` of their own standing in for them in every other test here, so the
+        // case that answers the role was the one thing nothing went through.
+        const QModelIndex card = m_imports->index(0, 0);
+        const QList<QByteArray> drawn{"name", "stage", "size", "folder",
+                                      "creates", "moves", "nodes"};
+        for (const QByteArray &one : drawn) {
+            QVERIFY2(m_imports->data(card, named.key(one)).isValid(), one.constData());
+        }
+        QCOMPARE(m_imports->data(card, named.key("creates")).toList().size(), 1);
+        QCOMPARE(m_imports->data(card, named.key("moves")).toList().size(), 1);
+        QVERIFY(m_imports->data(card, named.key("folder")).toBool());
+    }
+
+    /// Every answer a screen can ask for, about a row that is not there.
+    ///
+    /// A delegate outlives the row it draws. Abandoning a card while a click is on its way
+    /// hands this model an index one past the end, and nothing in QML notices — the row is
+    /// gone from the list and the handler still carries the number it had. Each of these
+    /// guards is the difference between that click doing nothing and it reading past the
+    /// end of `m_rows`.
+    void a_row_that_is_not_there_is_answered_rather_than_reached_into()
+    {
+        for (const int row : {-1, 0, 7}) {
+            m_imports->decide(row, u"ed-1"_s);
+            m_imports->accept(row);
+            m_imports->toggle(row, QString());
+            m_imports->pause(row);
+            m_imports->resume(row);
+            m_imports->abandon(row);
+            m_imports->setFiling(row, u"w-1"_s, true);
+            m_imports->setReplacing(row, u"Tome 1.cbz"_s, true);
+            m_imports->setDeclaring(row, u"work.json"_s, true);
+            QVERIFY(!m_imports->isFiling(row, u"w-1"_s));
+            QVERIFY(!m_imports->isReplacing(row, u"Tome 1.cbz"_s));
+            QVERIFY(!m_imports->isDeclaring(row, u"work.json"_s));
+            QVERIFY(m_imports->createsOf(row).isEmpty());
+            QVERIFY(m_imports->movesOf(row).isEmpty());
+            QVERIFY(!m_imports->data(m_imports->index(row, 0), int(Imports::Role::Name))
+                         .isValid());
+        }
+        QCOMPARE(m_imports->count(), 0);
+    }
+
+    /// A transfer that fails waits, says for how long, and comes back on its own.
+    ///
+    /// Not the same thing as a refusal: a 500 or a cut cable is nobody's decision, and the
+    /// file has nothing wrong with it. The seconds are shown because a queue that retries
+    /// in silence is a queue that looks stuck.
+    ///
+    /// Written last, and it found two things. `pump()` reached past the countdown: a row
+    /// `retryLater` had just parked was the only one left, so the loop that hands the slot
+    /// back to a paused file took it back in the same turn — fail, resume, fail, as fast as
+    /// the answers came. And `attempts` was raised before the table was read, so the first
+    /// wait was the table's *second* entry and the two seconds it opens with were dead
+    /// code. Both are why this asserts the number and not only the stage.
+    void a_transfer_that_fails_waits_out_loud_and_starts_again_by_itself()
+    {
+        int refusals = 0;
+        m_pretend->answerFor = [&refusals](const QByteArray &request) {
+            if (request.startsWith("POST /preflight"))
+                return aReservation("rcv_9");
+            if (request.startsWith("PUT /intake") && refusals++ == 0)
+                return aReply(500, R"({"error":"le disque"})");
+            if (request.startsWith("PUT /intake"))
+                return aReply(200, R"({"path":"Tome 9.cbz","received":9})");
+            return aReply(200, R"({"entryId":"en-9","path":"x","replacement":false})");
+        };
+        m_imports->offer({aFile(u"Tome 9.cbz"_s)});
+        QTRY_COMPARE(stageOf(0), int(Imports::Stage::Ready));
+
+        m_imports->send();
+        QTRY_COMPARE(stageOf(0), int(Imports::Stage::Paused));
+        QCOMPARE(m_imports->data(m_imports->index(0, 0), int(Imports::Role::RetryIn)).toInt(),
+                 2);
+
+        // Two seconds later, without anybody clicking anything.
+        QTRY_COMPARE_WITH_TIMEOUT(stageOf(0), int(Imports::Stage::Filed), 10000);
+        QCOMPARE(m_imports->data(m_imports->index(0, 0), int(Imports::Role::RetryIn)).toInt(),
+                 0);
+    }
+
+    /// Giving up throws away what is still being set up, and tells the server about each.
+    ///
+    /// What the × and « Revenir en arrière » mean. The server keeps what nobody named — a
+    /// place reserved and then forgotten holds the library's own disk for good — so the
+    /// cleanup is the point, not the row disappearing.
+    void giving_up_clears_the_queue_and_frees_what_was_held_for_it()
+    {
+        int given = 0;
+        m_pretend->answerFor = [&given](const QByteArray &request) {
+            if (request.startsWith("DELETE /intake/"))
+                ++given;
+            return request.startsWith("POST /preflight") ? aReservation("rcv_" + QByteArray::number(given))
+                                                         : aReply(204, QByteArray());
+        };
+        m_imports->offer({aFile(u"Tome 5.cbz"_s), aFile(u"Tome 6.cbz"_s)});
+        QTRY_COMPARE(m_imports->count(), 2);
+        QTRY_COMPARE(stageOf(1), int(Imports::Stage::Ready));
+
+        m_imports->giveUpPreparing();
+
+        QCOMPARE(m_imports->count(), 0);
+        QTRY_COMPARE(given, 2);
+    }
+
+    /// A universe dropped whole is one card with its series under it, and the tree says
+    /// what becomes of each — before the commit and after it.
+    ///
+    /// Everything here is a recursion the flat folders above never reach: the tree is
+    /// rebased through its children, the containers a volume sits in are read back out of
+    /// its path, and a state is asked two levels down. And the past tense is the one
+    /// `stateOfNode`'s own comment was written for — the tree kept promising « sera créée »
+    /// under a badge that already read « Envoyé », seventy-six volumes into a library that
+    /// already held them.
+    void a_universe_says_what_becomes_of_each_series_under_it()
+    {
+        m_pretend->answerFor = [](const QByteArray &request) {
+            if (request.startsWith("POST /import/") && request.contains("/commit"))
+                return aReply(200, R"({"root":"Terres","installed":1,"orphans":[],)"
+                                   R"("open":false})");
+            if (request.startsWith("POST /import"))
+                return aReply(200,
+                              R"({"id":"imp_u","root":"Terres",)"
+                              R"("creates":[{"kind":"UNIVERSE","name":"Terres","at":""},)"
+                              R"({"kind":"WORK","name":"Elfes","at":"Elfes"}],)"
+                              R"("moves":[{"workId":"w-2","name":"Mages",)"
+                              R"("from":"Mangas/Mages","at":"Mages"}],)"
+                              R"("toSend":["Elfes/Tome 1.cbz"],)"
+                              R"("alreadyThere":["Mages/Tome 1.cbz"],"bytesToSend":9})");
+            return aReply(200, R"({"path":"Elfes/Tome 1.cbz","received":9})");
+        };
+        m_imports->offer({aUniverse()});
+        QTRY_COMPARE(stageOf(0), int(Imports::Stage::Deciding));
+        m_imports->toggle(0, QString());
+
+        const auto stateOf = [this](const QString &at) {
+            const QVariantList nodes =
+                m_imports->data(m_imports->index(0, 0), int(Imports::Role::Nodes)).toList();
+            for (const QVariant &one : nodes) {
+                if (one.toMap().value(u"at"_s).toString() == at)
+                    return one.toMap().value(u"state"_s).toString();
+            }
+            return QStringLiteral("no such node");
+        };
+
+        using enum Manifest::Level;
+        QCOMPARE(stateOf(QString()), Words::willBeCreated(Universe));
+        QCOMPARE(stateOf(u"Elfes"_s), Words::willBeCreated(Work));
+        // The one the server said it already holds elsewhere: dropping the universe here
+        // would move it, and the line says so before anybody has agreed to anything.
+        QCOMPARE(stateOf(u"Mages"_s), Words::willBeMoved(Work));
+
+        m_imports->accept(0);
+        m_imports->send();
+        QTRY_COMPARE(stageOf(0), int(Imports::Stage::Filed));
+
+        QCOMPARE(stateOf(QString()), Words::wasCreated(Universe));
+        QCOMPARE(stateOf(u"Mages"_s), Words::wasMoved(Work));
+    }
+
+    /// Unticking a replacement and a declaration puts each back where it started.
+    ///
+    /// The twin of `a_tick_does_not_survive_being_set_false`, one box per floor. Both
+    /// default to clear and both are cleared again by every announcement — a box that
+    /// could be set and not unset is a decision a reader cannot take back, and the two
+    /// that overwrite something are exactly the two they would want to.
+    void a_replacement_and_a_declaration_can_both_be_untold()
+    {
+        m_pretend->answerFor = [](const QByteArray &) {
+            return aReply(200,
+                          R"({"id":"imp_u2","root":"Koro","creates":[],)"
+                          R"("toSend":["Tome 1.cbz"],"alreadyThere":[],"bytesToSend":9,)"
+                          R"("replaces":[{"path":"Tome 1.cbz","size":9,"presentSize":8,)"
+                          R"("presentTitle":"Koro","presentRead":false}],)"
+                          R"("declarations":[{"path":"work.json","presentName":"Koro",)"
+                          R"("differs":["titre"]}]})");
+        };
+        m_imports->offer({aFolder()});
+        QTRY_COMPARE(stageOf(0), int(Imports::Stage::Ready));
+
+        m_imports->setReplacing(0, u"Tome 1.cbz"_s, true);
+        m_imports->setDeclaring(0, u"work.json"_s, true);
+        QVERIFY(m_imports->isReplacing(0, u"Tome 1.cbz"_s));
+        QVERIFY(m_imports->isDeclaring(0, u"work.json"_s));
+
+        m_imports->setReplacing(0, u"Tome 1.cbz"_s, false);
+        m_imports->setDeclaring(0, u"work.json"_s, false);
+        QVERIFY(!m_imports->isReplacing(0, u"Tome 1.cbz"_s));
+        QVERIFY(!m_imports->isDeclaring(0, u"work.json"_s));
+    }
+
+    /// Every way the server can refuse, and the one card each refusal belongs to.
+    ///
+    /// A refusal is one file's own fact. Only a key that lost its right to import stops the
+    /// whole queue — everything else has to come back as this row failed, carrying the
+    /// sentence the server sent, because a queue that halts on one bad volume is a queue
+    /// nobody can empty. Four refusals, one per point on the two roads where the server
+    /// gets to say no.
+    void a_refusal_fails_the_one_card_it_belongs_to_and_keeps_its_sentence()
+    {
+        // The pre-flight, on a file's road.
+        m_pretend->answerFor = [](const QByteArray &) {
+            return aReply(500, R"({"error":"le disque est plein"})");
+        };
+        m_imports->offer({aFile(u"Tome 20.cbz"_s)});
+        QTRY_COMPARE(stageOf(0), int(Imports::Stage::Failed));
+        QVERIFY2(m_imports->data(m_imports->index(0, 0), int(Imports::Role::Trouble))
+                     .toString()
+                     .contains(u"disque"_s),
+                 "the server's own sentence is what the card shows");
+        QVERIFY(m_imports->trouble().isEmpty());
+
+        // The announcement, on a folder's.
+        m_pretend->answerFor = [](const QByteArray &) {
+            return aReply(500, R"({"error":"l’index est verrouillé"})");
+        };
+        m_imports->offer({aFolder()});
+        QTRY_COMPARE(stageOf(1), int(Imports::Stage::Failed));
+        QVERIFY(m_imports->trouble().isEmpty());
+    }
+
+    /// A commit the server refuses fails the card after every byte has gone up.
+    ///
+    /// The last thing that can go wrong, and the worst one to swallow: the volumes are on
+    /// the server, the rename did not happen, and a card reading « Rangé » over that would
+    /// send a reader looking for them in a library that does not hold them.
+    void a_commit_the_server_refuses_fails_the_card_and_never_says_it_landed()
+    {
+        m_pretend->answerFor = [](const QByteArray &request) {
+            if (request.startsWith("POST /import/") && request.contains("/commit"))
+                return aReply(500, R"({"error":"le renommage a échoué"})");
+            if (request.startsWith("POST /import"))
+                return aReply(200, R"({"id":"imp_c","root":"Koro","creates":[],)"
+                                   R"("toSend":["Tome 1.cbz"],"alreadyThere":[],)"
+                                   R"("bytesToSend":9})");
+            return aReply(200, R"({"path":"Tome 1.cbz","received":9})");
+        };
+        m_imports->offer({aFolder()});
+        QTRY_COMPARE(stageOf(0), int(Imports::Stage::Ready));
+
+        m_imports->send();
+        QTRY_COMPARE(stageOf(0), int(Imports::Stage::Failed));
+        QVERIFY2(m_pretend->heard.contains("POST /import/imp_c/commit"),
+                 m_pretend->heard.constData());
+    }
+
+    /// A commit whose answer this client cannot read fails the same way.
+    ///
+    /// Not the same as a refusal: the server said yes and said it in a shape `Api::installed`
+    /// will not accept. Reading it as an empty answer would put « 0 tome envoyé » on a card
+    /// whose volumes did land.
+    void a_commit_answered_in_a_shape_this_client_cannot_read_fails_the_card()
+    {
+        m_pretend->answerFor = [](const QByteArray &request) {
+            if (request.startsWith("POST /import/") && request.contains("/commit"))
+                return aReply(200, R"({"root":"Koro"})");
+            if (request.startsWith("POST /import"))
+                return aReply(200, R"({"id":"imp_d","root":"Koro","creates":[],)"
+                                   R"("toSend":["Tome 1.cbz"],"alreadyThere":[],)"
+                                   R"("bytesToSend":9})");
+            return aReply(200, R"({"path":"Tome 1.cbz","received":9})");
+        };
+        m_imports->offer({aFolder()});
+        QTRY_COMPARE(stageOf(0), int(Imports::Stage::Ready));
+
+        m_imports->send();
+        QTRY_COMPARE(stageOf(0), int(Imports::Stage::Failed));
+        QVERIFY2(m_imports->data(m_imports->index(0, 0), int(Imports::Role::Trouble))
+                     .toString()
+                     .contains(u"installed"_s),
+                 "the card names the answer it could not read");
+    }
+
+    /// A volume that went away between the walk and the transfer says which one.
+    ///
+    /// The walk reads the folder once and the transfer reads it again, minutes later on a
+    /// real series. Anything can happen in between — a file moved, a disk unplugged — and
+    /// the card has to name the volume rather than fail with a number.
+    void a_volume_gone_between_the_walk_and_the_transfer_is_named()
+    {
+        m_pretend->answerFor = [](const QByteArray &request) {
+            if (request.startsWith("POST /import"))
+                return aReply(200, R"({"id":"imp_g","root":"Koro","creates":[],)"
+                                   R"("toSend":["Tome 1.cbz"],"alreadyThere":[],)"
+                                   R"("bytesToSend":9})");
+            return aReply(200, R"({"path":"Tome 1.cbz","received":9})");
+        };
+        const QString at = aFolder();
+        m_imports->offer({at});
+        QTRY_COMPARE(stageOf(0), int(Imports::Stage::Ready));
+
+        QVERIFY(QFile::remove(at + u"/Tome 1.cbz"_s));
+        m_imports->send();
+
+        QTRY_COMPARE(stageOf(0), int(Imports::Stage::Failed));
+        QCOMPARE(m_imports->data(m_imports->index(0, 0), int(Imports::Role::Trouble)).toString(),
+                 Words::couldNotBeRead(u"Tome 1.cbz"_s));
     }
 };
 

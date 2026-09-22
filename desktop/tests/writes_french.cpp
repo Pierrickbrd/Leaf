@@ -626,6 +626,14 @@ private slots:
         QCOMPARE(Words::wasFiled(Work), u"envoyée"_s);
         QCOMPARE(Words::willBeReplaced(Universe), u"sera remplacé"_s);
         QCOMPARE(Words::willBeReplaced(Work), u"sera remplacée"_s);
+        // And the past tense of the same two, which is what a node reads once the commit
+        // has run. Said apart from `willBe…` because a tree that still promised « sera
+        // créée » over a series that had just been created was the one line on the screen
+        // saying the import had not happened.
+        QCOMPARE(Words::wasCreated(Universe), u"créé"_s);
+        QCOMPARE(Words::wasCreated(Work), u"créée"_s);
+        QCOMPARE(Words::wasMoved(Universe), u"déplacé"_s);
+        QCOMPARE(Words::wasMoved(Work), u"déplacée"_s);
 
         // A tome and a chapter never disagree: both are masculine.
         QCOMPARE(Words::wasFiled(Chapter), u"envoyé"_s);
@@ -736,6 +744,81 @@ private slots:
         QCOMPARE(Words::importStage(Words::Importing::Ready), u"Prêt"_s);
         QVERIFY(Words::announcing() != Words::waitingToBeChecked());
         QVERIFY(Words::importStage(Words::Importing::Ready) != Words::waitingToBeChecked());
+    }
+
+    /// What a commit landed, counted kind by kind and never as a bare number.
+    ///
+    /// A commit that could not install everything is not a failure: the card says which of
+    /// the four things happened to how many. Only the volumes actually installed are always
+    /// named — the other three appear when they are not zero, because « 0 mal arrivé » on
+    /// every successful import is the sentence that teaches a reader to stop reading.
+    void what_a_commit_landed_is_said_kind_by_kind()
+    {
+        QCOMPARE(Words::whatLanded(1, 0, 0, 0), u"1 tome envoyé"_s);
+        QCOMPARE(Words::whatLanded(3, 0, 0, 0), u"3 tomes envoyés"_s);
+
+        const QString all = Words::whatLanded(2, 1, 1, 4);
+        QVERIFY2(all.contains(u"encore à venir"_s), qPrintable(all));
+        QVERIFY2(all.contains(u"mal arrivé"_s), qPrintable(all));
+        // Never deleted, only reported — and the word has to say so, rather than leaving a
+        // count a reader takes for something lost.
+        QVERIFY2(all.contains(u"déjà là et non annoncés"_s), qPrintable(all));
+        QCOMPARE(all.count(u"·"_s), 3);
+    }
+
+    /// The three things a folder can create, each with the article French gives it.
+    ///
+    /// The elision is the whole reason this is not in the QML: « créera le UNIVERSE » is
+    /// what a binding joining two strings produces, and no `.qml` file can know that
+    /// « univers » takes « l’ » and « série » takes « la ».
+    void the_word_for_what_a_folder_creates_carries_its_article()
+    {
+        QVERIFY(Words::willCreate(u"UNIVERSE"_s, u"Terres"_s).startsWith(u"créera l’univers"_s));
+        QVERIFY(Words::willCreate(u"WORK"_s, u"Elfes"_s).startsWith(u"créera la série"_s));
+        QVERIFY(Words::willCreate(u"EDITION"_s, u"Perfect"_s).startsWith(u"créera l’édition"_s));
+        // A kind this client has not learnt stands as it came. The server may name one
+        // before the client does — `Api.h`'s own rule — and a hole where the word should be
+        // says less than the word nobody translated.
+        QVERIFY2(Words::willCreate(u"ARC"_s, u"x"_s).contains(u"ARC"_s),
+                 qPrintable(Words::willCreate(u"ARC"_s, u"x"_s)));
+    }
+
+    /// Every way an archive can fail to hold together, in French.
+    ///
+    /// These are the `concerns` the server and the client both produce — the reading a scan
+    /// does, run on the file in your hand. They reach a card as a list under its name, and
+    /// each one is the only thing that will ever explain why a volume the reader can see on
+    /// disk is not the volume they think it is.
+    void an_archive_that_does_not_hold_together_says_which_way()
+    {
+        const QList<QString> said{Words::archiveTooBig(), Words::catalogueMissing(),
+                                  Words::sidecarTooBig(),
+                                  Words::sidecarCompressedInAnUnknownWay(),
+                                  Words::sidecarCouldNotBeInflated()};
+        for (const QString &one : said) {
+            QVERIFY(!one.isEmpty());
+            QVERIFY2(one.endsWith(u'.'), qPrintable(one));
+        }
+        // Five sentences and five meanings: a list where two of them read the same is a
+        // list that says nothing on the line that matters.
+        QCOMPARE(QSet<QString>(said.begin(), said.end()).size(), said.size());
+
+        // One of a list, and it is the mark that makes it one — the `.qml` file draws the
+        // rows and never puts the bullet there itself.
+        QVERIFY(Words::concern(Words::catalogueMissing()).endsWith(Words::catalogueMissing()));
+        QVERIFY(Words::concern(u"x"_s).startsWith(u"·"_s));
+    }
+
+    /// The stage and how far it has got, joined here — and the stage alone when there is no
+    /// « how far » yet, because a trailing separator on nothing reads as broken.
+    void a_card_says_its_stage_and_its_progress_under_one_separator()
+    {
+        const QString far = Words::howFar(12 * 1024 * 1024, 134217728);
+        const QString both = Words::stageAnd(Words::importStage(Words::Importing::Sending), far);
+        QVERIFY2(both.contains(far), qPrintable(both));
+        QVERIFY2(both.contains(Words::importStage(Words::Importing::Sending)), qPrintable(both));
+        QCOMPARE(Words::stageAnd(Words::importStage(Words::Importing::Ready), QString()),
+                 Words::importStage(Words::Importing::Ready));
     }
 };
 

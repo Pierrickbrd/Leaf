@@ -7,6 +7,7 @@
 // comment that happens to carry the end signature, an archive that is not one at all.
 
 #include "Cbz.h"
+#include "Words.h"
 
 #include <QBuffer>
 #include <QByteArray>
@@ -121,6 +122,38 @@ QByteArray anArchive(const QList<Member> &members, const QByteArray &comment = {
     appendFour(file, catalogueAt);
     appendTwo(file, quint16(comment.size()));
     file.append(comment);
+    return file;
+}
+
+/// The four bytes that open a catalogue entry.
+const QByteArray CentralHeader("PK\x01\x02", 4);
+
+/// The same archive, with one catalogue entry claiming a different compression method.
+///
+/// The catalogue is what the reader believes about a member — `anArchive` can only write
+/// the two methods it knows, and both of the things that go wrong here are archives that
+/// say one thing in the catalogue and hold another.
+QByteArray sayingMethod(QByteArray file, const QByteArray &name, quint16 method)
+{
+    for (qsizetype at = 0; (at = file.indexOf(CentralHeader, at)) >= 0;
+         at += 4) {
+        const int nameLength =
+            quint8(file.at(at + 28)) | (quint8(file.at(at + 29)) << 8);
+        if (file.mid(at + 46, nameLength) != name)
+            continue;
+        file[at + 10] = char(method & 0xFF);
+        file[at + 11] = char((method >> 8) & 0xFF);
+        break;
+    }
+    return file;
+}
+
+/// The same archive, with the end record filling its member count the way Zip64 does.
+QByteArray sayingZip64(QByteArray file)
+{
+    const qsizetype end = file.size() - 22;
+    file[end + 10] = char(0xFF);
+    file[end + 11] = char(0xFF);
     return file;
 }
 
@@ -282,6 +315,74 @@ private slots:
         const Cbz::Found found = Cbz::sidecarOf(path);
         QVERIFY(found.opened());
         QCOMPARE(found.sidecar, Sidecar);
+    }
+
+    /// Zip64 is said outright rather than read wrong.
+    ///
+    /// It declares itself by filling the ordinary fields with ones and putting the real
+    /// figures in a second record this reader does not read. Reading the ones as numbers
+    /// would seek a catalogue of sixty-five thousand members into the middle of a file. A
+    /// comic volume is never four gigabytes, so the archive is offered without its sidecar
+    /// and the card says why.
+    void an_archive_that_says_zip64_is_left_where_it_is()
+    {
+        const QString path = wrote(sayingZip64(anArchive({
+            {"entry.json", Sidecar, true, {}},
+        })));
+
+        const Cbz::Found found = Cbz::sidecarOf(path);
+        QVERIFY(found.sidecar.isEmpty());
+        QCOMPARE(found.trouble, Words::archiveTooBig());
+    }
+
+    /// A sidecar too large to be one is refused by its own declared size, before a byte of
+    /// it is read — the catalogue says how big it will be, and believing it is the whole
+    /// point of the ceiling.
+    void a_sidecar_larger_than_a_sidecar_can_be_is_never_inflated()
+    {
+        // Written with escapes rather than as a raw string: one that both opens and closes
+        // on a quote reads as the end of the literal to `moc`, which then finds no class in
+        // this file at all and leaves the test binary without a vtable to link against.
+        QByteArray huge = "{\"leaf\":1,\"title\":\"";
+        huge.append(QByteArray(Cbz::MostSidecarBytes, 'x'));
+        huge.append("\"}");
+
+        const Cbz::Found found = Cbz::sidecarOf(wrote(anArchive({
+            {"entry.json", huge, true, {}},
+        })));
+
+        QVERIFY(found.sidecar.isEmpty());
+        QCOMPARE(found.trouble, Words::sidecarTooBig());
+    }
+
+    /// A method this client does not know is named rather than guessed at.
+    ///
+    /// Stored and deflated are the two a comic archive is ever written with; the format
+    /// allows a dozen more. Treating an unknown one as deflated would hand zlib bytes that
+    /// are not a deflate stream, and the answer would be "no sidecar" — which is what an
+    /// archive that genuinely has none says, and the two are not the same fact.
+    void a_sidecar_compressed_a_way_this_client_does_not_know_says_which()
+    {
+        const Cbz::Found found = Cbz::sidecarOf(wrote(
+            sayingMethod(anArchive({{"entry.json", Sidecar, true, {}}}), "entry.json", 9)));
+
+        QVERIFY(found.sidecar.isEmpty());
+        QCOMPARE(found.trouble, Words::sidecarCompressedInAnUnknownWay());
+    }
+
+    /// A member that says deflated and is not comes back as a concern, not as silence.
+    ///
+    /// The one failure that cannot be told from a truncated file: the catalogue is
+    /// believed, the bytes are fetched, and zlib refuses them. Saying nothing here would
+    /// let a volume whose metadata was quietly lost pass for one that never had any.
+    void a_sidecar_that_will_not_inflate_says_so_rather_than_going_quiet()
+    {
+        // Written stored, so the bytes on disk are plain JSON, and then declared deflated.
+        const Cbz::Found found = Cbz::sidecarOf(wrote(
+            sayingMethod(anArchive({{"entry.json", Sidecar, false, {}}}), "entry.json", 8)));
+
+        QVERIFY(found.sidecar.isEmpty());
+        QCOMPARE(found.trouble, Words::sidecarCouldNotBeInflated());
     }
 };
 
