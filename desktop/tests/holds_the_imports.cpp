@@ -596,7 +596,8 @@ private slots:
         m_imports->offer({aFolder()});
         QTRY_COMPARE(stageOf(0), int(Imports::Stage::Deciding));
 
-        const QVariantList made = m_imports->createsOf(0);
+        const QVariantList made = m_imports->data(m_imports->index(0, 0),
+                                                  int(Imports::Role::Creates)).toList();
         QCOMPARE(made.size(), 1);
         QCOMPARE(made.constFirst().toMap().value(u"name"_s).toString(), u"Koro Quest"_s);
 
@@ -769,12 +770,13 @@ private slots:
         // again.
         QTRY_COMPARE(stageOf(0), int(Imports::Stage::Deciding));
 
-        const QVariantList offered = m_imports->movesOf(0);
+        const QVariantList offered = m_imports->data(m_imports->index(0, 0),
+                                                     int(Imports::Role::Moves)).toList();
         QCOMPARE(offered.size(), 1);
         QCOMPARE(offered.constFirst().toMap().value(u"name"_s).toString(), u"Elfes"_s);
         // Clear until somebody ticks it. This is the assertion the whole case turns on.
         QVERIFY(!offered.constFirst().toMap().value(u"filing"_s).toBool());
-        QVERIFY(!m_imports->isFiling(0, u"w-1"_s));
+        QVERIFY(!m_imports->ticked(0, Imports::Choice::Filing, u"w-1"_s));
 
         m_imports->accept(0);
         // Nothing ticked and nothing to send: the card has no work at all, so starting the
@@ -808,8 +810,13 @@ private slots:
         QTRY_COMPARE(stageOf(0), int(Imports::Stage::Deciding));
 
         m_imports->setFiling(0, u"w-1"_s, true);
-        QVERIFY(m_imports->isFiling(0, u"w-1"_s));
-        QVERIFY(m_imports->movesOf(0).constFirst().toMap().value(u"filing"_s).toBool());
+        QVERIFY(m_imports->ticked(0, Imports::Choice::Filing, u"w-1"_s));
+        QVERIFY(m_imports->data(m_imports->index(0, 0), int(Imports::Role::Moves))
+                    .toList()
+                    .constFirst()
+                    .toMap()
+                    .value(u"filing"_s)
+                    .toBool());
 
         m_imports->accept(0);
         m_pretend->heard.clear();
@@ -834,10 +841,10 @@ private slots:
         m_imports->offer({aFolder()});
         QTRY_COMPARE(stageOf(0), int(Imports::Stage::Deciding));
         m_imports->setFiling(0, u"w-1"_s, true);
-        QVERIFY(m_imports->isFiling(0, u"w-1"_s));
+        QVERIFY(m_imports->ticked(0, Imports::Choice::Filing, u"w-1"_s));
 
         m_imports->setFiling(0, u"w-1"_s, false);
-        QVERIFY(!m_imports->isFiling(0, u"w-1"_s));
+        QVERIFY(!m_imports->ticked(0, Imports::Choice::Filing, u"w-1"_s));
     }
 
     /// A 409 is neither a failure nor a success: the server holds less than this client
@@ -1302,7 +1309,7 @@ private slots:
         QVERIFY(root.value(u"present"_s).toString().contains(u"summary"_s));
 
         m_imports->setDeclaring(0, u"work.json"_s, true);
-        QVERIFY(m_imports->isDeclaring(0, u"work.json"_s));
+        QVERIFY(m_imports->ticked(0, Imports::Choice::Declaring, u"work.json"_s));
 
         m_imports->send();
         QTRY_COMPARE(stageOf(0), int(Imports::Stage::Filed));
@@ -1357,12 +1364,12 @@ private slots:
         QTRY_COMPARE(stageOf(0), int(Imports::Stage::Ready));
 
         // Clear by default: nothing is overwritten by having been dropped.
-        QVERIFY(!m_imports->isReplacing(0, u"Tome 1.cbz"_s));
-        QVERIFY(!m_imports->isReplacing(0, u"Tome 2.cbz"_s));
+        QVERIFY(!m_imports->ticked(0, Imports::Choice::Replacing, u"Tome 1.cbz"_s));
+        QVERIFY(!m_imports->ticked(0, Imports::Choice::Replacing, u"Tome 2.cbz"_s));
 
         m_imports->setReplacing(0, u"Tome 1.cbz"_s, true);
-        QVERIFY(m_imports->isReplacing(0, u"Tome 1.cbz"_s));
-        QVERIFY(!m_imports->isReplacing(0, u"Tome 2.cbz"_s));
+        QVERIFY(m_imports->ticked(0, Imports::Choice::Replacing, u"Tome 1.cbz"_s));
+        QVERIFY(!m_imports->ticked(0, Imports::Choice::Replacing, u"Tome 2.cbz"_s));
 
         m_imports->send();
         QTRY_COMPARE(stageOf(0), int(Imports::Stage::Filed));
@@ -1497,11 +1504,9 @@ private slots:
             m_imports->setFiling(row, u"w-1"_s, true);
             m_imports->setReplacing(row, u"Tome 1.cbz"_s, true);
             m_imports->setDeclaring(row, u"work.json"_s, true);
-            QVERIFY(!m_imports->isFiling(row, u"w-1"_s));
-            QVERIFY(!m_imports->isReplacing(row, u"Tome 1.cbz"_s));
-            QVERIFY(!m_imports->isDeclaring(row, u"work.json"_s));
-            QVERIFY(m_imports->createsOf(row).isEmpty());
-            QVERIFY(m_imports->movesOf(row).isEmpty());
+            QVERIFY(!m_imports->ticked(row, Imports::Choice::Filing, u"w-1"_s));
+            QVERIFY(!m_imports->ticked(row, Imports::Choice::Replacing, u"Tome 1.cbz"_s));
+            QVERIFY(!m_imports->ticked(row, Imports::Choice::Declaring, u"work.json"_s));
             QVERIFY(!m_imports->data(m_imports->index(row, 0), int(Imports::Role::Name))
                          .isValid());
         }
@@ -1557,8 +1562,9 @@ private slots:
         m_pretend->answerFor = [&given](const QByteArray &request) {
             if (request.startsWith("DELETE /intake/"))
                 ++given;
-            return request.startsWith("POST /preflight") ? aReservation("rcv_" + QByteArray::number(given))
-                                                         : aReply(204, QByteArray());
+            if (request.startsWith("POST /preflight"))
+                return aReservation("rcv_" + QByteArray::number(given));
+            return aReply(204, QByteArray());
         };
         m_imports->offer({aFile(u"Tome 5.cbz"_s), aFile(u"Tome 6.cbz"_s)});
         QTRY_COMPARE(m_imports->count(), 2);
@@ -1647,13 +1653,13 @@ private slots:
 
         m_imports->setReplacing(0, u"Tome 1.cbz"_s, true);
         m_imports->setDeclaring(0, u"work.json"_s, true);
-        QVERIFY(m_imports->isReplacing(0, u"Tome 1.cbz"_s));
-        QVERIFY(m_imports->isDeclaring(0, u"work.json"_s));
+        QVERIFY(m_imports->ticked(0, Imports::Choice::Replacing, u"Tome 1.cbz"_s));
+        QVERIFY(m_imports->ticked(0, Imports::Choice::Declaring, u"work.json"_s));
 
         m_imports->setReplacing(0, u"Tome 1.cbz"_s, false);
         m_imports->setDeclaring(0, u"work.json"_s, false);
-        QVERIFY(!m_imports->isReplacing(0, u"Tome 1.cbz"_s));
-        QVERIFY(!m_imports->isDeclaring(0, u"work.json"_s));
+        QVERIFY(!m_imports->ticked(0, Imports::Choice::Replacing, u"Tome 1.cbz"_s));
+        QVERIFY(!m_imports->ticked(0, Imports::Choice::Declaring, u"work.json"_s));
     }
 
     /// Every way the server can refuse, and the one card each refusal belongs to.
