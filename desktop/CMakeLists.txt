@@ -68,6 +68,10 @@ qt_add_executable(leaf-desktop
     src/Cbz.cpp
     src/Manifest.h
     src/Manifest.cpp
+    src/Card.h
+    src/Card.cpp
+    src/Carrier.h
+    src/Carrier.cpp
     src/Imports.h
     src/Imports.cpp
     src/ImportCaptions.h
@@ -300,6 +304,7 @@ qt_add_executable(crosses-the-seam
     tests/crosses_the_seam.cpp tests/Pretend.h
     src/Boot.h src/Boot.cpp
     src/Covers.h src/Covers.cpp
+    src/Card.h src/Card.cpp src/Carrier.h src/Carrier.cpp
     src/Imports.h src/Imports.cpp src/ImportCaptions.h src/ImportCaptions.cpp
     src/CardCaptions.h src/CardCaptions.cpp
     src/Cbz.h src/Cbz.cpp src/Manifest.h src/Manifest.cpp
@@ -360,6 +365,7 @@ add_test(NAME holds-a-shelf COMMAND holds-a-shelf)
 # not pixels, so every branch is exercised without constructing a window.
 qt_add_executable(holds-the-imports
     tests/holds_the_imports.cpp tests/Pretend.h
+    src/Card.h src/Card.cpp src/Carrier.h src/Carrier.cpp
     src/Imports.h src/Imports.cpp src/Cbz.h src/Cbz.cpp src/Manifest.h src/Manifest.cpp
     src/Api.h src/Api.cpp src/Words.h src/Words.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
