@@ -57,6 +57,20 @@ Four files carry the metadata, each holding only what belongs to its level:
 `entry.json` lives inside the archive so a volume downloaded for offline reading carries its
 own chapter markers — otherwise "jump to chapter 103" stops working on a plane.
 
+**The three folder files also carry the folder's identity**, under `id`. The scan writes one
+the first time it meets a folder without one, creating the file if there is none, and never
+touches it again. That is what makes a rename survivable: identifiers used to be the hash of
+the absolute path, so renaming `Death Note` to `Death Note (VF)` gave every row a new
+identity, the old ones were pruned, and the reading positions went with them — the one thing
+a rescan cannot rebuild. A folder copied *without* its sidecars is therefore a new folder,
+and two folders carrying the same `id` are reported rather than merged. A library mounted
+read-only is indexed exactly as before, by path, and the scan report says so.
+
+An entry has no identifier written anywhere: it is « this file, in this edition », so nothing
+is rewritten inside thousands of archives for one field. Renaming a *file* is therefore a new
+entry, and its reading position is lost — deliberately, because following a file through a
+rename would mean identifying it by its contents.
+
 **The sidecars decide what a folder is.** `Dragon Ball/{Perfect Edition, Original Edition}`
 and `Terres d'Arran/{Elfes, Mages}` have exactly the same shape on disk and opposite
 meanings: one is a work in two editions, the other a universe of two works. No heuristic can
@@ -306,8 +320,12 @@ GET    /search?q=&kind=&limit=        ranked, accents folded, half-typed words m
 GET    /scan                          where a running scan has got to
 PATCH  /series/{id}  ·  /series/{id}/arcs  ·  /entries/{id}
 POST   /entries                       drop a file, the server proposes a destination
+POST   /preflight                     hold a place and hear the proposal, before any byte
+GET    /intake/{id}                   how much of it the server holds, to resume against
+PUT    /intake/{id}/file              the bytes, from an offset — 409 says the right one
 POST   /intake/{id}/file              you confirm, only then is it filed
 POST   /import  ·  /import/{id}/commit   a whole folder, resumable
+POST   /works/{id}/move               a series into a universe, or back out to the root
 POST   /cleanup  ·  /scan
 ```
 
@@ -387,9 +405,10 @@ cargo test --test scan -- name_of_the_test  # one test
 
 # the client
 sudo apt-get install cmake ninja-build qt6-base-dev qt6-declarative-dev libqt6svg6-dev \
-  qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts \
-  qml6-module-qtquick-templates qml6-module-qtqml qml6-module-qtqml-workerscript \
-  qml6-module-qt5compat-graphicaleffects xauth xvfb qtkeychain-qt6-dev
+  qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-dialogs \
+  qml6-module-qtquick-layouts qml6-module-qtquick-templates qml6-module-qtqml \
+  qml6-module-qtqml-workerscript qml6-module-qt5compat-graphicaleffects \
+  xauth xvfb qtkeychain-qt6-dev
 cd desktop
 cmake -S . -B build -G Ninja && cmake --build build
 ctest --test-dir build --output-on-failure                    # in a desktop session

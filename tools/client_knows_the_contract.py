@@ -47,6 +47,24 @@ WATCHED = {
     # that would silently stop reading a field the server grew.
     "Health": ("whole", ["health"]),
     "ScanStatus": ("whole", ["scanStatus"]),
+    # The import. A file crosses the seam three times — proposed, sent, filed — and each
+    # crossing is a shape the client has to read whole.
+    "Proposal": ("whole", ["proposal"]),
+    "Reserved": ("whole", ["reserved"]),
+    "Staged": ("whole", ["staged"]),
+    "Waiting": ("whole", ["waiting"]),
+    "Filed": ("whole", ["filed"]),
+    "Collision": ("whole", ["collision"]),
+    # And the bulk path, which crosses it four more times: announced, sent, followed,
+    # committed.
+    "ImportOpened": ("whole", ["opened"]),
+    "Creation": ("whole", ["opened"]),
+    "Relocation": ("whole", ["opened"]),
+    "Received": ("whole", ["received"]),
+    "BadOffset": ("whole", ["badOffset"]),
+    "ImportState": ("whole", ["session"]),
+    "ImportResult": ("whole", ["installed"]),
+    "FileReading": ("part", ["readingIn"]),
     "Entry": ("part", ["upNext"]),
     "Progress": ("part", ["upNext"]),
     "Chapter": ("part", ["upNext"]),

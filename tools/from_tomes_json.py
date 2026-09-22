@@ -355,11 +355,11 @@ def announce(
     refresh: bool,
 ) -> None:
     """What is about to be written, in the order it will be read."""
-    # « laissé tel quel » se disait dans une branche et pas dans l'autre, si bien qu'une
-    # série à édition implicite annonçait un work.json qu'elle n'écrivait pas. Reconvertie
-    # après un changement de format, elle réécrivait ses archives et gardait ses anciens
-    # champs — et rien ne le disait. Vu le 03/09/2026, sur quatre gigaoctets récrits pour
-    # rien avant que les dates de modification ne le trahissent.
+    # "left alone" was said on one branch and not the other, so a series with an implicit
+    # edition announced a work.json it never wrote. Converted again after a format change,
+    # it rewrote its archives and kept its old fields — and nothing said so. Seen on
+    # 03/09/2026, on four gigabytes rewritten for nothing before the modification times
+    # gave it away.
     left = "  (already there, left alone — --refresh to rewrite it)" if existing_work and not refresh else ""
     if edition_name:
         print(f"  work.json    → {work_name}: {work['medium']}, {work['status']}, {work['readingDirection']}{left}")
