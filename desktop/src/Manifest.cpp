@@ -160,11 +160,8 @@ bool isHidden(const QString &name)
 bool holdsArchives(const QString &at)
 {
     const QDir here(at);
-    for (const QFileInfo &about : here.entryInfoList(QDir::Files | QDir::NoDotAndDotDot)) {
-        if (isArchive(about))
-            return true;
-    }
-    return false;
+    return std::ranges::any_of(here.entryInfoList(QDir::Files | QDir::NoDotAndDotDot),
+                               isArchive);
 }
 
 void walk(const QString &at, const QString &root, int left, Manifest::Folder &into,
@@ -177,7 +174,7 @@ void walk(const QString &at, const QString &root, int left, Manifest::Folder &in
 
     const QDir here(at);
     QFileInfoList all = here.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
-    std::sort(all.begin(), all.end(), beforeNaturally);
+    std::ranges::sort(all, beforeNaturally);
     for (const QFileInfo &about : all) {
         // The entry's own kind, never what it points at: a symlink to a folder is a leaf,
         // so a link back to a parent is a file this does not follow rather than a walk
@@ -249,7 +246,7 @@ Manifest::Node nodeOf(const QString &at, const QString &root, int left)
     node.name = nameIn(node.declaration, QFileInfo(at).fileName());
 
     QFileInfoList here = QDir(at).entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
-    std::sort(here.begin(), here.end(), beforeNaturally);
+    std::ranges::sort(here, beforeNaturally);
     for (const QFileInfo &about : here) {
         if (about.isSymLink())
             continue;
@@ -376,7 +373,7 @@ QList<Node> found(const QString &path)
         if (left == 0)
             continue;
         QFileInfoList children = QDir(at).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
-        std::sort(children.begin(), children.end(), beforeNaturally);
+        std::ranges::sort(children, beforeNaturally);
         for (const QFileInfo &child : children) {
             if (!child.isSymLink() && !isHidden(child.fileName()))
                 waiting.append({child.absoluteFilePath(), left - 1});
