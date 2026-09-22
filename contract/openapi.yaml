@@ -835,8 +835,53 @@ paths:
   # /entries/received/{id}, which shared a shape with /entries/{id}/file and only worked
   # because a router matches the literal segment first. A staged file is not an entry — it
   # is a proposal awaiting a confirmation — and this name says so.
+  /preflight:
+    post:
+      operationId: preflight
+      tags: [import]
+      summary: Be told where a file would go, before sending it.
+      description: |
+        The same proposal `POST /entries` answers, from what a client can read cheaply: the
+        name, the size, and the `entry.json` found inside the archive. A reader sees the
+        destination, and the question, while it still costs nothing to change their mind.
+
+        It also **holds the place**. The `id` it answers is where the bytes go, and a
+        transfer that stops has something to resume against.
+
+        No `concerns` here: those need the page count, the page count needs the file, and
+        the file is exactly what has not arrived. They come with the confirmation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PreflightRequest" }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: Where it would go, and where to send it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Reserved" }
+      x-leaf-permission: import
+
   /intake/{id}:
     parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      operationId: getStagedFile
+      tags: [import]
+      summary: How much of a reserved file the server holds.
+      description: Enough for a broken transfer to know where to pick up.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: What is held, and what was announced.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Staged" }
+        "404": { $ref: "#/components/responses/NotFound" }
+      x-leaf-permission: import
     delete:
       operationId: abandonOfferedFile
       tags: [import]
@@ -849,6 +894,44 @@ paths:
 
   /intake/{id}/file:
     parameters: [{ $ref: "#/components/parameters/Id" }]
+    put:
+      operationId: sendStagedFile
+      tags: [import]
+      summary: Send the bytes of a reserved file, from an offset.
+      description: |
+        A break at 95 % of a 130 MB volume resumes at the byte, not at zero — the same
+        promise the bulk path makes, and for a while the only thing the two paths did
+        differently. `GET /intake/{id}` says where to pick up.
+
+        `POST` on this same path confirms; `PUT` carries bytes. The pair is the bulk path's,
+        so that one reading of either explains the other.
+      parameters:
+        - name: Content-Range
+          in: header
+          description: "`bytes 104857600-134217727/134217728`. Absent means from zero."
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: How much the server now holds.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Received" }
+        "409":
+          description: |
+            The offset is past what the server holds. The body carries what it *does* hold,
+            so the client knows exactly where to resume rather than starting over.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BadOffset" }
+        "404": { $ref: "#/components/responses/NotFound" }
+      x-leaf-permission: import
     post:
       operationId: fileOfferedFile
       tags: [import]
@@ -949,6 +1032,20 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ImportOpened" }
+        "400":
+          description: |
+            A declaration in `sidecars` that is not a JSON object. Refused here, before a
+            byte moves, rather than skipped at commit: one the server cannot read carries
+            no metadata — the scan ignores it — so writing it over one the library can
+            read replaces something useful with something inert, and takes the folder's
+            identity with it. The answer names the file to fix.
+
+            The scan tolerates a malformed sidecar and this refuses one, which is not a
+            contradiction: reading a library that already exists has to keep working,
+            writing a file into one is a different act.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
       x-leaf-permission: import
 
   /import/{id}:
@@ -1033,6 +1130,17 @@ paths:
         **Nothing is ever deleted here.** What is left over is reported as an orphan and
         shown to you by name before you decide. A wrong manifest therefore cannot destroy
         anything.
+
+        The body is optional, and a commit without one is the ordinary one. With `move`, the
+        works it names are filed under the folder being installed **before** it is installed
+        — which is what the announcement promised, and the only order that works: the commit
+        writes the declarations, so the destination would already be there afterwards and
+        the move would be refused.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommitRequest" }
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
@@ -1072,6 +1180,53 @@ paths:
                 properties:
                   removed: { type: array, items: { type: string } }
                 required: [removed]
+      x-leaf-permission: import
+
+  /works/{id}/move:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    post:
+      operationId: moveWork
+      tags: [import]
+      summary: Move a work into a universe, or out to a library root.
+      description: |
+        A `rename` on the disk and a rescan aimed at the work — not at the library, which
+        would cost as much as the library is big. Requires the **import** right.
+
+        **It is only that because an identity no longer comes from a path.** A folder used
+        to be identified by the hash of its absolute path, so moving one gave every row
+        under it a new identity, the old rows were pruned, and the reading positions went
+        with them. Shipping this route before that changed would have turned an accidental
+        loss into one offered by a button.
+
+        No universe is created here. A folder **is** the declaration, so the destination is
+        a universe that already exists; `universeId` absent or null means the library root
+        the work already lives under, which is the only way back out.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MoveRequest" }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: Where the work is now.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Moved" }
+        "400":
+          description: |
+            A folder of that name is already at the destination, or the destination sits
+            inside the work being moved. Refused rather than resolved: renaming one of the
+            two is a decision about a library, not about a request.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: No such work, or no such universe.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
       x-leaf-permission: import
 
   # -------------------------------------------------------------- maintenance
@@ -1359,6 +1514,32 @@ components:
             A false gap here is worth having: it means a volume you own declares no chapter
             markers, which is something to fix rather than to hide.
         entryCount: { type: integer }
+        readEntries:
+          type: integer
+          description: |
+            How many of this edition's entries are finished. Absent when none is, the way
+            `ownedVolumes` is absent at zero.
+
+            `readStatus` says unread, started or finished and cannot say *how far*. A shelf
+            tile drew a full bar the moment a series was opened, because the only thing it
+            had to draw with was "started" — an answer to a question nobody asked.
+        partRead:
+          type: number
+          description: |
+            How far into the entries that are *not* finished, counted in volumes: `0.82` is
+            one volume left at page 156 of 189. Absent at nought.
+
+            Beside `readEntries` rather than folded into it, because each is a plain fact
+            and their sum is the reader's business. Where somebody is in a series is the two
+            together, over `entryCount`: eleven finished and 0.82 of a twelfth, out of
+            twenty-one.
+
+            Summed over every unfinished entry with a position, not taken from the latest
+            one: a reader who left volume three at its middle and went on to volume four is
+            somewhere past four volumes, and the last position alone would place them at
+            one. Each is bounded at 1, because a page past the last page is a file that was
+            replaced by a shorter one rather than a reader who read more of it than it
+            holds.
         chapterCount: { type: integer }
         arcCount: { type: integer }
         genres: { type: array, items: { type: string } }
@@ -1904,7 +2085,88 @@ components:
             ADDITION — I am bringing these files and say nothing about the rest.
             COMPLETE — here is the whole series; whatever is not in it is reported as an
             orphan. Never deleted, only reported.
+        sidecars:
+          type: array
+          items: { $ref: "#/components/schemas/ManifestSidecar" }
+          description: |
+            The `universe.json`, `work.json` and `edition.json` of every folder under the
+            root, with their contents.
+
+            They travel here rather than among the files, for two reasons at once. They are
+            what says where all this goes — a folder *is* its declaration, and no route
+            creates a universe — so the server has to read them before it can say what it
+            would create. And they are a few hundred bytes, so sending them in the
+            announcement costs nothing and saves a round trip per folder.
+
+            They are installed at the commit like everything else. Without them a series
+            lands without the thing that says what it is, and the scan behind it classifies
+            a folder of archives as nothing at all.
       required: [root, files]
+
+    ManifestSidecar:
+      type: object
+      properties:
+        path: { type: string, description: Relative to the root. Never escapes it. }
+        json:
+          type: string
+          description: |
+            The bytes, unparsed. What this server does not understand it still installs: a
+            field a later version writes has to survive a trip through one that does not
+            know it.
+      required: [path, json]
+
+    Creation:
+      type: object
+      description: |
+        Something the library does not hold yet and would gain.
+
+        Answered before a byte moves, because "this will create a universe" is the one thing
+        a reader cannot undo by deleting a file afterwards — a folder that should have gone
+        under an existing shelf and made a second one beside it looks exactly like a folder
+        that went where it was meant to.
+      properties:
+        kind:
+          type: string
+          enum: [UNIVERSE, WORK, EDITION]
+          description: Which of the three declarations made it.
+        name:
+          type: string
+          description: |
+            What it will be called, read from the declaration and not from the folder name.
+            The two are allowed to differ, and the declaration is the one that wins.
+        at: { type: string, description: Where under the root, relative to it. }
+      required: [kind, name, at]
+
+    PreflightRequest:
+      type: object
+      properties:
+        name: { type: string, description: The file's own name. Any path in it is discarded. }
+        size: { type: integer, description: What the whole file weighs. }
+        sidecar:
+          type: [string, "null"]
+          description: |
+            The `entry.json` found inside the archive, as it stands. Absent when the client
+            could not open the file at all — the proposal then rests on the name alone, is
+            weaker for it, and the screen says so rather than pretending.
+      required: [name, size]
+
+    Reserved:
+      type: object
+      description: |
+        Where the file would go, and the place held for it while you decide.
+      properties:
+        id: { type: string, description: Where to send the bytes, and what to confirm by. }
+        proposal: { $ref: "#/components/schemas/Proposal" }
+      required: [id, proposal]
+
+    Staged:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        size: { type: integer, description: What the pre-flight announced it would weigh. }
+        received: { type: integer, description: What is actually here. Resume from there. }
+      required: [id, name, size, received]
 
     Waiting:
       type: object
@@ -1924,7 +2186,15 @@ components:
             True when abandoning it does not send you back to a file you still have. A drop
             taken with `consume` — the default — has left your folder, so the staged copy is
             the last one.
-      required: [id, name, size, lastTouchedAt, origin, onlyCopy]
+        received:
+          type: integer
+          description: |
+            How many bytes are actually here. Equal to `size` for a file that arrived whole;
+            less for one whose place a pre-flight reserved and whose transfer stopped.
+
+            Without it a list cannot tell a file waiting for a *decision* from one waiting
+            for its *bytes*, and since the pre-flight both of those live in this list.
+      required: [id, name, size, lastTouchedAt, origin, onlyCopy, received]
 
     Open:
       type: object
@@ -1946,10 +2216,120 @@ components:
       properties:
         id: { type: string }
         root: { type: string }
+        creates:
+          type: array
+          items: { $ref: "#/components/schemas/Creation" }
+          description: |
+            What the library would gain, in the order the declarations were announced.
+            Empty when everything is already there under a name it knows.
+        moves:
+          type: array
+          items: { $ref: "#/components/schemas/Relocation" }
+          description: |
+            What the library already holds somewhere else and this folder declares here.
+            Absent when there is none.
+
+            The sixth case of an import, and the one that needed a route: a universe
+            arrives and one of the series it declares is already on the disk under another
+            parent. It is a **move** and not a creation, and telling the two apart is only
+            possible because a folder's identity now travels with it in its sidecar. Works
+            only: a universe or an edition arriving under a new parent is a structure being
+            rearranged around them, which is far more than dropping a folder asks for.
+        replaces:
+          type: array
+          items: { $ref: "#/components/schemas/Replacement" }
+          description: |
+            What this manifest would land on top of: one entry per path the library already
+            holds, under this root, that the arriving file does not match — by size, or by
+            checksum when the manifest declares one. Their paths are also in toSend, since
+            installing the bytes is still what a commit does with them; this is what says
+            that doing so overwrites something rather than adds it.
+
+            Nothing here is replaced unless the commit names it. A reader ticks the ones
+            they want, volume by volume, exactly as they do for `moves` — six volumes that
+            could be replaced are six decisions, and five of them may be exactly what their
+            reader wants left alone.
+        declarations:
+          type: array
+          items: { $ref: "#/components/schemas/Declaration" }
+          description: |
+            The declarations this manifest would rewrite: one entry per sidecar the library
+            already holds at that path whose content differs from the arriving one, the
+            identity aside — an identity belongs to the library and never travels in an
+            import.
+
+            Nothing here is rewritten unless the commit names it, exactly as for `replaces`.
+            A folder every volume of which the library already holds still carries its
+            `work.json`, and installing it over a title or a summary edited through `PATCH`
+            is a decision, not a side effect of dropping the folder again.
         toSend: { type: array, items: { type: string } }
         alreadyThere: { type: array, items: { type: string } }
         bytesToSend: { type: integer }
-      required: [id, root, toSend, alreadyThere, bytesToSend]
+      required: [id, root, creates, replaces, declarations, toSend, alreadyThere, bytesToSend]
+
+    Replacement:
+      type: object
+      description: |
+        One file that would land on another, and enough of what is already there to decide
+        with. A size alone says "different" without saying how: two archives six hundred
+        bytes apart differ inside a declaration nobody can see from a file listing, and
+        without `presentTitle` the only way to find out is to open both by hand.
+      properties:
+        path: { type: string, description: Where it would land, relative to the root. }
+        size: { type: integer, description: What the arriving file weighs. }
+        presentSize: { type: integer, description: What the library's own file weighs. }
+        presentTitle:
+          type: [string, "null"]
+          description: |
+            The title the library's own file declares inside itself, when it declares one.
+            Null when the archive carries no `entry.json`, and absent when the server did
+            not open it — see `presentRead`.
+        presentNumber: { type: [number, "null"] }
+        presentRead:
+          type: boolean
+          description: |
+            Whether the server opened the file it already holds to read what it declares.
+            False past a ceiling on how many it will open in one preflight: a library
+            re-dropped whole can name hundreds of replacements, and opening every one of
+            them would spend the instant answer this whole phase exists to give.
+      required: [path, size, presentSize, presentRead]
+      additionalProperties: false
+
+    Declaration:
+      type: object
+      description: |
+        One sidecar that would be written over another, and what the two disagree about.
+        The field names, not the values: a summary is four hundred words and a screen has one
+        line, and « résumé, arcs » says what is at stake where the values would not fit.
+      properties:
+        path: { type: string, description: The sidecar, relative to the root. }
+        presentName:
+          type: [string, "null"]
+          description: What the library's own declaration calls itself — its title or name.
+        differs:
+          type: array
+          items: { type: string }
+          description: |
+            The fields the two declarations disagree about, by their name in the sidecar.
+            `id` is never among them: it is kept from the library's own copy whatever the
+            arriving one says.
+      required: [path, differs]
+      additionalProperties: false
+
+    Relocation:
+      type: object
+      required: [workId, name, from, at]
+      properties:
+        workId:
+          type: string
+          description: The identity it is already indexed under, which is what a move is aimed with.
+        name: { type: string }
+        from:
+          type: string
+          description: The folder it is in now, so a reader can see what is about to change.
+        at:
+          type: string
+          description: Where under the root it would go, the same way a Creation says it.
 
     ImportState:
       type: object
@@ -1966,6 +2346,12 @@ components:
     ImportResult:
       type: object
       properties:
+        moved:
+          type: array
+          items: { type: string }
+          description: |
+            The works this commit filed under the folder it installed, by identity. Only the
+            ones the request named, and absent when none moved.
         root: { type: string }
         installed: { type: integer }
         orphans:
@@ -2107,6 +2493,66 @@ components:
             Set when the scan itself failed, and absent otherwise. A scan that quietly did
             nothing is worse than one that says why.
 
+    CommitRequest:
+      type: object
+      description: |
+        What a commit may be told to do besides installing. Everything in it is a decision
+        a reader made in front of the announcement, never one the server took.
+      properties:
+        move:
+          type: array
+          items: { type: string }
+          description: |
+            The works to file under the folder being installed, by identity — the ones the
+            announcement listed under `moves` and a reader ticked. Nothing moves unless it
+            is named here: rearranging a library that was fine is the one thing a commit
+            must never decide on its own.
+        declare:
+          type: array
+          items: { type: string }
+          description: |
+            The sidecars this commit may write over one the library already holds — the ones
+            the announcement listed under `declarations` and a reader ticked. One that has
+            no counterpart in the library is installed whatever this says: it is a creation,
+            and `creates` announced it.
+        replace:
+          type: array
+          items: { type: string }
+          description: |
+            The paths this commit may install on top of a file the library already holds —
+            the ones the announcement listed under `replaces` and a reader ticked. A path
+            that arrived whole and is not named here is left in the inbox and reported in
+            `pending`, the same as one that never finished arriving: refused is not the
+            same as missing, and neither is silently skipped.
+      additionalProperties: false
+
+    MoveRequest:
+      type: object
+      description: |
+        Where a work is asked to go. `universeId` absent or null is the library root the
+        work already lives under — a destination like any other, and the only way out of a
+        universe.
+      properties:
+        universeId:
+          type: string
+          nullable: true
+      additionalProperties: false
+
+    Moved:
+      type: object
+      required: [workId, path, moved]
+      properties:
+        workId: { type: string }
+        path:
+          type: string
+          description: The folder it is in now.
+        moved:
+          type: boolean
+          description: |
+            False when the work was already where it was asked to go. Not a fault — asking
+            twice is what a retry looks like — and worth saying, because a move that did
+            nothing would otherwise answer exactly like one that did.
+
     ScanCounts:
       type: object
       description: |
@@ -2122,6 +2568,18 @@ components:
         chapters: { type: integer }
         pages: { type: integer }
         reanalysed: { type: integer }
+        progressCarried:
+          type: integer
+          description: |
+            Reading positions carried onto a new identity — nought on every scan but the
+            one after a library stops being identified by the paths of its folders.
+        progressLost:
+          type: integer
+          description: |
+            And those that could not be, because the file they pointed at is gone. Not
+            required, either of them: a client shown an answer without them should say
+            nothing about them rather than refuse the answer over a number that is nought
+            almost always.
 
     ScanFinding:
       type: object
