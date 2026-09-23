@@ -94,6 +94,10 @@ qt_add_executable(leaf-desktop
     src/SeriesCaptions.cpp
     src/Elsewhere.h
     src/Elsewhere.cpp
+    src/Erasure.h
+    src/Erasure.cpp
+    src/Commands.h
+    src/Commands.cpp
     src/Covers.h
     src/Covers.cpp
 )
@@ -134,6 +138,7 @@ set(LEAF_QML
     qml/FilterAxis.qml
     qml/FilterValueRow.qml
     qml/LeafTextAction.qml
+    qml/LeafField.qml
     qml/LeafSearchLine.qml
     qml/SearchSeriesGrid.qml
     qml/FileResultRow.qml
@@ -158,6 +163,10 @@ set(LEAF_QML
     qml/ElsewhereBlock.qml
     qml/BlockHeading.qml
     qml/TileShelf.qml
+    qml/MenuAction.qml
+    qml/CommandMenu.qml
+    qml/EraseDialog.qml
+    qml/VolumeTile.qml
 )
 foreach(qml_file IN LISTS LEAF_QML)
     string(REGEX REPLACE "^qml/" "" alias "${qml_file}")
@@ -171,15 +180,22 @@ set(LEAF_IMAGES
     qml/assets/icons/book.svg
     qml/assets/icons/book_2.svg
     qml/assets/icons/bookmark.svg
+    qml/assets/icons/check.svg
     qml/assets/icons/close.svg
     qml/assets/icons/cloud_done.svg
     qml/assets/icons/cloud_off.svg
     qml/assets/icons/collections_bookmark.svg
     qml/assets/icons/contrast.svg
     qml/assets/icons/dark_mode.svg
+    qml/assets/icons/delete.svg
+    qml/assets/icons/done_all.svg
+    qml/assets/icons/download.svg
+    qml/assets/icons/library_add.svg
     qml/assets/icons/light_mode.svg
+    qml/assets/icons/more_vert.svg
     qml/assets/icons/public.svg
     qml/assets/icons/refresh.svg
+    qml/assets/icons/remove_done.svg
     qml/assets/icons/search.svg
     qml/assets/icons/settings.svg
     qml/assets/icons/sort.svg
@@ -351,6 +367,8 @@ qt_add_executable(crosses-the-seam
     src/Entries.h src/Entries.cpp
     src/SeriesCaptions.h src/SeriesCaptions.cpp
     src/Elsewhere.h src/Elsewhere.cpp
+    src/Erasure.h src/Erasure.cpp
+    src/Commands.h src/Commands.cpp
 )
 target_include_directories(crosses-the-seam PRIVATE src)
 qt_add_qml_module(crosses-the-seam
@@ -503,6 +521,31 @@ target_include_directories(holds-elsewhere PRIVATE src)
 target_link_libraries(holds-elsewhere PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
 add_test(NAME holds-elsewhere COMMAND holds-elsewhere)
+
+# What a deletion would take, asked before it is done. The one path in this client that
+# unmakes a file, so every branch of it is walked here rather than on a screen.
+qt_add_executable(weighs-a-deletion
+    tests/weighs_a_deletion.cpp tests/Pretend.h
+    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
+    src/Erasure.h src/Erasure.cpp)
+target_include_directories(weighs-a-deletion PRIVATE src)
+target_link_libraries(weighs-a-deletion PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME weighs-a-deletion COMMAND weighs-a-deletion)
+
+# What the three dots do: the marks, and the copy of an archive written to disk.
+qt_add_executable(commands-the-library
+    tests/commands_the_library.cpp tests/Pretend.h
+    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
+    src/Commands.h src/Commands.cpp)
+target_include_directories(commands-the-library PRIVATE src)
+target_link_libraries(commands-the-library PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME commands-the-library COMMAND commands-the-library)
 
 # The two axes the bandeau offers, and the rule that decides whether an axis exists at all.
 # Headless like the shelf: a filter that is not offered is a decision, not a drawing.

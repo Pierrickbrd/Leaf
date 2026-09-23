@@ -13,6 +13,8 @@ Item {
 
     required property string universe
     required property string work
+    /// What the menu at the end of the title commands.
+    required property string seriesId
     required property string edition
     required property string cover
     required property string makers
@@ -22,6 +24,7 @@ Item {
 
     signal universeAsked()
     signal editionsAsked()
+    signal reimportAsked()
 
     objectName: "series-header"
     // Sized for the header with the most to say. A series with less leaves room below rather
@@ -80,15 +83,38 @@ Item {
                 }
             }
 
-            // The name one has in mind, and the only thing in large.
-            Text {
+            // The name one has in mind, and the only thing in large. The three dots sit at
+            // the end of it and are drawn always, not at the hover: there is one object on
+            // this screen and one menu, which is not a wall of them.
+            Item {
                 width: parent.width
-                text: header.work
-                color: Theme.ink
-                font.family: Theme.displayFamily
-                font.pixelSize: 28
-                font.weight: Font.Bold
-                elide: Text.ElideRight
+                height: title.implicitHeight
+
+                Text {
+                    id: title
+
+                    anchors.left: parent.left
+                    anchors.right: commands.left
+                    anchors.rightMargin: 8
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: header.work
+                    color: Theme.ink
+                    font.family: Theme.displayFamily
+                    font.pixelSize: 28
+                    font.weight: Font.Bold
+                    elide: Text.ElideRight
+                }
+
+                CommandMenu {
+                    id: commands
+
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: header.seriesId.length > 0
+                    seriesId: header.seriesId
+                    label: header.work
+                    onReimportAsked: header.reimportAsked()
+                }
             }
 
             // Named plainly under the work, never folded into the title.

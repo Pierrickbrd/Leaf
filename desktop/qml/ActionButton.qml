@@ -38,12 +38,17 @@ Rectangle {
     /// pressed — « Importer » with a question still unanswered is exactly that.
     property bool ready: true
 
+    /// Painted in the alert colour rather than the emerald. For the one button in this client
+    /// that unmakes files: everything else about it is the same pill, so it is a colour and
+    /// not a second component.
+    property bool danger: false
+
     readonly property bool hovered: pointer.hovered
 
     height: 32
     width: compact ? height : 14 + glyphs.width + 8 + word.implicitWidth + 14
     radius: height / 2
-    color: ready ? Theme.emerald : Theme.rule
+    color: !ready ? Theme.rule : (danger ? Theme.alert : Theme.emerald)
     opacity: ready ? 1.0 : 0.7
     activeFocusOnTab: visible
 

@@ -40,9 +40,8 @@ Server::Server(Settings *settings, QObject *parent) : QObject(parent), m_setting
             if (!one.caller) {
                 continue;
             }
-            send(one.verb, one.path, QUrlQuery(one.encodedQuery), one.body, one.range,
-                 one.caller,
-                 one.then);
+            send({one.verb, one.path, QUrlQuery(one.encodedQuery), one.body, one.range},
+                 one.caller, one.then, one.reading);
         }
     });
 }
@@ -98,19 +97,31 @@ void Server::get(const QString &path, const QObject *caller,
 void Server::post(const QString &path, const QByteArray &body, const QObject *caller,
                   std::function<void(const Answer &)> then)
 {
-    send("POST", path, QUrlQuery(), body, {}, caller, std::move(then));
+    send({"POST", path, QUrlQuery(), body, {}}, caller, std::move(then));
 }
 
 void Server::get(const QString &path, const QUrlQuery &query, const QObject *caller,
                  std::function<void(const Answer &)> then)
 {
-    send("GET", path, query, {}, {}, caller, std::move(then));
+    send({"GET", path, query, {}, {}}, caller, std::move(then));
 }
 
 void Server::remove(const QString &path, const QObject *caller,
                     std::function<void(const Answer &)> then)
 {
-    send("DELETE", path, QUrlQuery(), {}, {}, caller, std::move(then));
+    send({"DELETE", path, QUrlQuery(), {}, {}}, caller, std::move(then));
+}
+
+void Server::patch(const QString &path, const QByteArray &body, const QObject *caller,
+                   std::function<void(const Answer &)> then)
+{
+    send({"PATCH", path, QUrlQuery(), body, {}}, caller, std::move(then));
+}
+
+void Server::getFile(const QString &path, const QObject *caller,
+                     std::function<void(const Answer &)> then)
+{
+    send({"GET", path, QUrlQuery(), {}, {}}, caller, std::move(then), Reading::Bytes);
 }
 
 void Server::put(const QString &path, const QByteArray &body, qint64 from, qint64 whole,
@@ -133,20 +144,19 @@ void Server::put(const QString &path, const QUrlQuery &query, const QByteArray &
                 + QByteArray::number(from + body.size() - 1) + '/'
                 + QByteArray::number(whole);
     }
-    send("PUT", path, query, body, range, caller, std::move(then));
+    send({"PUT", path, query, body, range}, caller, std::move(then));
 }
 
-void Server::send(const QByteArray &verb, const QString &path, const QUrlQuery &query,
-                  const QByteArray &body, const QByteArray &range, const QObject *caller,
-                  std::function<void(const Answer &)> then)
+void Server::send(const Sending &what, const QObject *caller,
+                  std::function<void(const Answer &)> then, Reading reading)
 {
     // Nothing given is this client itself: the answer then stands for as long as the thing
     // that would send it, which is what every caller had before there was anything to say.
     QPointer<const QObject> alive(caller != nullptr ? caller : this);
 
-    // A caller that built its own query string has already lost the ampersands. Saying so is
-    // better than encoding it twice or sending it broken.
-    if (path.contains(u'?')) {
+    // A caller that built its own query string has already lost the ampersands. Saying so
+    // is better than encoding it twice or sending it broken.
+    if (what.path.contains(u'?')) {
         then({0, {}, Words::queryBelongsApart()});
         return;
     }
@@ -174,8 +184,8 @@ void Server::send(const QByteArray &verb, const QString &path, const QUrlQuery &
         // Encoded here and parsed back on the way out — see `Waiting::encodedQuery` for why
         // it is not the `QUrlQuery` itself. `FullyEncoded` is the only form that survives the
         // round trip: a `PrettyDecoded` query hands its own ampersands back to the parser.
-        m_waiting.append({verb, path, query.toString(QUrl::FullyEncoded), body, range, alive,
-                          std::move(then)});
+        m_waiting.append({what.verb, what.path, what.query.toString(QUrl::FullyEncoded),
+                          what.body, what.range, reading, alive, std::move(then)});
         return;
     }
 
@@ -192,9 +202,9 @@ void Server::send(const QByteArray &verb, const QString &path, const QUrlQuery &
         return;
     }
 
-    QUrl url(address + path);
-    if (!query.isEmpty()) {
-        url.setQuery(query);
+    QUrl url(address + what.path);
+    if (!what.query.isEmpty()) {
+        url.setQuery(what.query);
     }
     QNetworkRequest request{url};
     request.setRawHeader(KeyHeader, m_settings->key().toUtf8());
@@ -204,21 +214,22 @@ void Server::send(const QByteArray &verb, const QString &path, const QUrlQuery &
     // A body means something to send, and a server that reads a length. Set even when the
     // body is empty: `POST /scan` carries nothing, and a POST with no length at all is one
     // some proxies hold open waiting for it.
-    if (verb != "GET") {
+    if (what.verb != "GET") {
         // A PUT in this client is always part of a file, and part of a file is never JSON.
         request.setHeader(QNetworkRequest::ContentTypeHeader,
-                          verb == "PUT" ? QByteArrayLiteral("application/octet-stream")
+                          what.verb == "PUT" ? QByteArrayLiteral("application/octet-stream")
                                         : QByteArrayLiteral("application/json"));
     }
-    if (!range.isEmpty()) {
-        request.setRawHeader("Content-Range", range);
+    if (!what.range.isEmpty()) {
+        request.setRawHeader("Content-Range", what.range);
     }
-    QNetworkReply *reply = verb == "GET" ? m_network.get(request)
-                                         : m_network.sendCustomRequest(request, verb, body);
+    QNetworkReply *reply =
+        what.verb == "GET" ? m_network.get(request)
+                           : m_network.sendCustomRequest(request, what.verb, what.body);
     connect(reply, &QNetworkReply::finished, this,
-            [this, reply, alive, then = std::move(then)] {
+            [this, reply, alive, reading, then = std::move(then)] {
                 reply->deleteLater();
-                const Answer answer = read(reply);
+                const Answer answer = read(reply, reading);
                 if (answer.status == 403) {
                     m_stopped = answer.trouble;
                 } else if (answer.status == 429) {
@@ -236,7 +247,7 @@ void Server::send(const QByteArray &verb, const QString &path, const QUrlQuery &
             });
 }
 
-Server::Answer Server::read(QNetworkReply *reply) const
+Server::Answer Server::read(QNetworkReply *reply, Reading reading) const
 {
     const int status =
         reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -248,6 +259,13 @@ Server::Answer Server::read(QNetworkReply *reply) const
     }
 
     const QByteArray bytes = reply->readAll();
+    // An archive is not a document, and reading it as one would turn the one answer that
+    // arrived whole into « the server said something this client cannot read ». A refusal
+    // still carries its sentence in JSON, so only the successful answer is left alone.
+    if (reading == Reading::Bytes && status >= 200 && status < 300) {
+        return {status, {}, {}, bytes};
+    }
+
     QJsonParseError fault{};
     const QJsonDocument body = QJsonDocument::fromJson(bytes, &fault);
 

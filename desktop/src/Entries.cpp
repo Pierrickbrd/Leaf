@@ -71,13 +71,18 @@ QVariant gapRow(double number, Entries::Role role)
 
 /// A file, and the record that may or may not stand beside it.
 QVariant fileRow(const Api::Entry &file, const std::optional<Api::Progress> &read,
-                 Entries::Role role)
+                 const QString &address, Entries::Role role)
 {
     using enum Entries::Role;
     using enum Entries::State;
     switch (role) {
     case EntryId:
         return file.id;
+    case Cover:
+        return address.isEmpty() ? QString()
+                                 : address + u"/entries/"_s + file.id + u"/cover"_s;
+    case FileName:
+        return file.file;
     case Number:
         return file.number.has_value() ? Words::number(*file.number) : QString();
     case Title:
@@ -164,7 +169,8 @@ QVariant Entries::data(const QModelIndex &index, int role) const
         return stretchRow(line.range, which);
     if (line.missingNumber.has_value())
         return gapRow(*line.missingNumber, which);
-    return fileRow(line.file, line.read, which);
+    return fileRow(line.file, line.read, m_server == nullptr ? QString() : m_server->address(),
+                   which);
 }
 
 QHash<int, QByteArray> Entries::roleNames() const
@@ -184,6 +190,8 @@ QHash<int, QByteArray> Entries::roleNames() const
     named.insert(qToUnderlying(Kind_), "kind");
     named.insert(qToUnderlying(Detail), "detail");
     named.insert(qToUnderlying(Depth), "depth");
+    named.insert(qToUnderlying(Cover), "cover");
+    named.insert(qToUnderlying(FileName), "fileName");
     return named;
 }
 

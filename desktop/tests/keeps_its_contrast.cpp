@@ -82,8 +82,10 @@ private slots:
         static const Pair pairs[] = {
             {false, "ink",      13.29, 7.0}, {false, "inkSoft",  5.38, 4.5},
             {false, "inkFaint",  4.22, 3.0}, {false, "emerald",  5.12, 4.5},
+            {false, "alert",     6.90, 4.5},
             {true,  "ink",      15.91, 7.0}, {true,  "inkSoft",  7.36, 7.0},
             {true,  "inkFaint",  4.01, 3.0}, {true,  "emerald",  7.69, 7.0},
+            {true,  "alert",     5.71, 4.5},
         };
 
         for (const Pair &pair : pairs) {
@@ -141,6 +143,40 @@ private slots:
             theme.setDark(pair.dark);
             const double measured = contrast(theme.onEmerald(), theme.emerald());
             const QString what = pair.dark ? u"dark onEmerald"_s : u"light onEmerald"_s;
+            QVERIFY2(measured >= 4.5,
+                     qPrintable(u"%1 falls to %2:1, under its 4.5:1 floor"_s
+                                    .arg(what).arg(measured, 0, 'f', 2)));
+            QVERIFY2(std::abs(measured - pair.documented) <= 0.01,
+                     qPrintable(u"%1 is %2:1, not its recorded %3:1"_s
+                                    .arg(what).arg(measured, 0, 'f', 2).arg(pair.documented)));
+        }
+    }
+
+    /// The alert colour is not read on the paper alone: it is written on a card, in the
+    /// hollow a hovered row draws, and on its own wash. The hollow is the one that decided
+    /// the dark value — a deeper garnet fell to 4,44 there, under the floor, while every
+    /// other surface stayed comfortable and would have let it through.
+    void the_alert_is_measured_on_every_surface_it_is_written_on()
+    {
+        struct Pair {
+            bool dark;
+            const char *surface;
+            double documented;
+        };
+        static const Pair pairs[] = {
+            {false, "paper", 6.90}, {false, "surface", 7.48},
+            {false, "onBar", 6.88}, {false, "alertWash", 6.76},
+            {true,  "paper", 5.71}, {true,  "surface", 5.30},
+            {true,  "onBar", 4.88}, {true,  "alertWash", 5.22},
+        };
+
+        for (const Pair &pair : pairs) {
+            Theme theme;
+            theme.setDark(pair.dark);
+            const QColor under = theme.property(pair.surface).value<QColor>();
+            const double measured = contrast(theme.alert(), under);
+            const QString what = (pair.dark ? u"dark alert on "_s : u"light alert on "_s)
+                               + QString::fromUtf8(pair.surface);
             QVERIFY2(measured >= 4.5,
                      qPrintable(u"%1 falls to %2:1, under its 4.5:1 floor"_s
                                     .arg(what).arg(measured, 0, 'f', 2)));

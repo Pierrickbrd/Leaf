@@ -260,6 +260,11 @@ ApplicationWindow {
         }
     }
 
+    // The one confirmation that stands in front of something a scan will not undo. Here
+    // rather than on the page: the same modal opens from a shelf tile, and the shelf is not
+    // the page.
+    EraseDialog { }
+
     ImportDialog {
         id: importDialog
     }
@@ -273,7 +278,11 @@ ApplicationWindow {
     Component {
         id: seriesScreen
 
-        SeriesView { }
+        SeriesView {
+            // The import belongs to the window, not to a row: a dialog opened from inside a
+            // list would go with the list the moment its model answers again.
+            onReimportAsked: importDialog.show()
+        }
     }
 
     // The page is pointed at what navigation asked for, and the list follows once the page
@@ -305,6 +314,43 @@ ApplicationWindow {
             // to no universe, because that is how it learns to draw nothing: a block still
             // holding the last universe would offer the wrong places to go.
             Elsewhere.point(Series.universeId, Series.universe, Series.identifier)
+        }
+    }
+
+    // What a command changed, brought back to what is showing it. The page does not guess:
+    // a mark set from a menu is a fact on the server, and the screen asks again rather than
+    // moving its own rows to match what it just sent.
+    Connections {
+        target: Commands
+
+        function onMarked(seriesId, entryId) {
+            if (seriesId.length > 0 && seriesId === Series.identifier) {
+                Series.reload()
+                Entries.reload()
+            }
+            Resume.reload()
+            Shelf.reload()
+        }
+    }
+
+    // Gone from the disk. A page showing an edition that no longer exists goes back to the
+    // shelf rather than staying on a header nothing can answer for.
+    Connections {
+        target: Erasure
+
+        function onErased(seriesId, entryId) {
+            Shelf.reload()
+            Resume.reload()
+            if (entryId.length > 0) {
+                if (seriesId === Series.identifier) {
+                    Series.reload()
+                    Entries.reload()
+                }
+                return
+            }
+            if (Navigation.destination === Navigation.Series
+                    && seriesId === Series.identifier)
+                Navigation.back()
         }
     }
 

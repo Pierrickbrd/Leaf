@@ -965,6 +965,126 @@ private slots:
         QTRY_COMPARE(marked(), 1);
     }
 
+    /// The list becomes a wall of covers, and the three dots reach the one confirmation in
+    /// this client that unmakes a file. Both are gestures, so both are made here: a menu that
+    /// opens and commands nothing, and a toggle that changes an icon and nothing else, are
+    /// exactly what every headless test passes over.
+    void the_grid_draws_covers_and_the_dots_reach_the_confirmation()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+
+        const QByteArray one = QJsonDocument(QJsonObject{
+            {u"id"_s, u"albums"_s},
+            {u"workId"_s, u"elfes"_s},
+            {u"name"_s, u"Terres d'Arran · Elfes"_s},
+            {u"work"_s, u"Elfes"_s},
+            {u"edition"_s, u"Albums"_s},
+            {u"medium"_s, u"bd"_s},
+            {u"ownedVolumes"_s, 3},
+            {u"entryCount"_s, 3},
+            {u"chapterCount"_s, 0},
+            {u"arcCount"_s, 0},
+        }).toJson(QJsonDocument::Compact);
+
+        const auto aVolume = [](int number, const QString &title) {
+            return QJsonObject{{u"id"_s, u"v%1"_s.arg(number)}, {u"type"_s, u"VOLUME"_s},
+                               {u"number"_s, number},          {u"title"_s, title},
+                               {u"pageCount"_s, 54},           {u"chapterCount"_s, 0},
+                               {u"file"_s, u"Tome %1.cbz"_s.arg(number)},
+                               {u"size"_s, 48000000}};
+        };
+        const QByteArray files = QJsonDocument(QJsonArray{
+            aVolume(22, u"Les Portes de Nyn"_s), aVolume(23, u"La Nuit des Sylvains"_s),
+            aVolume(24, u"Le Serment de Lanawyn"_s)}).toJson(QJsonDocument::Compact);
+        const QByteArray shelf = QJsonDocument(QJsonObject{
+            {u"items"_s, QJsonArray{}}, {u"total"_s, 0}, {u"page"_s, 0}, {u"size"_s, 0},
+        }).toJson(QJsonDocument::Compact);
+
+        const auto reply = [](const QByteArray &body) {
+            return "HTTP/1.1 200 .\r\nContent-Type: application/json\r\nContent-Length: "
+                   + QByteArray::number(body.size()) + "\r\n\r\n" + body;
+        };
+        pretend.answerFor = [=](const QByteArray &request) -> QByteArray {
+            if (request.contains("/entries "))
+                return reply(files);
+            if (request.contains("/progress "))
+                return reply(QByteArrayLiteral("[]"));
+            if (request.contains("/cover"))
+                return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+            if (request.startsWith("GET /series/"))
+                return reply(one);
+            return reply(shelf);
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        QVERIFY(navigation->open(Navigation::Destination::Series,
+                                 {{u"series"_s, u"albums"_s}}));
+
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        auto *volumes = engine.singletonInstance<Entries *>(qmlTypeId("Leaf", 1, 0, "Entries"));
+        QVERIFY(volumes);
+        QTRY_COMPARE(volumes->count(), 3);
+        QTRY_VERIFY(!volumes->loading());
+        QTRY_VERIFY(itemNamed(page, u"volume-v23"_s));
+
+        // The toggle at the end of the tab bar draws covers where there were lines. It was
+        // wired to the icon of its own button and to nothing else for one whole branch.
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->showVolumesAsGrid(true);
+        QTRY_VERIFY(itemNamed(page, u"tile-volume-v23"_s));
+        // And the line is gone with it: two repeaters over one model, one of them emptied,
+        // rather than thirty delegates built for nobody.
+        QVERIFY(!itemNamed(page, u"volume-v23"_s));
+
+        preferences->showVolumesAsGrid(false);
+        QTRY_VERIFY(itemNamed(page, u"volume-v23"_s));
+
+        // The three dots of that line, pressed as a reader presses them — which begins by
+        // moving onto the line, because nothing is drawn there until the pointer is over it.
+        QQuickItem *dots = nullptr;
+        QTRY_VERIFY((dots = itemNamed(page, u"commands-v23"_s)));
+        // Opened the way a keyboard opens it. A synthetic pointer move does not make a row
+        // believe it is hovered, and what is worth settling here is that the menu is built
+        // and that what it commands reaches the model — not how a real mouse behaves.
+        QVERIFY(QMetaObject::invokeMethod(dots, "show"));
+
+        QQuickItem *erase = nullptr;
+        QTRY_VERIFY((erase = itemNamed(window->contentItem(), u"command-erase-v23"_s)));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          erase->mapToItem(window->contentItem(),
+                                           QPointF(erase->width() / 2.0,
+                                                   erase->height() / 2.0))
+                              .toPoint());
+
+        // And the confirmation says which volume, what it leaves behind, and that there is
+        // no trash — the three things it exists to say.
+        const auto questionOf = [&] {
+            const QQuickItem *said = itemNamed(window->contentItem(), u"erase-question"_s);
+            return said == nullptr ? QString() : said->property("text").toString();
+        };
+        QTRY_COMPARE(questionOf(), u"Supprimer le tome 23 ?"_s);
+        QVERIFY(itemNamed(window->contentItem(), u"erase-leaves"_s)
+                    ->property("text").toString().contains(u"rejoindra les manquants"_s));
+        QVERIFY(itemNamed(window->contentItem(), u"erase-warning"_s)
+                    ->property("text").toString().contains(u"corbeille"_s));
+    }
+
     void the_resume_band_draws_the_one_offer_above_the_grid()
     {
         Pretend pretend;

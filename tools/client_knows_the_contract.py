@@ -73,6 +73,10 @@ WATCHED = {
     "ReadingStep": ("whole", ["readingStep"]),
     "ReadingOrder": ("whole", ["readingOrder"]),
     "Universe": ("whole", ["universe"]),
+    # What a deletion took. `whole`, and `refused` is the reason: a file that would not go is
+    # the one thing this answer exists to say, and a client reading the two counts and not
+    # the list would report a clean deletion over a library that still holds the file.
+    "Erased": ("whole", ["erased"]),
     "Entry": ("part", ["upNext", "entry"]),
     "Progress": ("part", ["upNext", "progress"]),
     "Chapter": ("part", ["upNext"]),

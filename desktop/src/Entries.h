@@ -75,6 +75,13 @@ public:
         Kind_,
         Detail,
         Depth,
+        /// Whole, and straight into an `Image`. The route is spelled here for the reason the
+        /// shelf gives: assembled out of `Settings.address` in every `.qml` that draws a
+        /// cover, it is one more place to forget the key the engine puts on.
+        Cover,
+        /// The file's own name, which is all a deletion has to show. « the file name alone,
+        /// never a path » — the client knows no path and does not invent one.
+        FileName,
     };
     Q_ENUM(Role)
 

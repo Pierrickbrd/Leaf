@@ -451,6 +451,35 @@ private slots:
         QVERIFY(!got.ok());
     }
 
+    /// What a deletion took. `refused` is the field this answer exists for: a client reading
+    /// the two counts and not the list would report a clean deletion over a library that
+    /// still holds the file.
+    void a_deletion_says_what_went_and_what_would_not()
+    {
+        const Api::Read<Api::Erased> clean =
+            Api::erased({{u"files"_s, 29}, {u"bytes"_s, 1503238553}});
+        QVERIFY(clean.ok());
+        QCOMPARE(clean.value->files, 29);
+        // A count of bytes past two gigabytes is not an `int`: an edition of forty volumes
+        // passes that, and `toInt` would answer nought — a deletion that took nothing.
+        QCOMPARE(Api::erased({{u"files"_s, 40}, {u"bytes"_s, qint64(4294967296)}})
+                     .value->bytes,
+                 qint64(4294967296));
+        // Absent when every one of them went, which is the ordinary answer.
+        QVERIFY(clean.value->refused.isEmpty());
+
+        const Api::Read<Api::Erased> partly =
+            Api::erased({{u"files"_s, 1},
+                         {u"bytes"_s, 48000000},
+                         {u"refused"_s, QJsonArray{u"Tome 4.cbz"_s, u"Tome 9.cbz"_s}}});
+        QCOMPARE(partly.value->refused.size(), 2);
+        QCOMPARE(partly.value->refused.at(1), u"Tome 9.cbz"_s);
+
+        // Both counts are required, and an answer missing one is not an answer about what
+        // went — it is an answer about nothing, and saying nothing went would be worse.
+        QVERIFY(!Api::erased({{u"files"_s, 1}}).ok());
+    }
+
     /// A range, with the unit its bounds are counted in. An unfamiliar unit makes a chapter
     /// range — the format's ordinary one — and the arc still stands: a word this client has
     /// not been taught is no reason to drop a stretch of the story.
