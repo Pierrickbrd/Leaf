@@ -36,16 +36,6 @@ ToolTip {
         objectName: tip.objectName.length > 0 ? tip.objectName + "-background" : ""
 
         Rectangle {
-            x: 1
-            y: 3
-            width: parent.width
-            height: parent.height
-            radius: 9
-            color: "#000000"
-            opacity: Theme.dark ? 0.48 : 0.14
-        }
-
-        Rectangle {
             id: panel
 
             objectName: tip.objectName.length > 0 ? tip.objectName + "-panel" : ""
@@ -54,6 +44,8 @@ ToolTip {
             color: Theme.surface
             border.color: Theme.rule
             border.width: 1
+
+            CardLift { level: CardLift.Bubble }
         }
     }
 

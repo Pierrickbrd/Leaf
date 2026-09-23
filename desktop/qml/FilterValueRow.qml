@@ -34,6 +34,7 @@ Rectangle {
     }
 
     TapHandler {
+        gesturePolicy: TapHandler.ReleaseWithinBounds
         onTapped: row.triggered()
     }
 

@@ -72,11 +72,12 @@ Item {
     /// `Repeater` given a new list rebuilds every delegate — under the pointer.
     readonly property bool drawsRead: readStatusValues.length > 0
     readonly property bool drawsMedium: mediumValues.length > 0
+    /// What a chip reads in the moment between its list shrinking and the chip going.
+    readonly property var nothing: ({ "axis": "", "value": "", "label": "" })
     readonly property var drawnHere: (drawsRead ? ["read"] : [])
                                      .concat(drawsMedium ? ["medium"] : [])
 
-    /// Everything lit, across every axis. The button says so while the panel is shut, which
-    /// is the only moment a filter in force can be out of sight.
+    /// Everything lit, across every axis.
     readonly property int litCount: {
         let total = 0
         for (const axis in shelf.narrowing)
@@ -218,7 +219,10 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         source: "assets/icons/tune.svg"
         label: Captions.filterLabel
-        held: row.litCount > 0
+        // Green while its panel is open, as every button that opens something is — and not
+        // while a filter is in force: held for that, it stayed green through a whole session
+        // of browsing, and a colour that never changes says nothing.
+        held: panel.opened
         toolTipSuppressed: panel.opened
         popup: panel
 
@@ -229,7 +233,7 @@ Item {
             // 380 px it needs are always to its right. In the bar it was pulled the other
             // way, the button sitting in the middle of a row.
             x: 0
-            y: filterButton.height + 7
+            y: filterButton.height + gap
             overFiles: row.overFiles
             drawnAlready: row.drawnHere
             source: row.source
@@ -245,17 +249,22 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         spacing: 6
 
+        // A count, and each chip reads its own entry: handed the list, the repeater rebuilt
+        // every chip whenever one number moved — « Terminées 1 » becoming 2 tore down « Non
+        // lues » beside it, under the pointer. Kept, a chip changes its number in place.
         Repeater {
-            model: row.readStatusValues
+            model: row.readStatusValues.length
 
             delegate: FilterChip {
-                required property var modelData
+                required property int index
+                // Undefined for the moment between a list shrinking and its last chip going.
+                readonly property var pill: row.readStatusValues[index] ?? row.nothing
 
                 axis: "read"
-                value: modelData.value
-                label: modelData.label
-                lit: row.isLit("read", modelData.value)
-                onToggled: row.toggle("read", modelData.value)
+                value: pill.value
+                label: pill.label
+                lit: row.isLit("read", pill.value)
+                onToggled: row.toggle("read", pill.value)
             }
         }
 
@@ -270,16 +279,17 @@ Item {
         }
 
         Repeater {
-            model: row.mediumValues
+            model: row.mediumValues.length
 
             delegate: FilterChip {
-                required property var modelData
+                required property int index
+                readonly property var pill: row.mediumValues[index] ?? row.nothing
 
                 axis: "medium"
-                value: modelData.value
-                label: modelData.label
-                lit: row.isLit("medium", modelData.value)
-                onToggled: row.toggle("medium", modelData.value)
+                value: pill.value
+                label: pill.label
+                lit: row.isLit("medium", pill.value)
+                onToggled: row.toggle("medium", pill.value)
             }
         }
 
@@ -294,17 +304,18 @@ Item {
         }
 
         Repeater {
-            model: row.elsewhereValues
+            model: row.elsewhereValues.length
 
             delegate: FilterChip {
-                required property var modelData
+                required property int index
+                readonly property var pill: row.elsewhereValues[index] ?? row.nothing
 
-                axis: modelData.axis
-                value: modelData.value
-                label: modelData.label
+                axis: pill.axis
+                value: pill.value
+                label: pill.label
                 // Always lit: it is only here because it is.
                 lit: true
-                onToggled: row.toggle(modelData.axis, modelData.value)
+                onToggled: row.toggle(pill.axis, pill.value)
             }
         }
     }

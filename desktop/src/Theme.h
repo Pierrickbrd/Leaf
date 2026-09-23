@@ -27,6 +27,7 @@
 #include <QObject>
 #include <QQmlEngine>
 #include <QString>
+#include <QWindow>
 
 class Theme : public QObject
 {
@@ -81,6 +82,12 @@ public:
     /// What the reader asked for, when they asked for something. `System` hands the choice
     /// back to the desktop, which is what `followSystem` reads.
     Q_INVOKABLE void follow(int appearance);
+
+    /// One pixel of the window, in layout units: what a line must measure to be one pixel
+    /// wide and not a pixel and a bit. Asked of the window and not of `Screen`, because the
+    /// two disagree — 2 for the screen against 1.33 for the window that is on it, in the
+    /// harness the shelf tests run in — and it is the window that draws.
+    Q_INVOKABLE qreal hairOf(QWindow *window) const;
 
     QColor paper() const;
     QColor surface() const;

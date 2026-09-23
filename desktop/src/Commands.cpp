@@ -3,7 +3,9 @@
 #include "Words.h"
 
 #include <QDebug>
+#include <QDesktopServices>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QUrl>
@@ -130,6 +132,14 @@ void Commands::saveACopy(const QString &entryId, const QUrl &where)
         }
         write(answer.file, path);
     });
+}
+
+void Commands::showTheFolder(const QString &path) const
+{
+    const QFileInfo about(path);
+    if (!about.exists())
+        return;
+    QDesktopServices::openUrl(QUrl::fromLocalFile(about.absolutePath()));
 }
 
 void Commands::write(const QByteArray &archive, const QString &path)

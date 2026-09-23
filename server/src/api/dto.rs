@@ -548,9 +548,14 @@ impl SeriesSort {
             SeriesSort::Added => format!(
                 "last_added_at IS NULL, last_added_at {way}, w.name COLLATE LEAF ASC, e.id ASC"
             ),
-            SeriesSort::Read => format!(
-                "last_read_at IS NULL, last_read_at {way}, w.name COLLATE LEAF ASC, e.id ASC"
-            ),
+            // Never opened counts as read at the beginning of time, so the unread follow the
+            // oldest reading and the order reversed opens on them. Pinned to the far end, they
+            // stayed last both ways: « la plus ancienne » showed the one series read first, and
+            // a shelf of a hundred unread looked as if it had left them out. Search already
+            // read them so (`search_order`), and the two lists disagreed about one sort.
+            SeriesSort::Read => {
+                format!("COALESCE(last_read_at, 0) {way}, w.name COLLATE LEAF ASC, e.id ASC")
+            }
             SeriesSort::Volumes => {
                 format!("entry_count {way}, w.name COLLATE LEAF ASC, e.id ASC")
             }

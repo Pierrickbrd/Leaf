@@ -12,6 +12,7 @@
 // written apart: `leaf.conf` is the deployment's file, refused when anybody but its owner
 // can read it, and a preference has no reason to sit in a file with that rule on it.
 
+#include <QHash>
 #include <QObject>
 #include <QQmlEngine>
 #include <QSettings>
@@ -49,9 +50,41 @@ class Preferences : public QObject
     /// state on one row, where a grid shows covers and cuts long titles.
     Q_PROPERTY(bool volumesAsGrid READ volumesAsGrid WRITE showVolumesAsGrid NOTIFY changed)
 
+    /// What warns, and by which of the two channels. `[{ name, label, detail, bubble,
+    /// desktop }]`, in the order the section draws them — a list and not four cards, because
+    /// four lines and two columns of switches fit in one card where four cards of three pills
+    /// would fill a section to say the same thing.
+    Q_PROPERTY(QVariantList warnings READ warnings NOTIFY changed)
+
+    /// Where the bubbles appear: one of six zones of the screen. Not drawn at all when
+    /// nothing makes a bubble — an empty heading is worse than an absent one.
+    /// The two cards of the section and the two columns of its list, said once here so that
+    /// no `.qml` writes a word of French.
+    Q_PROPERTY(QString warningsTitle READ warningsTitle CONSTANT)
+    Q_PROPERTY(QString cornerTitle READ cornerTitle CONSTANT)
+    Q_PROPERTY(QString bubbleColumn READ bubbleColumn CONSTANT)
+    Q_PROPERTY(QString desktopColumn READ desktopColumn CONSTANT)
+
+    Q_PROPERTY(Corner corner READ corner NOTIFY changed)
+    Q_PROPERTY(QString cornerLabel READ cornerLabel NOTIFY changed)
+    Q_PROPERTY(bool anythingBubbles READ anythingBubbles NOTIFY changed)
+
 public:
     enum class Appearance { System, Light, Dark };
     Q_ENUM(Appearance)
+
+    /// The four families of event, and the one that crosses the other three.
+    ///
+    /// Eleven events, four lines: a switch cannot answer event by event, so it answers by
+    /// family. `Failures` is deliberately not one family among four — turning « scans » off
+    /// does not silence « a scan stopped », because one may want quiet about a subject's good
+    /// news and noise about its bad.
+    enum class Warns { Imports, Scans, Downloads, Failures };
+    Q_ENUM(Warns)
+
+    /// The six zones of the screen a bubble can be laid in.
+    enum class Corner { TopLeft, Top, TopRight, BottomLeft, Bottom, BottomRight };
+    Q_ENUM(Corner)
 
     explicit Preferences(QObject *parent = nullptr);
 
@@ -71,6 +104,23 @@ public:
     /// file sits in — what a reader wants next time is the place, not the thing.
     Q_INVOKABLE void rememberPlace(const QUrl &place);
 
+    QVariantList warnings() const;
+    QString warningsTitle() const;
+    QString cornerTitle() const;
+    QString bubbleColumn() const;
+    QString desktopColumn() const;
+    /// Whether this family warns at all, and whether it escalates to the desktop. Asked by
+    /// name so that the one place that decides is the one that holds the answer.
+    bool bubbles(Warns which) const;
+    bool reachesTheDesktop(Warns which) const;
+    Q_INVOKABLE void showBubble(Warns which, bool wanted);
+    Q_INVOKABLE void reachTheDesktop(Warns which, bool wanted);
+
+    Corner corner() const { return m_corner; }
+    QString cornerLabel() const;
+    bool anythingBubbles() const;
+    Q_INVOKABLE void putBubbles(Corner where);
+
 signals:
     void changed();
     /// The choice moved. `Theme` listens: it is the one that knows what a palette is, and
@@ -85,4 +135,11 @@ private:
     Appearance m_appearance = Appearance::System;
     QUrl m_lastPlace;
     bool m_volumesAsGrid = false;
+    /// Everything on, except the desktop for a download: a copy saved in two seconds wakes
+    /// nobody. It is being pestered that makes somebody open this screen, not silence.
+    QHash<Warns, bool> m_bubbles;
+    QHash<Warns, bool> m_desktop;
+    /// Where the desktop puts its own, so the place one has already learned to look — and
+    /// the middle stays clear, which is where the eye goes on a wall of covers.
+    Corner m_corner = Corner::BottomRight;
 };

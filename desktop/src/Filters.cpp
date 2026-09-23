@@ -150,6 +150,7 @@ Filters::Filters(Server *server, Shelf *shelf, QObject *parent)
     // is worse than no count, and a screen can forget to ask.
     if (m_shelf) {
         connect(m_shelf, &Shelf::criteriaChanged, this, [this] { countFiles(); });
+        connect(m_shelf, &Shelf::taken, this, &Filters::follow);
     }
 }
 
@@ -235,6 +236,24 @@ void Filters::reload()
     });
 }
 
+void Filters::refresh()
+{
+    askAgain();
+    countFiles();
+}
+
+void Filters::askAgain()
+{
+    ++m_generation;
+    if (!m_server)
+        return;
+    const int mine = m_generation;
+    m_server->get(u"/filters"_s, this, [this, mine](const Server::Answer &answer) {
+        if (mine == m_generation)
+            took(answer);
+    });
+}
+
 void Filters::took(const Server::Answer &answer)
 {
     m_loading = false;
@@ -258,8 +277,14 @@ void Filters::took(const Server::Answer &answer)
         return;
     }
 
-    const QVariantList statuses = readStatusPills(read.value->readStatuses);
-    const QVariantList kinds = mediumPills(read.value->media);
+    m_counted = *read.value;
+    show(*m_counted);
+}
+
+void Filters::show(const Api::Facets &counted)
+{
+    const QVariantList statuses = readStatusPills(counted.readStatuses);
+    const QVariantList kinds = mediumPills(counted.media);
 
     // An axis is offered when it has something to say and a row can hold it. Below the floor
     // it cuts nothing; above the ceiling it is a menu, which is not drawn yet.
@@ -271,7 +296,48 @@ void Filters::took(const Server::Answer &answer)
     m_media = offered(kinds) ? kinds : QVariantList();
     // The panel has room the row has not, so the ceiling of four does not apply to it: a
     // list of thirty authors is a list, where a row of thirty pills is a wall.
-    offer(m_axes, axesOf(*read.value));
+    offer(m_axes, axesOf(counted));
     m_trouble.clear();
     emit changed();
+}
+
+void Filters::follow(bool held, int before, int after)
+{
+    // Any file read or unread moves the counts over files, and only the server has them.
+    countFiles();
+    if (held && before == after)
+        return;
+    // Not on the shelf, or a status nobody said: what it was before is not known here, and
+    // a count moved on a guess is a count wrong until the next scan.
+    if (!held || before < 0 || after < 0 || !m_counted) {
+        askAgain();
+        return;
+    }
+    const QString from = Api::spell(Api::ReadStatus(before));
+    const QString to = Api::spell(Api::ReadStatus(after));
+    QList<Api::Facet> &statuses = m_counted->readStatuses;
+    bool moved = false;
+    for (qsizetype at = 0; at < statuses.size(); ++at) {
+        if (statuses[at].value != from)
+            continue;
+        if (--statuses[at].count <= 0)
+            statuses.removeAt(at);
+        moved = true;
+        break;
+    }
+    if (!moved) {
+        // Counted nowhere before, which these counts cannot be: they are not this library's.
+        askAgain();
+        return;
+    }
+    bool landed = false;
+    for (Api::Facet &one : statuses) {
+        if (one.value == to) {
+            ++one.count;
+            landed = true;
+        }
+    }
+    if (!landed)
+        statuses.append({to, 1});
+    show(*m_counted);
 }

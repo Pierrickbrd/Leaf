@@ -54,6 +54,10 @@ QString Scan::stateLabel() const
 
 QString Scan::lastScanLabel() const
 {
+    // While one runs, the end the server reports is the end of *this* one, which is not yet:
+    // what there is to say is when it began.
+    if (running())
+        return Words::scanStarted(m_startedAt);
     return Words::lastScan(m_finishedAt);
 }
 

@@ -48,6 +48,7 @@ Item {
     }
 
     TapHandler {
+        gesturePolicy: TapHandler.ReleaseWithinBounds
         onTapped: box.toggled(!box.checked)
     }
 

@@ -22,8 +22,8 @@ Item {
     readonly property bool started: reading === 1
 
     objectName: "volume-state"
-    implicitWidth: 19
-    implicitHeight: 19
+    implicitWidth: 24
+    implicitHeight: 24
 
     Canvas {
         id: ring
@@ -66,8 +66,8 @@ Item {
     // a colour never carries a meaning on its own here.
     Rectangle {
         anchors.centerIn: parent
-        width: 13
-        height: 13
+        width: 16
+        height: 16
         radius: 99
         visible: state.finished
         color: Theme.emerald
@@ -77,10 +77,10 @@ Item {
     // The same two strokes `LeafCheck` draws, for the same reason: a check from a font is a
     // different glyph on every machine.
     Rectangle {
-        x: 5
-        y: 10.5
-        width: 4.5
-        height: 1.8
+        x: 6.5
+        y: 13
+        width: 5.5
+        height: 2
         radius: 1
         rotation: 45
         visible: state.finished
@@ -89,10 +89,10 @@ Item {
     }
 
     Rectangle {
-        x: 7.2
-        y: 9.6
-        width: 7
-        height: 1.8
+        x: 9
+        y: 11.8
+        width: 8.5
+        height: 2
         radius: 1
         rotation: -45
         visible: state.finished

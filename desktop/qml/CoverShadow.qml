@@ -18,12 +18,18 @@ BorderImage {
     /// cover, "resume" under the band's card.
     required property string under
 
+    /// How far it bleeds, in proportion to what casts it. The elevation was measured on the
+    /// header's cover, a hundred and thirty-eight pixels wide; the same halo under a cover a
+    /// fifth of that is a smudge with a stamp in the middle. One rule rather than a number
+    /// per caller — five numbers is five things to get wrong, which is what the lift was.
+    readonly property real spread: Math.max(0.35, Math.min(1, width / 138))
+
     objectName: "cover-shadow-" + under
     anchors.fill: parent
-    anchors.leftMargin: -16
-    anchors.rightMargin: -16
-    anchors.topMargin: -12
-    anchors.bottomMargin: -20
+    anchors.leftMargin: -16 * shadow.spread
+    anchors.rightMargin: -16 * shadow.spread
+    anchors.topMargin: -12 * shadow.spread
+    anchors.bottomMargin: -20 * shadow.spread
 
     source: Theme.dark
             ? Qt.resolvedUrl("assets/cover-shadow-dark.png")

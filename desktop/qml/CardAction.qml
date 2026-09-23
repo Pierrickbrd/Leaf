@@ -58,6 +58,7 @@ Rectangle {
     }
 
     TapHandler {
+        gesturePolicy: TapHandler.ReleaseWithinBounds
         onTapped: action.triggered()
     }
 

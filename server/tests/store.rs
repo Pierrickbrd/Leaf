@@ -502,8 +502,8 @@ fn writes_take_their_turn_one_at_a_time() {
 #[test]
 fn a_scan_does_not_hold_the_writer_for_the_whole_library() {
     use std::io::Write;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use std::time::Instant;
 
     let dir = tempfile::tempdir().unwrap();
     let library = dir.path().join("library");
@@ -526,28 +526,40 @@ fn a_scan_does_not_hold_the_writer_for_the_whole_library() {
 
     let db = Arc::new(Db::open(&dir.path().join("index.sqlite")).unwrap());
     let scanning = Arc::clone(&db);
+    let over = Arc::new(AtomicBool::new(false));
+    let raised = Arc::clone(&over);
     let scan = std::thread::spawn(move || {
-        leaf_server::scan::scanner::Scanner::new(scanning, true)
+        let report = leaf_server::scan::scanner::Scanner::new(scanning, true)
             .scan(&[library])
-            .unwrap()
+            .unwrap();
+        raised.store(true, Ordering::SeqCst);
+        report
     });
 
-    // Whatever the scan is doing, a one-statement write gets a turn between two shelves.
-    let mut worst = std::time::Duration::ZERO;
-    for _ in 0..40 {
-        let started = Instant::now();
+    // Counted, not timed. This asked how long the slowest write waited and refused past
+    // 400 ms, which is a speed — the one thing `store/db.rs` says a test here must not
+    // assert, and it failed under coverage on a shared runner for saying it: 1028 ms, on a
+    // scan nothing had made slower. Measured on an idle laptop it was already reaching
+    // 151 ms of a 270 ms scan, so the margin was never there to begin with.
+    //
+    // What the test is actually for survives without a clock: a scan that wrapped the whole
+    // library in one transaction would let **one** write through — the first, which would
+    // block until the scan committed and would find it over. One turn per shelf is the least
+    // a scan that lets go between them can manage, and it manages thousands.
+    let mut turns = 0u32;
+    while !over.load(Ordering::SeqCst) && turns < 500 {
         db.write(|cx| cx.execute("PRAGMA user_version = 10", []))
             .unwrap();
-        worst = worst.max(started.elapsed());
+        turns += 1;
     }
     let report = scan.join().unwrap();
 
     assert_eq!(12, report.works, "the scan still did all of it");
-    println!("the longest a short write waited: {} ms", worst.as_millis());
+    println!("short writes that got a turn while the scan ran: {turns}");
     assert!(
-        worst.as_millis() < 400,
-        "a write waited {} ms — the scan is holding the writer too long",
-        worst.as_millis()
+        turns >= 12,
+        "only {turns} short write(s) got a turn across twelve shelves — the scan is holding \
+         the writer for the whole library"
     );
 }
 

@@ -977,8 +977,8 @@ async fn a_shelf_ordered_by_reading_puts_the_last_one_opened_first() {
 
     let (status, body) = library.get("/series?sort=read").await;
     assert_eq!(StatusCode::OK, status);
-    // Death Note was opened after Elfes. Nains was never opened, and sorts with the other
-    // absences at the far end rather than ahead of everything that was read.
+    // Death Note was opened after Elfes. Nains was never opened, which is older than any
+    // reading: after the oldest one here.
     assert_eq!(
         vec![
             "Death Note",
@@ -988,14 +988,14 @@ async fn a_shelf_ordered_by_reading_puts_the_last_one_opened_first() {
         names(&body)
     );
 
-    // Reversed, the oldest reading first — and the unread stays at the far end either way,
-    // because "never opened" is not a date and does not belong at one end of a range.
+    // Reversed, the oldest first — and the unread before it, rather than pinned at the far
+    // end both ways, where « la plus ancienne » opened on the one series that had been read.
     let (_, oldest) = library.get("/series?sort=read&direction=asc").await;
     assert_eq!(
         vec![
+            "Terres d'Arran · Nains",
             "Terres d'Arran · Elfes",
-            "Death Note",
-            "Terres d'Arran · Nains"
+            "Death Note"
         ],
         names(&oldest)
     );
@@ -1152,6 +1152,53 @@ async fn a_query_does_not_take_over_the_order() {
         .map(|s| s["work"].as_str().unwrap())
         .collect();
     assert_eq!(vec!["Elfes", "Nains"], works);
+}
+
+/// `work.json` says what the story is; `edition.json` may say what *this printing* of it is.
+/// A reader choosing between « Édition originale colorée » and « Perfect Edition » knows the
+/// story — they are asking what the difference is — so the edition's own words win, and an
+/// edition that says nothing is described by its work.
+#[tokio::test]
+async fn an_editions_own_words_win_over_the_works() {
+    let library = Library::new();
+    library
+        .db
+        .write(|cx| {
+            cx.execute(
+                "UPDATE work SET summary = 'Cinq peuples elfiques.' WHERE id = 'elfes'",
+                [],
+            )?;
+            cx.execute(
+                "UPDATE edition SET summary = 'Les trois cycles en un volume.'
+                 WHERE id = 'e-elfes'",
+                [],
+            )?;
+            Ok(())
+        })
+        .expect("two summaries");
+
+    let (status, body) = library.get("/series/e-elfes").await;
+    assert_eq!(StatusCode::OK, status);
+    assert_eq!("Les trois cycles en un volume.", body["summary"]);
+
+    // And with nothing of its own, it is described by its work — read at the moment of the
+    // answer, never copied into the edition's row: copied, an edited work would leave its
+    // editions saying what it used to say.
+    library
+        .db
+        .write(|cx| {
+            cx.execute("UPDATE edition SET summary = NULL WHERE id = 'e-elfes'", [])?;
+            Ok(())
+        })
+        .expect("forgetting it");
+
+    let (_, again) = library.get("/series/e-elfes").await;
+    assert_eq!("Cinq peuples elfiques.", again["summary"]);
+
+    // Neither one is not a field at all, which is what every client already reads as « no
+    // summary recorded ».
+    let (_, none) = library.get("/series/e-nains").await;
+    assert!(none.get("summary").is_none(), "{none}");
 }
 
 #[tokio::test]

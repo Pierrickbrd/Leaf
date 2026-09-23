@@ -22,10 +22,13 @@ Item {
         text: heading.title
         color: Theme.inkFaint
         font.family: Theme.textFamily
-        font.pixelSize: 11
+        font.pixelSize: 12
         font.capitalization: Font.AllUppercase
     }
 
+    // At the far end of the block and not against the heading: the two are a pair holding
+    // the width of what is under them — « Dans l'univers … 3 autres » reads as one line about
+    // the block, where the count tucked against the title read as part of the title.
     Text {
         id: said
 
@@ -33,11 +36,12 @@ Item {
         anchors.leftMargin: 10
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
+        horizontalAlignment: Text.AlignRight
         text: heading.line
         visible: text.length > 0
         color: Theme.inkSoft
         font.family: Theme.textFamily
-        font.pixelSize: 12
+        font.pixelSize: 13
         elide: Text.ElideRight
     }
 }

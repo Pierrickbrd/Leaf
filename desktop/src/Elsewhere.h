@@ -66,6 +66,12 @@ public:
     /// `/series?universe=` takes, and by identifier because that is what the ways take.
     Q_INVOKABLE void point(const QString &universeId, const QString &universeName,
                            const QString &seriesId);
+    /// Lets go of the universe, for a reader who has left the page. See `Series::forget`.
+    Q_INVOKABLE void forget();
+    /// One series of the universe as the server now has it — a volume taken off the disk
+    /// changes the « 6 tomes » under its tile. Nothing is asked, and a series not in the
+    /// universe changes nothing.
+    void take(const Api::Series &fresh);
     /// Chooses a way through, or none. An unknown identifier is none, which is the flat list.
     Q_INVOKABLE void chooseOrder(const QString &identifier);
     /// Where the reader stands in the series being read, so that « ici » lands on the step

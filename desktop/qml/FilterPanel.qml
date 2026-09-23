@@ -60,8 +60,25 @@ Popup {
     width: 380
     // Bounded by the window and never by its own content: a panel that runs off the bottom
     // is a panel whose last axis nobody knows is there.
-    height: Math.min(sheet.implicitHeight + 2 * padding,
-                     Math.max(240, Overlay.overlay ? Overlay.overlay.height - 96 : 520))
+    //
+    // And by the room under the button, not the window's height less a guess. Bounded by the
+    // window, a panel taller than what was left below its button was pushed up by `margins`
+    // until it fitted — over the button that opened it, on any window short enough, so the
+    // one command that closes it was under it.
+    height: Math.min(sheet.implicitHeight + 2 * padding, Math.max(160, roomBelow))
+    /// The space between the button and the panel hung under it.
+    property real gap: 7
+    /// From the button's foot to the window's, less the gap above the panel and the margin
+    /// below it. Measured from the button and not from `y`: `y` is where the panel ended up,
+    /// and a panel already pushed up read its own room from there, found itself fitting, and
+    /// stayed over the button. Read again at each opening — `visible` is in it for that —
+    /// and whenever the window changes height: `mapToItem` alone tells a binding nothing.
+    readonly property real roomBelow: {
+        const overlay = Overlay.overlay
+        if (!overlay || !parent || !visible)
+            return 520
+        return overlay.height - parent.mapToItem(overlay, 0, parent.height).y - gap - margins
+    }
     padding: 8
     margins: 10
     modal: false
@@ -102,32 +119,14 @@ Popup {
 
     background: Item {
         Rectangle {
-            x: 2
-            y: 6
-            width: parent.width
-            height: parent.height
-            radius: Theme.buttonRadius
-            color: "#000000"
-            opacity: Theme.dark ? 0.52 : 0.16
-        }
-
-        Rectangle {
-            x: 1
-            y: 2
-            width: parent.width
-            height: parent.height
-            radius: Theme.buttonRadius
-            color: "#000000"
-            opacity: Theme.dark ? 0.28 : 0.08
-        }
-
-        Rectangle {
             objectName: "filter-panel-surface"
             anchors.fill: parent
             radius: Theme.buttonRadius
             color: Theme.surface
             border.color: Theme.rule
             border.width: 1
+
+            CardLift { level: CardLift.Menu }
         }
     }
 
@@ -198,13 +197,20 @@ Popup {
                 width: list.width
                 spacing: 2
 
+                // A count, and each axis reads its own entry. Handed the list, the open
+                // panel was rebuilt whenever a count moved — every axis folded again, what was
+                // typed into one gone, the scroll back at the top — for a number changing in
+                // one row.
                 Repeater {
-                    model: panel.axes
+                    model: panel.axes.length
 
                     delegate: FilterAxis {
                         id: one
 
-                        required property var modelData
+                        required property int index
+                        readonly property var modelData: panel.axes[index]
+                                                         ?? ({ "axis": "", "title": "",
+                                                               "values": [] })
 
                         width: axesColumn.width
                         axis: modelData.axis

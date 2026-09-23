@@ -14,6 +14,46 @@ ApplicationWindow {
     /// underneath it otherwise. The shelf is no longer the Loader's business, so nothing
     /// may ask the Loader what is on screen.
     readonly property var showing: screen.item ? screen.item : shelf
+    /// Set when something changed the wall, or its counts, while the wall was not on screen,
+    /// and answered on the way back. Held here rather than on `Shelf`, because it is not a
+    /// fact about the library: it is a fact about what is drawn over it.
+    property bool shelfIsStale: false
+    property bool countsAreStale: false
+
+    /// **What an action changed is asked for, and nothing else.** A mark or a deletion names
+    /// its series, and `Library` asks for that one series and hands it to every model drawing
+    /// it — the shelf changes one tile, the counts move by one where they can. The two below
+    /// are for what names nothing: a scan, an import, a series that has to change place.
+    ///
+    /// Each is asked where somebody is looking and marked out of date where nobody is: asked
+    /// for at every change it would be libraries nobody looked at, and never asked for it
+    /// would go on saying « 4 lus » under a tile whose fifth was just marked.
+    function refreshTheShelf() {
+        if (Navigation.destination === Navigation.Shelf)
+            Shelf.refresh()
+        else
+            window.shelfIsStale = true
+    }
+    /// The pills' numbers, which only the shelf draws. « Terminées 1 » stayed at one after a
+    /// series was marked read: they were asked for once, when the row appeared, and never
+    /// again.
+    function refreshTheCounts() {
+        if (Navigation.destination === Navigation.Shelf)
+            Filters.refresh()
+        else
+            window.countsAreStale = true
+    }
+    /// Everything a change that names nothing may have moved: the wall, its counts, the band,
+    /// and the page of a series if one is open.
+    function refreshAll() {
+        window.refreshTheShelf()
+        window.refreshTheCounts()
+        Resume.reload()
+        if (Navigation.destination === Navigation.Series && Series.identifier.length > 0) {
+            Series.reload()
+            Entries.reload()
+        }
+    }
 
     function belongsTo(owner, item) {
         let candidate = item
@@ -92,7 +132,9 @@ ApplicationWindow {
     Shortcut {
         // StandardKey is a global QML enumeration: there is deliberately no object to qualify.
         // qmllint disable unqualified
-        sequence: StandardKey.Cancel
+        // `sequences` and not `sequence`: a standard key may be bound to several, and the
+        // singular form keeps only one of them — Qt says so on the console at every start.
+        sequences: [StandardKey.Cancel]
         // qmllint enable unqualified
         onActivated: {
             // On the shelf Escape first clears the transient question. Only an already-empty
@@ -111,6 +153,21 @@ ApplicationWindow {
         id: appNavigationCursor
 
         objectName: "navigation-cursor"
+    }
+
+    // Once the pointer has emphasised a cover, the keyboard's ring is hidden (`FocusRing`), and
+    // Enter used to open what it had been left on anyway: the chip or the cover nobody could
+    // see was chosen. Activating hands the emphasis back to the keyboard instead, and acts on
+    // nothing — the ring reappears where the keys stood, and the next Enter is a choice made
+    // in sight. A shortcut because it is offered the key before the focused item is; not in a
+    // field, where Enter and Space are typing.
+    Shortcut {
+        objectName: "activation-returns-to-the-keyboard"
+        enabled: appNavigationCursor.pointerTookOver
+                 && !(window.activeFocusItem
+                      && window.activeFocusItem.cursorPosition !== undefined)
+        sequences: ["Return", "Enter", "Space"]
+        onActivated: appNavigationCursor.resumeKeyboard()
     }
 
     FocusScope {
@@ -260,6 +317,77 @@ ApplicationWindow {
         }
     }
 
+    // Over everything and taking no room from it: a bubble is a layer, and the screen under
+    // it must not move when one appears.
+    ToastStack { }
+
+    // What warns, connected to what happens. Every sentence is written in C++ — a `.qml` that
+    // composed one would be a `.qml` writing French, and the next one would write it
+    // differently.
+    Connections {
+        target: Imports
+
+        function onSettled(went, subject, said) {
+            Toasts.importSettled(went, subject, said)
+            // What landed is on the wall without anybody pressing « Voir ». It was not: the
+            // shelf was asked again only from the bubble's button.
+            if (went)
+                window.refreshAll()
+        }
+    }
+
+    Connections {
+        target: Scan
+
+        function onFinished() {
+            if (Scan.trouble.length > 0)
+                Toasts.scanFailed(Scan.trouble)
+            else
+                Toasts.scanFinished(Scan.counts)
+            // What the scan found is on the wall and in its counts without a restart. It
+            // was neither: a scan changed the library and nothing on screen asked again. A
+            // scan names no series, so this is the one change that asks for all of it.
+            window.refreshAll()
+            // « 41 séries » on the settings screen, if that is where the scan was watched
+            // from. Asked for when the screen opens, and so only here when it is open.
+            if (Navigation.destination === Navigation.Settings)
+                Health.ask()
+        }
+    }
+
+    Connections {
+        target: Commands
+
+        function onSaved(where) {
+            Toasts.copySaved(where)
+        }
+
+        function onChanged() {
+            if (Commands.trouble.length > 0)
+                Toasts.commandRefused(Commands.trouble)
+        }
+    }
+
+    // What a bubble offered, done. The bubble knows what was said and not what to do about
+    // it, which is why it asks here.
+    Connections {
+        target: Toasts
+
+        function onActed(what, subject) {
+            // The shelf, refreshed: what just landed is on it, and there is no series
+            // identifier to open — an import knows the folder it was given and not what the
+            // scan made of it.
+            if (what === Toasts.See) {
+                Navigation.open(Navigation.Shelf, {})
+                window.refreshTheShelf()
+            }
+            else if (what === Toasts.Retry)
+                importDialog.show()
+            else if (what === Toasts.OpenFolder)
+                Commands.showTheFolder(subject)
+        }
+    }
+
     // The one confirmation that stands in front of something a scan will not undo. Here
     // rather than on the page: the same modal opens from a shelf tile, and the shelf is not
     // the page.
@@ -296,9 +424,26 @@ ApplicationWindow {
         target: Navigation
 
         function onChanged() {
+            // Back on the wall, once, with whatever changed under it while it was hidden.
+            if (Navigation.destination === Navigation.Shelf && window.shelfIsStale) {
+                Shelf.refresh()
+                window.shelfIsStale = false
+            }
+            if (Navigation.destination === Navigation.Shelf && window.countsAreStale) {
+                Filters.refresh()
+                window.countsAreStale = false
+            }
+            // Off the page: what it was holding is let go. Kept, the next series opened on
+            // the last one's cover and title for as long as its answer took — and a shelf
+            // seen in between did not make that any less wrong.
+            if (Navigation.destination !== Navigation.Series) {
+                Series.forget()
+                Entries.forget()
+                Elsewhere.forget()
+                return
+            }
             const asked = Navigation.parameters.series ?? ""
-            if (Navigation.destination === Navigation.Series && asked.length > 0
-                    && asked !== Series.identifier)
+            if (asked.length > 0 && asked !== Series.identifier)
                 Series.point(asked)
         }
     }
@@ -317,19 +462,36 @@ ApplicationWindow {
         }
     }
 
-    // What a command changed, brought back to what is showing it. The page does not guess:
+    // What a command changed, brought back to what is showing it. The page does not guess —
     // a mark set from a menu is a fact on the server, and the screen asks again rather than
-    // moving its own rows to match what it just sent.
+    // moving its own rows to match what it just sent — but it asks for what moved, and only
+    // where somebody is looking. Asking for all of it turned one word into four answers and
+    // a grid rebuilt from nothing, which is what a reader saw as the page reloading.
     Connections {
         target: Commands
 
         function onMarked(seriesId, entryId) {
-            if (seriesId.length > 0 && seriesId === Series.identifier) {
-                Series.reload()
-                Entries.reload()
-            }
+            // The one series, once, for its tile, the header of its page, its place among
+            // its editions and in its universe — and the counts move with its tile.
+            Library.touched(seriesId)
+            // Not `reload`: the list did not change. The same files, in the same order, with
+            // one state different — so only the states are asked for again.
+            if (seriesId.length > 0 && seriesId === Series.identifier)
+                Entries.refreshProgress()
+            // The band is on this page as much as on the shelf, and marking a volume moves
+            // where one resumes.
             Resume.reload()
-            Shelf.reload()
+        }
+    }
+
+    // A series changed in a way only a fresh page can place: marked read under « Non lues »
+    // it simply left, but under « Terminées » it has to come in somewhere, and ordered by
+    // reading it moves. Asked where the wall is seen, and on the way back otherwise.
+    Connections {
+        target: Shelf
+
+        function onOutOfOrder() {
+            window.refreshTheShelf()
         }
     }
 
@@ -339,13 +501,17 @@ ApplicationWindow {
         target: Erasure
 
         function onErased(seriesId, entryId) {
-            Shelf.reload()
+            // The tile, or the rows of the file, leave where they stand; a series losing one
+            // file is asked for once, for its « 6 tomes ».
+            Library.erased(seriesId, entryId)
+            // Every axis of what left loses one — its genres, its authors, its medium — and
+            // only the server has them all.
+            window.refreshTheCounts()
             Resume.reload()
             if (entryId.length > 0) {
-                if (seriesId === Series.identifier) {
-                    Series.reload()
+                // The list lost a row and the page's counts are in `Library`'s answer.
+                if (seriesId === Series.identifier)
                     Entries.reload()
-                }
                 return
             }
             if (Navigation.destination === Navigation.Series

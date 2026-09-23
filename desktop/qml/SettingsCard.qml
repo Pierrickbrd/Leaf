@@ -47,9 +47,13 @@ Item {
         anchors.right: parent.right
         y: card.titleHeight
         height: body.height + 2 * card.padding
+
+        CardLift { level: CardLift.Card }
         radius: Theme.cardRadius
         color: Theme.surface
-        border.color: Theme.rule
+        // Lifted off the paper rather than outlined on it: an outline round every card makes
+        // a form, and a settings screen of six outlined boxes reads as a form to fill in.
+        border.color: "transparent"
         border.width: 1
         antialiasing: true
 

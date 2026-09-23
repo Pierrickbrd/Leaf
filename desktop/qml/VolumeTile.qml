@@ -13,7 +13,6 @@
 // be fifty grey lines on a wall of illustrations.
 
 import QtQuick
-import Qt5Compat.GraphicalEffects
 import Leaf
 
 Item {
@@ -55,7 +54,19 @@ Item {
         cursorShape: Qt.PointingHandCursor
     }
 
+    // The cover answers the pointer. Without it the grid was a wall that did not react at
+    // all: nothing said a tile could be opened, and the menu appearing in a corner was the
+    // only sign anything had been noticed.
+    scale: tile.hovered ? 1.03 : 1.0
+    Behavior on scale {
+        NumberAnimation {
+            duration: 90
+            easing.type: Easing.OutQuad
+        }
+    }
+
     TapHandler {
+        gesturePolicy: TapHandler.ReleaseWithinBounds
         enabled: !tile.missing
         onTapped: tile.opened()
     }
@@ -71,73 +82,18 @@ Item {
             visible: !tile.missing
         }
 
-        Rectangle {
+        RoundedCover {
             id: clipped
 
             anchors.fill: parent
-            radius: Theme.coverRadius
-            color: Theme.onPaper
-            clip: true
-            antialiasing: true
+            source: tile.cover
             visible: !tile.missing
 
-            Item {
-                id: source
-
-                anchors.fill: parent
-
-                Image {
-                    anchors.fill: parent
-                    source: tile.cover
-                    asynchronous: true
-                    cache: true
-                    fillMode: Image.PreserveAspectCrop
-                }
-
-                // A green cover would swallow the emerald laid on it. The shade is invisible
-                // on a dark one and saves the bar on every other.
-                LinearGradient {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.bottom: parent.bottom
-                    height: 15
-                    visible: tile.started || tile.finished
-                    start: Qt.point(0, 0)
-                    end: Qt.point(0, height)
-                    gradient: Gradient {
-                        GradientStop { position: 0.0; color: "#00000000" }
-                        GradientStop { position: 1.0; color: "#66000000" }
-                    }
-                }
-
-                Rectangle {
-                    objectName: "read-so-far-" + tile.entryId
-                    anchors.left: parent.left
-                    anchors.bottom: parent.bottom
-                    width: parent.width * (tile.finished ? 1 : Math.max(0.04, tile.howFarRead))
-                    height: 4
-                    visible: tile.started || tile.finished
-                    color: Theme.emerald
-                }
-            }
-
-            ShaderEffectSource {
-                id: texture
-
-                sourceItem: source
-                hideSource: true
-                visible: false
-            }
-
-            OpacityMask {
-                anchors.fill: parent
-                source: texture
-                maskSource: Rectangle {
-                    width: clipped.width
-                    height: clipped.height
-                    radius: clipped.radius
-                    antialiasing: true
-                }
+            ReadBar {
+                key: tile.entryId
+                started: tile.started
+                finished: tile.finished
+                howFarRead: tile.howFarRead
             }
         }
 
@@ -169,62 +125,26 @@ Item {
             }
         }
 
-        Rectangle {
-            anchors.fill: parent
-            radius: Theme.coverRadius
-            color: "transparent"
-            border.color: Theme.rule
-            border.width: 1
-            visible: !tile.missing
-            antialiasing: true
-        }
+        CoverSkin { visible: !tile.missing }
 
-        // Far from the bar: two marks on the same edge fought for the room. The bar says
-        // « how far » and this says « and it is done », which a fill rounded up to a hundred
-        // per cent would not prove.
-        Rectangle {
-            id: done
-
-            objectName: "finished-" + tile.entryId
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.margins: 6
-            width: 20
-            height: 20
-            radius: 99
-            visible: tile.finished
-            color: Theme.emerald
-            antialiasing: true
-
-            Image {
-                id: tick
-
-                anchors.centerIn: parent
-                width: 14
-                height: 14
-                source: "assets/icons/check.svg"
-                sourceSize.width: 14
-                sourceSize.height: 14
-                fillMode: Image.PreserveAspectFit
-                visible: false
-            }
-
-            ColorOverlay {
-                anchors.fill: tick
-                source: tick
-                color: Theme.onEmerald
-            }
+        ReadCheck {
+            key: tile.entryId
+            finished: tile.finished
+            coverWidth: tile.coverWidth
         }
 
         // To the left of the check and never over it — the corner is taken, and a button does
-        // not cover what it commands.
+        // not cover what it commands. On its own dark veil, because an illustration can be
+        // pale and grey dots laid straight on one are invisible one time in three.
         CommandMenu {
             objectName: "commands-tile-" + tile.entryId
             anchors.right: parent.right
-            anchors.rightMargin: tile.finished ? 32 : 4
+            anchors.rightMargin: 4
             anchors.top: parent.top
             anchors.topMargin: 4
-            visible: !tile.missing && (tile.hovered || opened)
+            coverWidth: tile.coverWidth
+            visible: !tile.missing
+            veiled: true
             seriesId: tile.seriesId
             entryId: tile.entryId
             fileName: tile.fileName

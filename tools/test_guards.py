@@ -17,7 +17,11 @@ import unittest
 
 import bytes_stay_utf8
 import client_knows_the_contract as contract
+import covers_stay_round
 import nothing_talks_to_the_console as console
+import one_file_owns_it as owns
+import taps_stay_where_they_land as taps
+import tests_stay_off_the_bus as bus
 import words_stay_french
 
 
@@ -403,6 +407,328 @@ class NothingTalksToTheConsole(unittest.TestCase):
         with contextlib.redirect_stdout(said):
             self.assertEqual(console.main(), 0)
         self.assertIn("none of them talks to the console", said.getvalue())
+
+
+class CoversStayRound(unittest.TestCase):
+    """The guard that exists because three shipped covers had square corners."""
+
+    def against(self, files: dict[str, str]):
+        """`main`, reading a `qml/` written for the occasion."""
+        with tempfile.TemporaryDirectory() as folder:
+            folder = pathlib.Path(folder)
+            qml = folder / "desktop" / "qml"
+            qml.mkdir(parents=True)
+            # Something innocent, always: a run that matches no Rectangle refuses for the
+            # right reason, and the case under test would never run.
+            laid = {"Fine.qml": "Rectangle {\n    radius: 6\n}\n"}
+            laid.update(files)
+            for name, body in laid.items():
+                (qml / name).write_text(body, encoding="utf-8")
+
+            was = (covers_stay_round.ROOT, covers_stay_round.QML)
+            try:
+                covers_stay_round.ROOT = folder
+                covers_stay_round.QML = qml
+                said = io.StringIO()
+                with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
+                    return covers_stay_round.main(), said.getvalue()
+            finally:
+                covers_stay_round.ROOT, covers_stay_round.QML = was
+
+    def test_a_rounded_rectangle_that_does_not_clip_passes(self):
+        code, said = self.against({})
+        self.assertEqual(code, 0, said)
+        self.assertIn("none of them clips to a rounding it does not have", said)
+
+    def test_the_cover_that_actually_shipped_is_refused(self):
+        code, said = self.against(
+            {"SeriesHeader.qml": "Item {\n"
+                                 "    Rectangle {\n"
+                                 "        radius: Theme.coverRadius\n"
+                                 "        clip: true\n"
+                                 "        Image { }\n"
+                                 "    }\n"
+                                 "}\n"}
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("SeriesHeader.qml:2", said)
+
+    def test_clipping_without_a_rounding_is_left_alone(self):
+        # A square rectangle that clips tells the truth: there is no corner to lie about.
+        code, said = self.against({"List.qml": "Rectangle {\n    clip: true\n}\n"})
+        self.assertEqual(code, 0, said)
+
+    def test_a_childs_clip_is_not_its_parents(self):
+        # The row of the import dialog rounds its own corners and holds a clipped list. It
+        # is not the defect, and a guard reading the whole subtree would accuse every panel.
+        code, said = self.against(
+            {"Row.qml": "Rectangle {\n"
+                        "    radius: 8\n"
+                        "    ListView {\n"
+                        "        clip: true\n"
+                        "    }\n"
+                        "}\n"}
+        )
+        self.assertEqual(code, 0, said)
+
+    def test_it_refuses_to_see_nothing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = pathlib.Path(folder)
+            empty = folder / "desktop" / "qml"
+            empty.mkdir(parents=True)
+            was = (covers_stay_round.ROOT, covers_stay_round.QML)
+            try:
+                covers_stay_round.ROOT, covers_stay_round.QML = folder, empty
+                said = io.StringIO()
+                with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
+                    code = covers_stay_round.main()
+            finally:
+                covers_stay_round.ROOT, covers_stay_round.QML = was
+        self.assertEqual(code, 2)
+        self.assertIn("this guard is broken", said.getvalue())
+
+
+class TestsStayOffTheBus(unittest.TestCase):
+    """The guard that exists because green test runs wrote on somebody's desktop."""
+
+    def against(self, files: dict[str, str]):
+        """`main`, reading a `desktop/tests/` written for the occasion."""
+        with tempfile.TemporaryDirectory() as folder:
+            folder = pathlib.Path(folder)
+            tests = folder / "desktop" / "tests"
+            tests.mkdir(parents=True)
+            # A boot that is handed one, always: a run that finds none refuses for the right
+            # reason and the case under test never runs.
+            laid = {"fine.cpp": "void a() { Boot::run(engine, *qGuiApp, nowhere()); }\n"}
+            laid.update(files)
+            for name, body in laid.items():
+                (tests / name).write_text(body, encoding="utf-8")
+
+            was = (bus.ROOT, bus.TESTS)
+            try:
+                bus.ROOT, bus.TESTS = folder, tests
+                said = io.StringIO()
+                with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
+                    return bus.main(), said.getvalue()
+            finally:
+                bus.ROOT, bus.TESTS = was
+
+    def test_a_boot_handed_a_bus_passes(self):
+        code, said = self.against({})
+        self.assertEqual(code, 0, said)
+        self.assertIn("none of them is the session's", said)
+
+    def test_the_boot_that_actually_shipped_is_refused(self):
+        code, said = self.against(
+            {"seam.cpp": "void a() { Boot::run(engine, *qGuiApp); }\n"})
+        self.assertEqual(code, 1)
+        self.assertIn("seam.cpp:1", said)
+
+    def test_a_notifier_on_the_default_bus_is_refused(self):
+        for built in ("Notifier bus;", "Notifier bus();"):
+            with self.subTest(built=built):
+                code, _ = self.against({"warns.cpp": "void a() { %s }\n" % built})
+                self.assertEqual(code, 1, built)
+
+    def test_a_notifier_handed_one_is_left_alone(self):
+        code, said = self.against(
+            {"warns.cpp": 'void a() { Notifier bus(QDBusConnection(u"nowhere"_s)); }\n'})
+        self.assertEqual(code, 0, said)
+
+    def test_the_static_that_sends_nothing_is_left_alone(self):
+        # `announcement` composes and returns; it has no bus to speak on.
+        code, said = self.against(
+            {"warns.cpp": 'void a() { auto m = Notifier::announcement(u"a"_s, u"b"_s); }\n'})
+        self.assertEqual(code, 0, said)
+
+    def test_a_line_of_comment_explains_the_rule_without_breaking_it(self):
+        code, said = self.against(
+            {"warns.cpp": "// Handed one, never `Boot::run(engine, app)` on its own.\n"})
+        self.assertEqual(code, 0, said)
+
+    def test_it_refuses_to_see_nothing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = pathlib.Path(folder)
+            empty = folder / "desktop" / "tests"
+            empty.mkdir(parents=True)
+            was = (bus.ROOT, bus.TESTS)
+            try:
+                bus.ROOT, bus.TESTS = folder, empty
+                said = io.StringIO()
+                with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
+                    code = bus.main()
+            finally:
+                bus.ROOT, bus.TESTS = was
+        self.assertEqual(code, 2)
+        self.assertIn("this guard is broken", said.getvalue())
+
+
+class OneFileOwnsIt(unittest.TestCase):
+    """The guard that exists because eleven places wrote the same six lines."""
+
+    def against(self, files: dict[str, str]):
+        """`main`, reading a `qml/` written for the occasion."""
+        with tempfile.TemporaryDirectory() as folder:
+            folder = pathlib.Path(folder)
+            qml = folder / "desktop" / "qml"
+            qml.mkdir(parents=True)
+            # Every owner must hold its own shape, or the guard refuses for the right reason
+            # and the case under test never runs.
+            laid = {
+                "Glyph.qml": "Item { ColorOverlay { } }\n",
+                "CardLift.qml": "RectangularGlow {\n  glowRadius: 8\n  z: -1\n}\n",
+                "RoundedCover.qml": "Item { OpacityMask { } }\n",
+            }
+            laid.update(files)
+            for name, body in laid.items():
+                (qml / name).write_text(body, encoding="utf-8")
+
+            was = (owns.ROOT, owns.QML)
+            try:
+                owns.ROOT, owns.QML = folder, qml
+                said = io.StringIO()
+                with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
+                    return owns.main(), said.getvalue()
+            finally:
+                owns.ROOT, owns.QML = was
+
+    def test_one_owner_each_passes(self):
+        code, said = self.against({})
+        self.assertEqual(code, 0, said)
+        self.assertIn("no second copy", said)
+
+    def test_a_second_tinted_glyph_is_refused(self):
+        code, said = self.against({"Bar.qml": "Item { ColorOverlay { source: x } }\n"})
+        self.assertEqual(code, 1)
+        self.assertIn("Bar.qml:1", said)
+
+    def test_a_second_lift_is_refused(self):
+        code, said = self.against(
+            {"Card.qml": 'Rectangle {\n  color: "#000000"\n  z: -1\n}\n'})
+        self.assertEqual(code, 1, said)
+
+    def test_a_second_blurred_lift_is_refused(self):
+        code, said = self.against(
+            {"Panel.qml": "Item {\n  RectangularGlow {\n    glowRadius: 12\n  }\n}\n"})
+        self.assertEqual(code, 1, said)
+        self.assertIn("Panel.qml:2", said)
+
+    def test_a_black_fill_pushed_off_what_it_sits_under_is_a_lift(self):
+        # What the menu and the filter panel each drew: no `z`, an offset instead.
+        code, said = self.against(
+            {"Menu.qml": 'Rectangle {\n  x: 2\n  y: 6\n  color: "#000000"\n'
+                         "  opacity: 0.52\n}\n"})
+        self.assertEqual(code, 1, said)
+        self.assertIn("Menu.qml:4", said)
+
+    def test_a_hairline_behind_a_row_is_not_a_lift(self):
+        # `z: -1` on its own is any line drawn behind something. The pair is the shape.
+        code, said = self.against(
+            {"Tabs.qml": "Rectangle {\n  color: Theme.rule\n  z: -1\n}\n"})
+        self.assertEqual(code, 0, said)
+
+    def test_a_veil_is_not_a_lift_either(self):
+        # A black fill with nothing behind it is a veil, which several covers wear.
+        code, said = self.against(
+            {"Menu.qml": 'Rectangle {\n  color: "#000000"\n  opacity: 0.74\n}\n'})
+        self.assertEqual(code, 0, said)
+
+    def test_a_second_rounded_mask_is_refused(self):
+        code, said = self.against(
+            {"Band.qml": "Image { layer.effect: OpacityMask { } }\n"})
+        self.assertEqual(code, 1, said)
+
+    def test_a_line_of_comment_explains_the_rule_without_breaking_it(self):
+        code, said = self.against({"Note.qml": "// A ColorOverlay belongs in Glyph.qml.\n"})
+        self.assertEqual(code, 0, said)
+
+    def test_it_refuses_an_owner_that_lost_its_own_shape(self):
+        code, said = self.against({"Glyph.qml": "Item { }\n"})
+        self.assertEqual(code, 2)
+        self.assertIn("this guard is broken", said)
+
+
+class TapsStayWhereTheyLand(unittest.TestCase):
+    """The guard that exists because a click in the filter panel opened the series behind."""
+
+    def against(self, files: dict[str, str]):
+        """`main`, reading a `qml/` written for the occasion."""
+        with tempfile.TemporaryDirectory() as folder:
+            folder = pathlib.Path(folder)
+            qml = folder / "desktop" / "qml"
+            qml.mkdir(parents=True)
+            # Something innocent, always: a run that matches no TapHandler refuses for the
+            # right reason, and the case under test would never run.
+            laid = {"Fine.qml": "Item {\n    TapHandler {\n"
+                                "        gesturePolicy: TapHandler.ReleaseWithinBounds\n"
+                                "    }\n}\n"}
+            laid.update(files)
+            for name, body in laid.items():
+                (qml / name).write_text(body, encoding="utf-8")
+            was = (taps.ROOT, taps.QML)
+            try:
+                taps.ROOT, taps.QML = folder, qml
+                said = io.StringIO()
+                with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
+                    return taps.main(), said.getvalue()
+            finally:
+                taps.ROOT, taps.QML = was
+
+    def test_a_handler_that_takes_the_press_passes(self):
+        code, said = self.against({})
+        self.assertEqual(code, 0, said)
+        self.assertIn("every one takes the press for itself", said)
+
+    def test_the_heading_that_let_the_click_through_is_refused(self):
+        code, said = self.against(
+            {"FilterAxis.qml": "Rectangle {\n"
+                               "    TapHandler {\n"
+                               "        onTapped: axisItem.open = !axisItem.open\n"
+                               "    }\n"
+                               "}\n"}
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("FilterAxis.qml:2", said)
+
+    def test_a_handler_written_on_one_line_is_read_too(self):
+        code, said = self.against(
+            {"Tabs.qml": "Item {\n    TapHandler { onTapped: bar.chosen(0) }\n}\n"}
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Tabs.qml:2", said)
+
+    def test_a_policy_on_the_next_handler_does_not_count_for_this_one(self):
+        code, said = self.against(
+            {"Two.qml": "Item {\n"
+                        "    TapHandler { }\n"
+                        "    TapHandler {\n"
+                        "        gesturePolicy: TapHandler.ReleaseWithinBounds\n"
+                        "    }\n"
+                        "}\n"}
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Two.qml:2", said)
+
+    def test_it_refuses_to_see_nothing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder = pathlib.Path(folder)
+            empty = folder / "desktop" / "qml"
+            empty.mkdir(parents=True)
+            was = (taps.ROOT, taps.QML)
+            try:
+                taps.ROOT, taps.QML = folder, empty
+                said = io.StringIO()
+                with contextlib.redirect_stdout(said), contextlib.redirect_stderr(said):
+                    code = taps.main()
+            finally:
+                taps.ROOT, taps.QML = was
+        self.assertEqual(code, 2)
+        self.assertIn("this guard is broken", said.getvalue())
+
+    def test_the_client_as_it_stands_passes(self):
+        said = io.StringIO()
+        with contextlib.redirect_stdout(said):
+            self.assertEqual(taps.main(), 0)
 
 
 if __name__ == "__main__":

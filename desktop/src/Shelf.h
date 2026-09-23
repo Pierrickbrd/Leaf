@@ -24,6 +24,7 @@
 
 #include "Api.h"
 #include "Server.h"
+#include "Settling.h"
 
 #include <QAbstractListModel>
 #include <QHash>
@@ -71,6 +72,7 @@ public:
         Medium,
         Volumes,
         InProgress,
+        Finished,
         HowFarRead,
     };
     Q_ENUM(Role)
@@ -103,8 +105,8 @@ public:
     /// that did not fill.
     QString trouble() const;
 
-    QStringList readStatuses() const { return chosen(u"read"_qs); }
-    QStringList media() const { return chosen(u"medium"_qs); }
+    QStringList readStatuses() const { return chosen(QStringLiteral("read")); }
+    QStringList media() const { return chosen(QStringLiteral("medium")); }
     /// The whole selection, by the contract's own axis names. One value rather than eight
     /// getters: the panel repeats over it, and a ninth axis costs nothing.
     QVariantMap narrowing() const { return m_narrowing; }
@@ -128,6 +130,14 @@ public:
     /// not cost a page, and a shelf that reloads on every notify is one nobody can read while
     /// it works.
     Q_INVOKABLE void filterBy(const QVariantMap &narrowing);
+    /// Narrows, and lets go of the wall at the same time.
+    ///
+    /// `filterBy` keeps what is showing until the narrower answer arrives, and waits for the
+    /// hand to stop before asking — both right for a reader ticking chips while looking at
+    /// the shelf. Neither is right for a link that *arrives* here: what is kept is the whole
+    /// library, which is the one thing that reader did not ask to see, and the settling adds
+    /// a fifth of a second of it on top. So this one empties and asks at once.
+    Q_INVOKABLE void narrowTo(const QVariantMap &narrowing);
 
     /// The order, normalised through `Api` on the way in: a word the client does not know
     /// becomes `name`, which is what the server falls back to. Reporting anything else would
@@ -154,6 +164,19 @@ public:
     /// Forget everything and ask again from the first page. Also the retry after a refusal,
     /// and what a changed filter does.
     Q_INVOKABLE void reload();
+    /// The same criteria, asked again because the library changed under them — a scan, an
+    /// import. As many as are held come back in one answer, where `reload` asked for the
+    /// first hundred: a reader a hundred and fifty series down saw the rest taken off the
+    /// wall, and the scroll jump back to where the hundredth had been.
+    Q_INVOKABLE void refresh();
+
+    /// One series as the server now has it, after something was done to it. Its tile alone
+    /// changes; nothing is asked. When the change can move it — out of a lit read status, or
+    /// to another place in an order by reading — `outOfOrder` asks the window to decide
+    /// whether the wall is worth asking again, since only the server knows where it goes.
+    void take(const Api::Series &fresh);
+    /// Taken off the disk: its tile leaves, and nothing is asked.
+    void forget(const QString &seriesId);
 
 signals:
     /// One signal for the four properties above. It fires on every transition of every one of
@@ -166,16 +189,20 @@ signals:
     /// many transitions mattered.
     void criteriaChanged();
 
+    /// A series changed in a way only a fresh page can place. See `take`.
+    void outOfOrder();
+    /// What `take` found: whether the series was on the wall, and its read status before and
+    /// after, as `Api::ReadStatus`, or -1 where the server said none. The counts on the pills follow from it without a question
+    /// when it was; when it was not, nobody here knew what it was before.
+    void taken(bool held, int before, int after);
+
 private:
-    void ask(int page);
+    /// `size` is the shelf's own page except for `refresh`, which asks for all it holds.
+    void ask(int page, int size);
     void replaceWith(const QList<Api::Series> &fresh);
-    void took(int page, const Server::Answer &answer);
+    void took(int page, int size, const Server::Answer &answer);
 
     Server *m_server;
-    /// Long enough to swallow a burst of keystrokes, short enough that a pause between two
-    /// words is not felt as a stall. Two hundred milliseconds is the usual answer, and it is
-    /// what a fast typist leaves between letters.
-    static constexpr int Settling = 200;
 
     QString m_sort = Api::spell(Api::Sort::Name);
     /// The way each criterion was last being read, by its contract spelling. Held per

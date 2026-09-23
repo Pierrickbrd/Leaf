@@ -13,7 +13,6 @@
 // out and paints them; it decides no French of its own.
 
 import QtQuick
-import Qt5Compat.GraphicalEffects
 import Leaf
 
 Item {
@@ -43,7 +42,17 @@ Item {
     // leave that hole above a grid with nothing in it.
     height: showing ? Widths.shelfMargin + card.height + Widths.shelfGap : 0
 
-    Component.onCompleted: sourceModel.reload()
+    /// Asks for its model on creation, which is right for the one band that is built once
+    /// and wrong for the one the Loader rebuilds. `Main.qml` says it of the page already —
+    /// « a screen that fetches on creation would fetch again every time the Loader rebuilt
+    /// it » — and this band was doing exactly that, one answer per series opened. The same
+    /// switch `FilterPills` carries, for the same reason.
+    property bool reloadOnCompleted: true
+
+    Component.onCompleted: {
+        if (reloadOnCompleted)
+            sourceModel.reload()
+    }
 
     Rectangle {
         id: card
@@ -78,40 +87,27 @@ Item {
             y: card.padding
             // 2:3, like every cover in the client. A cover is the one thing on this card worth
             // recognising from across the room, so the width goes here rather than to the text.
-            width: 80
-            height: 120
+            // Two and a half times the name written beside it, which is the proportion the
+            // design draws. At four times it was a poster with a caption, and the band is a
+            // line about where one stopped — not a second header.
+            width: 62
+            height: 93
             visible: band.sourceModel.available
 
-            Image {
-                id: art
+            CoverShadow {
+                under: "resume-cover"
+            }
 
+            RoundedCover {
                 objectName: "resume-cover"
                 anchors.fill: parent
                 source: band.sourceModel.cover
-                asynchronous: true
-                cache: true
-                fillMode: Image.PreserveAspectCrop
-                layer.enabled: true
-                layer.effect: OpacityMask {
-                    maskSource: Rectangle {
-                        width: cover.width
-                        height: cover.height
-                        radius: Theme.coverRadius
-                        antialiasing: true
-                    }
-                }
             }
 
-            // The hairline the covers carry in the grid: without it a pale cover has no edge
-            // against the card it sits on.
-            Rectangle {
-                anchors.fill: parent
-                radius: Theme.coverRadius
-                color: "transparent"
-                border.color: Theme.rule
-                border.width: 1
-                antialiasing: true
-            }
+            // The hairline every other cover in this client wears. Written out here, it was
+            // the dark line without the pale catch of light along the top — the same object
+            // as the others, one detail short of looking like them.
+            CoverSkin { }
         }
 
         // One column, centred on the card: the artifact centres it, and a card whose three
@@ -137,7 +133,7 @@ Item {
                 text: band.sourceModel.seriesName
                 color: Theme.ink
                 font.family: Theme.displayFamily
-                font.pixelSize: 20
+                font.pixelSize: 22
                 font.weight: Font.Bold
                 elide: Text.ElideRight
             }
@@ -148,7 +144,7 @@ Item {
                 text: band.compact ? band.sourceModel.whereShort : band.sourceModel.where
                 color: Theme.inkSoft
                 font.family: Theme.textFamily
-                font.pixelSize: 14
+                font.pixelSize: 15
                 elide: Text.ElideRight
             }
 

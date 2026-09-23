@@ -24,6 +24,84 @@ class KeepsAPreference : public QObject
 private slots:
     void initTestCase() { QStandardPaths::setTestModeEnabled(true); }
 
+    /// Everything warns at the start, except the desktop for a download — a copy saved in
+    /// two seconds wakes nobody. It is being pestered that makes somebody open that screen,
+    /// not silence.
+    void a_fresh_install_warns_about_everything_but_wakes_nobody_for_a_copy()
+    {
+        Preferences fresh;
+        using enum Preferences::Warns;
+        for (const Preferences::Warns which : {Imports, Scans, Downloads, Failures})
+            QVERIFY(fresh.bubbles(which));
+        QVERIFY(fresh.reachesTheDesktop(Imports));
+        QVERIFY(fresh.reachesTheDesktop(Scans));
+        QVERIFY(fresh.reachesTheDesktop(Failures));
+        QVERIFY(!fresh.reachesTheDesktop(Downloads));
+
+        // Where the desktop puts its own, which is the place one has already learned to look.
+        QCOMPARE(fresh.corner(), Preferences::Corner::BottomRight);
+        QVERIFY(fresh.anythingBubbles());
+        QCOMPARE(fresh.warnings().size(), 4);
+        for (const QVariant &one : fresh.warnings()) {
+            QVERIFY(!one.toMap().value(u"label"_s).toString().isEmpty());
+            QVERIFY(!one.toMap().value(u"detail"_s).toString().isEmpty());
+        }
+    }
+
+    /// Written under its own name and read back. A file holding `warns/2=false` is a file
+    /// nobody can read, and the order of an enum is not a promise made to a settings file.
+    void what_warns_is_written_under_a_word_and_read_back()
+    {
+        using enum Preferences::Warns;
+        {
+            Preferences chosen;
+            QSignalSpy moved(&chosen, &Preferences::changed);
+            chosen.showBubble(Scans, false);
+            chosen.reachTheDesktop(Imports, false);
+            chosen.putBubbles(Preferences::Corner::TopLeft);
+            QCOMPARE(moved.size(), 3);
+            // Asking again for what is already so announces nothing.
+            chosen.showBubble(Scans, false);
+            chosen.putBubbles(Preferences::Corner::TopLeft);
+            QCOMPARE(moved.size(), 3);
+        }
+
+        const Preferences again;
+        QVERIFY(!again.bubbles(Scans));
+        QVERIFY(again.bubbles(Imports));
+        QVERIFY(!again.reachesTheDesktop(Imports));
+        QCOMPARE(again.corner(), Preferences::Corner::TopLeft);
+        QCOMPARE(again.cornerLabel(), u"En haut à gauche"_s);
+    }
+
+    /// The card that says where bubbles go is not drawn when nothing makes one: an empty
+    /// heading is worse than an absent one.
+    void nothing_bubbling_is_a_card_that_is_not_drawn()
+    {
+        Preferences quiet;
+        using enum Preferences::Warns;
+        for (const Preferences::Warns which : {Imports, Scans, Downloads, Failures})
+            quiet.showBubble(which, false);
+
+        QVERIFY(!quiet.anythingBubbles());
+        quiet.showBubble(Failures, true);
+        QVERIFY(quiet.anythingBubbles());
+    }
+
+    /// A word this file does not know is the bottom right — the same rule the appearance
+    /// reads its own file by, and the one place a hand-edited file is answered for.
+    void a_corner_this_version_does_not_know_is_the_one_the_desktop_uses()
+    {
+        {
+            QSettings file(QSettings::IniFormat, QSettings::UserScope, u"Leaf"_s,
+                           u"preferences"_s);
+            file.setValue(u"corner"_s, u"sous le bureau"_s);
+            file.sync();
+        }
+        const Preferences odd;
+        QCOMPARE(odd.corner(), Preferences::Corner::BottomRight);
+    }
+
     /// Lines are the default: they say the whole title, the pages and the state on one row,
     /// where a grid shows covers and cuts long titles.
     void the_volumes_of_a_series_are_lines_until_somebody_says_otherwise()
@@ -34,7 +112,10 @@ private slots:
         QSignalSpy moved(&fresh, &Preferences::changed);
         fresh.showVolumesAsGrid(true);
         QVERIFY(fresh.volumesAsGrid());
-        QVERIFY(moved.size() >= 1);
+        // Once, and not twice. It was said before the file was written and again after it,
+        // which is one fact announced twice and everything bound to this object redrawn for
+        // nothing.
+        QCOMPARE(moved.size(), 1);
 
         // Asking again for what is already so announces nothing: a binding refreshed by a
         // change that did not happen is a binding refreshed for nothing.

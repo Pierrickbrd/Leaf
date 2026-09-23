@@ -27,7 +27,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-finput-charset=UTF-8 -fexec-charset=UTF-8)
 endif()
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Network Concurrent Test)
+# DBus is asked for by name although qtkeychain already pulls it in for the keyring: a
+# link that happens to work through somebody else's dependency breaks the day they drop it.
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Quick QuickControls2 Network Concurrent DBus Test)
 # The session keyring — GNOME's or KDE's, and the code never learns which.
 find_package(Qt6Keychain REQUIRED)
 # The archive reader unpacks one small member of a CBZ and never a page — see Cbz.h.
@@ -55,6 +57,7 @@ qt_add_executable(leaf-desktop
     src/Widths.cpp
     src/Navigation.h
     src/Navigation.cpp
+    src/Settling.h
     src/Shelf.h
     src/Rearrange.cpp
     src/Preferences.h
@@ -94,10 +97,16 @@ qt_add_executable(leaf-desktop
     src/SeriesCaptions.cpp
     src/Elsewhere.h
     src/Elsewhere.cpp
+    src/Library.h
+    src/Library.cpp
     src/Erasure.h
     src/Erasure.cpp
     src/Commands.h
     src/Commands.cpp
+    src/Toasts.h
+    src/Toasts.cpp
+    src/Notifier.h
+    src/Notifier.cpp
     src/Covers.h
     src/Covers.cpp
 )
@@ -111,6 +120,9 @@ set(LEAF_QML
     qml/NavigationCursor.qml
     qml/CardAction.qml
     qml/FocusRing.qml
+    qml/Pill.qml
+    qml/ReadBar.qml
+    qml/ReadCheck.qml
     qml/ScrollVeil.qml
     qml/ActionButton.qml
     qml/BarButton.qml
@@ -119,6 +131,7 @@ set(LEAF_QML
     qml/LeafMenuItem.qml
     qml/AppBar.qml
     qml/FilterChip.qml
+    qml/GenrePill.qml
     qml/FilterPills.qml
     qml/LeafCheck.qml
     qml/LevelMark.qml
@@ -167,6 +180,18 @@ set(LEAF_QML
     qml/CommandMenu.qml
     qml/EraseDialog.qml
     qml/VolumeTile.qml
+    qml/LeafSwitch.qml
+    qml/WarningLine.qml
+    qml/BubbleCorner.qml
+    qml/Toast.qml
+    qml/ToastStack.qml
+    qml/EditionSwitch.qml
+    qml/IconButton.qml
+    qml/CardLift.qml
+    qml/CoverSkin.qml
+    qml/Glyph.qml
+    qml/RoundedCover.qml
+    qml/MiniTile.qml
 )
 foreach(qml_file IN LISTS LEAF_QML)
     string(REGEX REPLACE "^qml/" "" alias "${qml_file}")
@@ -181,6 +206,7 @@ set(LEAF_IMAGES
     qml/assets/icons/book_2.svg
     qml/assets/icons/bookmark.svg
     qml/assets/icons/check.svg
+    qml/assets/icons/check_circle.svg
     qml/assets/icons/close.svg
     qml/assets/icons/cloud_done.svg
     qml/assets/icons/cloud_off.svg
@@ -190,6 +216,9 @@ set(LEAF_IMAGES
     qml/assets/icons/delete.svg
     qml/assets/icons/done_all.svg
     qml/assets/icons/download.svg
+    qml/assets/icons/expand_more.svg
+    qml/assets/icons/grid_view.svg
+    qml/assets/icons/error.svg
     qml/assets/icons/library_add.svg
     qml/assets/icons/light_mode.svg
     qml/assets/icons/more_vert.svg
@@ -201,6 +230,7 @@ set(LEAF_IMAGES
     qml/assets/icons/sort.svg
     qml/assets/icons/tune.svg
     qml/assets/icons/upload.svg
+    qml/assets/icons/view_list.svg
 )
 foreach(image_file IN LISTS LEAF_IMAGES)
     string(REGEX REPLACE "^qml/" "" alias "${image_file}")
@@ -257,6 +287,7 @@ qt_add_resources(leaf-desktop "leaf-fonts"
 
 target_link_libraries(leaf-desktop PRIVATE
     Qt6::Core
+    Qt6::DBus
     Qt6::Gui
     Qt6::Quick
     Qt6::QuickControls2
@@ -367,8 +398,11 @@ qt_add_executable(crosses-the-seam
     src/Entries.h src/Entries.cpp
     src/SeriesCaptions.h src/SeriesCaptions.cpp
     src/Elsewhere.h src/Elsewhere.cpp
+    src/Library.h src/Library.cpp
     src/Erasure.h src/Erasure.cpp
     src/Commands.h src/Commands.cpp
+    src/Toasts.h src/Toasts.cpp
+    src/Notifier.h src/Notifier.cpp
 )
 target_include_directories(crosses-the-seam PRIVATE src)
 qt_add_qml_module(crosses-the-seam
@@ -388,8 +422,8 @@ qt_add_resources(crosses-the-seam "leaf-fonts-for-the-seam-test"
     BASE "${CMAKE_CURRENT_SOURCE_DIR}/../assets/fonts"
     FILES ${LEAF_FONTS})
 target_link_libraries(crosses-the-seam PRIVATE
-    Qt6::Core Qt6::Gui Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Qml Qt6::Concurrent Qt6::Test
-    ZLIB::ZLIB ${QTKEYCHAIN_LIBRARIES})
+    Qt6::Core Qt6::Gui Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Qml Qt6::Concurrent
+    Qt6::DBus Qt6::Test ZLIB::ZLIB ${QTKEYCHAIN_LIBRARIES})
 add_test(NAME crosses-the-seam COMMAND crosses-the-seam)
 
 # The shelf's model, against the same forty-line server. It holds rows, pages and says why it
@@ -452,6 +486,19 @@ target_include_directories(keeps-a-preference PRIVATE src)
 target_link_libraries(keeps-a-preference PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Test)
 add_test(NAME keeps-a-preference COMMAND keeps-a-preference)
+
+# What warns, and the restraint that makes it worth reading: three at a time, a success that
+# goes and a failure that waits, and the desktop only when the window is not there.
+qt_add_executable(warns-once
+    tests/warns_once.cpp
+    src/Preferences.h src/Preferences.cpp src/Words.h src/Words.cpp
+    src/Api.h src/Api.cpp src/Navigation.h src/Navigation.cpp
+    src/Widths.h src/Widths.cpp src/Toasts.h src/Toasts.cpp
+    src/Notifier.h src/Notifier.cpp)
+target_include_directories(warns-once PRIVATE src)
+target_link_libraries(warns-once PRIVATE
+    Qt6::Core Qt6::DBus Qt6::Gui Qt6::Qml Qt6::Test)
+add_test(NAME warns-once COMMAND warns-once)
 
 qt_add_executable(holds-the-search
     tests/holds_the_search.cpp tests/Pretend.h
@@ -612,6 +659,18 @@ add_test(NAME nothing-talks-to-the-console
 
 add_test(NAME words-stay-french
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/words_stay_french.py)
+
+add_test(NAME covers-stay-round
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/covers_stay_round.py)
+
+add_test(NAME tests-stay-off-the-bus
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/tests_stay_off_the_bus.py)
+
+add_test(NAME one-file-owns-it
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/one_file_owns_it.py)
+
+add_test(NAME taps-stay-where-they-land
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/taps_stay_where_they_land.py)
 
 # These tests never need a scene graph, so the software-only offscreen platform keeps them
 # independent of a desktop session.

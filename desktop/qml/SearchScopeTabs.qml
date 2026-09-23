@@ -134,6 +134,7 @@ Item {
                 }
 
                 TapHandler {
+                    gesturePolicy: TapHandler.ReleaseWithinBounds
                     onTapped: {
                         tab.forceActiveFocus(Qt.MouseFocusReason)
                         tabs.navigationCursor.usePointer(tabs, index)
@@ -155,7 +156,7 @@ Item {
                 FocusRing {
                     objectName: tab.objectName + "-focus"
                     cornerRadius: tab.radius
-                    visible: tab.activeFocus
+                    focused: tab.activeFocus
                              && tabs.navigationCursor.mode
                                 === tabs.navigationCursor.keyboardMode
                              && tabs.navigationCursor.region === tabs

@@ -27,11 +27,11 @@ Column {
             Text {
                 id: label
 
-                width: Math.min(110, column.width * 0.42)
+                width: Math.min(132, column.width * 0.42)
                 text: parent.modelData.label
                 color: Theme.inkFaint
                 font.family: Theme.textFamily
-                font.pixelSize: 12
+                font.pixelSize: 13
                 elide: Text.ElideRight
             }
 
@@ -40,7 +40,7 @@ Column {
                 text: parent.modelData.value
                 color: parent.modelData.alarming === true ? Theme.alert : Theme.ink
                 font.family: Theme.textFamily
-                font.pixelSize: 12
+                font.pixelSize: 13
                 wrapMode: Text.WordWrap
             }
         }

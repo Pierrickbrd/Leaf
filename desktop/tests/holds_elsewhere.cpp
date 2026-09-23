@@ -420,6 +420,21 @@ private slots:
         QCOMPARE(words.hereToo(u"29 albums"_s), u"29 albums · ici"_s);
     }
 
+    /// The block goes with the page. A universe kept from the last series is a list of
+    /// somewhere else to go that has nothing to do with where one is.
+    void leaving_the_page_lets_go_of_the_universe()
+    {
+        m_block->point(u"u-arran"_s, u"Terres d'Arran"_s, u"elfes"_s);
+        settle();
+        QCOMPARE(m_block->tiles().size(), 1);
+
+        m_block->forget();
+        QVERIFY(m_block->tiles().isEmpty());
+        QVERIFY(m_block->universe().isEmpty());
+        QVERIFY(m_block->pointedAt().isEmpty());
+        QVERIFY(!m_block->loading());
+    }
+
     void a_block_with_no_server_offers_nothing()
     {
         Elsewhere orphan(nullptr);

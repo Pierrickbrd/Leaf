@@ -60,6 +60,14 @@ public:
     static Band bandFor(int width);
     static int shelfColumnsFor(int width);
 
+    /// The side of a round mark laid on a cover — the « … » in its top corner, the check in
+    /// its bottom one — for a cover this wide. An eighth of it, between 22 and 30. Fixed at
+    /// 22, the check on a cover three hundred wide was a speck nobody found; at a sixth with
+    /// a ceiling of 40, the « … » covered more of the illustration than it had any reason to.
+    /// One rule for both, so the two corners of one cover never disagree on what size a mark
+    /// is.
+    Q_INVOKABLE static int markOn(qreal coverWidth);
+
 signals:
     /// Emitted on every real change of the stored width.
     void windowChanged();

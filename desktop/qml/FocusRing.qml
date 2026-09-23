@@ -25,5 +25,15 @@ Rectangle {
     color: "transparent"
     border.color: Theme.emerald
     border.width: thickness
-    visible: parent ? parent.activeFocus : false
+    /// What the ring follows. A control whose focus is not its own `activeFocus` names it here
+    /// rather than overriding `visible`, so the rule below still holds for it.
+    property bool focused: parent ? parent.activeFocus : false
+    readonly property var cursor: Window.window ? Window.window.navigationCursor : null
+
+    // Hidden, not moved, once the pointer has emphasised a cover: the focus stays where the
+    // keyboard left it so the next key continues from there, but two things lit at once — a
+    // chip ringed and a cover hovered — left a reader unsure which one Enter would open. And
+    // still hidden after the pointer leaves, until a key brings it back: reappearing on its
+    // own, it lit a chip nobody had gone back to.
+    visible: focused && !(cursor && cursor.pointerTookOver)
 }

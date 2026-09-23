@@ -2,7 +2,6 @@
 
 import QtQuick
 import QtQuick.Controls
-import Qt5Compat.GraphicalEffects
 import Leaf
 
 Rectangle {
@@ -79,6 +78,7 @@ Rectangle {
     }
 
     TapHandler {
+        gesturePolicy: TapHandler.ReleaseWithinBounds
         onPressedChanged: {
             if (pressed)
                 button.popupWasOpen = button.popup ? button.popup.opened : false
@@ -91,22 +91,14 @@ Rectangle {
         cornerRadius: button.radius
     }
 
-    Image {
+    Glyph {
         id: glyph
 
         x: 12
         anchors.verticalCenter: parent.verticalCenter
-        width: 24
-        height: 24
+        side: 24
         source: button.source
-        sourceSize: Qt.size(24, 24)
-        visible: false
-    }
-
-    ColorOverlay {
-        anchors.fill: glyph
-        source: glyph
-        color: button.held ? Theme.emerald : Theme.inkSoft
+        tint: button.held ? Theme.emerald : Theme.inkSoft
     }
 
     Text {

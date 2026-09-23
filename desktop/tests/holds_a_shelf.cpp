@@ -17,6 +17,7 @@
 #include <QQmlEngine>
 #include <QScopedPointer>
 #include <QSignalSpy>
+#include <utility>
 #include <QStandardPaths>
 #include <QTest>
 #include <QtGlobal>
@@ -235,6 +236,28 @@ private slots:
         QCOMPARE(m_shelf->rowCount(), 1);
         QCOMPARE(m_shelf->data(m_shelf->index(0), role(Shelf::Role::Name)).toString(),
                  u"Assassination Classroom"_s);
+    }
+
+    /// Arriving at the shelf with a filter is not the same act as narrowing the one you are
+    /// already looking at. `filterBy` keeps the wall until the narrower answer lands and
+    /// waits for the hand to stop; this empties and asks at once, because what would be kept
+    /// is the whole library — the one thing that reader did not ask to see.
+    void arriving_with_a_filter_empties_the_wall_and_asks_at_once()
+    {
+        m_pretend->answers(200, aPage({aSeries(u"dn"_s, u"Death Note"_s)}, 1));
+        m_shelf->reload();
+        settle();
+        QCOMPARE(m_shelf->rowCount(), 1);
+
+        m_pretend->heard.clear();
+        m_pretend->answers(200, aPage({aSeries(u"elfes"_s, u"Elfes"_s)}, 1));
+        m_shelf->narrowTo({{u"universe"_s, QStringList{u"Terres d'Arran"_s}}});
+
+        // Emptied on the spot, where `filterBy` leaves what is showing in place.
+        QCOMPARE(m_shelf->rowCount(), 0);
+        // And asked for without waiting out the settling the chips are given.
+        QTRY_VERIFY(m_pretend->heard.contains("universe=Terres"));
+        QTRY_COMPARE(m_shelf->rowCount(), 1);
     }
 
     /// A pill lit again by a stray binding must not cost a page.
@@ -727,10 +750,11 @@ private slots:
                  m_settings->address() + u"/series/dn/cover"_s);
     }
 
-    void only_a_series_being_read_is_marked()
+    void a_finished_series_is_told_apart_from_one_never_opened()
     {
-        // §01: an emerald bar means in progress, nothing means never opened, and finished
-        // carries no mark either — so two of the three answers are the same answer here.
+        // A partial bar for in progress, a full one and a check for finished, nothing for
+        // never opened. Finished once carried no mark, and was then drawn exactly like a
+        // series nobody had opened.
         QJsonObject reading = aSeries(u"dn"_s, u"Death Note"_s);
         reading[u"readStatus"_s] = u"IN_PROGRESS"_s;
         QJsonObject finished = aSeries(u"ac"_s, u"Assassination Classroom"_s);
@@ -742,6 +766,129 @@ private slots:
         QVERIFY(m_shelf->data(m_shelf->index(0), role(Shelf::Role::InProgress)).toBool());
         QVERIFY(!m_shelf->data(m_shelf->index(1), role(Shelf::Role::InProgress)).toBool());
         QVERIFY(!m_shelf->data(m_shelf->index(2), role(Shelf::Role::InProgress)).toBool());
+        QVERIFY(!m_shelf->data(m_shelf->index(0), role(Shelf::Role::Finished)).toBool());
+        QVERIFY(m_shelf->data(m_shelf->index(1), role(Shelf::Role::Finished)).toBool());
+        QVERIFY(!m_shelf->data(m_shelf->index(2), role(Shelf::Role::Finished)).toBool());
+    }
+
+    /// A series marked read is one tile, and only that tile changes: nothing is asked, no row
+    /// moves, and the counts hear what it was and what it is. The shelf used to ask for its
+    /// first hundred series again for it.
+    void a_series_taken_changes_its_tile_alone_and_asks_nothing()
+    {
+        QJsonObject reading = aSeries(u"kq"_s, u"Koro Quest"_s);
+        reading[u"readStatus"_s] = u"IN_PROGRESS"_s;
+        m_pretend->answers(200, aPage({aSeries(u"dn"_s, u"Death Note"_s), reading}, 2));
+        m_shelf->reload();
+        settle();
+        m_pretend->heard.clear();
+
+        QSignalSpy repainted(m_shelf, &QAbstractItemModel::dataChanged);
+        QSignalSpy reset(m_shelf, &QAbstractItemModel::modelReset);
+        QSignalSpy taken(m_shelf, &Shelf::taken);
+        QSignalSpy outOfOrder(m_shelf, &Shelf::outOfOrder);
+        QJsonObject done = reading;
+        done[u"readStatus"_s] = u"READ"_s;
+        done[u"readEntries"_s] = 12;
+        m_shelf->take(*Api::series(done).value);
+
+        QCOMPARE(requests(), 0);
+        QCOMPARE(reset.count(), 0);
+        QCOMPARE(repainted.count(), 1);
+        QCOMPARE(repainted.first().at(0).toModelIndex().row(), 1);
+        QVERIFY(m_shelf->data(m_shelf->index(1), role(Shelf::Role::Finished)).toBool());
+        QCOMPARE(taken.count(), 1);
+        QCOMPARE(taken.first().at(0).toBool(), true);
+        QCOMPARE(taken.first().at(1).toInt(), std::to_underlying(Api::ReadStatus::InProgress));
+        QCOMPARE(taken.first().at(2).toInt(), std::to_underlying(Api::ReadStatus::Read));
+        QCOMPARE(outOfOrder.count(), 0);
+    }
+
+    /// Under « En cours », a series just read has no place: it leaves, and still nothing is
+    /// asked. Under « Terminées », it has to come in somewhere only the server knows.
+    void a_series_taken_leaves_a_status_it_no_longer_has_and_asks_to_enter_one_it_does()
+    {
+        QJsonObject reading = aSeries(u"kq"_s, u"Koro Quest"_s);
+        reading[u"readStatus"_s] = u"IN_PROGRESS"_s;
+        m_pretend->answers(200, aPage({reading}, 1));
+        m_shelf->narrowTo(by({u"IN_PROGRESS"_s}));
+        settle();
+        QCOMPARE(m_shelf->rowCount(), 1);
+        m_pretend->heard.clear();
+
+        QJsonObject done = reading;
+        done[u"readStatus"_s] = u"READ"_s;
+        m_shelf->take(*Api::series(done).value);
+        QCOMPARE(m_shelf->rowCount(), 0);
+        QCOMPARE(m_shelf->total(), 0);
+        QCOMPARE(requests(), 0);
+
+        m_pretend->answers(200, aPage({}, 0));
+        m_shelf->narrowTo(by({u"READ"_s}));
+        settle();
+        QSignalSpy outOfOrder(m_shelf, &Shelf::outOfOrder);
+        m_shelf->take(*Api::series(done).value);
+        QCOMPARE(outOfOrder.count(), 1);
+    }
+
+    /// Ordered by reading, what was just read moves, and where to is the server's to say.
+    void a_series_taken_under_an_order_by_reading_asks_to_be_placed()
+    {
+        m_pretend->answers(200, aPage({aSeries(u"kq"_s, u"Koro Quest"_s)}, 1));
+        m_shelf->sortBy(u"read"_s);
+        settle();
+        QSignalSpy outOfOrder(m_shelf, &Shelf::outOfOrder);
+        QJsonObject done = aSeries(u"kq"_s, u"Koro Quest"_s);
+        done[u"readStatus"_s] = u"READ"_s;
+        m_shelf->take(*Api::series(done).value);
+        QCOMPARE(outOfOrder.count(), 1);
+    }
+
+    void a_series_forgotten_leaves_without_a_question()
+    {
+        m_pretend->answers(200, aPage({aSeries(u"dn"_s, u"Death Note"_s),
+                                       aSeries(u"kq"_s, u"Koro Quest"_s)},
+                                      2));
+        m_shelf->reload();
+        settle();
+        m_pretend->heard.clear();
+
+        m_shelf->forget(u"dn"_s);
+        QCOMPARE(m_shelf->rowCount(), 1);
+        QCOMPARE(m_shelf->total(), 1);
+        QCOMPARE(m_shelf->data(m_shelf->index(0), role(Shelf::Role::SeriesId)).toString(),
+                 u"kq"_s);
+        QCOMPARE(requests(), 0);
+    }
+
+    /// Asked again after a scan, the shelf asks for as many as it holds, in one answer. It
+    /// asked for the first hundred, and a reader a hundred and fifty down lost the rest.
+    void a_refresh_asks_for_all_it_holds_and_keeps_them()
+    {
+        QJsonArray first;
+        for (int i = 0; i < 100; ++i)
+            first << aSeries(u"s%1"_s.arg(i, 3, 10, QChar(u'0')), u"S%1"_s.arg(i));
+        m_pretend->answers(200, aPage(first, 150));
+        m_shelf->reload();
+        settle();
+        QJsonArray second;
+        for (int i = 100; i < 150; ++i)
+            second << aSeries(u"s%1"_s.arg(i, 3, 10, QChar(u'0')), u"S%1"_s.arg(i));
+        m_pretend->answers(200, aPage(second, 150, 1));
+        m_shelf->fetchMore({});
+        settle();
+        QCOMPARE(m_shelf->rowCount(), 150);
+
+        m_pretend->heard.clear();
+        QJsonArray all = first;
+        for (const QJsonValue &one : std::as_const(second))
+            all.append(one);
+        m_pretend->answers(200, aPage(all, 150));
+        m_shelf->refresh();
+        settle();
+        QCOMPARE(requests(), 1);
+        QVERIFY(m_pretend->heard.contains("size=200"));
+        QCOMPARE(m_shelf->rowCount(), 150);
     }
 
     void a_shelf_factory_with_no_server_says_so_rather_than_reaching_through_nothing()
