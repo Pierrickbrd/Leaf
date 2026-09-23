@@ -120,7 +120,8 @@ pub const SCHEMA: &[&str] = &[
       unit        TEXT NOT NULL CHECK (unit IN ('CHAPTER','VOLUME')),
       from_number REAL NOT NULL,
       to_number   REAL NOT NULL,
-      position    INTEGER NOT NULL
+      position    INTEGER NOT NULL,
+      parent_id   TEXT REFERENCES arc(id) ON DELETE SET NULL
     )
     "#,
     r#"
@@ -416,6 +417,10 @@ pub const MIGRATIONS: &[&str] = &[
     // never counted out of the shape: an album standing alone and a running series you own
     // one volume of are the same rows, and only somebody saying so tells them apart.
     "ALTER TABLE edition ADD COLUMN one_shot INTEGER NOT NULL DEFAULT 0",
+    // 24 — the arc an arc sits inside. Declared in the sidecar by name and resolved here,
+    // because two ranges containing one another are not a saga: the format lets arcs
+    // overlap for reasons that have nothing to do with nesting.
+    "ALTER TABLE arc ADD COLUMN parent_id TEXT REFERENCES arc(id) ON DELETE SET NULL",
 ];
 
 /// What a fresh database is stamped with. Deriving it from the list is what makes adding a
