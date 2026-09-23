@@ -17,6 +17,109 @@ class WritesFrench : public QObject
     Q_OBJECT
 
 private slots:
+    // ——— La fiche d'une série ————————————————————————————————————————————————
+
+    void the_three_tabs_are_worded_once_and_in_order()
+    {
+        QCOMPARE(Words::tab(Words::Tab::Volumes), u"Tomes"_s);
+        QCOMPARE(Words::tab(Words::Tab::Description), u"Description"_s);
+        QCOMPARE(Words::tab(Words::Tab::Elsewhere), u"Voir aussi"_s);
+    }
+
+    /// Every label of the description, because a switch that grows a case and forgets its
+    /// word answers an empty string — which draws a value with nothing in front of it.
+    void every_label_of_the_description_has_a_word()
+    {
+        using enum Words::Fact;
+        const QList<Words::Fact> all = {Writers, Artists, Publisher, Collection, Language,
+                                        Kind, Direction, Status, Age, Colour, Held, Read,
+                                        FirstReceived, LastReceived};
+        QSet<QString> said;
+        for (const Words::Fact one : all) {
+            const QString word = Words::fact(one);
+            QVERIFY2(!word.isEmpty(), qPrintable(QString::number(int(one))));
+            said.insert(word);
+        }
+        // And no two of them are the same word: a description with two « Type » rows is a
+        // description nobody can read.
+        QCOMPARE(said.size(), all.size());
+        QCOMPARE(Words::fact(Writers), u"Scénario"_s);
+        QCOMPARE(Words::fact(Held), u"Tomes détenus"_s);
+    }
+
+    void a_number_is_written_the_way_french_writes_it()
+    {
+        // A 3.5 is a side story, and « Tome 3.5 » is English.
+        QCOMPARE(Words::number(3.5), u"3,5"_s);
+        QCOMPARE(Words::number(12.0), u"12"_s);
+        QCOMPARE(Words::number(-1), u"-1"_s);
+    }
+
+    void the_three_reading_directions_and_the_two_colours()
+    {
+        QCOMPARE(Words::readingDirection(Api::ReadingDirection::LeftToRight),
+                 u"Gauche à droite"_s);
+        QCOMPARE(Words::readingDirection(Api::ReadingDirection::RightToLeft),
+                 u"Droite à gauche"_s);
+        QCOMPARE(Words::readingDirection(Api::ReadingDirection::Vertical), u"Verticale"_s);
+        // Positive on both sides: « pas en couleur » is a double negative nobody reads twice.
+        QCOMPARE(Words::colour(true), u"Couleur"_s);
+        QCOMPARE(Words::colour(false), u"Noir et blanc"_s);
+    }
+
+    /// Never below two: there is nothing to choose between when a work has one edition.
+    void the_switcher_says_nothing_below_two_editions()
+    {
+        QVERIFY(Words::editions(0).isEmpty());
+        QVERIFY(Words::editions(1).isEmpty());
+        QCOMPARE(Words::editions(2), u"2 éditions"_s);
+        QVERIFY(Words::arcs(0).isEmpty());
+        QCOMPARE(Words::arcs(1), u"1 arc"_s);
+        QCOMPARE(Words::arcs(5), u"5 arcs"_s);
+    }
+
+    /// From two. A finished series would otherwise carry « ×1 » on every line for no news.
+    void how_often_a_volume_was_finished_is_said_from_two()
+    {
+        QVERIFY(Words::timesFinished(0).isEmpty());
+        QVERIFY(Words::timesFinished(1).isEmpty());
+        QCOMPARE(Words::timesFinished(6), u"×6"_s);
+    }
+
+    /// The label agrees and the value enumerates — commas to the end and no « et », because
+    /// this is a list of identifiers and not a sentence.
+    void the_missing_volumes_agree_and_enumerate()
+    {
+        QCOMPARE(Words::missingLabel(1), u"Manquant"_s);
+        QCOMPARE(Words::missingLabel(4), u"Manquants"_s);
+        QVERIFY(Words::missingVolumes({}).isEmpty());
+        QCOMPARE(Words::missingVolumes({7}), u"Tome 7"_s);
+        QCOMPARE(Words::missingVolumes({7, 9, 12, 18}), u"Tomes 7, 9, 12, 18"_s);
+    }
+
+    void what_a_library_holds_of_an_edition_is_said_out_of_what_it_runs_to()
+    {
+        QCOMPARE(Words::heldOutOf(29, 30), u"29 sur 30"_s);
+        // Nothing declared is nothing to be out of.
+        QCOMPARE(Words::heldOutOf(29, 0), u"29"_s);
+    }
+
+    /// The ordinal is worth the trouble: « le 5 en cours » reads as a quantity.
+    void how_many_are_read_says_whether_one_is_open()
+    {
+        QCOMPARE(Words::readEntries(4, false, 5), u"4"_s);
+        QCOMPARE(Words::readEntries(4, true, 5), u"4 · le 5ᵉ en cours"_s);
+        QCOMPARE(Words::readEntries(0, true, 1), u"0 · le 1ᵉʳ en cours"_s);
+    }
+
+    void the_page_has_words_for_what_it_has_none_of()
+    {
+        QCOMPARE(Words::neverRead(), u"Non lu"_s);
+        QCOMPARE(Words::inThisLibrary(), u"Dans cette bibliothèque"_s);
+        QCOMPARE(Words::volumesAxis(), u"les tomes"_s);
+        QVERIFY(Words::noVolumeByThatName().endsWith(u"."_s));
+    }
+
     /// A BD comes in albums. That is the shelf's whole reason for reading the medium.
     void a_bd_comes_in_albums_and_everything_else_in_volumes()
     {

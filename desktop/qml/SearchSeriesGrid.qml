@@ -152,5 +152,6 @@ GridView {
                   && grid.navigationCursor.index === index
         onPointerEntered: grid.pointAt(index)
         onPointerExited: grid.stopPointingAt(index)
+        onOpened: Navigation.open(Navigation.Series, { "series": seriesId })
     }
 }

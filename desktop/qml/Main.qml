@@ -237,6 +237,8 @@ ApplicationWindow {
                 switch (Navigation.destination) {
                 case Navigation.Settings:
                     return settingsScreen
+                case Navigation.Series:
+                    return seriesScreen
                 default:
                     return null
                 }
@@ -266,5 +268,38 @@ ApplicationWindow {
         id: settingsScreen
 
         SettingsView { }
+    }
+
+    Component {
+        id: seriesScreen
+
+        SeriesView { }
+    }
+
+    // The page is pointed at what navigation asked for, and the list follows once the page
+    // knows its gaps: a hole belongs to the series and not to its files, so it travels from
+    // one model to the other rather than being asked for twice.
+    //
+    // Here rather than inside `SeriesView`, because a screen that fetches on creation would
+    // fetch again every time the Loader rebuilt it — and the whole arrangement of this page
+    // is that nothing is thrown away to be asked for a second time.
+    Connections {
+        target: Navigation
+
+        function onChanged() {
+            const asked = Navigation.parameters.series ?? ""
+            if (Navigation.destination === Navigation.Series && asked.length > 0
+                    && asked !== Series.identifier)
+                Series.point(asked)
+        }
+    }
+
+    Connections {
+        target: Series
+
+        function onChanged() {
+            if (Series.available && Series.identifier !== Entries.pointedAt)
+                Entries.point(Series.identifier, Series.missingVolumes)
+        }
     }
 }

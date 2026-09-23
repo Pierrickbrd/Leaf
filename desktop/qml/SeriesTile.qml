@@ -25,6 +25,7 @@ Item {
 
     signal pointerEntered()
     signal pointerExited()
+    signal opened()
 
     objectName: "tile-" + seriesId
     width: cellWidth
@@ -42,6 +43,12 @@ Item {
         hoverEnabled: true
         onEntered: tile.pointerEntered()
         onExited: tile.pointerExited()
+    }
+
+    // Beside the hover area rather than inside it: that one takes no button on purpose, so
+    // that a stationary pointer never steals the emphasis a key just gave somewhere else.
+    TapHandler {
+        onTapped: tile.opened()
     }
 
     Item {

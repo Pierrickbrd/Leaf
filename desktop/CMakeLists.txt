@@ -86,6 +86,12 @@ qt_add_executable(leaf-desktop
     src/Filters.cpp
     src/Resume.h
     src/Resume.cpp
+    src/Series.h
+    src/Series.cpp
+    src/Entries.h
+    src/Entries.cpp
+    src/SeriesCaptions.h
+    src/SeriesCaptions.cpp
     src/Covers.h
     src/Covers.cpp
 )
@@ -136,6 +142,14 @@ set(LEAF_QML
     qml/CoverShadow.qml
     qml/ResumeBand.qml
     qml/ShelfView.qml
+    qml/SeriesView.qml
+    qml/SeriesHeader.qml
+    qml/SeriesTabs.qml
+    qml/SeriesDescription.qml
+    qml/SeriesSkeleton.qml
+    qml/FactColumn.qml
+    qml/VolumeRow.qml
+    qml/VolumeState.qml
 )
 foreach(qml_file IN LISTS LEAF_QML)
     string(REGEX REPLACE "^qml/" "" alias "${qml_file}")
@@ -325,6 +339,9 @@ qt_add_executable(crosses-the-seam
     src/Scan.h src/Scan.cpp
     src/Preferences.h src/Preferences.cpp
     src/Resume.h src/Resume.cpp
+    src/Series.h src/Series.cpp
+    src/Entries.h src/Entries.cpp
+    src/SeriesCaptions.h src/SeriesCaptions.cpp
 )
 target_include_directories(crosses-the-seam PRIVATE src)
 qt_add_qml_module(crosses-the-seam
@@ -433,6 +450,33 @@ target_include_directories(holds-the-resume PRIVATE src)
 target_link_libraries(holds-the-resume PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
 add_test(NAME holds-the-resume COMMAND holds-the-resume)
+
+# One series, as its own page draws it. Apart from the shelf's test because it answers a
+# different question: not « what does a grid of many look like » but « what does a page of
+# one say », which is where every French string of that screen is settled.
+qt_add_executable(holds-the-series
+    tests/holds_the_series.cpp tests/Pretend.h
+    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
+    src/Series.h src/Series.cpp)
+target_include_directories(holds-the-series PRIVATE src)
+target_link_libraries(holds-the-series PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME holds-the-series COMMAND holds-the-series)
+
+# The volumes tab: two answers married into one list, and the gaps that belong to neither.
+qt_add_executable(holds-the-volumes
+    tests/holds_the_volumes.cpp tests/Pretend.h
+    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
+    src/Entries.h src/Entries.cpp
+    src/SeriesCaptions.h src/SeriesCaptions.cpp)
+target_include_directories(holds-the-volumes PRIVATE src)
+target_link_libraries(holds-the-volumes PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME holds-the-volumes COMMAND holds-the-volumes)
 
 # The two axes the bandeau offers, and the rule that decides whether an axis exists at all.
 # Headless like the shelf: a filter that is not offered is a decision, not a drawing.

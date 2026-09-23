@@ -434,6 +434,7 @@ Item {
             // just after a keyboard event selected somewhere else.
             onPointerEntered: root.followPointer(index)
             onPointerExited: root.releasePointer(index)
+            onOpened: Navigation.open(Navigation.Series, { "series": seriesId })
         }
     }
 

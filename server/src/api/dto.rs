@@ -73,6 +73,12 @@ pub struct SeriesDto {
     pub reading_direction: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// The prose somebody wrote about the work, shown as it stands.
+    ///
+    /// Stored since the first version and served nowhere: a page that describes a series had
+    /// no way to show the one thing a reader opens that tab for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     /// Computed, never declared. Absent means UNREAD.
     #[serde(skip_serializing_if = "is_unread")]
     pub read_status: String,

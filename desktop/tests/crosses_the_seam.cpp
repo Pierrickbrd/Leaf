@@ -13,7 +13,9 @@
 #include "ImportCaptions.h"
 #include "Imports.h"
 #include "Preferences.h"
+#include "Entries.h"
 #include "Navigation.h"
+#include "Series.h"
 #include "Pretend.h"
 #include "Shelf.h"
 #include "Theme.h"
@@ -664,6 +666,117 @@ private slots:
 
     /// The band the artifact puts above the grid, with the wording and the elevation it draws.
     /// Every string here was settled in C++ — this asserts the QML shows those and not others.
+    /// The series page, against the real engine: a header that words itself, and a list whose
+    /// lines come from two answers married in C++.
+    ///
+    /// Headless tests settle what each model holds; this settles that the screen the reader
+    /// opens is made of it. A `.qml` file that stopped binding a role would pass every one of
+    /// them and draw nothing here.
+    void a_series_opens_on_a_page_that_words_its_header_and_its_volumes()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+
+        const QByteArray one = QJsonDocument(QJsonObject{
+            {u"id"_s, u"albums"_s},
+            {u"workId"_s, u"elfes"_s},
+            {u"name"_s, u"Terres d'Arran · Elfes"_s},
+            {u"universe"_s, u"Terres d'Arran"_s},
+            {u"work"_s, u"Elfes"_s},
+            {u"edition"_s, u"Albums"_s},
+            {u"publisher"_s, u"Soleil"_s},
+            {u"medium"_s, u"bd"_s},
+            {u"ownedVolumes"_s, 2},
+            {u"entryCount"_s, 2},
+            {u"chapterCount"_s, 0},
+            {u"arcCount"_s, 0},
+            {u"summary"_s, u"Cinq peuples elfiques."_s},
+        }).toJson(QJsonDocument::Compact);
+
+        const QByteArray files = QJsonDocument(QJsonArray{
+            QJsonObject{{u"id"_s, u"v1"_s}, {u"type"_s, u"VOLUME"_s}, {u"number"_s, 1},
+                        {u"title"_s, u"Le Crystal"_s}, {u"pageCount"_s, 54},
+                        {u"chapterCount"_s, 0}, {u"file"_s, u"T1.cbz"_s}, {u"size"_s, 1}},
+            QJsonObject{{u"id"_s, u"v2"_s}, {u"type"_s, u"VOLUME"_s}, {u"number"_s, 2},
+                        {u"title"_s, u"L'Honneur"_s}, {u"pageCount"_s, 54},
+                        {u"chapterCount"_s, 0}, {u"file"_s, u"T2.cbz"_s}, {u"size"_s, 1}},
+        }).toJson(QJsonDocument::Compact);
+
+        const QByteArray states = QJsonDocument(QJsonArray{
+            QJsonObject{{u"entryId"_s, u"v1"_s}, {u"page"_s, 53}, {u"pageCount"_s, 54},
+                        {u"finished"_s, true}},
+        }).toJson(QJsonDocument::Compact);
+
+        const QByteArray shelf = QJsonDocument(QJsonObject{
+            {u"items"_s, QJsonArray{}}, {u"total"_s, 0}, {u"page"_s, 0}, {u"size"_s, 0},
+        }).toJson(QJsonDocument::Compact);
+
+        const auto reply = [](const QByteArray &body) {
+            return "HTTP/1.1 200 .\r\nContent-Type: application/json\r\nContent-Length: "
+                   + QByteArray::number(body.size()) + "\r\n\r\n" + body;
+        };
+        pretend.answerFor = [=](const QByteArray &request) -> QByteArray {
+            if (request.contains("/entries "))
+                return reply(files);
+            if (request.contains("/progress "))
+                return reply(states);
+            if (request.contains("/cover"))
+                return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+            if (request.startsWith("GET /series/"))
+                return reply(one);
+            return reply(shelf);
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        QVERIFY(navigation->open(Navigation::Destination::Series,
+                                 {{u"series"_s, u"albums"_s}}));
+
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QVERIFY(itemNamed(page, u"series-header"_s));
+        QVERIFY(itemNamed(page, u"series-tabs"_s));
+        // The edition has a name, so the level below the work is drawn — and the universe
+        // above it is a link and not a title.
+        QVERIFY(itemNamed(page, u"series-universe"_s));
+
+        // The shell points the page, and the list follows once the page knows its gaps.
+        auto *page_ = engine.singletonInstance<Series *>(qmlTypeId("Leaf", 1, 0, "Series"));
+        QVERIFY(page_);
+        QTRY_VERIFY(page_->available());
+        auto *volumes =
+            engine.singletonInstance<Entries *>(qmlTypeId("Leaf", 1, 0, "Entries"));
+        QVERIFY(volumes);
+        QTRY_COMPARE(volumes->count(), 2);
+
+        // Two answers, married: the first volume is finished and the second was never opened.
+        QQuickItem *first = nullptr;
+        QTRY_VERIFY((first = itemNamed(page, u"volume-v1"_s)));
+        QVERIFY(itemNamed(page, u"volume-v2"_s));
+        QCOMPARE(first->property("state").toInt(), 2);
+        QCOMPARE(first->property("number").toString(), u"1"_s);
+        QCOMPARE(first->property("title").toString(), u"Le Crystal"_s);
+        QCOMPARE(first->property("pages").toString(), u"54 p."_s);
+
+        // And Escape leaves the page, whatever happened before it. The window has to hold
+        // the keyboard for that: a shortcut nobody is focused on is a shortcut nobody fires.
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Shelf);
+    }
+
     void the_resume_band_draws_the_one_offer_above_the_grid()
     {
         Pretend pretend;

@@ -24,6 +24,37 @@ class KeepsAPreference : public QObject
 private slots:
     void initTestCase() { QStandardPaths::setTestModeEnabled(true); }
 
+    /// Lines are the default: they say the whole title, the pages and the state on one row,
+    /// where a grid shows covers and cuts long titles.
+    void the_volumes_of_a_series_are_lines_until_somebody_says_otherwise()
+    {
+        Preferences fresh;
+        QVERIFY(!fresh.volumesAsGrid());
+
+        QSignalSpy moved(&fresh, &Preferences::changed);
+        fresh.showVolumesAsGrid(true);
+        QVERIFY(fresh.volumesAsGrid());
+        QVERIFY(moved.size() >= 1);
+
+        // Asking again for what is already so announces nothing: a binding refreshed by a
+        // change that did not happen is a binding refreshed for nothing.
+        const int announced = moved.size();
+        fresh.showVolumesAsGrid(true);
+        QCOMPARE(moved.size(), announced);
+    }
+
+    /// Kept once and not per series — a reader's habit, not a state of one page. It therefore
+    /// has to survive the object, which is what writing it to the file is for.
+    void the_choice_survives_the_run()
+    {
+        {
+            Preferences first;
+            first.showVolumesAsGrid(true);
+        }
+        Preferences again;
+        QVERIFY(again.volumesAsGrid());
+    }
+
     /// Every slot starts from an empty file, because "what a fresh install answers" is one
     /// of the answers under test and a leftover from the slot before would hide it.
     void init()

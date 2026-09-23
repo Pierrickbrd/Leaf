@@ -11,25 +11,14 @@ using Qt::Literals::StringLiterals::operator""_s;
 
 namespace {
 
-/// A number as French writes it: no decimal point, and no trailing zero on a whole one.
-///
-/// Volume numbers are halves as often as not — a 3.5 is a side story — and « Tome 3.5 » is
-/// English. « Tome 3,5 » is French, and « Tome 12,0 » is neither.
-QString number(double value)
-{
-    if (std::abs(value - std::round(value)) < 0.0001)
-        return QString::number(static_cast<qint64>(std::llround(value)));
-    return QString::number(value, 'g', 4).replace(u'.', u',');
-}
-
 /// Only a volume shortens. A chapter's number is the entry's own identity, and « Ch. 98 » is
 /// an abbreviation nobody has agreed on — so the short line drops the chapter segment rather
 /// than inventing a spelling for it.
 QString entry(Api::UpNext::Kind kind, double value, bool briefly)
 {
     if (kind == Api::UpNext::Kind::Chapter)
-        return u"Chapitre "_s + number(value);
-    return (briefly ? u"T"_s : u"Tome "_s) + number(value);
+        return u"Chapitre "_s + Words::number(value);
+    return (briefly ? u"T"_s : u"Tome "_s) + Words::number(value);
 }
 
 QString line(Api::UpNext::Kind kind, std::optional<double> number_, std::optional<int> page,
@@ -1232,6 +1221,183 @@ QString stageAnd(const QString &stage, const QString &howFar)
 QString concern(const QString &said)
 {
     return u"· %1"_s.arg(said);
+}
+
+// ——— La fiche d'une série ————————————————————————————————————————————————————
+
+QString number(double value)
+{
+    if (std::abs(value - std::round(value)) < 0.0001)
+        return QString::number(static_cast<qint64>(std::llround(value)));
+    return QString::number(value, 'g', 4).replace(u'.', u',');
+}
+
+QString tab(Tab which)
+{
+    using enum Tab;
+    switch (which) {
+    case Volumes:
+        return u"Tomes"_s;
+    case Description:
+        return u"Description"_s;
+    case Elsewhere:
+        return u"Voir aussi"_s;
+    }
+    return {};
+}
+
+QString makers(const Api::Series &one)
+{
+    QStringList said;
+    if (!one.credits.authors.isEmpty())
+        said << one.credits.authors.join(u", "_s);
+    else if (one.credits.author && !one.credits.author->isEmpty())
+        said << *one.credits.author;
+    if (one.publication.publisher)
+        said << *one.publication.publisher;
+    if (one.medium)
+        said << medium(*one.medium);
+    if (one.run)
+        said << editionStatus(*one.run == Api::Run::Completed ? u"completed"_s : u"ongoing"_s);
+    return said.join(u" · "_s);
+}
+
+QString weights(const Api::Series &one)
+{
+    QStringList said;
+    // What this library holds, counted in the medium's own word — a BD comes in albums.
+    said << volumes(one.holding.ownedVolumes, one.medium);
+    if (const QString spread = arcs(one.counts.arcs); !spread.isEmpty())
+        said << spread;
+    if (one.ageRating && !one.ageRating->isEmpty())
+        said << *one.ageRating;
+    if (one.readingDirection)
+        said << readingDirection(*one.readingDirection);
+    return said.join(u" · "_s);
+}
+
+QString editions(int count)
+{
+    // Never below two: there is nothing to choose between when a work has one edition.
+    return count < 2 ? QString() : counted(count, u"édition"_s, u"éditions"_s);
+}
+
+QString arcs(int count)
+{
+    return count <= 0 ? QString() : counted(count, u"arc"_s, u"arcs"_s);
+}
+
+QString neverRead()
+{
+    return u"Non lu"_s;
+}
+
+QString timesFinished(int times)
+{
+    // From two. A finished series would otherwise carry « ×1 » on every line for no news.
+    return times < 2 ? QString() : u"×%1"_s.arg(times);
+}
+
+QString missingLabel(int count)
+{
+    return count == 1 ? u"Manquant"_s : u"Manquants"_s;
+}
+
+QString missingVolumes(const QList<double> &numbers)
+{
+    if (numbers.isEmpty())
+        return {};
+    QStringList said;
+    said.reserve(numbers.size());
+    for (const double one : numbers)
+        said << number(one);
+    // Commas to the end and no « et »: a list of identifiers is not a sentence.
+    return (numbers.size() == 1 ? u"Tome "_s : u"Tomes "_s) + said.join(u", "_s);
+}
+
+QString heldOutOf(int owned, int ceiling)
+{
+    return ceiling > 0 ? u"%1 sur %2"_s.arg(owned).arg(ceiling) : QString::number(owned);
+}
+
+QString inThisLibrary()
+{
+    return u"Dans cette bibliothèque"_s;
+}
+
+QString fact(Fact which)
+{
+    using enum Fact;
+    switch (which) {
+    case Writers:
+        return u"Scénario"_s;
+    case Artists:
+        return u"Dessin"_s;
+    case Publisher:
+        return u"Éditeur"_s;
+    case Collection:
+        return u"Collection"_s;
+    case Language:
+        return u"Langue"_s;
+    case Kind:
+        return u"Type"_s;
+    case Direction:
+        return u"Lecture"_s;
+    case Status:
+        return u"Statut"_s;
+    case Age:
+        return u"Âge"_s;
+    case Colour:
+        return u"Couleur"_s;
+    case Held:
+        return u"Tomes détenus"_s;
+    case Read:
+        return u"Lus"_s;
+    case FirstReceived:
+        return u"Premier reçu"_s;
+    case LastReceived:
+        return u"Dernier reçu"_s;
+    }
+    return {};
+}
+
+QString readingDirection(Api::ReadingDirection value)
+{
+    using enum Api::ReadingDirection;
+    switch (value) {
+    case LeftToRight:
+        return u"Gauche à droite"_s;
+    case RightToLeft:
+        return u"Droite à gauche"_s;
+    case Vertical:
+        return u"Verticale"_s;
+    }
+    return {};
+}
+
+QString colour(bool coloured)
+{
+    // Positive on both sides: « pas en couleur » is a double negative nobody reads twice.
+    return coloured ? u"Couleur"_s : u"Noir et blanc"_s;
+}
+
+QString readEntries(int finished, bool oneOpen, int which)
+{
+    if (!oneOpen)
+        return QString::number(finished);
+    // The ordinal is worth the trouble: « le 5 en cours » reads as a quantity.
+    return u"%1 · le %2%3 en cours"_s.arg(finished).arg(which).arg(which == 1 ? u"ᵉʳ"_s
+                                                                             : u"ᵉ"_s);
+}
+
+QString volumesAxis()
+{
+    return u"les tomes"_s;
+}
+
+QString noVolumeByThatName()
+{
+    return u"Aucun tome ne porte ce nom."_s;
 }
 
 } // namespace Words
