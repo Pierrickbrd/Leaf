@@ -221,6 +221,11 @@ def progress(run, series, entry):
     run.check("forget the series", whole, SERIES_PROGRESS, "DELETE")
 
 
+# `DELETE /series/{id}` and `DELETE /entries/{id}` are deliberately not driven here.
+# This tool checks the *shape* of answers, and it can be pointed at a real server by hand —
+# a shape check that unlinks files is a tool that can hurt the library it was aimed at. The
+# two routes are covered by the server's own tests, against a library built for the purpose
+# and thrown away after.
 def records(run, series, entry):
     print("— records —")
     run.check("patch series", f"/series/{series}", ONE_SERIES, "PATCH", {"summary": "…"})

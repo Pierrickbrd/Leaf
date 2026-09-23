@@ -309,6 +309,37 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
       x-leaf-permission: import
 
+    delete:
+      operationId: eraseSeries
+      tags: [library]
+      summary: Take a whole edition off the disk.
+      description: |
+        **There is no trash.** The library is the files and the index is rebuilt by scanning
+        them, so this unlinks every archive the edition holds and no rescan brings them back.
+
+        What was not asked for stays: the folder, its `work.json`, its `edition.json`, a
+        cover dropped beside a volume. Those are files somebody wrote, not files somebody
+        asked to erase — an empty folder is visible and can be swept up, a lost `work.json`
+        is not. Re-importing into the same folder picks the metadata back up.
+
+        The disk goes first and the row second. A file that will not go keeps its row, is
+        named in `refused`, and keeps the edition alive with it: an edition holding nothing
+        would be a series the shelf draws and nothing opens. The work goes when its last
+        edition does.
+
+        Needs a key carrying `delete`, which is apart from `import`: adding files to a shelf
+        and unmaking them are not the same power, and a key written before this right existed
+        carries `read,import` and cannot do this.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "200":
+          description: What went, and what would not.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Erased" }
+
   /series/{id}/entries:
     parameters: [{ $ref: "#/components/parameters/Id" }]
     get:
@@ -488,6 +519,30 @@ paths:
               schema: { $ref: "#/components/schemas/Entry" }
         "404": { $ref: "#/components/responses/NotFound" }
       x-leaf-permission: import
+
+    delete:
+      operationId: eraseEntry
+      tags: [library]
+      summary: Take one file off the disk.
+      description: |
+        The same rules as erasing a whole edition, for one archive. A cover sitting beside it
+        stays: this erases the file that was named, and nothing else.
+
+        The numbering does not move. `number` identifies and `position` orders, so erasing
+        the twenty-third volume of thirty leaves the twenty-fourth as the twenty-fourth — and
+        leaves a gap `missingVolumes` will report, for ever, because that is what a
+        collection with a hole in it is.
+
+        Needs a key carrying `delete`.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "200":
+          description: What went, and what would not.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Erased" }
 
   /entries/{id}/chapters:
     parameters: [{ $ref: "#/components/parameters/Id" }]
@@ -1870,6 +1925,22 @@ components:
       required: [finished]
       properties:
         finished: { type: boolean }
+
+    Erased:
+      type: object
+      description: |
+        What a deletion took. A deletion that half succeeded cannot be undone, so it is
+        reported rather than rolled back: the caller is told exactly which files are still
+        there instead of working it out from a count.
+      required: [files, bytes]
+      properties:
+        files: { type: integer, description: How many archives were unlinked. }
+        bytes: { type: integer, description: What they weighed, as the index held it. }
+        refused:
+          type: array
+          items: { type: string }
+          description: |
+            The files that would not go, by name. Absent when every one of them went.
 
     ProgressPatch:
       type: object
