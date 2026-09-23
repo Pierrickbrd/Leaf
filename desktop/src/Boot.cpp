@@ -2,8 +2,10 @@
 
 #include "Covers.h"
 #include "Fonts.h"
+#include "Notifier.h"
 #include "Preferences.h"
 #include "Theme.h"
+#include "Toasts.h"
 
 #include <QCoreApplication>
 #include <QDebug>
@@ -15,7 +17,8 @@ using Qt::Literals::StringLiterals::operator""_s;
 
 namespace Boot {
 
-void run(QQmlApplicationEngine &engine, const QGuiApplication &application)
+void run(QQmlApplicationEngine &engine, const QGuiApplication &application,
+         QDBusConnection notifications)
 {
     // Before any QML: a family the database does not know resolves to a fallback, and the
     // window would come up in Noto Sans with nothing said about it.
@@ -87,6 +90,16 @@ void run(QQmlApplicationEngine &engine, const QGuiApplication &application)
         qWarning().noquote()
             << u"error resolving the Theme singleton — the interface will stay in its light "
                u"palette"_s;
+
+    // What escalates to the desktop, put on the bus it was handed. The notifier is owned by
+    // the engine so it lives exactly as long as what raises the events, and it is connected
+    // here rather than held by `Toasts`: what a bubble is has nothing to do with what D-Bus
+    // is, and a model that opened a session bus could not be built in a test.
+    if (const auto *toasts =
+            engine.singletonInstance<Toasts *>(qmlTypeId("Leaf", 1, 0, "Toasts"))) {
+        QObject::connect(toasts, &Toasts::escalated,
+                         new Notifier(std::move(notifications), &engine), &Notifier::show);
+    }
 }
 
 } // namespace Boot

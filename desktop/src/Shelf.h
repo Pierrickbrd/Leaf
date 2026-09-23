@@ -24,6 +24,7 @@
 
 #include "Api.h"
 #include "Server.h"
+#include "Settling.h"
 
 #include <QAbstractListModel>
 #include <QHash>
@@ -128,6 +129,14 @@ public:
     /// not cost a page, and a shelf that reloads on every notify is one nobody can read while
     /// it works.
     Q_INVOKABLE void filterBy(const QVariantMap &narrowing);
+    /// Narrows, and lets go of the wall at the same time.
+    ///
+    /// `filterBy` keeps what is showing until the narrower answer arrives, and waits for the
+    /// hand to stop before asking — both right for a reader ticking chips while looking at
+    /// the shelf. Neither is right for a link that *arrives* here: what is kept is the whole
+    /// library, which is the one thing that reader did not ask to see, and the settling adds
+    /// a fifth of a second of it on top. So this one empties and asks at once.
+    Q_INVOKABLE void narrowTo(const QVariantMap &narrowing);
 
     /// The order, normalised through `Api` on the way in: a word the client does not know
     /// becomes `name`, which is what the server falls back to. Reporting anything else would
@@ -172,10 +181,6 @@ private:
     void took(int page, const Server::Answer &answer);
 
     Server *m_server;
-    /// Long enough to swallow a burst of keystrokes, short enough that a pause between two
-    /// words is not felt as a stall. Two hundred milliseconds is the usual answer, and it is
-    /// what a fast typist leaves between letters.
-    static constexpr int Settling = 200;
 
     QString m_sort = Api::spell(Api::Sort::Name);
     /// The way each criterion was last being read, by its contract spelling. Held per

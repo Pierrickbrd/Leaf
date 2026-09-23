@@ -1818,6 +1818,51 @@ fn a_volume_taken_off_the_disk_is_taken_out_of_the_index_when_the_work_is_read_a
 }
 
 #[test]
+fn an_edition_writes_its_own_summary_and_leaves_the_works_alone() {
+    // The column is new, and the answer coalesces it over the work's — so an edition whose
+    // sidecar says nothing has to reach the table as NULL and not as an empty string, which
+    // would win the coalesce and describe the edition with nothing at all.
+    let library = Library::new();
+    library.write(
+        "Bleach/work.json",
+        r#"{"leaf":1,"title":"Bleach","summary":"Un lycéen voit les morts."}"#,
+    );
+    library.write(
+        "Bleach/Perfect Edition/edition.json",
+        r#"{"leaf":1,"name":"Perfect Edition","summary":"Les 74 tomes en 40, au grand format."}"#,
+    );
+    library.write("Bleach/Poche/edition.json", r#"{"leaf":1,"name":"Poche"}"#);
+    for edition in ["Perfect Edition", "Poche"] {
+        archive(
+            &library
+                .folder(&format!("Bleach/{edition}"))
+                .join("Tome 1.cbz"),
+            2,
+            None,
+        );
+    }
+    library.scan();
+
+    assert_eq!(
+        library.one::<String>("SELECT summary FROM work"),
+        Some("Un lycéen voit les morts.".to_string())
+    );
+    assert_eq!(
+        library.one::<String>("SELECT summary FROM edition WHERE name = 'Perfect Edition'"),
+        Some("Les 74 tomes en 40, au grand format.".to_string())
+    );
+    // Counted rather than read: `one` hands back `None` for a row that is missing and for a
+    // column that is NULL alike, so reading the Poche row could not tell « no summary » from
+    // « no edition » — and the second would pass this test while meaning the scan lost it.
+    assert_eq!(library.count("edition"), 2);
+    assert_eq!(
+        library.one::<i64>("SELECT COUNT(*) FROM edition WHERE summary IS NOT NULL"),
+        Some(1),
+        "an edition that says nothing about itself holds no summary at all"
+    );
+}
+
+#[test]
 fn an_edition_folder_that_has_gone_takes_its_edition_with_it() {
     let library = Library::new();
     library.write("Bleach/work.json", r#"{"leaf":1,"title":"Bleach"}"#);

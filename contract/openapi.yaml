@@ -1585,8 +1585,18 @@ components:
         summary:
           type: [string, "null"]
           description: |
-            The prose somebody wrote about the work, shown as it stands. Stored since the
-            first version and served nowhere until a page existed that had a place for it.
+            The prose somebody wrote, shown as it stands. Stored since the first version and
+            served nowhere until a page existed that had a place for it.
+
+            **An edition's own words win over the work's.** `work.json` says what the story
+            is; `edition.json` may say what *this printing* of it is — restored, coloured,
+            three volumes in one — and a reader choosing between two editions of a book they
+            already know is asking the second question, not the first. Absent from the
+            edition is the ordinary case, and then this is the work's.
+
+            The fallback happens here, when the answer is read, and never by copying the
+            work's sentence into the edition's row: copied, the day somebody edits the work
+            its editions would go on saying what it used to say.
         readStatus:
           type: string
           enum: [UNREAD, IN_PROGRESS, READ]

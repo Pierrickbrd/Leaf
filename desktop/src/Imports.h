@@ -197,6 +197,10 @@ public:
 
 signals:
     void changed();
+    /// A card has reached the end of its road, one way or the other. What warns listens to
+    /// this and not to `changed`: a card moves a dozen times on its way and only the last of
+    /// those is news — it is the commit that warns, not each byte.
+    void settled(bool went, const QString &subject, const QString &said);
 
 private:
     /// The carrier reaches into `m_rows` and into the model's own `beginInsertRows` and

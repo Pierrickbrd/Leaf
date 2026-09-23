@@ -40,6 +40,28 @@ Item {
         view.volumes.point(seriesId, [])
     }
 
+    // Started when there is nothing to draw, stopped the moment there is. Its `triggered`
+    // is what the skeleton waits on, so a fast answer draws no skeleton at all.
+    Timer {
+        id: waited
+
+        property bool triggered: false
+
+        interval: 200
+        onTriggered: waited.triggered = true
+    }
+
+    readonly property bool bare: !view.page.available && view.page.loading
+    onBareChanged: {
+        if (view.bare) {
+            waited.triggered = false
+            waited.restart()
+            return
+        }
+        waited.stop()
+        waited.triggered = false
+    }
+
     // A tab that goes away under the reader takes the page with it rather than leaving it on
     // nothing: a series whose universe answered late is the ordinary way this happens.
     onElsewhereHasAnythingChanged: {
@@ -52,10 +74,30 @@ Item {
 
     property int current: view.volumesTab
 
+    // The way out, which the page carries because « a control that leaves a page belongs to
+    // it » — the bar keeps the brand and drops everything that acts on a shelf. The settings
+    // screen has had one since it was written; this page had nothing but Escape, which is an
+    // instruction nobody can see.
+    //
+    // Outside the flick and not the first row of it: a control that leaves the page cannot be
+    // something one has to scroll back up to find.
+    BarButton {
+        id: back
+
+        objectName: "series-back"
+        x: Widths.shelfMargin
+        y: 12
+        visible: Navigation.canGoBack
+        source: "assets/icons/arrow_back.svg"
+        label: Navigation.backLabel
+        onTriggered: Navigation.back()
+    }
+
     Flickable {
         id: scroll
 
         anchors.fill: parent
+        anchors.topMargin: back.visible ? back.y + back.height : 0
         anchors.leftMargin: Widths.shelfMargin
         anchors.rightMargin: Widths.shelfMargin
         contentWidth: width
@@ -71,10 +113,13 @@ Item {
 
             SeriesSkeleton {
                 width: parent.width
-                height: 168
-                // The one screen with nothing to keep. Changing edition or opening another
-                // series never shows it: there is always a page to hold on to.
-                visible: !view.page.available && view.page.loading
+                height: 208
+                // The one screen with nothing to keep — and only once the wait is long
+                // enough to be one. On a server on this machine an answer lands in a few
+                // milliseconds, and a shape that flashes for four of them says something
+                // heavy happened where nothing did. Two hundred milliseconds is the floor
+                // the shelf's own skeleton is held to.
+                visible: !view.page.available && view.page.loading && waited.triggered
             }
 
             SeriesHeader {
@@ -88,68 +133,22 @@ Item {
                 weights: view.page.weights
                 genres: view.page.genres
                 editionsLabel: view.page.editionsLabel
+                editions: view.page.editions
                 seriesId: view.page.identifier
-                onUniverseAsked: Shelf.filterBy({ "universe": [view.page.universe] })
-                onEditionsAsked: switcher.visible = !switcher.visible
-                onReimportAsked: view.reimportAsked("")
-            }
-
-            // Opens on the spot rather than taking the page away: this is a change of
-            // edition, not a navigation.
-            Column {
-                id: switcher
-
-                width: parent.width
-                spacing: 6
-                visible: false
-
-                Repeater {
-                    model: view.page.editions
-
-                    Rectangle {
-                        required property var modelData
-
-                        width: switcher.width
-                        height: 40
-                        radius: Theme.cardRadius
-                        color: modelData.here ? Theme.emeraldWash : Theme.surface
-
-                        TapHandler {
-                            onTapped: {
-                                view.goToEdition(parent.modelData.seriesId)
-                                switcher.visible = false
-                            }
-                        }
-
-                        Column {
-                            x: 14
-                            anchors.verticalCenter: parent.verticalCenter
-                            spacing: 1
-
-                            Text {
-                                text: parent.parent.modelData.name
-                                color: Theme.ink
-                                font.family: Theme.displayFamily
-                                font.pixelSize: 14
-                                font.weight: Font.DemiBold
-                            }
-
-                            // Under the name and on both, the one being read included: it is
-                            // often the only thing that really tells two editions apart, so
-                            // it cannot disappear at the moment one is chosen.
-                            Text {
-                                text: parent.parent.modelData.detail
-                                color: Theme.inkFaint
-                                font.family: Theme.textFamily
-                                font.pixelSize: 11
-                            }
-                        }
-                    }
+                onUniverseAsked: {
+                    Shelf.narrowTo({ "universe": [view.page.universe] })
+                    Navigation.open(Navigation.Shelf, {})
                 }
+                onEditionChosen: seriesId => view.goToEdition(seriesId)
+                onReimportAsked: view.reimportAsked("")
             }
 
             ResumeBand {
                 width: parent.width
+                // The shelf's band asked for this model at startup and it has been kept up to
+                // date since. This one is rebuilt every time the page is opened, so asking
+                // here is asking again for what is already held.
+                reloadOnCompleted: false
                 // Absent, not empty: a grey band announcing « nothing started » would say the
                 // same thing and take the room of four volumes.
                 visible: Resume.available && Resume.seriesId === view.page.identifier
@@ -191,6 +190,7 @@ Item {
                     Loader {
                         id: line
 
+                        required property int index
                         required property string entryId
                         required property string number
                         required property string title
@@ -222,6 +222,7 @@ Item {
                                 neverReadWord: SeriesCaptions.neverRead
                                 seriesId: view.page.identifier
                                 fileName: line.fileName
+                                last: line.index === view.volumes.count - 1
                                 onReimportAsked: view.reimportAsked(line.entryId)
                             }
                         }
@@ -265,7 +266,11 @@ Item {
                 spacing: Widths.shelfGap
                 visible: view.current === view.volumesTab && Preferences.volumesAsGrid
 
-                readonly property real side: 104
+                // The shelf's own columns, so a volume is drawn at the size a series is: the
+                // grid exists to show covers, and a fixed width had them at a third of the
+                // size of the ones on the wall this page was opened from.
+                readonly property real side: (width + spacing) / Math.max(1, Widths.shelfColumns)
+                                             - spacing
 
                 Repeater {
                     model: asGrid.visible ? view.volumes : null
@@ -316,9 +321,8 @@ Item {
                 width: parent.width
                 visible: view.current === view.descriptionTab
                 summary: view.page.summary
-                credits: view.page.credits
-                nature: view.page.nature
-                holding: view.page.holding
+                facts: view.page.facts
+                genres: view.page.genres
             }
 
             ElsewhereTab {

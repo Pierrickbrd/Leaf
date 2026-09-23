@@ -17,12 +17,14 @@
 
 #include "Api.h"
 #include "Server.h"
+#include "Settling.h"
 
 #include <QAbstractListModel>
 #include <QHash>
 #include <QList>
 #include <QQmlEngine>
 #include <QString>
+#include <QTimer>
 #include <QVariantList>
 
 class Entries final : public QAbstractListModel
@@ -108,6 +110,19 @@ public:
     Q_INVOKABLE void point(const QString &seriesId, const QVariantList &missing = {},
                            int arcCount = 0);
     Q_INVOKABLE void reload();
+    /// Asks again for the reading states, and for nothing else.
+    ///
+    /// Marking one volume « lu » went through `reload`, which asks for the list, then the
+    /// progress, then the arcs, and ends on `beginResetModel` — forty covers torn down and
+    /// built again because one of them changed a word. Nothing about the list had moved: the
+    /// same files, in the same order, with one state different. So this asks the one cheap
+    /// route that carries the states and tells the view its rows changed, which leaves every
+    /// delegate where it was and every cover decoded.
+    Q_INVOKABLE void refreshProgress();
+    /// Lets go of the list, for a reader who has left the page it belongs to. See
+    /// `Series::forget`: what is kept is kept for a page being replaced under the eye, and a
+    /// page one has left is not that.
+    Q_INVOKABLE void forget();
 
     /// Narrows what is shown to the lines whose number or title match. Blank is not a search:
     /// a cleared field is the whole list back, the way a cleared chip is the whole shelf.
@@ -135,6 +150,10 @@ private:
 
     void tookEntries(const Server::Answer &answer);
     void tookProgress(const Server::Answer &answer);
+    /// The same answer read a second time, into a list that already exists.
+    void tookProgressAgain(const Server::Answer &answer);
+    /// The states of one answer, by the entry they belong to.
+    static QHash<QString, Api::Progress> statesIn(const Server::Answer &answer);
     void tookArcs(const Server::Answer &answer);
     /// Puts every separator where its arc begins, and cuts the one volume an arc runs
     /// through into the two stretches either side of the frontier.
@@ -157,6 +176,11 @@ private:
     QList<Line> m_files;
     QList<Line> m_all;
     QList<Line> m_shown;
+    /// The pause a search waits for, exactly as the shelf's field waits for it. Filtering
+    /// asks the server nothing here, so this is not about a request: `rebuild` resets the
+    /// model, and a reset per key tore down and rebuilt every tile of a grid — each one now
+    /// carrying a masked cover, which is a texture a keystroke has no business allocating.
+    QTimer m_settling;
     QString m_query;
     bool m_loading = false;
     QString m_trouble;

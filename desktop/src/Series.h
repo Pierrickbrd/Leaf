@@ -25,6 +25,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVariantList>
+#include <QVariantMap>
 
 #include <optional>
 
@@ -53,15 +54,18 @@ class Series : public QObject
     Q_PROPERTY(QStringList genres READ genres NOTIFY changed)
     Q_PROPERTY(QString summary READ summary NOTIFY changed)
 
-    /// The description, in the two columns the artifact asks for: who made it and who
-    /// publishes it on the left, what it is on the right. Lists of `{label, value}` rather
-    /// than a getter apiece — a fifteenth fact then costs nothing, and a line whose value is
-    /// missing is simply not in the list.
-    Q_PROPERTY(QVariantList credits READ credits NOTIFY changed)
-    Q_PROPERTY(QVariantList nature READ nature NOTIFY changed)
-    /// What *this library* holds of the edition, which is not what the edition is — the one
-    /// block that speaks about you, and the only place that says a volume is missing.
-    Q_PROPERTY(QVariantList holding READ holding NOTIFY changed)
+    /// The four columns of the description, under the names the design gives them:
+    /// `credits` and `nature` — who made it and who publishes it on the left, what it is on
+    /// the right — then `holding`, what *this library* holds of the edition, and `received`,
+    /// when it arrived. Each is a list of `{label, value}` rather than a getter apiece: a
+    /// fifteenth fact then costs nothing, and a line whose value is missing is simply not in
+    /// the list.
+    ///
+    /// One map and not four properties, the shape `Erasure::said` and `Shelf::narrowing`
+    /// already take. Four getters of the same kind, read by one `.qml`, are a group whether
+    /// or not it is written down — and writing it down is what keeps this class under the
+    /// ceiling a page object reaches quickly.
+    Q_PROPERTY(QVariantMap facts READ facts NOTIFY changed)
 
     /// The other editions of the same work, this one among them. Below two the switcher is
     /// not drawn at all: there is nothing to choose between.
@@ -95,9 +99,7 @@ public:
     QString weights() const;
     QStringList genres() const;
     QString summary() const;
-    QVariantList credits() const;
-    QVariantList nature() const;
-    QVariantList holding() const;
+    QVariantMap facts() const;
     QVariantList editions() const;
     QString editionsLabel() const;
     QString oneShotEntry() const;
@@ -108,6 +110,15 @@ public:
     /// a retry is — but it keeps what is on screen either way.
     Q_INVOKABLE void point(const QString &identifier);
     Q_INVOKABLE void reload();
+    /// Lets go of the series it was showing, for a reader who has left the page.
+    ///
+    /// **Keeping is for a page being replaced, not for a page one has left.** Nothing empties
+    /// to refill while the reader is on it — changing edition, opening another series of the
+    /// universe — because what is there is what they are looking at. Once they are back on
+    /// the shelf there is nothing to keep, and holding on meant the next series opened on the
+    /// *last* one's cover and title for as long as the answer took. Ten seconds and a screen
+    /// in between did not help: it was still there, and it was still wrong.
+    Q_INVOKABLE void forget();
 
 signals:
     void changed();

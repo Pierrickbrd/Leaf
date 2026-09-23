@@ -21,6 +21,7 @@
 // decisions here is the same repair — see `server/src/boot.rs` — so that `crosses-the-seam`
 // can call `run()` the way `main` does and observe what happened.
 
+#include <QDBusConnection>
 #include <QQmlApplicationEngine>
 
 class QGuiApplication;
@@ -35,6 +36,11 @@ namespace Boot {
 /// Neither failure throws or aborts: a window that opens with the wrong fonts or the wrong
 /// palette still opens, and nothing else would notice, so each is a warning rather than a
 /// silent fallback.
-void run(QQmlApplicationEngine &engine, const QGuiApplication &application);
+/// `notifications` is the bus the desktop half speaks on, given for the same reason
+/// `Notifier` takes one: a test that boots the real window boots the real notifier, and a
+/// bubble raised over the shelf then lands on the desktop of whoever ran the test. The
+/// application hands it the session bus; `crosses-the-seam` hands it one that goes nowhere.
+void run(QQmlApplicationEngine &engine, const QGuiApplication &application,
+         QDBusConnection notifications = QDBusConnection::sessionBus());
 
 } // namespace Boot

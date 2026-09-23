@@ -57,6 +57,11 @@ public:
     /// The archive itself, written where the reader chose. A series is not a file, so this
     /// exists for a volume alone.
     Q_INVOKABLE void saveACopy(const QString &entryId, const QUrl &where);
+    /// Opens the folder a saved copy landed in, which is the one thing its bubble offers.
+    /// Here rather than in the `.qml` that asks: taking a folder off a path is path work,
+    /// and a `.qml` doing it with `lastIndexOf` gets a Windows path wrong the day there is
+    /// one.
+    Q_INVOKABLE void showTheFolder(const QString &path) const;
 
 signals:
     void changed();

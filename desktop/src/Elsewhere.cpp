@@ -195,6 +195,22 @@ void Elsewhere::point(const QString &universeId, const QString &universeName,
     emit changed();
 }
 
+void Elsewhere::forget()
+{
+    ++m_generation;
+    if (m_seriesId.isEmpty() && m_siblings.isEmpty())
+        return;
+    m_universeId.clear();
+    m_universe.clear();
+    m_seriesId.clear();
+    m_siblings.clear();
+    m_orders.clear();
+    m_chosen.clear();
+    m_at.reset();
+    m_pending = 0;
+    emit changed();
+}
+
 void Elsewhere::chooseOrder(const QString &identifier)
 {
     if (identifier == m_chosen)

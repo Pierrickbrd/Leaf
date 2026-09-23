@@ -1,8 +1,13 @@
 // One file of an edition, on a line.
 //
-// The gutter on the right is reserved on **every** row and stays empty until the pointer is
-// over one. Laid out the other way, the « … » would either cover the state it commands or
-// make the page count and the ring jump left under the cursor on every row it crosses.
+// **The menu is always there**, which is what settles the layout of the rest. A gutter was
+// reserved for it and left empty until the pointer crossed the row: the page count could not
+// jump, but the row was drawn with two centimetres of nothing on its right and its two
+// margins were not the same width — visibly so, on a wide window. Drawn always, it is the
+// last thing in the row like any other, and both sides breathe the same.
+//
+// A rule under every line, including the last. Five volumes on a tall window were five rows
+// floating in a page that did not appear to end; the rule says where the list stops.
 
 import QtQuick
 import Leaf
@@ -23,6 +28,9 @@ Item {
     /// offered under.
     required property string seriesId
     required property string fileName
+    /// The last line of the list draws no rule: a rule under the last row is a table's
+    /// bottom edge, and this is a list that ends.
+    required property bool last
 
     readonly property bool missing: state === 3
     readonly property bool hovered: pointer.hovered || commands.opened
@@ -31,7 +39,7 @@ Item {
     signal reimportAsked()
 
     objectName: "volume-" + (row.entryId.length > 0 ? row.entryId : "missing-" + row.number)
-    implicitHeight: 34
+    implicitHeight: 46
 
     Accessible.role: Accessible.ListItem
     Accessible.name: row.number + " " + row.title
@@ -51,19 +59,56 @@ Item {
         onTapped: row.opened()
     }
 
+    // The one being read wears the wash, which is how this client says « here » everywhere
+    // else. Hovering is quieter than that, and the two do not fight: a hovered row that is
+    // also the one in progress stays the one in progress.
     Rectangle {
         anchors.fill: parent
         anchors.bottomMargin: 1
         radius: 8
-        color: row.hovered ? Theme.onPaper : "transparent"
+        color: row.state === 1 ? Theme.emeraldWash
+                               : (row.hovered ? Theme.onPaper : "transparent")
+    }
+
+    // A hole in a collection is hatched rather than coloured: it is not a state of a file,
+    // it is the absence of one, and a wash would have read as a fourth reading state.
+    Canvas {
+        anchors.fill: parent
+        visible: row.missing
+        antialiasing: true
+
+        onPaint: {
+            const context = getContext("2d")
+            context.reset()
+            context.strokeStyle = Theme.inkFaint
+            context.globalAlpha = 0.09
+            context.lineWidth = 1
+            for (let at = -height; at < width; at += 10) {
+                context.beginPath()
+                context.moveTo(at, height)
+                context.lineTo(at + height, 0)
+                context.stroke()
+            }
+        }
+    }
+
+    // A hair, and not under the last: thirty full-strength lines down a page would be a
+    // table's grid, and what is read here is the titles. The row being read closes its own
+    // wash, so it carries none either.
+    Rectangle {
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        height: 1
+        visible: !row.last && row.state !== 1
+        color: Theme.rule
+        opacity: 0.55
     }
 
     Row {
         anchors.left: parent.left
         anchors.right: parent.right
-        // The reserved gutter. Two centimetres of nothing cost less than a page count that
-        // moves under the pointer.
-        anchors.rightMargin: 30
+        anchors.rightMargin: 6
         anchors.verticalCenter: parent.verticalCenter
         anchors.leftMargin: 6
         spacing: 10
@@ -71,22 +116,24 @@ Item {
         Text {
             id: no
 
-            width: 24
+            width: 28
             text: row.number
             color: row.missing ? Theme.inkFaint : Theme.inkSoft
             font.family: Theme.displayFamily
-            font.pixelSize: 13
+            font.pixelSize: 15
             font.weight: Font.DemiBold
             horizontalAlignment: Text.AlignRight
             anchors.verticalCenter: parent.verticalCenter
         }
 
         Text {
-            width: row.width - 30 - no.width - weight.width - mark.width - 46
+            // What is left once everything with a fixed width has taken its share: the two
+            // margins, the four gaps, the number, the pages, the state and the menu.
+            width: row.width - 12 - 40 - no.width - weight.width - mark.width - commands.width
             text: row.title
             color: row.missing ? Theme.alert : Theme.ink
             font.family: Theme.textFamily
-            font.pixelSize: 13
+            font.pixelSize: 15
             font.italic: !row.missing && row.title.length === 0
             elide: Text.ElideRight
             anchors.verticalCenter: parent.verticalCenter
@@ -98,7 +145,7 @@ Item {
             text: row.pages
             color: Theme.inkFaint
             font.family: Theme.textFamily
-            font.pixelSize: 11
+            font.pixelSize: 13
             anchors.verticalCenter: parent.verticalCenter
         }
 
@@ -112,7 +159,7 @@ Item {
                 text: row.timesFinished
                 color: Theme.inkFaint
                 font.family: Theme.textFamily
-                font.pixelSize: 10
+                font.pixelSize: 11
                 anchors.verticalCenter: parent.verticalCenter
             }
 
@@ -123,7 +170,7 @@ Item {
                 visible: row.state === 0
                 color: Theme.inkFaint
                 font.family: Theme.textFamily
-                font.pixelSize: 11
+                font.pixelSize: 13
                 anchors.verticalCenter: parent.verticalCenter
             }
 
@@ -134,21 +181,21 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
             }
         }
-    }
 
-    // In the reserved gutter, beside the state and never over it. Nothing to command on a
-    // file that is not there, so a gap carries no menu even under the pointer.
-    CommandMenu {
-        id: commands
+        // Last in the row, beside the state and never over it. Nothing to command on a file
+        // that is not there, so a gap carries no menu — and keeps its width all the same, or
+        // its own line would be laid out differently from every other.
+        CommandMenu {
+            id: commands
 
-        anchors.right: parent.right
-        anchors.rightMargin: 2
-        anchors.verticalCenter: parent.verticalCenter
-        visible: row.hovered && !row.missing
-        seriesId: row.seriesId
-        entryId: row.entryId
-        fileName: row.fileName
-        label: row.title
-        onReimportAsked: row.reimportAsked()
+            anchors.verticalCenter: parent.verticalCenter
+            opacity: row.missing ? 0 : 1
+            enabled: !row.missing
+            seriesId: row.seriesId
+            entryId: row.entryId
+            fileName: row.fileName
+            label: row.title
+            onReimportAsked: row.reimportAsked()
+        }
     }
 }

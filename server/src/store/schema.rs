@@ -107,7 +107,8 @@ pub const SCHEMA: &[&str] = &[
       format       TEXT,
       language     TEXT,
       colour       INTEGER,
-      one_shot     INTEGER NOT NULL DEFAULT 0
+      one_shot     INTEGER NOT NULL DEFAULT 0,
+      summary      TEXT
     )
     "#,
     // A range, not a list: four Haikyū volumes belong to two arcs, because an arc does
@@ -421,6 +422,15 @@ pub const MIGRATIONS: &[&str] = &[
     // because two ranges containing one another are not a saga: the format lets arcs
     // overlap for reasons that have nothing to do with nesting.
     "ALTER TABLE arc ADD COLUMN parent_id TEXT REFERENCES arc(id) ON DELETE SET NULL",
+    // 25 — what an edition says about itself. `edition.json` has declared a `summary` since
+    // the format's first version and this server read it into a struct and dropped it on the
+    // floor: no column, nothing written, nothing served. A format that promises a field and
+    // silently loses it is worse than one that never offered it.
+    //
+    // It is a column of its own and not a second use of the work's, because the two are
+    // different sentences: the work's says what the story is, and an edition's says what
+    // *this printing* of it is — restored, coloured, three volumes in one.
+    "ALTER TABLE edition ADD COLUMN summary TEXT",
 ];
 
 /// What a fresh database is stamped with. Deriving it from the list is what makes adding a

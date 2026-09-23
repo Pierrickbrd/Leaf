@@ -15,6 +15,8 @@ Item {
     required property string work
     /// What the menu at the end of the title commands.
     required property string seriesId
+    /// The other editions of the same work, for the menu the pill opens.
+    required property var editions
     required property string edition
     required property string cover
     required property string makers
@@ -23,63 +25,95 @@ Item {
     required property string editionsLabel
 
     signal universeAsked()
-    signal editionsAsked()
+    signal editionChosen(string seriesId)
     signal reimportAsked()
 
     objectName: "series-header"
     // Sized for the header with the most to say. A series with less leaves room below rather
     // than pulling the tab bar up to meet it.
-    implicitHeight: 168
+    implicitHeight: 208
     height: implicitHeight
 
     Row {
         anchors.fill: parent
-        spacing: 18
+        spacing: 22
 
         // Flush to the left edge: a cover is what one recognises first, and it has no reason
         // to sit indented behind empty space.
         Item {
             id: art
 
-            width: 112
+            width: 138
             height: header.implicitHeight
 
-            Rectangle {
-                anchors.fill: parent
-                radius: Theme.coverRadius
-                color: Theme.onPaper
-                clip: true
-
-                Image {
-                    anchors.fill: parent
-                    source: header.cover
-                    fillMode: Image.PreserveAspectCrop
-                    asynchronous: true
-                    cache: true
-                }
+            CoverShadow {
+                under: header.seriesId
             }
+
+            RoundedCover {
+                anchors.fill: parent
+                source: header.cover
+            }
+
+            CoverSkin { }
         }
 
         Column {
             width: parent.width - art.width - parent.spacing
             spacing: 3
 
-            Row {
-                spacing: 5
+            // The icon is part of the link, and so is the rule under it: the design draws
+            // both inside one `.univers`, and a globe left outside the target was a piece of
+            // the link one could not press.
+            Item {
+                id: universeName
+
+                objectName: "series-universe"
+                width: mark.width + 6 + name.implicitWidth
+                height: name.implicitHeight + 5
                 visible: header.universe.length > 0
 
-                LevelMark {
-                    level: 0
-                    size: 15
-                    anchors.verticalCenter: universeName.verticalCenter
+                HoverHandler {
+                    id: pointer
+
+                    cursorShape: Qt.PointingHandCursor
                 }
 
-                LeafTextAction {
-                    id: universeName
+                TapHandler {
+                    onTapped: header.universeAsked()
+                }
 
-                    objectName: "series-universe"
-                    label: header.universe
-                    onTriggered: header.universeAsked()
+                Accessible.role: Accessible.Link
+                Accessible.name: header.universe
+                Accessible.onPressAction: header.universeAsked()
+
+                LevelMark {
+                    id: mark
+
+                    level: 0
+                    size: 17
+                    anchors.verticalCenter: name.verticalCenter
+                }
+
+                Text {
+                    id: name
+
+                    anchors.left: mark.right
+                    anchors.leftMargin: 6
+                    text: header.universe
+                    color: pointer.hovered ? Theme.ink : Theme.inkSoft
+                    font.family: Theme.textFamily
+                    font.pixelSize: 14
+                }
+
+                // Under the words *and* under the icon: it is how a link says it is one
+                // without borrowing the emerald a command wears.
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    height: 1
+                    color: pointer.hovered ? Theme.inkSoft : Theme.rule
                 }
             }
 
@@ -100,7 +134,7 @@ Item {
                     text: header.work
                     color: Theme.ink
                     font.family: Theme.displayFamily
-                    font.pixelSize: 28
+                    font.pixelSize: 36
                     font.weight: Font.Bold
                     elide: Text.ElideRight
                 }
@@ -124,18 +158,18 @@ Item {
 
                 Text {
                     text: header.edition
-                    color: Theme.inkSoft
+                    color: Theme.ink
                     font.family: Theme.textFamily
-                    font.pixelSize: 13
+                    font.pixelSize: 15
+                    font.weight: Font.Medium
                     anchors.verticalCenter: parent.verticalCenter
                 }
 
-                LeafTextAction {
-                    objectName: "edition-switch"
+                EditionSwitch {
+                    editions: header.editions
                     label: header.editionsLabel
-                    visible: header.editionsLabel.length > 0
                     anchors.verticalCenter: parent.verticalCenter
-                    onTriggered: header.editionsAsked()
+                    onChosen: seriesId => header.editionChosen(seriesId)
                 }
             }
 
@@ -146,7 +180,7 @@ Item {
                 text: header.makers
                 color: Theme.inkSoft
                 font.family: Theme.textFamily
-                font.pixelSize: 12
+                font.pixelSize: 14
                 elide: Text.ElideRight
             }
 
@@ -155,18 +189,20 @@ Item {
                 text: header.weights
                 color: Theme.inkFaint
                 font.family: Theme.textFamily
-                font.pixelSize: 12
+                font.pixelSize: 14
                 elide: Text.ElideRight
             }
 
             Item { width: 1; height: 8 }
 
-            // Genres and tags, side by side and never folded together. A plain pill and not a
-            // FilterChip: that one carries an axis and a value because it goes back on the
-            // wire, and nothing here is asking for anything.
+            // Here **and** at the foot of the description, which is where the design draws
+            // them twice: up here they say at a glance what kind of book this is, down there
+            // they close the civil status they belong to. A plain pill and not a
+            // `FilterChip` — that one carries an axis and a value because it goes back on
+            // the wire, and nothing here is asking for anything.
             Flow {
                 width: parent.width
-                spacing: 5
+                spacing: 6
 
                 Repeater {
                     model: header.genres
@@ -176,8 +212,8 @@ Item {
 
                         radius: 99
                         color: Theme.onPaper
-                        implicitWidth: word.implicitWidth + 18
-                        implicitHeight: 21
+                        implicitWidth: word.implicitWidth + 22
+                        implicitHeight: 25
 
                         Text {
                             id: word
@@ -186,11 +222,12 @@ Item {
                             text: parent.modelData
                             color: Theme.inkSoft
                             font.family: Theme.textFamily
-                            font.pixelSize: 11
+                            font.pixelSize: 12
                         }
                     }
                 }
             }
+
         }
     }
 }

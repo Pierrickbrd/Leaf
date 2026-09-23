@@ -53,23 +53,20 @@ Rectangle {
         width: 36
         height: 54
 
-        Rectangle {
-            anchors.fill: parent
-            radius: 6
-            color: Theme.onPaper
-            border.color: Theme.rule
-            border.width: 1
-            clip: true
-            antialiasing: true
-
-            Image {
-                anchors.fill: parent
-                source: row.cover
-                asynchronous: true
-                cache: true
-                fillMode: Image.PreserveAspectCrop
-            }
+        CoverShadow {
+            under: "file-" + row.resultId
         }
+
+        RoundedCover {
+            anchors.fill: parent
+            source: row.cover
+            radius: 6
+        }
+
+        // The same hairline every other cover in this client wears, where this one drew a
+        // rule of its own: one cover looking unlike the five others is one cover that reads
+        // as a different kind of thing.
+        CoverSkin { radius: 6 }
     }
 
     Text {

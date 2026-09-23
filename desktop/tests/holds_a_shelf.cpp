@@ -237,6 +237,28 @@ private slots:
                  u"Assassination Classroom"_s);
     }
 
+    /// Arriving at the shelf with a filter is not the same act as narrowing the one you are
+    /// already looking at. `filterBy` keeps the wall until the narrower answer lands and
+    /// waits for the hand to stop; this empties and asks at once, because what would be kept
+    /// is the whole library — the one thing that reader did not ask to see.
+    void arriving_with_a_filter_empties_the_wall_and_asks_at_once()
+    {
+        m_pretend->answers(200, aPage({aSeries(u"dn"_s, u"Death Note"_s)}, 1));
+        m_shelf->reload();
+        settle();
+        QCOMPARE(m_shelf->rowCount(), 1);
+
+        m_pretend->heard.clear();
+        m_pretend->answers(200, aPage({aSeries(u"elfes"_s, u"Elfes"_s)}, 1));
+        m_shelf->narrowTo({{u"universe"_s, QStringList{u"Terres d'Arran"_s}}});
+
+        // Emptied on the spot, where `filterBy` leaves what is showing in place.
+        QCOMPARE(m_shelf->rowCount(), 0);
+        // And asked for without waiting out the settling the chips are given.
+        QTRY_VERIFY(m_pretend->heard.contains("universe=Terres"));
+        QTRY_COMPARE(m_shelf->rowCount(), 1);
+    }
+
     /// A pill lit again by a stray binding must not cost a page.
     void the_same_filter_asked_twice_goes_out_once()
     {

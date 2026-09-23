@@ -207,6 +207,7 @@ mod filled {
         EditionJson {
             leaf: Some(FORMAT_VERSION),
             name: Some(String::new()),
+            summary: Some(String::new()),
             medium: Some(String::new()),
             publisher: Some(String::new()),
             collection: Some(String::new()),

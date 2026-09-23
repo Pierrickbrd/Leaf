@@ -13,10 +13,15 @@
 #include "ImportCaptions.h"
 #include "Imports.h"
 #include "Preferences.h"
+#include "Toasts.h"
 #include "Entries.h"
 #include "Navigation.h"
 #include "Series.h"
 #include "Pretend.h"
+
+#include <QDBusConnection>
+
+#include <memory>
 #include "Shelf.h"
 #include "Theme.h"
 #include "Widths.h"
@@ -215,9 +220,26 @@ QMutex loopLock;
 QStringList loops;
 QtMessageHandler passItOn = nullptr;
 
+/// Whether Qt is complaining about the QML itself rather than about the world.
+///
+/// A binding loop is one of those. So is a `TypeError` — and that one is worse, because it
+/// happens *when a gesture is made* and never at load: choosing an edition tore down the row
+/// that was handling the tap, everything it looked up afterwards came back undefined, and
+/// « Cannot call method 'close' of undefined » went into the terminal four times a click
+/// while every one of these tests stayed green.
+///
+/// A missing cover or a refused connection are not that: this harness points the client at a
+/// port that refuses on purpose, and the covers it asks for are never there.
+bool complainsAboutTheQml(const QString &said)
+{
+    return said.contains(u"Binding loop"_s) || said.contains(u"TypeError"_s)
+        || said.contains(u"ReferenceError"_s) || said.contains(u"is not a function"_s)
+        || said.contains(u"Unable to assign"_s) || said.contains(u"Cannot assign"_s);
+}
+
 void watchForLoops(QtMsgType type, const QMessageLogContext &where, const QString &said)
 {
-    if (said.contains(u"Binding loop"_s)) {
+    if (complainsAboutTheQml(said)) {
         const QMutexLocker held(&loopLock);
         loops.append(said);
     }
@@ -244,6 +266,17 @@ void forgetLoops()
 /// between two lines of one test — an axis found, its own tally gone — and the run ended
 /// in SIGSEGV where a failed comparison would have named what was missing.
 QString textNamed(QQuickItem *root, const QString &name);
+
+/// A bus that goes nowhere, and why every boot here is handed one.
+///
+/// `Boot::run` wires the real notifier, so a test that boots the window and raises anything
+/// worth announcing lands it on the desktop of whoever ran `ctest`. A connection under a name
+/// nobody registered is never connected, so the notifier is built, asked, and silent — which
+/// is also what it does on a machine with no daemon, the case it exists to survive.
+QDBusConnection nowhere()
+{
+    return QDBusConnection(u"leaf-tests-speak-to-nobody"_s);
+}
 
 QQuickItem *itemNamed(QQuickItem *root, const QString &name)
 {
@@ -311,7 +344,9 @@ private slots:
     {
         qunsetenv("LEAF_ADDRESS");
         qunsetenv("LEAF_KEY");
-        // Every test, not one: whichever screen a test drew, it drew it properly.
+        // Every test, not one: whichever screen a test drew, it drew it properly — and
+        // whatever gesture it made, the QML answered it without an error nobody would have
+        // read.
         const QStringList seen = loopsSoFar();
         QVERIFY2(seen.isEmpty(), qPrintable(seen.join(u"\n"_s)));
     }
@@ -319,7 +354,7 @@ private slots:
     void booting_loads_exactly_one_window()
     {
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
 
         QCOMPARE(engine.rootObjects().size(), 1);
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
@@ -330,7 +365,7 @@ private slots:
     void the_loader_opens_on_the_shelf_grid()
     {
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
 
         QCOMPARE(engine.rootObjects().size(), 1);
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
@@ -345,7 +380,7 @@ private slots:
     void the_grid_follows_all_three_width_rules()
     {
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
 
         QCOMPARE(engine.rootObjects().size(), 1);
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
@@ -366,7 +401,7 @@ private slots:
     void the_grid_keeps_one_extra_row_and_takes_keyboard_focus()
     {
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
 
         QCOMPARE(engine.rootObjects().size(), 1);
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
@@ -410,7 +445,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
 
         QCOMPARE(engine.rootObjects().size(), 1);
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
@@ -715,7 +750,14 @@ private slots:
             return "HTTP/1.1 200 .\r\nContent-Type: application/json\r\nContent-Length: "
                    + QByteArray::number(body.size()) + "\r\n\r\n" + body;
         };
+        // Counted, for the assertion at the end of this test: the band that offers to resume
+        // is drawn on the shelf *and* on this page, and only one of the two is built once.
+        auto resumeAsked = std::make_shared<int>(0);
         pretend.answerFor = [=](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /next")) {
+                ++*resumeAsked;
+                return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+            }
             if (request.contains("/entries "))
                 return reply(files);
             if (request.contains("/progress "))
@@ -730,7 +772,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
 
         QCOMPARE(engine.rootObjects().size(), 1);
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
@@ -765,6 +807,13 @@ private slots:
         // for as long as this page made three requests and wrong the day it made four.
         QTRY_VERIFY(!volumes->loading());
 
+        // The shelf's band asked once, at startup. This page's band must not ask again: the
+        // Loader rebuilds this screen every time a series is opened, so a band fetching on
+        // creation fetches once per series opened — which is the trap `Main.qml` names for
+        // the page itself, walked into by a band nobody counted as a page.
+        QVERIFY2(*resumeAsked <= 1,
+                 qPrintable(u"the resume state was asked for %1 times"_s.arg(*resumeAsked)));
+
         // Two answers, married: the first volume is finished and the second was never opened.
         QQuickItem *first = nullptr;
         QTRY_VERIFY((first = itemNamed(page, u"volume-v1"_s)));
@@ -774,8 +823,23 @@ private slots:
         QCOMPARE(first->property("title").toString(), u"Le Crystal"_s);
         QCOMPARE(first->property("pages").toString(), u"54 p."_s);
 
-        // And Escape leaves the page, whatever happened before it. The window has to hold
-        // the keyboard for that: a shortcut nobody is focused on is a shortcut nobody fires.
+        // The page carries its own way out, and it is a button before it is a shortcut:
+        // Escape works and always did, but a page whose only exit is a key nobody is told
+        // about is a page with no exit. It names where it goes, not where you are.
+        QQuickItem *back = nullptr;
+        QTRY_VERIFY((back = itemNamed(page, u"series-back"_s)));
+        QVERIFY(back->isVisible());
+        QCOMPARE(back->property("label").toString(), navigation->backLabel());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          back->mapToItem(window->contentItem(),
+                                          QPointF(back->width() / 2.0, back->height() / 2.0))
+                              .toPoint());
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Shelf);
+
+        // And Escape leaves it too, whatever happened before it. The window has to hold the
+        // keyboard for that: a shortcut nobody is focused on is a shortcut nobody fires.
+        QVERIFY(navigation->open(Navigation::Destination::Series,
+                                 {{u"series"_s, u"albums"_s}}));
         window->requestActivate();
         QVERIFY(QTest::qWaitForWindowActive(window));
         QTest::keyClick(window, Qt::Key_Escape);
@@ -898,7 +962,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -923,6 +987,42 @@ private slots:
         QTRY_COMPARE(separatorRange(), u"tome 2"_s);
         QVERIFY(itemNamed(page, u"volume-v1"_s));
         QVERIFY(itemNamed(page, u"volume-v2"_s));
+
+        auto *page_ =
+            engine.singletonInstance<Series *>(qmlTypeId("Leaf", 1, 0, "Series"));
+        auto *volumes =
+            engine.singletonInstance<Entries *>(qmlTypeId("Leaf", 1, 0, "Entries"));
+        QVERIFY(page_);
+        QVERIFY(volumes);
+
+        // Changing edition, made as a reader makes it: the pill, then the other edition.
+        // It is the one gesture that tears down the list it was made in — the row handling
+        // the tap is rebuilt by what the tap does — and the menu stayed open over the
+        // edition it had just switched to, with a `TypeError` per click in the terminal.
+        QQuickItem *pill = nullptr;
+        QTRY_VERIFY((pill = itemNamed(page, u"edition-switch"_s)));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          pill->mapToItem(window->contentItem(),
+                                          QPointF(pill->width() / 2.0, pill->height() / 2.0))
+                              .toPoint());
+
+        QQuickItem *other = nullptr;
+        QTRY_VERIFY((other = itemNamed(window->contentItem(), u"edition-integrale"_s)));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          other->mapToItem(window->contentItem(),
+                                           QPointF(other->width() / 2.0,
+                                                   other->height() / 2.0))
+                              .toPoint());
+
+        QTRY_COMPARE(page_->identifier(), u"integrale"_s);
+        // And the menu is gone with it: if I want to change again, I will open it again.
+        QTRY_VERIFY(!itemNamed(window->contentItem(), u"edition-integrale"_s));
+
+        // Back to the edition this test is about, so what follows reads the list it served.
+        QVERIFY(navigation->open(Navigation::Destination::Series,
+                                 {{u"series"_s, u"albums"_s}}));
+        QTRY_COMPARE(page_->identifier(), u"albums"_s);
+        QTRY_VERIFY(!volumes->loading());
 
         // The last tab is reached by a click on it, like a reader reaches it.
         QQuickItem *tab = nullptr;
@@ -957,7 +1057,7 @@ private slots:
                 return -3;
             int which = -1;
             for (int at = 0; at < steps.size(); ++at) {
-                if (steps.at(at)->property("volumes").toString().endsWith(u"· ici"_s))
+                if (steps.at(at)->property("detail").toString().endsWith(u"· ici"_s))
                     which = which < 0 ? at : -2;
             }
             return which;
@@ -1020,7 +1120,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -1085,6 +1185,83 @@ private slots:
                     ->property("text").toString().contains(u"corbeille"_s));
     }
 
+    /// The third section of the settings, and a bubble drawn over whatever is on screen.
+    /// Both are made of a model nobody can see from here — a switch bound to nothing looks
+    /// exactly like a switch that is off, and a bubble that fails to build leaves the screen
+    /// it was raised over looking perfectly well.
+    void the_switches_turn_warnings_off_and_a_bubble_is_drawn_over_the_shelf()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answers(200, QByteArrayLiteral(R"({"items":[],"total":0,"page":0,"size":0})"));
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        using enum Preferences::Warns;
+        for (const Preferences::Warns which : {Imports, Scans, Downloads, Failures})
+            preferences->showBubble(which, true);
+
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        QVERIFY(navigation->open(Navigation::Destination::Settings, {}));
+
+        QQuickItem *screen = nullptr;
+        QTRY_VERIFY((screen = itemNamed(window->contentItem(), u"settings-view"_s)));
+        // The section is the second of three, and its two cards are drawn only there.
+        screen->setProperty("section", 1);
+        QQuickItem *lever = nullptr;
+        QTRY_VERIFY((lever = itemNamed(screen, u"warns-scans-bubble"_s)));
+        QTRY_VERIFY(itemNamed(screen, u"settings-corner"_s)->isVisible());
+
+        // Pressed the way a keyboard presses it, because a switch is a control and not a
+        // picture: the same press a reader makes with the space bar.
+        lever->forceActiveFocus(Qt::TabFocusReason);
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY(!preferences->bubbles(Scans));
+
+        // With nothing left to make a bubble, the card that says where they go is not drawn
+        // at all: an empty heading is worse than an absent one.
+        for (const Preferences::Warns which : {Imports, Downloads, Failures})
+            preferences->showBubble(which, false);
+        QTRY_VERIFY(!itemNamed(screen, u"settings-corner"_s)->isVisible());
+
+        // And a bubble, raised over the shelf. It says its two lines and it stays, because a
+        // failure that fades on its own is a failure nobody read.
+        preferences->showBubble(Failures, true);
+        QVERIFY(navigation->open(Navigation::Destination::Shelf, {}));
+        auto *bubbles = engine.singletonInstance<Toasts *>(qmlTypeId("Leaf", 1, 0, "Toasts"));
+        QVERIFY(bubbles);
+        bubbles->scanFailed(u"le disque ne répond pas"_s);
+
+        const auto headlineOf = [&] {
+            const QQuickItem *said = itemNamed(window->contentItem(), u"toast-0-headline"_s);
+            return said == nullptr ? QString() : said->property("text").toString();
+        };
+        QTRY_COMPARE(headlineOf(), Words::scanStopped());
+        QTest::qWait(250);
+        QCOMPARE(bubbles->count(), 1);
+
+        // The cross is the way out, and it is the only way out of a failure.
+        QQuickItem *cross = nullptr;
+        QTRY_VERIFY((cross = itemNamed(window->contentItem(), u"toast-0-close"_s)));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          cross->mapToItem(window->contentItem(),
+                                           QPointF(cross->width() / 2.0,
+                                                   cross->height() / 2.0))
+                              .toPoint());
+        QTRY_COMPARE(bubbles->count(), 0);
+    }
+
     void the_resume_band_draws_the_one_offer_above_the_grid()
     {
         Pretend pretend;
@@ -1105,7 +1282,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -1141,9 +1318,12 @@ private slots:
         QCOMPARE(cover->property("source").toString(),
                  u"http://127.0.0.1:%1/entries/volume-12/cover"_s.arg(pretend.serverPort()));
 
+        // The display family, and larger than what is said under it: the name of the series
+        // is the one thing read from across the room. The size itself is pinned so that a
+        // page-wide change of scale is a decision and not a drift.
         const QFont nameFont = name->property("font").value<QFont>();
         QCOMPARE(nameFont.family(), Theme().displayFamily());
-        QCOMPARE(nameFont.pixelSize(), 20);
+        QCOMPARE(nameFont.pixelSize(), 22);
         QCOMPARE(card->property("radius").toInt(), Theme().cardRadius());
         // A pill, and not the 12 px button radius the other two radii cover.
         QCOMPARE(action->property("radius").toDouble(), action->height() / 2);
@@ -1208,7 +1388,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -1311,7 +1491,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -1350,7 +1530,7 @@ private slots:
     void the_bar_overlays_and_brand_belong_to_leaf()
     {
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -1456,7 +1636,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -1645,7 +1825,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -1844,7 +2024,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -1903,7 +2083,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -1986,7 +2166,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -2047,7 +2227,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -2158,7 +2338,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -2233,7 +2413,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -2362,7 +2542,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -2465,7 +2645,7 @@ private slots:
         qunsetenv("LEAF_KEY");
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -2514,7 +2694,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -2555,7 +2735,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -2607,7 +2787,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
 
         QCOMPARE(engine.rootObjects().size(), 1);
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
@@ -2637,7 +2817,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(silent.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
 
         QCOMPARE(engine.rootObjects().size(), 1);
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
@@ -2669,7 +2849,7 @@ private slots:
     void a_first_page_that_fails_is_said_in_the_empty_grid()
     {
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
 
         QCOMPARE(engine.rootObjects().size(), 1);
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
@@ -2691,7 +2871,7 @@ private slots:
     void the_window_hands_its_own_width_to_widths()
     {
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
 
         auto *widths = engine.singletonInstance<Widths *>(qmlTypeId("Leaf", 1, 0, "Widths"));
         QVERIFY(widths);
@@ -2704,7 +2884,7 @@ private slots:
     void navigation_starts_on_the_shelf_and_says_so_in_french()
     {
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
 
         auto *navigation =
             engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
@@ -2724,7 +2904,7 @@ private slots:
         night.setColor(QPalette::Window, QColor(u"#101010"_s));
         QGuiApplication::setPalette(night);
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *preferences = engine.singletonInstance<Preferences *>(
             qmlTypeId("Leaf", 1, 0, "Preferences"));
         auto *theme = engine.singletonInstance<Theme *>(qmlTypeId("Leaf", 1, 0, "Theme"));
@@ -2755,7 +2935,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -2829,7 +3009,7 @@ private slots:
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
@@ -2965,7 +3145,7 @@ private slots:
         QGuiApplication::setPalette(night);
 
         QQmlApplicationEngine engine;
-        Boot::run(engine, *qGuiApp);
+        Boot::run(engine, *qGuiApp, nowhere());
 
         auto *theme = engine.singletonInstance<Theme *>(qmlTypeId("Leaf", 1, 0, "Theme"));
         QVERIFY(theme);

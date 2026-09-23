@@ -22,7 +22,7 @@ Item {
     signal searched(string text)
 
     objectName: "series-tabs"
-    implicitHeight: 34
+    implicitHeight: 40
 
     Row {
         anchors.left: parent.left
@@ -40,8 +40,8 @@ Item {
                 required property string modelData
 
                 objectName: "series-tab-" + index
-                width: word.implicitWidth + 24
-                height: 32
+                width: word.implicitWidth + 28
+                height: 38
 
                 TapHandler { onTapped: bar.chosen(parent.index) }
                 HoverHandler { cursorShape: Qt.PointingHandCursor }
@@ -53,7 +53,7 @@ Item {
                     text: parent.modelData
                     color: bar.current === parent.index ? Theme.ink : Theme.inkSoft
                     font.family: Theme.textFamily
-                    font.pixelSize: 13
+                    font.pixelSize: 15
                     font.weight: bar.current === parent.index ? Font.DemiBold : Font.Normal
                 }
 
@@ -89,18 +89,24 @@ Item {
             objectName: "volume-search"
             placeholder: SeriesCaptions.volumesAxis
             text: bar.query
-            width: 190
+            width: 220
             anchors.verticalCenter: parent.verticalCenter
             onAsked: text => bar.searched(text)
         }
 
-        BarButton {
+        // One target, wearing the icon of the mode it switches *to*. Two segments side by
+        // side ask a reader to work out which of them is lit before aiming at the other;
+        // a button that changes says where it goes.
+        IconButton {
             objectName: "volume-view"
-            source: bar.asGrid ? "assets/icons/collections_bookmark.svg"
-                               : "assets/icons/book_2.svg"
-            label: SeriesCaptions.volumesTab
             anchors.verticalCenter: parent.verticalCenter
+            width: 34
+            height: 34
+            side: 20
+            glyph: bar.asGrid ? "view_list" : "grid_view"
+            label: bar.asGrid ? SeriesCaptions.asList : SeriesCaptions.asGrid
             onTriggered: bar.viewToggled()
         }
     }
+
 }

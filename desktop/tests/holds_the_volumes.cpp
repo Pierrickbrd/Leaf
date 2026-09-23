@@ -3,6 +3,7 @@
 
 #include "Entries.h"
 #include "SeriesCaptions.h"
+#include "Settling.h"
 #include "Pretend.h"
 #include "Server.h"
 #include "Settings.h"
@@ -82,6 +83,15 @@ class HoldsTheVolumes : public QObject
         for (int i = 0; i < 200 && m_list->loading(); ++i)
             QTest::qWait(10);
         QTest::qWait(40);
+    }
+
+    /// A search settles before it narrows, the same pause the shelf's field waits and out of
+    /// the same file. `settle` waits on `loading`, which a search never sets — narrowing asks
+    /// the server nothing. So this pays the settling twice over, which is what
+    /// `holds_a_shelf`'s own helper does and for the same reason.
+    void narrowed()
+    {
+        QTest::qWait(Settling::Milliseconds * 2);
     }
 
     void serve(const QByteArray &files, const QByteArray &states,
@@ -189,6 +199,88 @@ private slots:
         QVERIFY(at(0, "timesFinished").toString().isEmpty());
     }
 
+    /// Marking a volume went through `reload`, which asks for the list, the progress and the
+    /// arcs and ends on a model reset — forty covers torn down and decoded again because one
+    /// of them changed a word, which is what a reader saw as the page reloading.
+    void marking_a_volume_moves_its_state_without_rebuilding_the_list()
+    {
+        serve(rows({volume(1, u"Le Crystal"_s), volume(2, u"L'Honneur"_s)}), rows({}));
+        m_list->point(u"albums"_s);
+        settle();
+        QCOMPARE(at(0, "state").value<Entries::State>(), Entries::State::NeverRead);
+
+        QSignalSpy rebuilt(m_list, &Entries::modelAboutToBeReset);
+        QSignalSpy moved(m_list, &QAbstractItemModel::dataChanged);
+        m_pretend->heard.clear();
+
+        serve(rows({volume(1, u"Le Crystal"_s), volume(2, u"L'Honneur"_s)}),
+              rows({standing(u"v1"_s, 53, true, 1)}));
+        m_list->refreshProgress();
+        settle();
+
+        QCOMPARE(at(0, "state").value<Entries::State>(), Entries::State::Read);
+        QCOMPARE(rebuilt.count(), 0);
+        QVERIFY(!moved.isEmpty());
+        // And it asked for the one route that carries a state, not for the list again.
+        QVERIFY2(m_pretend->heard.contains("/progress"), m_pretend->heard.constData());
+        QVERIFY2(!m_pretend->heard.contains("/entries"), m_pretend->heard.constData());
+        QVERIFY2(!m_pretend->heard.contains("/arcs"), m_pretend->heard.constData());
+    }
+
+    /// A gap has no file behind it, so it has no identifier either. Read like a volume it
+    /// would look the empty string up in the states — and the day a server answers with one
+    /// entry whose id is empty, every gap in the list would wear that volume's progress.
+    void a_refresh_leaves_the_gaps_alone()
+    {
+        serve(rows({volume(6, u"Alyana"_s), volume(8, u"Le Crépuscule"_s)}), rows({}));
+        m_list->point(u"albums"_s, QVariantList{7.0});
+        settle();
+        QCOMPARE(m_list->count(), 3);
+        QCOMPARE(at(1, "kind").value<Entries::Kind>(), Entries::Kind::Gap);
+
+        serve(rows({volume(6, u"Alyana"_s), volume(8, u"Le Crépuscule"_s)}),
+              rows({standing(u"v6"_s, 53, true, 1)}));
+        m_list->refreshProgress();
+        settle();
+
+        QCOMPARE(at(0, "state").value<Entries::State>(), Entries::State::Read);
+        QCOMPARE(at(1, "kind").value<Entries::Kind>(), Entries::Kind::Gap);
+        QCOMPARE(at(1, "state").value<Entries::State>(), Entries::State::Missing);
+    }
+
+    /// Asked of a list that is pointed at nothing, which is what a mark arriving just after
+    /// the reader left the page would be.
+    void a_refresh_with_no_series_asks_nothing()
+    {
+        serve(rows({volume(1, u"Le Crystal"_s)}), rows({}));
+        m_list->point(u"albums"_s);
+        settle();
+        m_list->forget();
+
+        m_pretend->heard.clear();
+        m_list->refreshProgress();
+        settle();
+        QVERIFY2(m_pretend->heard.isEmpty(), m_pretend->heard.constData());
+    }
+
+    /// What is drawn is what the server last said. A state nobody could re-read is not a
+    /// reason to blank a list that is still true.
+    void a_refused_refresh_leaves_the_states_that_were_already_there()
+    {
+        serve(rows({volume(1, u"Le Crystal"_s)}), rows({standing(u"v1"_s, 53, true, 1)}));
+        m_list->point(u"albums"_s);
+        settle();
+        QCOMPARE(at(0, "state").value<Entries::State>(), Entries::State::Read);
+
+        m_pretend->answerFor = nullptr;
+        m_pretend->answers(503, QByteArrayLiteral("{}"));
+        m_list->refreshProgress();
+        settle();
+
+        QCOMPARE(m_list->count(), 1);
+        QCOMPARE(at(0, "state").value<Entries::State>(), Entries::State::Read);
+    }
+
     /// A gap comes from neither answer: it is what `holding.missingVolumes` reports, and the
     /// page hands it over because it already knows it.
     void the_gaps_are_rows_and_sit_where_their_numbers_put_them()
@@ -262,12 +354,14 @@ private slots:
         // Local: the whole list is already in hand, so nothing is asked of the server.
         const qsizetype asked = m_pretend->heard.size();
         m_list->searchFor(u"cendres"_s);
+        narrowed();
         QCOMPARE(m_list->count(), 1);
         QCOMPARE(at(0, "title").toString(), u"Cendres"_s);
         QCOMPARE(m_pretend->heard.size(), asked);
 
         // A number is written on the line too, so it is searchable on the line.
         m_list->searchFor(u"2"_s);
+        narrowed();
         QCOMPARE(m_list->count(), 1);
         QCOMPARE(at(0, "title").toString(), u"L'Honneur"_s);
 
@@ -285,11 +379,70 @@ private slots:
         settle();
 
         m_list->searchFor(u"introuvable"_s);
+        narrowed();
         QCOMPARE(m_list->count(), 0);
         QVERIFY(m_list->narrowedToNothing());
     }
 
+    /// A word typed in one go narrows the list once, not once per letter. The shelf says the
+    /// same of its own field — `a_burst_of_keys_is_a_single_question` — and this is that
+    /// sentence one screen over, with a different cost behind it: nothing is asked of the
+    /// server here, and what a keystroke paid for was a model reset, which in grid mode tore
+    /// down and rebuilt every tile, each one now carrying a masked cover.
+    void a_burst_of_keys_narrows_the_list_once()
+    {
+        serve(rows({volume(1, u"Le Crystal"_s), volume(2, u"Cendres"_s)}), rows({}));
+        m_list->point(u"albums"_s);
+        settle();
+
+        QSignalSpy rebuilt(m_list, &Entries::modelAboutToBeReset);
+        for (const QString &sofar : {u"c"_s, u"ce"_s, u"cen"_s, u"cend"_s})
+            m_list->searchFor(sofar);
+
+        // What was typed is known straight away — the field and the cross that clears it must
+        // not lag a key behind. Only the list waits.
+        QCOMPARE(m_list->query(), u"cend"_s);
+        QCOMPARE(rebuilt.count(), 0);
+
+        narrowed();
+        QCOMPARE(rebuilt.count(), 1);
+        QCOMPARE(m_list->count(), 1);
+        QCOMPARE(at(0, "title").toString(), u"Cendres"_s);
+    }
+
+    /// Clearing is not typing. A reader who wipes the field is not mid-word, so the whole
+    /// list comes back at once — the rule the shelf's field follows, for the same reason.
+    void clearing_the_search_brings_the_list_back_without_waiting()
+    {
+        serve(rows({volume(1, u"Le Crystal"_s), volume(2, u"Cendres"_s)}), rows({}));
+        m_list->point(u"albums"_s);
+        settle();
+        m_list->searchFor(u"cendres"_s);
+        narrowed();
+        QCOMPARE(m_list->count(), 1);
+
+        m_list->searchFor(QString());
+        QCOMPARE(m_list->count(), 2);
+        QVERIFY(!m_list->narrowedToNothing());
+    }
+
     /// The words of the screen follow the list without asking it anything: a caption is
+    /// The list goes with the page it belongs to. See `Series::forget`: what was held was
+    /// held for a replacement, and a reader on the shelf is not replacing anything.
+    void leaving_the_page_empties_the_list()
+    {
+        serve(rows({volume(1, u"Le Crystal"_s), volume(2, u"L'Honneur"_s)}), rows({}));
+        m_list->point(u"albums"_s);
+        settle();
+        QCOMPARE(m_list->count(), 2);
+
+        m_list->forget();
+        QCOMPARE(m_list->count(), 0);
+        QVERIFY(m_list->pointedAt().isEmpty());
+        QVERIFY(!m_list->loading());
+        QVERIFY(std::isnan(m_list->reading()));
+    }
+
     /// A cover and a file name, for the two things a list of lines has no use for: the grid
     /// draws one and a deletion names the other. Spelled here rather than assembled out of
     /// the address in every `.qml` that wants one.
@@ -323,6 +476,7 @@ private slots:
 
         // A search narrows what is drawn and has no business moving a mark on another block.
         m_list->searchFor(u"Dryade"_s);
+        narrowed();
         QCOMPARE(m_list->count(), 1);
         QCOMPARE(m_list->reading(), 2.0);
 
@@ -348,6 +502,7 @@ private slots:
         QVERIFY(words.nothingFound().isEmpty());
 
         m_list->searchFor(u"introuvable"_s);
+        narrowed();
         QVERIFY(words.narrowedToNothing());
         QVERIFY(words.nothingFound().endsWith(u"."_s));
 

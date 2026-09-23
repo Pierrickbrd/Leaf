@@ -34,6 +34,9 @@ class SeriesCaptions final : public QObject
     Q_PROPERTY(QString inThisLibrary READ inThisLibrary CONSTANT)
     /// The axis the field narrows, which `LeafSearchLine` turns into « Chercher dans … ».
     Q_PROPERTY(QString volumesAxis READ volumesAxis CONSTANT)
+    /// What each of the two view buttons does, which is not what they act on.
+    Q_PROPERTY(QString asList READ asList CONSTANT)
+    Q_PROPERTY(QString asGrid READ asGrid CONSTANT)
     /// Said under a list a search emptied — which is not a series with no files, and the two
     /// have to be told apart or the screen cannot say why there is nothing.
     Q_PROPERTY(QString nothingFound READ nothingFound NOTIFY changed)
@@ -61,6 +64,8 @@ public:
     QString neverRead() const;
     QString inThisLibrary() const;
     QString volumesAxis() const;
+    QString asList() const;
+    QString asGrid() const;
     QString nothingFound() const;
     bool narrowedToNothing() const;
     QString sameWorkHeading() const;

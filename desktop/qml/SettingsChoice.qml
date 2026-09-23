@@ -5,7 +5,6 @@
 // above them, for the same reason — a screen with one way of choosing is learnt once.
 
 import QtQuick
-import Qt5Compat.GraphicalEffects
 import Leaf
 
 Item {
@@ -78,24 +77,14 @@ Item {
                     cornerRadius: pill.height / 2
                 }
 
-                Image {
+                Glyph {
                     id: glyph
 
                     x: 12
                     anchors.verticalCenter: parent.verticalCenter
-                    width: 18
-                    height: 18
+                    side: 18
                     source: "assets/icons/" + pill.modelData.icon + ".svg"
-                    sourceSize: Qt.size(18, 18)
-                    visible: false
-                }
-
-                // The glyphs ship without a fill, so the client tints them — see the note
-                // beside them. One file serves both palettes and both states.
-                ColorOverlay {
-                    anchors.fill: glyph
-                    source: glyph
-                    color: pill.lit ? Theme.emerald : Theme.inkSoft
+                    tint: pill.lit ? Theme.emerald : Theme.inkSoft
                 }
 
                 Text {

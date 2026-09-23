@@ -65,6 +65,8 @@ QVariantList Settings::sections() const
 {
     return {QVariantMap{{QStringLiteral("name"), QStringLiteral("general")},
                         {QStringLiteral("label"), Words::generalSettings()}},
+            QVariantMap{{QStringLiteral("name"), QStringLiteral("notifications")},
+                        {QStringLiteral("label"), Words::notificationSettings()}},
             QVariantMap{{QStringLiteral("name"), QStringLiteral("library")},
                         {QStringLiteral("label"), Words::librarySettings()}}};
 }

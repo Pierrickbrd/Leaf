@@ -55,6 +55,17 @@ Item {
         cursorShape: Qt.PointingHandCursor
     }
 
+    // The cover answers the pointer. Without it the grid was a wall that did not react at
+    // all: nothing said a tile could be opened, and the menu appearing in a corner was the
+    // only sign anything had been noticed.
+    scale: tile.hovered ? 1.03 : 1.0
+    Behavior on scale {
+        NumberAnimation {
+            duration: 90
+            easing.type: Easing.OutQuad
+        }
+    }
+
     TapHandler {
         enabled: !tile.missing
         onTapped: tile.opened()
@@ -71,72 +82,49 @@ Item {
             visible: !tile.missing
         }
 
-        Rectangle {
+        RoundedCover {
             id: clipped
 
             anchors.fill: parent
-            radius: Theme.coverRadius
-            color: Theme.onPaper
-            clip: true
-            antialiasing: true
+            source: tile.cover
             visible: !tile.missing
 
-            Item {
-                id: source
-
-                anchors.fill: parent
-
-                Image {
-                    anchors.fill: parent
-                    source: tile.cover
-                    asynchronous: true
-                    cache: true
-                    fillMode: Image.PreserveAspectCrop
+            // A green cover would swallow the emerald laid on it. The shade is invisible
+            // on a dark one and saves the bar on every other.
+            LinearGradient {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: 15
+                visible: tile.started || tile.finished
+                start: Qt.point(0, 0)
+                end: Qt.point(0, height)
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: "#00000000" }
+                    GradientStop { position: 1.0; color: "#73000000" }
                 }
+            }
 
-                // A green cover would swallow the emerald laid on it. The shade is invisible
-                // on a dark one and saves the bar on every other.
-                LinearGradient {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.bottom: parent.bottom
-                    height: 15
-                    visible: tile.started || tile.finished
-                    start: Qt.point(0, 0)
-                    end: Qt.point(0, height)
-                    gradient: Gradient {
-                        GradientStop { position: 0.0; color: "#00000000" }
-                        GradientStop { position: 1.0; color: "#66000000" }
-                    }
-                }
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: 4
+                visible: tile.started || tile.finished
+                // The alpha is in the colour, never in `opacity`: `opacity` on an item is
+                // applied to everything it holds, so a track at 0.45 was drawing the emerald
+                // inside it at 0.45 too. The design says `rgba(0,0,0,.45)` for exactly this
+                // reason — the track is what is translucent, and what it measures is not.
+                color: Qt.rgba(0, 0, 0, 0.45)
 
                 Rectangle {
                     objectName: "read-so-far-" + tile.entryId
                     anchors.left: parent.left
+                    anchors.top: parent.top
                     anchors.bottom: parent.bottom
-                    width: parent.width * (tile.finished ? 1 : Math.max(0.04, tile.howFarRead))
-                    height: 4
-                    visible: tile.started || tile.finished
+                    width: parent.width
+                           * (tile.finished ? 1 : Math.max(0.04, tile.howFarRead))
                     color: Theme.emerald
-                }
-            }
-
-            ShaderEffectSource {
-                id: texture
-
-                sourceItem: source
-                hideSource: true
-                visible: false
-            }
-
-            OpacityMask {
-                anchors.fill: parent
-                source: texture
-                maskSource: Rectangle {
-                    width: clipped.width
-                    height: clipped.height
-                    radius: clipped.radius
-                    antialiasing: true
                 }
             }
         }
@@ -169,62 +157,51 @@ Item {
             }
         }
 
-        Rectangle {
-            anchors.fill: parent
-            radius: Theme.coverRadius
-            color: "transparent"
-            border.color: Theme.rule
-            border.width: 1
-            visible: !tile.missing
-            antialiasing: true
-        }
+        CoverSkin { visible: !tile.missing }
 
-        // Far from the bar: two marks on the same edge fought for the room. The bar says
-        // « how far » and this says « and it is done », which a fill rounded up to a hundred
-        // per cent would not prove.
+        // Bottom right, just above the bar. The top corner belongs to the three dots, and
+        // the two of them shared it: a check half under a button is a state one has to move
+        // the pointer away to read. Above the bar rather than on it — the bar says « how far »
+        // and this says « and it is done », which a fill rounded up to a hundred per cent
+        // would not prove.
         Rectangle {
             id: done
 
             objectName: "finished-" + tile.entryId
             anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.margins: 6
-            width: 20
-            height: 20
+            anchors.bottom: parent.bottom
+            anchors.rightMargin: 6
+            anchors.bottomMargin: 10
+            width: 22
+            height: 22
             radius: 99
             visible: tile.finished
-            color: Theme.emerald
+            // The same dark the three dots sit on, for the same reason: what is underneath is
+            // an illustration and it may be any colour at all. The emerald is the mark, not
+            // the disc — drawn the other way round it was a green button stuck in the corner
+            // of every finished cover.
+            color: Qt.rgba(12 / 255, 16 / 255, 14 / 255, 0.74)
             antialiasing: true
 
-            Image {
-                id: tick
-
+            Glyph {
                 anchors.centerIn: parent
-                width: 14
-                height: 14
+                side: 14
                 source: "assets/icons/check.svg"
-                sourceSize.width: 14
-                sourceSize.height: 14
-                fillMode: Image.PreserveAspectFit
-                visible: false
-            }
-
-            ColorOverlay {
-                anchors.fill: tick
-                source: tick
-                color: Theme.onEmerald
+                tint: Theme.emerald
             }
         }
 
         // To the left of the check and never over it — the corner is taken, and a button does
-        // not cover what it commands.
+        // not cover what it commands. On its own dark veil, because an illustration can be
+        // pale and grey dots laid straight on one are invisible one time in three.
         CommandMenu {
             objectName: "commands-tile-" + tile.entryId
             anchors.right: parent.right
-            anchors.rightMargin: tile.finished ? 32 : 4
+            anchors.rightMargin: 4
             anchors.top: parent.top
             anchors.topMargin: 4
-            visible: !tile.missing && (tile.hovered || opened)
+            visible: !tile.missing
+            veiled: true
             seriesId: tile.seriesId
             entryId: tile.entryId
             fileName: tile.fileName

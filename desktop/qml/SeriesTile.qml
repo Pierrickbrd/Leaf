@@ -1,7 +1,6 @@
 // One series cover and its two lines, shared by the shelf and both search views.
 
 import QtQuick
-import Qt5Compat.GraphicalEffects
 import Leaf
 
 Item {
@@ -79,85 +78,42 @@ Item {
             under: tile.seriesId
         }
 
-        Rectangle {
+        RoundedCover {
             id: clippedCover
 
             objectName: "clipped-cover-" + tile.seriesId
             anchors.fill: parent
-            radius: Theme.coverRadius
-            color: Theme.onPaper
-            clip: true
-            antialiasing: true
+            source: tile.cover
+            pictureName: "cover-" + tile.seriesId
 
-            Item {
-                id: coverSource
-                anchors.fill: parent
+            // How far through the series, drawn as the fraction it is.
+            //
+            // It spanned the cover's whole width whenever a series was merely started,
+            // which read as finished — the emerald, the four pixels and the full width
+            // of the band's own progress bar above, saying « started » where that one
+            // says « how far ». It could not say more: the shelf had `readStatus` and
+            // nothing else, and « how far » is a number the server now sends.
+            Rectangle {
+                objectName: "in-progress-" + tile.seriesId
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: 4
+                color: Theme.rule
+                opacity: tile.inProgress ? 1 : 0
 
-                Image {
-                    id: coverImage
-
-                    objectName: "cover-" + tile.seriesId
-                    anchors.fill: parent
-                    source: tile.cover
-                    asynchronous: true
-                    cache: true
-                    fillMode: Image.PreserveAspectCrop
-                }
-
-                // How far through the series, drawn as the fraction it is.
-                //
-                // It spanned the cover's whole width whenever a series was merely started,
-                // which read as finished — the emerald, the four pixels and the full width
-                // of the band's own progress bar above, saying « started » where that one
-                // says « how far ». It could not say more: the shelf had `readStatus` and
-                // nothing else, and « how far » is a number the server now sends.
                 Rectangle {
-                    objectName: "in-progress-" + tile.seriesId
+                    objectName: "read-so-far-" + tile.seriesId
                     anchors.left: parent.left
-                    anchors.right: parent.right
+                    anchors.top: parent.top
                     anchors.bottom: parent.bottom
-                    height: 4
-                    color: Theme.rule
-                    opacity: tile.inProgress ? 1 : 0
-
-                    Rectangle {
-                        objectName: "read-so-far-" + tile.seriesId
-                        anchors.left: parent.left
-                        anchors.top: parent.top
-                        anchors.bottom: parent.bottom
-                        width: parent.width * tile.howFarRead
-                        color: Theme.emerald
-                    }
-                }
-            }
-
-            ShaderEffectSource {
-                id: coverTexture
-                sourceItem: coverSource
-                hideSource: true
-                visible: false
-            }
-
-            OpacityMask {
-                anchors.fill: parent
-                source: coverTexture
-                maskSource: Rectangle {
-                    width: clippedCover.width
-                    height: clippedCover.height
-                    radius: clippedCover.radius
-                    antialiasing: true
+                    width: parent.width * tile.howFarRead
+                    color: Theme.emerald
                 }
             }
         }
 
-        Rectangle {
-            anchors.fill: parent
-            radius: Theme.coverRadius
-            color: "transparent"
-            border.color: Theme.rule
-            border.width: 1
-            antialiasing: true
-        }
+        CoverSkin { }
 
         FocusRing {
             objectName: "focus-" + tile.seriesId

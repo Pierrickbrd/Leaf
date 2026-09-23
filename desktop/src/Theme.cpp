@@ -85,5 +85,5 @@ QColor Theme::onEmerald() const    { return pick(m_dark, 0xF0ECE3u, 0x08110Du); 
 // The hollow of a hovered row decided the dark value: a deeper garnet fell to 4,44 there,
 // under the floor. `keeps_its_contrast` holds the four figures of each theme.
 QColor Theme::alert() const        { return pick(m_dark, 0x8E1F2Bu, 0xE0656Eu); }
-QColor Theme::alertWash() const    { return pick(m_dark, 0xF2DCE0u, 0x2C1116u); }
+QColor Theme::alertWash() const    { return pick(m_dark, 0xF2DCE0u, 0x2A1216u); }
 QColor Theme::readerPaper() const  { return pick(m_dark, 0xDCD2BCu, 0x070908u); }
