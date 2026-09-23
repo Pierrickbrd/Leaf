@@ -217,6 +217,100 @@ fn a_folder_of_archives_is_a_work_with_an_implicit_edition() {
     assert_eq!(2, report.entries);
 }
 
+/// The shape `oneshot.json` exists for, and the one no count could tell apart: a book
+/// standing alone, beside another book standing alone.
+///
+/// Without the declaration both files are archives sitting in `BD/`, which makes `BD/` a
+/// work and the two albums its volumes — a two-volume series named after a folder somebody
+/// made to tidy up. Nothing on the disk says otherwise, which is exactly why somebody has
+/// to say it.
+#[test]
+fn an_archive_that_declares_itself_a_whole_book_is_lifted_out_of_the_folder_it_sits_in() {
+    let library = Library::new();
+    let shelf = library.folder("BD");
+    archive(
+        &shelf.join("Le Combat Ordinaire.cbz"),
+        3,
+        Some((
+            "oneshot.json",
+            r#"{"leaf":1,"title":"Le Combat Ordinaire","authors":["Manu Larcenet"],
+                "publisher":"Dargaud","medium":"bd"}"#,
+        )),
+    );
+    archive(
+        &shelf.join("Blast.cbz"),
+        4,
+        Some((
+            "oneshot.json",
+            r#"{"leaf":1,"title":"Blast","authors":["Manu Larcenet"]}"#,
+        )),
+    );
+
+    library.scan();
+
+    // Two works, two editions, two entries — and not one work holding two volumes.
+    assert_eq!(2, library.count("work"));
+    assert_eq!(2, library.count("edition"));
+    assert_eq!(2, library.count("entry"));
+    assert_eq!(
+        2,
+        library
+            .one::<i64>("SELECT COUNT(*) FROM edition WHERE one_shot = 1")
+            .unwrap()
+    );
+    // Each holds exactly one file, which is what lets the shelf offer it to the reader.
+    assert_eq!(
+        1,
+        library
+            .one::<i64>(
+                "SELECT MAX((SELECT COUNT(*) FROM entry x WHERE x.edition_id = e.id))
+                 FROM edition e"
+            )
+            .unwrap()
+    );
+    // The title comes from the file, not from the folder it was dropped in.
+    let mut names = library.all("SELECT name FROM work ORDER BY name");
+    names.sort();
+    assert_eq!(vec!["Blast", "Le Combat Ordinaire"], names);
+    // And the folder is not a series: nothing is recorded under its name.
+    assert!(!names.contains(&"BD".to_string()));
+}
+
+/// An album inside a series it belongs to stays a volume of it. The declaration is what
+/// lifts a file out, so an artbook you want filed with the work is filed with it by saying
+/// nothing.
+#[test]
+fn a_volume_that_declares_nothing_stays_where_it_sits() {
+    let library = Library::new();
+    let naruto = library.folder("Naruto");
+    archive(&naruto.join("Tome 1.cbz"), 2, None);
+    archive(
+        &naruto.join("Artbook.cbz"),
+        2,
+        Some(("oneshot.json", r#"{"leaf":1,"title":"Naruto Artbook"}"#)),
+    );
+
+    library.scan();
+
+    // Two works: Naruto with its volume, and the artbook on its own.
+    assert_eq!(2, library.count("work"));
+    assert_eq!(
+        1,
+        library
+            .one::<i64>("SELECT COUNT(*) FROM edition WHERE one_shot = 1")
+            .unwrap()
+    );
+    assert_eq!(
+        1,
+        library
+            .one::<i64>(
+                "SELECT COUNT(*) FROM entry WHERE edition_id IN
+                 (SELECT id FROM edition WHERE one_shot = 0)"
+            )
+            .unwrap()
+    );
+}
+
 #[test]
 fn a_folder_of_folders_is_a_universe_unless_it_says_otherwise() {
     let library = Library::new();
@@ -1024,6 +1118,7 @@ fn every_field_the_server_advertises_is_one_a_sidecar_reads_back() {
             "work.json" => written(sidecars::read::<sidecars::WorkJson>(&bytes)),
             "edition.json" => written(sidecars::read::<sidecars::EditionJson>(&bytes)),
             "entry.json" => written(sidecars::read::<sidecars::EntryJson>(&bytes)),
+            "oneshot.json" => written(sidecars::read::<sidecars::OneShotJson>(&bytes)),
             "chapters[]" => written(sidecars::read::<sidecars::ChapterJson>(&bytes)),
             "arcs[]" => written(sidecars::read::<sidecars::ArcJson>(&bytes)),
             other => panic!("a sidecar is advertised that this test does not know: {other}"),

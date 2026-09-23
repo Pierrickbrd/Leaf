@@ -26,6 +26,12 @@ pub struct ProgressDto {
     pub page: i64,
     pub page_count: i64,
     pub finished: bool,
+    /// How many times this entry has been finished. `finished` says where the reader stands
+    /// now; this says whether they ever reached the end, and the two stopped being the same
+    /// question the day re-reading became possible. Absent at nought, like every other count
+    /// in these answers.
+    #[serde(skip_serializing_if = "crate::api::dto::is_zero")]
+    pub times_finished: i64,
     pub updated_at: i64,
     /// Where that page falls in the chapters. Derived from the markers rather than stored:
     /// two records of the same fact would eventually disagree, and this one costs a lookup.
@@ -43,6 +49,17 @@ pub struct ProgressPatch {
     /// re-reading a volume is a normal thing to do, so it stays possible — explicitly.
     #[serde(default)]
     pub rewind: bool,
+}
+
+/// What a whole series can be told about its progress.
+///
+/// Only `finished`: a page number is a position inside one file and says nothing across
+/// thirty, and moving a whole series backwards is `DELETE` — forgetting it, which is a
+/// different act from being somewhere else in it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeriesProgressPatch {
+    pub finished: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -100,7 +117,8 @@ impl<'a> Progress<'a> {
         let mut found = std::collections::HashMap::new();
         for part in unique.chunks(CHUNK) {
             let sql = format!(
-                "SELECT p.entry_id, p.page, p.finished, p.updated_at, e.page_count
+                "SELECT p.entry_id, p.page, p.finished, p.times_finished, p.updated_at,
+                        e.page_count
                  FROM progress p JOIN entry e ON e.id = p.entry_id
                  WHERE p.entry_id IN ({})",
                 marks(part.len())
@@ -113,11 +131,12 @@ impl<'a> Progress<'a> {
                         r.get::<_, i64>("page")?,
                         r.get::<_, i64>("page_count")?,
                         r.get::<_, i64>("finished")? == 1,
+                        r.get::<_, i64>("times_finished")?,
                         r.get::<_, i64>("updated_at")?,
                     ))
                 })
             })?;
-            for (entry_id, page, page_count, finished, updated_at) in rows {
+            for (entry_id, page, page_count, finished, times_finished, updated_at) in rows {
                 let none = Vec::new();
                 let chapter = chapter_at_page(chapters.get(&entry_id).unwrap_or(&none), page);
                 found.insert(
@@ -127,6 +146,7 @@ impl<'a> Progress<'a> {
                         page,
                         page_count,
                         finished,
+                        times_finished,
                         updated_at,
                         chapter,
                     },
@@ -180,14 +200,22 @@ impl<'a> Progress<'a> {
             let asked = patch.page.map(|p| p.clamp(0, (page_count - 1).max(0)));
 
             cx.execute(
-                "INSERT INTO progress (entry_id, edition_id, page, finished, updated_at)
-                 VALUES (?1, ?2, COALESCE(?3, 0), COALESCE(?4, 0), ?5)
+                "INSERT INTO progress
+                   (entry_id, edition_id, page, finished, times_finished, updated_at)
+                 VALUES (?1, ?2, COALESCE(?3, 0), COALESCE(?4, 0), COALESCE(?4, 0), ?5)
                  ON CONFLICT(entry_id) DO UPDATE SET
                    page = CASE
                             WHEN ?6 THEN COALESCE(?3, progress.page)
                             ELSE MAX(progress.page, COALESCE(?3, progress.page))
                           END,
                    finished = COALESCE(?4, progress.finished),
+                   -- Counted on the edge, and in this statement for the same reason the
+                   -- page is: read-then-write would let two patches arriving together both
+                   -- see an unfinished row and count the same ending twice.
+                   times_finished = progress.times_finished
+                     + CASE WHEN progress.finished = 0
+                                 AND COALESCE(?4, progress.finished) = 1
+                            THEN 1 ELSE 0 END,
                    updated_at = ?5",
                 rusqlite::params![
                     entry_id,
@@ -206,9 +234,72 @@ impl<'a> Progress<'a> {
         self.of(entry_id)
     }
 
+    /// Marks every entry of a series finished, or unfinished, in one statement.
+    ///
+    /// The point of the route is that it is **not** thirty `PATCH`es. A series of thirty
+    /// volumes is one upsert over a `SELECT`, so `store/db.rs`'s statement counter sees the
+    /// same number here whether the series holds three volumes or three hundred — which is
+    /// what a test can hold it to.
+    ///
+    /// Marking as finished fills the page in too: a volume finished at page nought is a
+    /// contradiction the shelf would draw as an empty bar over the word « lu ».
+    pub fn record_series(
+        &self,
+        edition_id: &str,
+        finished: bool,
+        now: i64,
+    ) -> Result<Option<Vec<ProgressDto>>> {
+        let known = self.db.write(|cx| {
+            let found =
+                cx.query_one("SELECT 1 FROM edition WHERE id = ?1", [edition_id], |_| {
+                    Ok(())
+                })?;
+            if found.is_none() {
+                return Ok(false);
+            }
+            if finished {
+                cx.execute(
+                    "INSERT INTO progress
+                       (entry_id, edition_id, page, finished, times_finished, updated_at)
+                     SELECT x.id, x.edition_id, MAX(x.page_count - 1, 0), 1, 1, ?2
+                       FROM entry x WHERE x.edition_id = ?1
+                     ON CONFLICT(entry_id) DO UPDATE SET
+                       page = MAX(progress.page, excluded.page),
+                       finished = 1,
+                       times_finished = progress.times_finished
+                         + CASE WHEN progress.finished = 0 THEN 1 ELSE 0 END,
+                       updated_at = ?2",
+                    rusqlite::params![edition_id, now],
+                )?;
+            } else {
+                // No row is created for a volume that was never opened: saying « not
+                // finished » about a book nobody started is not a fact worth storing, and
+                // an absent record is already that answer.
+                cx.execute(
+                    "UPDATE progress SET finished = 0, updated_at = ?2 WHERE edition_id = ?1",
+                    rusqlite::params![edition_id, now],
+                )?;
+            }
+            Ok(true)
+        })?;
+        if !known {
+            return Ok(None);
+        }
+        Ok(Some(self.of_series(edition_id)?))
+    }
+
     pub fn forget(&self, entry_id: &str) -> Result<()> {
         self.db.write(|cx| {
             cx.execute("DELETE FROM progress WHERE entry_id = ?1", [entry_id])?;
+            Ok(())
+        })
+    }
+
+    /// Forgets every position in a series. One statement, and silent about whether there was
+    /// anything to forget — the same contract as forgetting one.
+    pub fn forget_series(&self, edition_id: &str) -> Result<()> {
+        self.db.write(|cx| {
+            cx.execute("DELETE FROM progress WHERE edition_id = ?1", [edition_id])?;
             Ok(())
         })
     }

@@ -106,7 +106,8 @@ pub const SCHEMA: &[&str] = &[
       volume_count INTEGER,
       format       TEXT,
       language     TEXT,
-      colour       INTEGER
+      colour       INTEGER,
+      one_shot     INTEGER NOT NULL DEFAULT 0
     )
     "#,
     // A range, not a list: four Haikyū volumes belong to two arcs, because an arc does
@@ -187,6 +188,7 @@ pub const SCHEMA: &[&str] = &[
       edition_id  TEXT NOT NULL REFERENCES edition(id) ON DELETE CASCADE,
       page        INTEGER NOT NULL,
       finished    INTEGER NOT NULL DEFAULT 0,
+      times_finished INTEGER NOT NULL DEFAULT 0,
       updated_at  INTEGER NOT NULL
     )
     "#,
@@ -400,6 +402,20 @@ pub const MIGRATIONS: &[&str] = &[
     "#,
     "CREATE INDEX IF NOT EXISTS ix_order_step ON reading_order_step(order_id, position)",
     "CREATE INDEX IF NOT EXISTS ix_order_universe ON reading_order(universe_id, position)",
+    // 22 — how many times an entry has been finished. `finished` says where the reader
+    // stands now and cannot say whether they ever reached the end, which is why re-reading
+    // a finished series made it look unfinished: the rewind that starts the second reading
+    // clears the only mark the first one left.
+    //
+    // Backfilled from `finished` for the same reason as `added_at` above — a column added
+    // later would claim every volume already read was never finished, and no rescan brings
+    // that back.
+    "ALTER TABLE progress ADD COLUMN times_finished INTEGER NOT NULL DEFAULT 0",
+    "UPDATE progress SET times_finished = 1 WHERE finished = 1",
+    // 23 — a book that is a whole book. Declared by `oneshot.json` inside the archive and
+    // never counted out of the shape: an album standing alone and a running series you own
+    // one volume of are the same rows, and only somebody saying so tells them apart.
+    "ALTER TABLE edition ADD COLUMN one_shot INTEGER NOT NULL DEFAULT 0",
 ];
 
 /// What a fresh database is stamped with. Deriving it from the list is what makes adding a

@@ -211,6 +211,85 @@ async fn a_field_this_server_does_not_know_survives_a_patch() {
     );
 }
 
+/// Marking a whole series is part of reading, like recording a position, so a read-only key
+/// may do it — otherwise closing a series you finished would need an import right.
+///
+/// And it is one call, not one per volume: the menu entry exists because the route does.
+#[tokio::test]
+async fn a_whole_series_is_marked_read_then_forgotten_through_the_router() {
+    let server = Server::new();
+    a_volume(&server);
+    let series = server.series();
+    let progress = format!("/series/{series}/progress");
+
+    let (status, body) = server
+        .send(
+            request("PATCH", &progress, READ_ONLY)
+                .header("content-type", "application/json")
+                .body(json_body(serde_json::json!({"finished": true})))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(StatusCode::OK, status);
+    let marked = body.as_array().expect("an array");
+    assert_eq!(1, marked.len());
+    assert_eq!(serde_json::json!(true), marked[0]["finished"]);
+    assert_eq!(serde_json::json!(1), marked[0]["timesFinished"]);
+
+    // Clearing the mark is not forgetting the position, so the record is still there.
+    let (status, body) = server
+        .send(
+            request("PATCH", &progress, READ_ONLY)
+                .header("content-type", "application/json")
+                .body(json_body(serde_json::json!({"finished": false})))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::OK, status);
+    let cleared = body.as_array().expect("an array");
+    assert_eq!(1, cleared.len());
+    assert_eq!(serde_json::json!(false), cleared[0]["finished"]);
+    // The ending is not undone by saying the book is no longer open at its last page.
+    assert_eq!(serde_json::json!(1), cleared[0]["timesFinished"]);
+
+    let (status, _) = server
+        .send(
+            request("DELETE", &progress, READ_ONLY)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::NO_CONTENT, status);
+
+    let (status, body) = server
+        .send(
+            request("GET", &progress, READ_ONLY)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::OK, status);
+    assert!(body.as_array().expect("an array").is_empty());
+}
+
+#[tokio::test]
+async fn marking_a_series_that_is_not_there_is_a_404() {
+    let server = Server::new();
+    a_volume(&server);
+
+    let (status, _) = server
+        .send(
+            request("PATCH", "/series/nothing-like-it/progress", READ_ONLY)
+                .header("content-type", "application/json")
+                .body(json_body(serde_json::json!({"finished": true})))
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(StatusCode::NOT_FOUND, status);
+}
+
 #[tokio::test]
 async fn patching_something_that_is_not_there_is_a_404() {
     let server = Server::new();

@@ -314,14 +314,16 @@ Read<Series> series(const QJsonObject &from)
         return refused<Series>(QStringLiteral("series"), field.trouble());
 
     one.universe = field.maybeText(u"universe"_s);
+    one.universeId = field.maybeText(u"universeId"_s);
+    one.oneShotEntry = field.maybeText(u"oneShotEntry"_s);
     one.edition = field.maybeText(u"edition"_s);
     one.credits.author = field.maybeText(u"author"_s);
     one.credits.authors = field.words(u"authors"_s);
     one.credits.artists = field.words(u"artists"_s);
-    one.publisher = field.maybeText(u"publisher"_s);
-    one.collection = field.maybeText(u"collection"_s);
-    one.language = field.maybeText(u"language"_s);
-    one.declaredVolumes = field.maybeWhole(u"declaredVolumes"_s);
+    one.publication.publisher = field.maybeText(u"publisher"_s);
+    one.publication.collection = field.maybeText(u"collection"_s);
+    one.publication.language = field.maybeText(u"language"_s);
+    one.publication.declaredVolumes = field.maybeWhole(u"declaredVolumes"_s);
     one.genres = field.words(u"genres"_s);
     one.tags = field.words(u"tags"_s);
     one.ageRating = field.maybeText(u"ageRating"_s);

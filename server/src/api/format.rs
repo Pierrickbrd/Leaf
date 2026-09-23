@@ -81,6 +81,11 @@ pub fn describe() -> Format {
                 fields: fields_of(&filled::entry()),
             },
             Sidecar {
+                file: crate::scan::scanner::ONESHOT_JSON.into(),
+                place: "inside the archive, and its presence is the declaration".into(),
+                fields: fields_of(&filled::one_shot()),
+            },
+            Sidecar {
                 file: "chapters[]".into(),
                 place: "inside entry.json".into(),
                 fields: fields_of(&filled::chapter()),
@@ -213,6 +218,29 @@ mod filled {
             chapter_label: Some(String::new()),
             colour: Some(false),
             arcs: vec![arc()],
+        }
+    }
+
+    /// No `status` and no `volumeCount`: a book that is whole has nothing left to
+    /// announce, and a file asked to repeat what it already is can disagree with itself.
+    pub fn one_shot() -> crate::metadata::sidecars::OneShotJson {
+        crate::metadata::sidecars::OneShotJson {
+            leaf: Some(FORMAT_VERSION),
+            title: Some(String::new()),
+            medium: Some(String::new()),
+            authors: vec![String::new()],
+            artists: vec![String::new()],
+            publisher: Some(String::new()),
+            collection: Some(String::new()),
+            language: Some(String::new()),
+            reading_direction: Some(String::new()),
+            genres: vec![String::new()],
+            tags: vec![String::new()],
+            summary: Some(String::new()),
+            age_rating: Some(String::new()),
+            colour: Some(true),
+            isbn: Some(String::new()),
+            published_on: Some(String::new()),
         }
     }
 

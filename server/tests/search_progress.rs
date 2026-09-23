@@ -582,6 +582,261 @@ fn progress_belongs_to_the_edition() {
     assert!(statuses.contains(&("e2", "UNREAD")), "{statuses:?}");
 }
 
+/// The status of one edition as the shelf computes it.
+fn read_status(f: &Fixture, edition: &str) -> String {
+    Repository::new(&f.db)
+        .series(&SeriesFilter::default(), SeriesSort::Name, 0, 0)
+        .expect("listing")
+        .into_iter()
+        .find(|s| s.id == edition)
+        .expect("the series")
+        .read_status
+}
+
+fn finish(progress: &Progress, entry: &str, at: i64) {
+    progress
+        .record(
+            entry,
+            &ProgressPatch {
+                page: Some(189),
+                finished: Some(true),
+                ..Default::default()
+            },
+            at,
+        )
+        .expect("recording")
+        .expect("the entry");
+}
+
+fn start_over(progress: &Progress, entry: &str, at: i64) {
+    progress
+        .record(
+            entry,
+            &ProgressPatch {
+                page: Some(0),
+                finished: Some(false),
+                rewind: true,
+            },
+            at,
+        )
+        .expect("recording")
+        .expect("the entry");
+}
+
+/// `finished` and « have I read this » were the same column, and they are not the same
+/// question. The rewind that starts a second reading clears the first, so the only mark a
+/// finished volume left was erased by re-opening it.
+#[test]
+fn finishing_counts_the_endings_and_a_rewind_counts_none() {
+    let f = Fixture::new();
+    let progress = Progress::new(&f.db);
+
+    finish(&progress, "v1", 1_000);
+    assert_eq!(
+        1,
+        progress.of("v1").unwrap().expect("a record").times_finished
+    );
+
+    // Saying it a second time is the same ending: a client re-sending the last page of a
+    // book it has already closed must not add a reading to the count.
+    finish(&progress, "v1", 1_100);
+    assert_eq!(
+        1,
+        progress.of("v1").unwrap().expect("a record").times_finished
+    );
+
+    let rewound = {
+        start_over(&progress, "v1", 1_200);
+        progress.of("v1").unwrap().expect("a record")
+    };
+    assert_eq!(
+        1, rewound.times_finished,
+        "starting over keeps what happened"
+    );
+    assert!(!rewound.finished, "and says where the reader is now");
+    assert_eq!(0, rewound.page);
+
+    finish(&progress, "v1", 1_300);
+    assert_eq!(
+        2,
+        progress.of("v1").unwrap().expect("a record").times_finished
+    );
+}
+
+/// The defect the counter exists for: a series you had finished left the READ filter the
+/// moment you opened one of its volumes again.
+#[test]
+fn a_series_being_reread_is_still_read() {
+    let f = Fixture::new();
+    let progress = Progress::new(&f.db);
+
+    finish(&progress, "v1", 1_000);
+    finish(&progress, "v2", 1_000);
+    assert_eq!("READ", read_status(&f, "e"));
+
+    start_over(&progress, "v1", 2_000);
+
+    assert_eq!(
+        "READ",
+        read_status(&f, "e"),
+        "having finished it is something that happened, and re-reading does not un-happen it"
+    );
+    // And the volume itself answers the other question, which is why both are kept.
+    assert!(!progress.of("v1").unwrap().expect("a record").finished);
+}
+
+/// And not too loose in the other direction: the rule is every entry finished, not any.
+#[test]
+fn a_series_with_a_volume_never_finished_is_still_in_progress() {
+    let f = Fixture::new();
+    let progress = Progress::new(&f.db);
+
+    finish(&progress, "v1", 1_000);
+    assert_eq!("IN_PROGRESS", read_status(&f, "e"));
+}
+
+/// A volume finished once and rewound to page nought is not a series nobody started: the
+/// UNREAD branch asks the same question as the READ one, and had to learn it too.
+#[test]
+fn a_series_entirely_rewound_is_not_unread_again() {
+    let f = Fixture::new();
+    let progress = Progress::new(&f.db);
+
+    finish(&progress, "v1", 1_000);
+    finish(&progress, "v2", 1_000);
+    start_over(&progress, "v1", 2_000);
+    start_over(&progress, "v2", 2_000);
+
+    assert_eq!("READ", read_status(&f, "e"));
+}
+
+#[test]
+fn marking_a_whole_series_read_fills_in_the_page_it_was_finished_at() {
+    let f = Fixture::new();
+    let progress = Progress::new(&f.db);
+
+    let records = progress
+        .record_series("e", true, 5_000)
+        .expect("recording")
+        .expect("the series");
+
+    assert_eq!(2, records.len());
+    for one in &records {
+        assert!(one.finished);
+        assert_eq!(1, one.times_finished);
+        // A volume finished at page nought is a contradiction, and a shelf would draw it as
+        // an empty bar under the word « lu ».
+        assert_eq!(189, one.page, "{one:?}");
+    }
+    assert_eq!("READ", read_status(&f, "e"));
+}
+
+/// The whole point of the route. Thirty volumes cost what two do, because it is one
+/// statement over a `SELECT` and not one call per volume — the shape `store/db.rs` counts
+/// statements to make visible.
+#[test]
+fn marking_a_whole_series_read_costs_the_same_whatever_it_holds() {
+    let f = Fixture::new();
+    let progress = Progress::new(&f.db);
+
+    let before = f.db.statements();
+    progress.record_series("e", true, 5_000).expect("recording");
+    let two_volumes = f.db.statements() - before;
+
+    f.db.write(|cx| {
+        for n in 3..=32 {
+            cx.execute(
+                "INSERT INTO entry (id, edition_id, type, file, size, modified_at, added_at,
+                                    volume_number, sort_key, page_count)
+                 VALUES (?1, 'e', 'VOLUME', ?2, 1, 1, 1, ?3, ?3, 190)",
+                (format!("v{n}"), format!("/v{n}.cbz"), n as f64),
+            )?;
+        }
+        Ok(())
+    })
+    .expect("seeding thirty more");
+
+    let before = f.db.statements();
+    progress.record_series("e", true, 6_000).expect("recording");
+    let thirty_two_volumes = f.db.statements() - before;
+
+    assert_eq!(
+        two_volumes, thirty_two_volumes,
+        "marking a series read cost {thirty_two_volumes} statements for 32 volumes \
+         against {two_volumes} for 2"
+    );
+}
+
+/// Saying « not finished » about a book nobody opened is not a fact worth storing, and an
+/// absent record already says it.
+#[test]
+fn marking_a_whole_series_unread_records_nothing_about_what_was_never_opened() {
+    let f = Fixture::new();
+    let progress = Progress::new(&f.db);
+
+    let records = progress
+        .record_series("e", false, 5_000)
+        .expect("recording")
+        .expect("the series");
+
+    assert!(records.is_empty());
+    assert_eq!("UNREAD", read_status(&f, "e"));
+}
+
+/// Clearing the mark is not forgetting the position: one says « not finished », the other
+/// says « never opened », and the menu offers the second.
+#[test]
+fn marking_a_read_series_unread_keeps_the_page_and_forgetting_it_does_not() {
+    let f = Fixture::new();
+    let progress = Progress::new(&f.db);
+
+    progress.record_series("e", true, 5_000).expect("recording");
+    let cleared = progress
+        .record_series("e", false, 6_000)
+        .expect("recording")
+        .expect("the series");
+    assert_eq!(2, cleared.len());
+    assert!(cleared.iter().all(|p| !p.finished));
+    assert!(cleared.iter().all(|p| p.page == 189));
+    // The endings are not undone by saying the book is not open at its last page.
+    assert!(cleared.iter().all(|p| p.times_finished == 1));
+
+    progress.forget_series("e").expect("forgetting");
+    assert!(progress.of_series("e").unwrap().is_empty());
+    assert_eq!("UNREAD", read_status(&f, "e"));
+}
+
+/// The same contract as forgetting one: silent about whether there was anything to forget.
+#[test]
+fn forgetting_a_series_that_holds_nothing_is_not_a_failure() {
+    let f = Fixture::new();
+    Progress::new(&f.db).forget_series("e").expect("forgetting");
+    Progress::new(&f.db)
+        .forget_series("nowhere")
+        .expect("forgetting");
+}
+
+#[test]
+fn marking_a_series_that_is_not_there_records_nothing() {
+    let f = Fixture::new();
+    assert!(Progress::new(&f.db)
+        .record_series("nowhere", true, 5_000)
+        .expect("recording")
+        .is_none());
+}
+
+/// Progress belongs to the edition, and marking one whole does not reach into another.
+#[test]
+fn marking_a_series_read_leaves_the_other_editions_alone() {
+    let f = Fixture::new();
+    let progress = Progress::new(&f.db);
+
+    progress.record_series("e", true, 5_000).expect("recording");
+
+    assert!(progress.of_series("e2").unwrap().is_empty());
+    assert_eq!("UNREAD", read_status(&f, "e2"));
+}
+
 /// Progress never moves backwards — including when two positions arrive at once.
 ///
 /// That rule is what makes the offline queue safe: a phone replaying yesterday's positions

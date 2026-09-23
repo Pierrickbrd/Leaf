@@ -31,7 +31,7 @@ use super::intake::{Collision, FileRequest, Intake, Proposal};
 use super::keys::{Keys, Permission, HEADER};
 use super::local_drop::{DropListing, DropRequest, LocalDrop};
 use super::pages::{Pages, ServedImage};
-use super::progress::{Progress, ProgressDto, ProgressPatch, UpNextDto};
+use super::progress::{Progress, ProgressDto, ProgressPatch, SeriesProgressPatch, UpNextDto};
 use super::records::{EntryPatch, Records, SeriesPatch};
 use super::relocate::{MoveRequest, Relocate};
 use super::throttle::Throttle;
@@ -191,7 +191,12 @@ pub fn router(state: AppState) -> Router {
         .route("/works/{id}/move", post(move_work))
         .route("/search", get(search))
         .route("/next", get(up_next))
-        .route("/series/{id}/progress", get(series_progress))
+        .route(
+            "/series/{id}/progress",
+            get(series_progress)
+                .patch(record_series_progress)
+                .delete(forget_series_progress),
+        )
         .route(
             "/entries/{id}/progress",
             get(entry_progress)
@@ -878,6 +883,15 @@ async fn search(
 
 // ----------------------------------------------------------------- progress
 
+/// The clock both recording handlers stamp with. Written once because two copies of the
+/// same expression drift the day one of them is fixed.
+fn now_in_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// Where the reader stands in one entry.
 async fn entry_progress(
     _: Reader,
@@ -902,10 +916,7 @@ async fn record_progress(
     Path(id): Path<String>,
     Json(patch): Json<ProgressPatch>,
 ) -> Result<Response, Failure> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
+    let now = now_in_millis();
     or_missing(
         blocking(move || Progress::new(&state.db).record(&id, &patch, now)).await?,
         "unknown entry",
@@ -930,6 +941,29 @@ async fn series_progress(
     Ok(Json(
         blocking(move || Progress::new(&state.db).of_series(&id)).await?,
     ))
+}
+
+/// Marks a whole series read, or unread — one statement rather than one call per volume.
+async fn record_series_progress(
+    _: Reader,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(patch): Json<SeriesProgressPatch>,
+) -> Result<Response, Failure> {
+    let now = now_in_millis();
+    or_missing(
+        blocking(move || Progress::new(&state.db).record_series(&id, patch.finished, now)).await?,
+        "unknown series",
+    )
+}
+
+async fn forget_series_progress(
+    _: Reader,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, Failure> {
+    blocking(move || Progress::new(&state.db).forget_series(&id)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// What to open next: what you are in the middle of, then what follows it.

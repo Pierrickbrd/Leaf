@@ -45,6 +45,12 @@ pub struct SeriesDto {
     pub work_id: String,
     /// Built from the levels that add something: "Terres d'Arran · Elfes".
     pub name: String,
+    /// Beside the name, because `/universes/{id}/orders` is addressed by id and a client
+    /// holding only the name had to fetch every universe in the library and match strings
+    /// to find one — a whole request, and an answer that goes wrong the day a universe is
+    /// renamed under it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub universe_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub universe: Option<String>,
     pub work: String,
@@ -83,6 +89,14 @@ pub struct SeriesDto {
     /// The gaps in the story itself — the other granularity.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub missing_chapters: Vec<f64>,
+    /// The single file of a book that is a whole book, and absent for everything else.
+    ///
+    /// The id and not a flag, because a shelf tile that opens the reader needs to know
+    /// *what* to open at the moment it is clicked. A boolean would have sent the client
+    /// back for the entry list first — a request between the click and the page, which is
+    /// the blank screen this avoids.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub one_shot_entry: Option<String>,
     pub entry_count: i64,
     /// How many of those entries are finished.
     ///
@@ -538,7 +552,7 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-fn is_zero(value: &i64) -> bool {
+pub(crate) fn is_zero(value: &i64) -> bool {
     *value == 0
 }
 
