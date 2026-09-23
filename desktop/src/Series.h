@@ -73,6 +73,8 @@ class Series : public QObject
     /// to the series and not to its files — a hole has no file behind it — so they travel
     /// from here to the list rather than being asked for twice.
     Q_PROPERTY(QVariantList missingVolumes READ missingVolumes NOTIFY changed)
+    /// How many arcs the edition declares, which is the guard on asking for them at all.
+    Q_PROPERTY(int arcCount READ arcCount NOTIFY changed)
 
 public:
     explicit Series(Server *server, QObject *parent = nullptr);
@@ -100,6 +102,7 @@ public:
     QString editionsLabel() const;
     QString oneShotEntry() const;
     QVariantList missingVolumes() const;
+    int arcCount() const;
 
     /// Points the page at a series. Asking for the one already held asks again — that is what
     /// a retry is — but it keeps what is on screen either way.

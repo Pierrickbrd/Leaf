@@ -21,6 +21,27 @@ Item {
 
     readonly property int volumesTab: 0
     readonly property int descriptionTab: 1
+    readonly property int elsewhereTab: 2
+
+    /// True when the last tab has anything to show. A work with one edition in a universe of
+    /// one series has nowhere to go: two tabs then, not three with an empty one.
+    readonly property bool elsewhereHasAnything:
+        view.page.editions.length > 0 || Elsewhere.tiles.length > 0
+
+    /// Changing edition is not a navigation: the page and its list are re-pointed under the
+    /// same header. Here and not in two places, because the switcher in the header and the
+    /// last tab both do it and the day one of them learns something the other must too.
+    function goToEdition(seriesId) {
+        view.page.point(seriesId)
+        view.volumes.point(seriesId, [])
+    }
+
+    // A tab that goes away under the reader takes the page with it rather than leaving it on
+    // nothing: a series whose universe answered late is the ordinary way this happens.
+    onElsewhereHasAnythingChanged: {
+        if (!view.elsewhereHasAnything && view.current === view.elsewhereTab)
+            view.current = view.volumesTab
+    }
 
     objectName: "series-view"
     clip: true
@@ -89,8 +110,7 @@ Item {
 
                         TapHandler {
                             onTapped: {
-                                view.page.point(parent.modelData.identifier)
-                                view.volumes.point(parent.modelData.identifier, [])
+                                view.goToEdition(parent.modelData.seriesId)
                                 switcher.visible = false
                             }
                         }
@@ -112,7 +132,7 @@ Item {
                             // often the only thing that really tells two editions apart, so
                             // it cannot disappear at the moment one is chosen.
                             Text {
-                                text: parent.parent.modelData.count
+                                text: parent.parent.modelData.detail
                                 color: Theme.inkFaint
                                 font.family: Theme.textFamily
                                 font.pixelSize: 11
@@ -133,6 +153,7 @@ Item {
                 width: parent.width
                 visible: view.page.available
                 current: view.current
+                hasElsewhere: view.elsewhereHasAnything
                 asGrid: Preferences.volumesAsGrid
                 query: view.volumes.query
                 onChosen: which => view.current = which
@@ -150,12 +171,62 @@ Item {
                 Repeater {
                     model: view.volumes
 
-                    // The roles are declared by `VolumeRow` itself and injected here by the
-                    // repeater. Re-declaring them is a duplicate name, and a delegate that
-                    // fails to be created fails quietly — the list simply stays empty.
-                    VolumeRow {
+                    // A row is a file, a gap, a separator or a stretch of chapters, and
+                    // the four are read in one column. A loader picks the shape rather than
+                    // one component drawing four things and hiding three.
+                    //
+                    // The three components are declared **inside** the loader: a component
+                    // resolves its bindings in the scope it was written in, and one written
+                    // beside the repeater cannot see the row.
+                    Loader {
+                        id: line
+
+                        required property string entryId
+                        required property string number
+                        required property string title
+                        required property string pages
+                        required property int state
+                        required property real howFarRead
+                        required property string timesFinished
+                        required property int kind
+                        required property string detail
+                        required property int depth
+
                         width: parent.width
-                        neverReadWord: SeriesCaptions.neverRead
+                        sourceComponent: kind === 2 ? arcSeparator
+                                       : kind === 3 ? chapterStretch
+                                                    : volumeLine
+
+                        Component {
+                            id: volumeLine
+
+                            VolumeRow {
+                                entryId: line.entryId
+                                number: line.number
+                                title: line.title
+                                pages: line.pages
+                                state: line.state
+                                howFarRead: line.howFarRead
+                                timesFinished: line.timesFinished
+                                neverReadWord: SeriesCaptions.neverRead
+                            }
+                        }
+
+                        Component {
+                            id: arcSeparator
+
+                            ArcRow {
+                                name: line.title
+                                range: line.detail
+                                depth: line.depth
+                            }
+                        }
+
+                        Component {
+                            id: chapterStretch
+
+                            ChapterRange { range: line.detail }
+                        }
                     }
                 }
 
@@ -177,6 +248,13 @@ Item {
                 credits: view.page.credits
                 nature: view.page.nature
                 holding: view.page.holding
+            }
+
+            ElsewhereTab {
+                width: parent.width
+                visible: view.current === view.elsewhereTab
+                page: view.page
+                onEditionChosen: seriesId => view.goToEdition(seriesId)
             }
         }
     }

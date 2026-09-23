@@ -178,12 +178,20 @@ QVariantList Series::editions() const
     if (m_siblings.size() < 2)
         return said;
     for (const Api::Series &one : m_siblings) {
+        // The keys a tile is drawn from, which are the same here as in the universe block:
+        // one shape, because a series is drawn the same way wherever it appears and two
+        // shapes would be two delegates the day one of them gains a field.
         said.append(QVariantMap{
-            {u"identifier"_s, one.id},
+            {u"seriesId"_s, one.id},
             // An implicit edition has no name of its own — nothing would ever show it — so
             // the work's name stands in rather than a blank pill.
             {u"name"_s, one.edition.value_or(one.work)},
-            {u"count"_s, Words::volumes(one.holding.ownedVolumes, one.medium)},
+            {u"detail"_s, Words::volumes(one.holding.ownedVolumes, one.medium)},
+            {u"cover"_s, m_server == nullptr
+                             ? QString()
+                             : m_server->address() + u"/series/"_s + one.id + u"/cover"_s},
+            {u"inProgress"_s, one.holding.readStatus == Api::ReadStatus::InProgress},
+            {u"howFarRead"_s, Api::howFarRead(one)},
             {u"here"_s, one.id == m_id},
         });
     }
@@ -208,6 +216,11 @@ QVariantList Series::missingVolumes() const
     for (const double one : m_one->holding.missingVolumes)
         said.append(one);
     return said;
+}
+
+int Series::arcCount() const
+{
+    return m_one.has_value() ? int(m_one->counts.arcs) : 0;
 }
 
 void Series::point(const QString &identifier)

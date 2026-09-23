@@ -1390,6 +1390,49 @@ QString readEntries(int finished, bool oneOpen, int which)
                                                                              : u"ᵉ"_s);
 }
 
+namespace {
+
+/// « tomes » or « chapitres », and the singular that French keeps at one.
+QString unitWord(bool volumes, bool one)
+{
+    if (volumes)
+        return one ? u"tome"_s : u"tomes"_s;
+    return one ? u"chapitre"_s : u"chapitres"_s;
+}
+
+} // namespace
+
+QString arcRange(Api::Arc::Unit unit, double from, double to)
+{
+    const bool volumes = unit == Api::Arc::Unit::Volume;
+    // A range of one is a range all the same — an arc that covers a single volume says so
+    // rather than repeating the number twice.
+    if (std::abs(to - from) < 0.0001)
+        return u"%1 %2"_s.arg(unitWord(volumes, true), number(from));
+    return u"%1 %2 à %3"_s.arg(unitWord(volumes, false), number(from), number(to));
+}
+
+QString chapterRange(double from, double to)
+{
+    return arcRange(Api::Arc::Unit::Chapter, from, to);
+}
+
+QString fromChapter(double from)
+{
+    return u"à partir du chapitre %1"_s.arg(number(from));
+}
+
+QString stepRange(const Api::ReadingStep &step)
+{
+    if (!step.from.has_value() || !step.to.has_value())
+        return {};
+    // A volume step counts in the edition's own word, a chapter step in chapters. The unit is
+    // absent for a whole work, and a whole work has no range to write.
+    const bool volumes = step.unit == Api::ReadingStep::Unit::Volume;
+    return arcRange(volumes ? Api::Arc::Unit::Volume : Api::Arc::Unit::Chapter, *step.from,
+                    *step.to);
+}
+
 QString volumesAxis()
 {
     return u"les tomes"_s;
@@ -1398,6 +1441,38 @@ QString volumesAxis()
 QString noVolumeByThatName()
 {
     return u"Aucun tome ne porte ce nom."_s;
+}
+
+QString sameWorkOtherwise()
+{
+    return u"La même œuvre, autrement"_s;
+}
+
+QString inTheUniverse()
+{
+    return u"Dans l’univers"_s;
+}
+
+QString universeLine(const QString &name, int others)
+{
+    if (others <= 0 || name.isEmpty())
+        return name;
+    return name + u" · "_s + counted(others, u"autre"_s, u"autres"_s);
+}
+
+QString outsideTheOrder()
+{
+    return u"Hors parcours"_s;
+}
+
+QString seriesCount(int count)
+{
+    return count <= 0 ? QString() : counted(count, u"série"_s, u"séries"_s);
+}
+
+QString hereToo(const QString &detail)
+{
+    return detail.isEmpty() ? u"ici"_s : detail + u" · ici"_s;
 }
 
 } // namespace Words

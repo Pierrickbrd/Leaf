@@ -89,13 +89,6 @@ Item {
                     fillMode: Image.PreserveAspectCrop
                 }
 
-                // A mark, not a measure. It used to span the cover's whole width in the
-                // emerald the band above draws its progress bar with — the same colour, the
-                // same four pixels, one of them saying « how far » and the other « started
-                // ». Read as a bar it claimed a series was finished the moment it was
-                // opened. A short segment cannot be mistaken for a fraction of anything,
-                // and the shelf has no fraction to show: nothing in a series row says how
-                // many of its volumes have been read.
                 // How far through the series, drawn as the fraction it is.
                 //
                 // It spanned the cover's whole width whenever a series was merely started,

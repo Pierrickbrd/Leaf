@@ -47,6 +47,59 @@ private slots:
         QCOMPARE(Words::fact(Held), u"Tomes détenus"_s);
     }
 
+    /// A range in its own unit, and never inferred from where the next separator falls: an
+    /// arc does not end where the one below it starts.
+    void an_arc_writes_its_range_in_its_own_unit()
+    {
+        using enum Api::Arc::Unit;
+        QCOMPARE(Words::arcRange(Volume, 1, 4), u"tomes 1 à 4"_s);
+        QCOMPARE(Words::arcRange(Chapter, 42, 68), u"chapitres 42 à 68"_s);
+        // A range of one is a range all the same, and says so once rather than twice.
+        QCOMPARE(Words::arcRange(Volume, 7, 7), u"tome 7"_s);
+        QCOMPARE(Words::arcRange(Chapter, 12.5, 12.5), u"chapitre 12,5"_s);
+    }
+
+    /// The two halves of a file an arc runs through — and the open one, for the last file of
+    /// an edition, which has no neighbour to bound it.
+    void the_stretches_inside_a_crossed_volume_are_written_open_at_the_end()
+    {
+        QCOMPARE(Words::chapterRange(64, 68), u"chapitres 64 à 68"_s);
+        QCOMPARE(Words::fromChapter(69), u"à partir du chapitre 69"_s);
+    }
+
+    /// The two blocks of the last tab, titled apart because they are not the same intention.
+    void the_last_tab_titles_its_two_blocks_apart()
+    {
+        QCOMPARE(Words::sameWorkOtherwise(), u"La même œuvre, autrement"_s);
+        QCOMPARE(Words::inTheUniverse(), u"Dans l’univers"_s);
+        QCOMPARE(Words::outsideTheOrder(), u"Hors parcours"_s);
+        QCOMPARE(Words::seriesCount(1), u"1 série"_s);
+        QCOMPARE(Words::seriesCount(4), u"4 séries"_s);
+        // Nothing to count is no line, rather than « 0 série » under a heading that is not
+        // drawn either.
+        QVERIFY(Words::seriesCount(0).isEmpty());
+    }
+
+    /// The name of the universe, and how many others it holds — the count drops with its
+    /// separator when a walk is being drawn, because the walk counts its own steps.
+    void the_universe_line_counts_the_others_and_never_itself()
+    {
+        QCOMPARE(Words::universeLine(u"Terres d'Arran"_s, 3), u"Terres d'Arran · 3 autres"_s);
+        QCOMPARE(Words::universeLine(u"Terres d'Arran"_s, 1), u"Terres d'Arran · 1 autre"_s);
+        QCOMPARE(Words::universeLine(u"Terres d'Arran"_s, 0), u"Terres d'Arran"_s);
+        QVERIFY(Words::universeLine(QString(), 3).isEmpty());
+    }
+
+    /// « ici » goes on the tile's own grey line: a tile has one, and a mark floating over a
+    /// cover would have to be placed again at every size.
+    void the_tile_being_read_says_so_on_the_line_it_already_has()
+    {
+        QCOMPARE(Words::hereToo(u"29 albums"_s), u"29 albums · ici"_s);
+        // A step covering a whole work of an edition nobody holds has no count to carry, and
+        // « ici » still has to be said.
+        QCOMPARE(Words::hereToo(QString()), u"ici"_s);
+    }
+
     void a_number_is_written_the_way_french_writes_it()
     {
         // A 3.5 is a side story, and « Tome 3.5 » is English.

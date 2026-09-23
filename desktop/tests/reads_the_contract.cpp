@@ -451,6 +451,104 @@ private slots:
         QVERIFY(!got.ok());
     }
 
+    /// A range, with the unit its bounds are counted in. An unfamiliar unit makes a chapter
+    /// range — the format's ordinary one — and the arc still stands: a word this client has
+    /// not been taught is no reason to drop a stretch of the story.
+    void an_arc_is_a_range_and_keeps_its_place_when_its_unit_is_unfamiliar()
+    {
+        const QJsonObject range{{u"id"_s, u"a1"_s},      {u"name"_s, u"Baratié"_s},
+                                {u"unit"_s, u"VOLUME"_s}, {u"from"_s, 42.0},
+                                {u"to"_s, 68.5},          {u"position"_s, 1}};
+        const Api::Read<Api::Arc> got = Api::arc(range);
+        QVERIFY(got.ok());
+        QCOMPARE(got.value->name, u"Baratié"_s);
+        QCOMPARE(got.value->unit, Api::Arc::Unit::Volume);
+        QCOMPARE(got.value->to, 68.5);
+        QVERIFY(!got.value->parentId.has_value());
+
+        QJsonObject odd = range;
+        odd[u"unit"_s] = u"SAISON"_s;
+        QCOMPARE(Api::arc(odd).value->unit, Api::Arc::Unit::Chapter);
+
+        QJsonObject held = range;
+        held[u"parentId"_s] = u"east-blue"_s;
+        QCOMPARE(Api::arc(held).value->parentId, std::optional<QString>(u"east-blue"_s));
+
+        QJsonObject boundless = range;
+        boundless.remove(u"to"_s);
+        QVERIFY(!Api::arc(boundless).ok());
+    }
+
+    /// A step is a stretch of one work. `seriesId` is on a volume range and never on a
+    /// chapter one, because "volumes 1 to 7" is different content in two editions while a
+    /// chapter number identifies the same story in both.
+    void a_step_of_a_reading_order_names_the_work_and_sometimes_the_edition()
+    {
+        const QJsonObject whole{{u"workId"_s, u"elfes"_s}, {u"work"_s, u"Elfes"_s}};
+        const Api::Read<Api::ReadingStep> plain = Api::readingStep(whole);
+        QVERIFY(plain.ok());
+        QCOMPARE(plain.value->work, u"Elfes"_s);
+        // Absent for the whole work, which the contract calls the common case.
+        QVERIFY(!plain.value->unit.has_value());
+        QVERIFY(!plain.value->from.has_value());
+
+        QJsonObject part = whole;
+        part[u"unit"_s] = u"VOLUME"_s;
+        part[u"seriesId"_s] = u"albums"_s;
+        part[u"series"_s] = u"Albums"_s;
+        part[u"from"_s] = 1.0;
+        part[u"to"_s] = 7.0;
+        const Api::Read<Api::ReadingStep> ranged = Api::readingStep(part);
+        QCOMPARE(ranged.value->unit, std::optional<Api::ReadingStep::Unit>(
+                                         Api::ReadingStep::Unit::Volume));
+        QCOMPARE(ranged.value->seriesId, std::optional<QString>(u"albums"_s));
+        QCOMPARE(ranged.value->to, std::optional<double>(7.0));
+
+        QVERIFY(!Api::readingStep(QJsonObject{{u"work"_s, u"Elfes"_s}}).ok());
+    }
+
+    /// An order with no steps is not a way through anything, so an absent list is a refusal
+    /// and not an empty one — which is the opposite of how genres are read.
+    void an_order_is_its_steps_and_refuses_to_be_read_without_them()
+    {
+        const QJsonObject order{
+            {u"id"_s, u"chrono"_s},
+            {u"name"_s, u"Chronologique"_s},
+            {u"default"_s, true},
+            {u"steps"_s, QJsonArray{QJsonObject{{u"workId"_s, u"nains"_s},
+                                                {u"work"_s, u"Nains"_s}}}},
+        };
+        const Api::Read<Api::ReadingOrder> got = Api::readingOrder(order);
+        QVERIFY(got.ok());
+        QVERIFY(got.value->isDefault);
+        QCOMPARE(got.value->steps.size(), 1);
+        QCOMPARE(got.value->steps.constFirst().work, u"Nains"_s);
+
+        QJsonObject stepless = order;
+        stepless.remove(u"steps"_s);
+        QVERIFY(!Api::readingOrder(stepless).ok());
+
+        QJsonObject odd = order;
+        odd[u"steps"_s] = QJsonArray{42};
+        QVERIFY(!Api::readingOrder(odd).ok());
+
+        QJsonObject broken = order;
+        broken[u"steps"_s] = QJsonArray{QJsonObject{{u"work"_s, u"Nains"_s}}};
+        QVERIFY(!Api::readingOrder(broken).ok());
+    }
+
+    /// `orderCount` is the guard: a screen knows before it asks whether there is anything to
+    /// ask for. Usually nought.
+    void a_universe_says_how_many_ways_through_it_it_declares()
+    {
+        const Api::Read<Api::Universe> got = Api::universe(
+            QJsonObject{{u"id"_s, u"u-arran"_s}, {u"name"_s, u"Terres d'Arran"_s},
+                        {u"orderCount"_s, 2}});
+        QVERIFY(got.ok());
+        QCOMPARE(got.value->orderCount, 2);
+        QVERIFY(!Api::universe(QJsonObject{{u"id"_s, u"u"_s}}).ok());
+    }
+
     /// The client had never read a file. `UpNext` carried a few entry fields inline, so a
     /// list of volumes had no type to be made of.
     void an_entry_is_a_file_and_a_kind_it_does_not_have_to_know()

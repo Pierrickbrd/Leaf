@@ -45,6 +45,31 @@ public:
         return value.toInt();
     }
 
+    /// A number that has to be there, and may be a half: an arc bound is 68 or 68.5, and a
+    /// volume number is a half as often as not.
+    double real(QStringView name)
+    {
+        const QJsonValue value = m_from.value(name);
+        if (!value.isDouble()) {
+            complain(name, QStringLiteral("a number"));
+            return 0;
+        }
+        return value.toDouble();
+    }
+
+    /// A list that has to be there. `words` takes an absent one for an empty one, which is
+    /// right for genres and wrong for the steps of an order: an order with no steps is not a
+    /// way through anything.
+    QJsonArray array(QStringView name)
+    {
+        const QJsonValue value = m_from.value(name);
+        if (!value.isArray()) {
+            complain(name, QStringLiteral("a list"));
+            return {};
+        }
+        return value.toArray();
+    }
+
     QJsonObject object(QStringView name)
     {
         const QJsonValue value = m_from.value(name);
@@ -296,6 +321,19 @@ QString spell(ReadStatus value)
         return QStringLiteral("UNREAD");
     }
     return QStringLiteral("UNREAD");
+}
+
+double howFarRead(const Series &one)
+{
+    const int whole = one.counts.entries;
+    if (whole <= 0)
+        return 0.0;
+    // The finished volumes **and** the page somebody stopped on in the one they are in:
+    // « tome 12, page 156 » is eleven whole and 0.82 of a twelfth. Counting only the whole
+    // ones made the bar jump a volume at a time and sit still in between, which on a
+    // twenty-one volume series is most of the time.
+    const double read = one.holding.readEntries + one.holding.partRead;
+    return qBound(0.0, read / whole, 1.0);
 }
 
 Read<Series> series(const QJsonObject &from)
@@ -658,6 +696,81 @@ Read<Progress> progress(const QJsonObject &from)
     // Absent at nought, like every other count in these answers.
     where.timesFinished = field.maybeWhole(u"timesFinished"_s).value_or(0);
     return {where, {}};
+}
+
+Read<Arc> arc(const QJsonObject &from)
+{
+    Fields field(from);
+    Arc one;
+    one.id = field.text(u"id"_s);
+    one.name = field.text(u"name"_s);
+    one.from = field.real(u"from"_s);
+    one.to = field.real(u"to"_s);
+    one.position = field.whole(u"position"_s);
+    const QString unit = field.text(u"unit"_s);
+    if (field.broken())
+        return refused<Arc>(QStringLiteral("arc"), field.trouble());
+
+    // An unfamiliar unit makes a chapter range, which is what the format calls the ordinary
+    // one. The arc still stands: a word this client has not been taught is not a reason to
+    // drop a stretch of the story.
+    one.unit = (unit == u"VOLUME"_s) ? Arc::Unit::Volume : Arc::Unit::Chapter;
+    one.parentId = field.maybeText(u"parentId"_s);
+    return {one, {}};
+}
+
+Read<ReadingStep> readingStep(const QJsonObject &from)
+{
+    Fields field(from);
+    ReadingStep step;
+    step.workId = field.text(u"workId"_s);
+    step.work = field.text(u"work"_s);
+    if (field.broken())
+        return refused<ReadingStep>(QStringLiteral("readingStep"), field.trouble());
+
+    if (const auto unit = field.maybeText(u"unit"_s); unit.has_value())
+        step.unit = (*unit == u"VOLUME"_s) ? ReadingStep::Unit::Volume
+                                           : ReadingStep::Unit::Chapter;
+    step.seriesId = field.maybeText(u"seriesId"_s);
+    step.series = field.maybeText(u"series"_s);
+    step.from = field.maybeReal(u"from"_s);
+    step.to = field.maybeReal(u"to"_s);
+    return {step, {}};
+}
+
+Read<ReadingOrder> readingOrder(const QJsonObject &from)
+{
+    Fields field(from);
+    ReadingOrder order;
+    order.id = field.text(u"id"_s);
+    order.name = field.text(u"name"_s);
+    const QJsonArray steps = field.array(u"steps"_s);
+    if (field.broken())
+        return refused<ReadingOrder>(QStringLiteral("readingOrder"), field.trouble());
+
+    order.isDefault = from.value(u"default"_s).toBool(false);
+    for (const QJsonValue &one : steps) {
+        if (!one.isObject())
+            return refused<ReadingOrder>(QStringLiteral("readingOrder.steps"),
+                                         QStringLiteral("expected an object"));
+        const Read<ReadingStep> step = readingStep(one.toObject());
+        if (!step.ok())
+            return refused<ReadingOrder>(QStringLiteral("readingOrder.steps"), step.trouble);
+        order.steps.append(*step.value);
+    }
+    return {order, {}};
+}
+
+Read<Universe> universe(const QJsonObject &from)
+{
+    Fields field(from);
+    Universe one;
+    one.id = field.text(u"id"_s);
+    one.name = field.text(u"name"_s);
+    one.orderCount = field.whole(u"orderCount"_s);
+    if (field.broken())
+        return refused<Universe>(QStringLiteral("universe"), field.trouble());
+    return {one, {}};
 }
 
 // ——— L'import ———————————————————————————————————————————————————————————————

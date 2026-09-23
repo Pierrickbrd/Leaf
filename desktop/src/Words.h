@@ -274,6 +274,26 @@ QString colour(bool coloured);
 /// ordinal is worth the trouble: « le 5 en cours » reads as a quantity.
 QString readEntries(int finished, bool oneOpen, int which);
 
+/// « tomes 1 à 4 », « chapitres 42 à 68 » — an arc's range, in its own unit. The range is
+/// written beside the name and never inferred from where the next separator falls: an arc
+/// does not end where the one below it starts, which is the whole reason it is a range.
+QString arcRange(Api::Arc::Unit unit, double from, double to);
+
+/// « chapitres 64 à 68 » — a stretch of chapters inside one volume, shown under the line of
+/// the volume an arc crosses. Two of them and a marker between, rather than the list of the
+/// chapters themselves: a range is not something one opens, so `startPage` — null on most
+/// libraries — is missed by nobody.
+QString chapterRange(double from, double to);
+
+/// « à partir du chapitre 69 » — the same, for the last volume of an edition, which has no
+/// neighbour to give it an upper bound. Open, the way the format writes its ranges open.
+QString fromChapter(double from);
+
+/// « albums 1 à 7 » — the stretch of a work a step of a reading order covers, in the unit the
+/// step counts in. A step with no bounds covers the whole work and says nothing, which the
+/// contract calls the common case.
+QString stepRange(const Api::ReadingStep &step);
+
 /// « les tomes » — the axis the field of a series page narrows, handed to `searchWithin`
 /// rather than spelled into a sentence of its own. One rule writes « Chercher dans … », and
 /// a second copy of it would be a second thing to keep in step.
@@ -282,6 +302,32 @@ QString volumesAxis();
 /// « Aucun tome ne porte ce nom. » — said under an emptied list rather than leaving a blank,
 /// the way the shelf says it of a search that found nothing.
 QString noVolumeByThatName();
+
+// ——— Where to go from a series that is not this series ————————————————————————————
+
+/// « La même œuvre, autrement » and « Dans l'univers » — the two blocks of the last tab,
+/// titled apart because they are not the same intention: changing edition is this book in
+/// another binding, walking the universe is other books.
+QString sameWorkOtherwise();
+QString inTheUniverse();
+
+/// « Terres d'Arran · 3 autres » — the universe a series belongs to and how many other series
+/// it holds, on one line. The count drops with its separator when a way through is walked:
+/// that walk names its own steps, and a count beside them would be counting something else.
+QString universeLine(const QString &name, int others);
+
+/// « Hors parcours » and « 2 séries » — what a chosen way through does not name. Under its
+/// own heading rather than slipped onto the end, where it would read as the end of the walk.
+QString outsideTheOrder();
+QString seriesCount(int count);
+
+/// « 29 albums · ici » — what a tile says under its name, with the mark that it is the one
+/// being read. Appended to that line rather than drawn beside it: a tile has one grey line,
+/// and a mark floating over a cover would have to be placed again at every size.
+///
+/// Lower case and in full: it marks a list one looks at, not an item one chose — the
+/// switcher above, which *is* a choice, marks its own with a tint instead.
+QString hereToo(const QString &detail);
 
 /// « Vouliez-vous dire Tsugumi Ōba ? » — the approximate guess, and only when the search
 /// found nothing at all. A guess shown like an exact hit costs more trust than finding
