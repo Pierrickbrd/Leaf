@@ -903,15 +903,16 @@ impl Scanner {
         cx.execute(
             "INSERT INTO edition (id, work_id, name, path, implicit, publisher, status, medium,
                                   cover_file, reading_direction, volume_count, format, language,
-                                  collection, colour)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                                  collection, colour, summary)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
              ON CONFLICT(id) DO UPDATE SET
                path=excluded.path,
                work_id=excluded.work_id, name=excluded.name, implicit=excluded.implicit,
                publisher=excluded.publisher, status=excluded.status, medium=excluded.medium,
                cover_file=excluded.cover_file, reading_direction=excluded.reading_direction,
                volume_count=excluded.volume_count, format=excluded.format, language=excluded.language,
-               collection=excluded.collection, colour=excluded.colour",
+               collection=excluded.collection, colour=excluded.colour,
+               summary=excluded.summary",
             rusqlite::params![
                 id,
                 work_id,
@@ -934,6 +935,11 @@ impl Scanner {
                     &defaults.collection
                 ),
                 meta.as_ref().and_then(|m| m.colour).or(defaults.colour),
+                // No default from the work: an edition that says nothing about itself falls
+                // back to the work's summary at the moment it is read, not by having the
+                // work's copied into its row. Copied, the day somebody edits the work the
+                // editions would go on saying what it used to say.
+                meta.as_ref().and_then(|m| m.summary.clone()),
             ],
         )?;
         report.editions += 1;

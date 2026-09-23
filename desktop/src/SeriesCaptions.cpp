@@ -102,6 +102,16 @@ QString SeriesCaptions::volumesAxis() const
     return Words::volumesAxis();
 }
 
+QString SeriesCaptions::asList() const
+{
+    return Words::viewAsList();
+}
+
+QString SeriesCaptions::asGrid() const
+{
+    return Words::viewAsGrid();
+}
+
 QString SeriesCaptions::nothingFound() const
 {
     return narrowedToNothing() ? Words::noVolumeByThatName() : QString();

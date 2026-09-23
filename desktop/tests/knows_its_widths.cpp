@@ -103,6 +103,16 @@ private slots:
 
     /// `bandLabel` is read only from QML today — the card's second line in `Main.qml` — so
     /// nothing here had called it before.
+    /// A mark on a cover follows the cover, within bounds: a speck at 22 on a cover three
+    /// hundred wide went unseen, and a sixth of the cover up to 40 hid too much of it.
+    void a_mark_on_a_cover_follows_the_cover_between_two_bounds()
+    {
+        QCOMPARE(Widths::markOn(Widths::MinimumCoverWidth), 22);
+        QCOMPARE(Widths::markOn(208), 26);
+        QCOMPARE(Widths::markOn(300), 30);
+        QCOMPARE(Widths::markOn(600), 30);
+    }
+
     void the_band_label_is_the_bands_own_name_in_french()
     {
         Widths widths;

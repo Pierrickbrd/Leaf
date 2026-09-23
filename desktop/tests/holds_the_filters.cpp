@@ -6,6 +6,8 @@
 
 #include "Filters.h"
 #include "Shelf.h"
+
+#include <utility>
 #include "Pretend.h"
 #include "Server.h"
 #include "Settings.h"
@@ -271,6 +273,81 @@ private slots:
         // A single medium filters nothing, so that axis is not offered over files either.
         QVERIFY(m_filters->fileMedia().isEmpty());
         QCOMPARE(valueOf(m_filters->fileReadStatuses(), 0), u"UNREAD"_s);
+    }
+
+    /// Asked again when the library changes, and without emptying first: « Terminées 1 »
+    /// stayed at one after a series was marked read, and a pill that blinked out for the
+    /// length of a request would be a pill moving under the pointer.
+    void a_refresh_keeps_the_counts_until_the_new_ones_arrive()
+    {
+        m_pretend->answers(200, answer(counted({{u"UNREAD"_s, 9}, {u"READ"_s, 1}}),
+                                       counted({{u"manga"_s, 4}, {u"bd"_s, 2}})));
+        m_filters->reload();
+        settle();
+        QCOMPARE(countOf(m_filters->readStatuses(), 1), 1);
+
+        m_pretend->heard.clear();
+        m_pretend->answers(200, answer(counted({{u"UNREAD"_s, 8}, {u"READ"_s, 2}}),
+                                       counted({{u"manga"_s, 4}, {u"bd"_s, 2}})));
+        m_filters->refresh();
+        QCOMPARE(countOf(m_filters->readStatuses(), 1), 1);
+        QTRY_COMPARE(countOf(m_filters->readStatuses(), 1), 2);
+        QCOMPARE(countOf(m_filters->readStatuses(), 0), 8);
+        QVERIFY(m_pretend->heard.contains("GET /filters"));
+    }
+
+    /// A series on the shelf marked read moves « Non lues » down one and « Terminées » up one,
+    /// and asks nothing: the shelf knew what it was, the server has said what it is.
+    void a_series_read_on_the_shelf_moves_two_counts_without_a_question()
+    {
+        m_pretend->answers(200, answer(counted({{u"UNREAD"_s, 9}, {u"READ"_s, 1}}),
+                                       counted({{u"manga"_s, 4}, {u"bd"_s, 2}})));
+        m_filters->reload();
+        settle();
+        m_pretend->heard.clear();
+
+        emit m_shelf->taken(true, std::to_underlying(Api::ReadStatus::Unread),
+                            std::to_underlying(Api::ReadStatus::Read));
+        QCOMPARE(labelOf(m_filters->readStatuses(), 0), u"Non lues 8"_s);
+        QCOMPARE(labelOf(m_filters->readStatuses(), 1), u"Terminées 2"_s);
+        QVERIFY(!m_pretend->heard.contains("GET /filters"));
+
+        // A status nobody counted yet joins the row; one counted down to nothing leaves it.
+        emit m_shelf->taken(true, std::to_underlying(Api::ReadStatus::Read),
+                            std::to_underlying(Api::ReadStatus::InProgress));
+        QCOMPARE(m_filters->readStatuses().size(), 3);
+        QCOMPARE(countOf(m_filters->readStatuses(), 1), 1);
+        QVERIFY(!m_pretend->heard.contains("GET /filters"));
+    }
+
+    /// Not on the shelf, what it was before is not known here — and a count moved on a guess
+    /// is wrong until the next scan. So it is asked.
+    void a_series_the_shelf_did_not_hold_has_the_counts_asked_again()
+    {
+        m_pretend->answers(200, answer(counted({{u"UNREAD"_s, 9}, {u"READ"_s, 1}}),
+                                       counted({{u"manga"_s, 4}, {u"bd"_s, 2}})));
+        m_filters->reload();
+        settle();
+        m_pretend->heard.clear();
+
+        emit m_shelf->taken(false, -1, std::to_underlying(Api::ReadStatus::Read));
+        QTRY_VERIFY(m_pretend->heard.contains("GET /filters"));
+    }
+
+    /// And while something is searched for, the counts over files are asked again with them.
+    void a_refresh_during_a_search_counts_the_files_again()
+    {
+        m_pretend->answers(200, answer(counted({{u"UNREAD"_s, 57}, {u"READ"_s, 3}}),
+                                       counted({{u"manga"_s, 60}})));
+        m_shelf->searchFor(u"koro"_s);
+        for (int i = 0; i < 300 && m_filters->fileReadStatuses().isEmpty(); ++i)
+            QTest::qWait(10);
+        QCOMPARE(countOf(m_filters->fileReadStatuses(), 1), 3);
+
+        m_pretend->answers(200, answer(counted({{u"UNREAD"_s, 50}, {u"READ"_s, 10}}),
+                                       counted({{u"manga"_s, 60}})));
+        m_filters->refresh();
+        QTRY_COMPARE(countOf(m_filters->fileReadStatuses(), 1), 10);
     }
 
     /// And when the field is cleared there is no list of files, so the row that counted them

@@ -93,7 +93,24 @@ private:
                 return false;
             const QByteArray one = request.left(whole);
             request.remove(0, whole);
-            socket->write(answerFor ? answerFor(one) : answer);
+            QByteArray reply = answerFor ? answerFor(one) : answer;
+            // Nothing to say is a server that never answers, so the connection is held open
+            // rather than closed. Closed without a byte, it read as a server that hung up, the
+            // request failed, and the card a test meant to keep « in flight » went to `Failed`
+            // before the assertion could look at it.
+            if (reply.isEmpty())
+                return false;
+            // Said, when this answer is the last before hanging up. A server closing a
+            // connection it did not announce closing leaves the client a socket it believes
+            // reusable: the next request goes down it and meets the close. Qt sends a GET
+            // again on its own; a POST it does not, so an import asked for just after the
+            // shelf's three questions failed before reaching here — one run in five alone,
+            // most runs in the whole suite.
+            const qsizetype statusEnd = reply.indexOf("\r\n");
+            if (request.isEmpty() && reply.startsWith("HTTP/") && statusEnd > 0
+                && !reply.toLower().contains("\r\nconnection:"))
+                reply.insert(statusEnd + 2, "Connection: close\r\n");
+            socket->write(reply);
             socket->flush();
             // Closed only once there is nothing left to answer: a client that pipelined two
             // requests down one connection is still waiting for the second.

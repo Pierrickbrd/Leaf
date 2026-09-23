@@ -166,7 +166,47 @@ private slots:
         QVERIFY(m_resume->cover().isEmpty());
     }
 
-    void a_server_that_says_no_leaves_no_stale_offer_and_says_why()
+    /// Asking is not emptying. The card was cleared at the moment the question went out, so
+    /// the band went to nothing and its height with it, and everything under it jumped up and
+    /// came back down when the answer landed — on every volume marked read, for an answer
+    /// that says what it said before. `Series::reload` and `Entries::reload` both say of
+    /// themselves that they keep what is on screen; this one did not, and was the only one.
+    void asking_again_keeps_the_band_until_there_is_something_to_replace_it()
+    {
+        m_pretend->answers(200, offers({anOffer()}));
+        m_resume->reload();
+        settle();
+        QVERIFY(m_resume->available());
+        const QString held = m_resume->seriesName();
+
+        m_resume->reload();
+        QVERIFY2(m_resume->available(), "the band went out while the question was in flight");
+        QCOMPARE(m_resume->seriesName(), held);
+        QVERIFY(m_resume->loading());
+        settle();
+        QVERIFY(m_resume->available());
+    }
+
+    /// And a refusal is not an answer either. What is drawn is what the server last said, and
+    /// a question nobody could answer is no reason to take the offer away.
+    void a_server_that_says_no_keeps_what_it_last_said_and_says_why()
+    {
+        m_pretend->answers(200, offers({anOffer()}));
+        m_resume->reload();
+        settle();
+        const QString held = m_resume->seriesName();
+
+        m_pretend->answers(500, "{}");
+        m_resume->reload();
+        settle();
+
+        QVERIFY(m_resume->available());
+        QCOMPARE(m_resume->seriesName(), held);
+        QVERIFY(!m_resume->loading());
+        QVERIFY(!m_resume->trouble().isEmpty());
+    }
+
+    void a_server_that_says_no_from_the_start_offers_nothing_and_says_why()
     {
         m_pretend->answers(500, "{}");
         m_resume->reload();

@@ -167,7 +167,7 @@ private slots:
             {false, "paper", 6.90}, {false, "surface", 7.48},
             {false, "onBar", 6.88}, {false, "alertWash", 6.76},
             {true,  "paper", 5.71}, {true,  "surface", 5.30},
-            {true,  "onBar", 4.88}, {true,  "alertWash", 5.22},
+            {true,  "onBar", 4.88}, {true,  "alertWash", 5.23},
         };
 
         for (const Pair &pair : pairs) {

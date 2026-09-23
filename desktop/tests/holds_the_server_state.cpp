@@ -244,6 +244,8 @@ private slots:
         settle([&scan] { return scan.running(); });
         QVERIFY(scan.running());
         QCOMPARE(scan.stateLabel(), Words::scanState(Words::Scanning::Running));
+        // No `finishedAt` while it runs, and that is not « Jamais lancé » under « En cours… ».
+        QCOMPARE(scan.lastScanLabel(), Words::scanStarted(1788463365455LL));
         QCOMPARE(finished.count(), 0);
 
         m_pretend->answers(200, asJson({{u"state"_s, u"DONE"_s},

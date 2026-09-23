@@ -73,6 +73,7 @@ Item {
         }
 
         TapHandler {
+            gesturePolicy: TapHandler.ReleaseWithinBounds
             onTapped: axisItem.open = !axisItem.open
         }
 
@@ -157,14 +158,17 @@ Item {
             width: body.width
             height: Math.min(axisItem.showing.length, axisItem.atMostOnScreen)
                     * axisItem.rowHeight
-            model: axisItem.showing
+            // A count, for the reason `FilterPills` gives: a row changes its number in place.
+            model: axisItem.showing.length
             clip: true
             interactive: axisItem.showing.length > axisItem.atMostOnScreen
             boundsBehavior: Flickable.StopAtBounds
             cacheBuffer: axisItem.rowHeight * 2
 
             delegate: FilterValueRow {
-                required property var modelData
+                required property int index
+                readonly property var modelData: axisItem.showing[index]
+                                                 ?? ({ "value": "", "label": "" })
 
                 width: rows.width
                 height: axisItem.rowHeight

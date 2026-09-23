@@ -23,6 +23,7 @@
 #include "Server.h"
 
 #include <QObject>
+#include <optional>
 #include <QQmlEngine>
 #include <QString>
 #include <QVariantList>
@@ -86,6 +87,12 @@ public:
     bool tooManyValues() const { return m_tooMany; }
 
     Q_INVOKABLE void reload();
+    /// Asked again because the library changed under the counts — a series marked read, a
+    /// book taken off the disk, a scan — and not because the reader narrowed it. Unlike
+    /// `reload`, nothing is emptied first: the pills keep their numbers until the new ones
+    /// arrive, rather than vanishing from under the pointer for the length of a request.
+    /// The file counts are asked again with them, since a search may be showing.
+    Q_INVOKABLE void refresh();
 
 signals:
     /// Only when the offered axes are not the ones offered a moment ago. See the property.
@@ -99,6 +106,12 @@ private:
     void offer(QVariantList &held, QVariantList fresh);
 
     void took(const Server::Answer &answer);
+    /// Draws a set of series counts, from an answer or from the last one moved by hand.
+    void show(const Api::Facets &counted);
+    /// The series counts, asked again without emptying what is drawn.
+    void askAgain();
+    /// A series on the shelf changed read status, or might have: see `Shelf::taken`.
+    void follow(bool held, int before, int after);
     /// Asked for separately from the series counts and against the query in force, because
     /// the two answer different questions about different populations.
     void countFiles();
@@ -106,6 +119,9 @@ private:
 
     Server *m_server;
     Shelf *m_shelf;
+    /// The last series counts, kept so that a series marked read moves two of them by one
+    /// without a question. Empty until the first answer.
+    std::optional<Api::Facets> m_counted;
     QVariantList m_readStatuses;
     QVariantList m_media;
     QVariantList m_fileReadStatuses;

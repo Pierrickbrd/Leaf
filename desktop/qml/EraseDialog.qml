@@ -13,7 +13,7 @@ Popup {
     id: confirmation
 
     objectName: "erase-dialog"
-    width: Math.min(460, Overlay.overlay ? Overlay.overlay.width - 80 : 460)
+    width: Math.min(430, Overlay.overlay ? Overlay.overlay.width - 80 : 430)
     anchors.centerIn: Overlay.overlay
     padding: 0
     modal: true
@@ -23,26 +23,32 @@ Popup {
     onClosed: Erasure.dismiss()
 
     // Dimmed and not hidden: what is about to go is on the screen behind this.
+    // The design's own veil, and the same one the import dialog is laid under: what is about
+    // to go stays visible behind it, because one deletes something one can see.
     Overlay.modal: Rectangle {
-        color: Qt.rgba(0, 0, 0, Theme.dark ? 0.62 : 0.38)
+        color: Qt.rgba(12 / 255, 16 / 255, 14 / 255, 0.74)
     }
 
     background: Rectangle {
         objectName: "erase-surface"
         radius: Theme.cardRadius
-        color: Theme.paper
+        // A card, not the paper: a modal the colour of the page behind it has nothing but a
+        // hairline saying where the page stops and the question starts.
+        color: Theme.surface
         border.color: Theme.rule
         border.width: 1
         antialiasing: true
+
+        CardLift { level: CardLift.Modal }
     }
 
     Column {
         id: body
 
-        x: 22
-        y: 20
-        width: parent.width - 44
-        spacing: 12
+        x: 17
+        y: 16
+        width: parent.width - 34
+        spacing: 10
 
         Text {
             objectName: "erase-question"
@@ -50,29 +56,36 @@ Popup {
             text: Erasure.said.question ?? ""
             color: Theme.ink
             font.family: Theme.displayFamily
-            font.pixelSize: 17
-            font.weight: Font.DemiBold
+            font.pixelSize: 20
+            font.weight: Font.Bold
             wrapMode: Text.WordWrap
         }
 
-        Text {
+        // What goes and which file it is are one paragraph in two lines, not two blocks: they
+        // are one fact about one thing.
+        Column {
             width: parent.width
-            text: Erasure.said.what ?? ""
-            visible: text.length > 0
-            color: Theme.ink
-            font.family: Theme.textFamily
-            font.pixelSize: 13
-            wrapMode: Text.WordWrap
-        }
+            spacing: 1
 
-        Text {
-            width: parent.width
-            text: Erasure.said.file ?? ""
-            visible: text.length > 0
-            color: Theme.inkFaint
-            font.family: Theme.textFamily
-            font.pixelSize: 12
-            elide: Text.ElideMiddle
+            Text {
+                width: parent.width
+                text: Erasure.said.what ?? ""
+                visible: text.length > 0
+                color: Theme.ink
+                font.family: Theme.textFamily
+                font.pixelSize: 12
+                wrapMode: Text.WordWrap
+            }
+
+            Text {
+                width: parent.width
+                text: Erasure.said.file ?? ""
+                visible: text.length > 0
+                color: Theme.inkSoft
+                font.family: Theme.textFamily
+                font.pixelSize: 12
+                elide: Text.ElideMiddle
+            }
         }
 
         Text {
@@ -82,20 +95,23 @@ Popup {
             visible: text.length > 0
             color: Theme.inkSoft
             font.family: Theme.textFamily
-            font.pixelSize: 13
-            lineHeight: 1.35
+            font.pixelSize: 12
+            lineHeight: 1.4
             wrapMode: Text.WordWrap
         }
 
+        // Said plainly, in the colour of the two paragraphs above it. The design puts the
+        // garnet on the button and nowhere else: a modal where the prose shouts as loudly as
+        // the button is a modal where neither is read.
         Text {
             objectName: "erase-warning"
             width: parent.width
             text: Erasure.said.warning ?? ""
             visible: text.length > 0
-            color: Theme.alert
+            color: Theme.inkSoft
             font.family: Theme.textFamily
-            font.pixelSize: 13
-            lineHeight: 1.35
+            font.pixelSize: 12
+            lineHeight: 1.4
             wrapMode: Text.WordWrap
         }
 
@@ -105,7 +121,7 @@ Popup {
             visible: text.length > 0
             color: Theme.inkSoft
             font.family: Theme.textFamily
-            font.pixelSize: 13
+            font.pixelSize: 12
             wrapMode: Text.WordWrap
         }
 
@@ -145,13 +161,14 @@ Popup {
     Row {
         anchors.right: body.right
         anchors.top: body.bottom
-        anchors.topMargin: 18
-        anchors.bottomMargin: 20
-        spacing: 10
+        anchors.topMargin: 16
+        anchors.bottomMargin: 16
+        spacing: 8
 
-        ActionButton {
+        LeafTextAction {
             objectName: "erase-cancel"
             label: Erasure.cancelLabel
+            anchors.verticalCenter: parent.verticalCenter
             onTriggered: Erasure.dismiss()
         }
 
@@ -166,5 +183,5 @@ Popup {
 
     // The popup grows with what it says, which is not the same height for a file and for an
     // edition — and not the same again once the server has refused one.
-    implicitHeight: body.implicitHeight + 20 + 18 + 34 + 20
+    implicitHeight: body.implicitHeight + 16 + 16 + 32 + 16
 }

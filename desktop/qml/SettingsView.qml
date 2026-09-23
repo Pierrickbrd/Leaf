@@ -19,7 +19,8 @@ Item {
     id: page
 
     readonly property int general: 0
-    readonly property int library: 1
+    readonly property int notifications: 1
+    readonly property int library: 2
     property int section: general
 
     readonly property bool sideBySide: Widths.band === Widths.Wide
@@ -100,6 +101,79 @@ Item {
                     }
                 }
 
+                // Four lines and two columns of switches, in one card. Four cards of three
+                // pills would have filled the section to say the same thing, and a line makes
+                // room for a fifth family the day one asks for it.
+                SettingsCard {
+                    objectName: "settings-warnings"
+                    visible: page.section === page.notifications
+                    title: Preferences.warningsTitle
+
+                    Item {
+                        width: parent.width
+                        height: 18
+
+                        Text {
+                            x: heads.switches
+                            width: 54
+                            horizontalAlignment: Text.AlignHCenter
+                            text: Preferences.bubbleColumn
+                            color: Theme.inkFaint
+                            font.family: Theme.textFamily
+                            font.pixelSize: 10
+                            font.capitalization: Font.AllUppercase
+                        }
+
+                        Text {
+                            x: heads.switches + 54
+                            width: 54
+                            horizontalAlignment: Text.AlignHCenter
+                            text: Preferences.desktopColumn
+                            color: Theme.inkFaint
+                            font.family: Theme.textFamily
+                            font.pixelSize: 10
+                            font.capitalization: Font.AllUppercase
+                        }
+                    }
+
+                    Column {
+                        id: heads
+
+                        width: parent.width
+                        spacing: 10
+
+                        /// Where both columns of switches begin, so every line lines up
+                        /// whatever the words beside them are.
+                        readonly property real switches: width - 108
+
+                        Repeater {
+                            // A count, and each line reads its family by index. Handed the
+                            // list itself, the repeater rebuilt all four lines every time one
+                            // switch was pressed — the list is a new value on every change —
+                            // and the switch pressed was thrown away and replaced by one
+                            // already at its other end: no travel, however long it was set to.
+                            model: Preferences.warnings.length
+
+                            WarningLine {
+                                required property int index
+                                readonly property var family: Preferences.warnings[index]
+
+                                objectName: "warns-" + family.name
+                                width: heads.width
+                                switches: heads.switches
+                                label: family.label
+                                detail: family.detail
+                                bubble: family.bubble
+                                desktop: family.desktop
+                                onBubbleAsked: wanted =>
+                                    Preferences.showBubble(family.value, wanted)
+                                onDesktopAsked: wanted =>
+                                    Preferences.reachTheDesktop(family.value, wanted)
+                            }
+                        }
+                    }
+                }
+
                 SettingsCard {
                     objectName: "settings-scan"
                     visible: page.section === page.library
@@ -149,6 +223,24 @@ Item {
                 width: page.sideBySide ? columns.width - columns.side - page.gap
                                        : columns.width
                 spacing: page.gap
+
+                // Not drawn at all when nothing makes a bubble: an empty heading is worse
+                // than an absent one, which is the rule the shelf already applies to its
+                // search sections.
+                SettingsCard {
+                    objectName: "settings-corner"
+                    visible: page.section === page.notifications
+                             && Preferences.anythingBubbles
+                    title: Preferences.cornerTitle
+
+                    BubbleCorner {
+                        objectName: "bubble-corner"
+                        width: parent.width
+                        chosen: Preferences.corner
+                        label: Preferences.cornerLabel
+                        onPicked: where => Preferences.putBubbles(where)
+                    }
+                }
 
                 SettingsCard {
                     objectName: "settings-connection"

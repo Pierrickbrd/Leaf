@@ -22,6 +22,9 @@ Item {
     required property string label
     /// The file this volume is, which is the name a copy is offered under.
     property string fileName: ""
+    /// Drawn over an illustration, so it carries its own dark veil. An illustration can be
+    /// pale, and grey dots laid straight on one are invisible one time in three.
+    property bool veiled: false
 
     readonly property bool whole: entryId.length === 0
     readonly property bool opened: menu.opened
@@ -42,15 +45,43 @@ Item {
     readonly property string about: whole ? seriesId : entryId
 
     objectName: "commands-" + about
-    implicitWidth: 30
-    implicitHeight: 30
+    // Round, and the size the design draws it: a button the height of a bar button stamped
+    // a square the size of a postage stamp on every cover.
+    implicitWidth: side
+    implicitHeight: side
 
-    BarButton {
+    /// The button's size and its glyph's. On a cover, in proportion to the cover — see
+    /// `Widths.markOn`. In the header of a series page it is set outright, beside a title in
+    /// 30 points; on a row of a list it stays at 24.
+    property real coverWidth: 0
+    property int side: coverWidth > 0 ? Widths.markOn(coverWidth) : 24
+    property int glyphSide: Math.round(side * 0.58)
+    width: implicitWidth
+    height: implicitHeight
+
+    // On an illustration it carries its own dark, which is the design's own value: an
+    // illustration can be pale, and grey dots laid straight on one are invisible one time in
+    // three. Off an illustration there is nothing to carry.
+    Rectangle {
+        anchors.fill: parent
+        radius: width / 2
+        visible: dots.veiled
+        // In the colour and not in `opacity`, so the glyph above keeps its own strength.
+        color: Qt.rgba(12 / 255, 16 / 255, 14 / 255, 0.74)
+    }
+
+    // No tooltip: the label is what this commands, and on a tile it is written under the
+    // cover while on a row it is the row itself.
+    IconButton {
         id: button
 
         anchors.fill: parent
-        source: "assets/icons/more_vert.svg"
+        glyph: "more_vert"
+        side: dots.glyphSide
         label: dots.label
+        color: dots.veiled ? "transparent"
+                           : (menu.opened || hovered ? Theme.onPaper : "transparent")
+        tint: dots.veiled || menu.opened ? Theme.ink : Theme.inkSoft
         popup: menu
         held: menu.opened
     }

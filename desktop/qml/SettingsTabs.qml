@@ -95,6 +95,7 @@ Item {
                 }
 
                 TapHandler {
+                    gesturePolicy: TapHandler.ReleaseWithinBounds
                     onTapped: tabs.selected(tab.index)
                 }
 

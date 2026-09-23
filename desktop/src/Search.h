@@ -97,6 +97,11 @@ public:
     Q_INVOKABLE void searchFor(const QString &query, const QStringList &readStatuses,
                                const QStringList &media);
     Q_INVOKABLE void expand();
+    /// Drops the rows of what was just taken off the disk — a whole series when `entryId` is
+    /// empty, one file otherwise — and asks nothing: the server has said it is gone, and the
+    /// rest of the list has not moved. A series erased from the search's own grid left its
+    /// volumes listed above it, each one opening onto nothing.
+    Q_INVOKABLE void forget(const QString &seriesId, const QString &entryId);
     Q_INVOKABLE void clearFilters();
 
 signals:

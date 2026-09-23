@@ -321,6 +321,30 @@ void Search::took(bool filtered, int page, const Server::Answer &answer)
     emit changed();
 }
 
+void Search::forget(const QString &seriesId, const QString &entryId)
+{
+    const auto gone = [&](const Api::Hit &one) {
+        return entryId.isEmpty() ? one.seriesId == seriesId : one.entryId == entryId;
+    };
+    int dropped = 0;
+    for (int at = int(m_files.size()) - 1; at >= 0; --at) {
+        if (!gone(m_files.at(at)))
+            continue;
+        beginRemoveRows({}, at, at);
+        m_files.remove(at);
+        endRemoveRows();
+        ++dropped;
+    }
+    if (dropped == 0)
+        return;
+    // Every row dropped was one already received, so the server's list has shrunk by as many
+    // before the next page: the offset moves back with it, or that page would skip as many.
+    m_fileTotal = qMax(0, m_fileTotal - dropped);
+    m_wireTotal = qMax(0, m_wireTotal - dropped);
+    m_received = qMax(0, m_received - dropped);
+    emit changed();
+}
+
 void Search::replaceFiles(QList<Api::Hit> files)
 {
     // Row by row and by id, for the reason the shelf does it: a reset destroys every row and

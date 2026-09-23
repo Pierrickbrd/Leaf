@@ -336,6 +336,32 @@ private slots:
         QCOMPARE(requests(), 0);
     }
 
+    /// A series erased from the search's own grid takes its files out of the rows above it,
+    /// and nothing is asked: they stayed listed once, each opening onto a file that was gone.
+    void what_was_erased_leaves_the_rows_without_a_question()
+    {
+        m_pretend->answers(200, hitPage({aHit(u"ENTRY"_s, u"h1"_s, u"Tome 1"_s, u"kq"_s,
+                                              u"Koro Quest"_s, u"v1"_s),
+                                         aHit(u"ENTRY"_s, u"h2"_s, u"Tome 2"_s, u"kq"_s,
+                                              u"Koro Quest"_s, u"v2"_s),
+                                         aHit(u"ENTRY"_s, u"h3"_s, u"Tome 1"_s, u"dn"_s,
+                                              u"Death Note"_s, u"d1"_s)},
+                                        3, 3, 0, 20));
+        m_search->searchFor(u"tome"_s, {}, {});
+        settle();
+        QCOMPARE(m_search->count(), 3);
+        m_pretend->heard.clear();
+
+        m_search->forget(u"dn"_s, u"d1"_s);
+        QCOMPARE(m_search->count(), 2);
+        QCOMPARE(m_search->fileTotal(), 2);
+
+        m_search->forget(u"kq"_s, QString());
+        QCOMPARE(m_search->count(), 0);
+        QCOMPARE(m_search->fileTotal(), 0);
+        QCOMPARE(requests(), 0);
+    }
+
     void the_same_search_twice_goes_out_once()
     {
         m_search->searchFor(u"parasite"_s, {}, {});

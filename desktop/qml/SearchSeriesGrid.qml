@@ -91,18 +91,17 @@ GridView {
         return enter(candidate, Qt.OtherFocusReason)
     }
 
+    // Emphasis only, as on the shelf: `currentIndex` is the keyboard's, because a view scrolls
+    // its current item into sight and a pointer passing over a cut cover must not move it.
     function pointAt(position) {
         navigationCursor.usePointer(grid, position)
-        currentIndex = position
     }
 
     function stopPointingAt(position) {
         if (navigationCursor.mode === navigationCursor.pointerMode
                 && navigationCursor.region === grid
-                && navigationCursor.index === position) {
+                && navigationCursor.index === position)
             navigationCursor.clear(grid)
-            currentIndex = keyboardIndex
-        }
     }
 
     function resetPosition() {
@@ -124,6 +123,11 @@ GridView {
         function onResetRequested(owner) {
             if (owner === grid)
                 grid.resetPosition()
+        }
+
+        function onResumeRequested(owner) {
+            if (owner === grid && grid.activeFocus && grid.keyboardIndex >= 0)
+                grid.navigationCursor.useKeyboard(grid, grid.keyboardIndex)
         }
     }
 

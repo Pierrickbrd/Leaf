@@ -72,6 +72,7 @@ Rectangle {
     }
 
     TapHandler {
+        gesturePolicy: TapHandler.ReleaseWithinBounds
         onTapped: {
             link.navigationCursor.usePointer(link, 0)
             link.forceActiveFocus(Qt.MouseFocusReason)
@@ -102,7 +103,7 @@ Rectangle {
 
     FocusRing {
         cornerRadius: link.radius
-        visible: link.activeFocus
+        focused: link.activeFocus
                  && link.navigationCursor.mode === link.navigationCursor.keyboardMode
                  && link.navigationCursor.region === link
     }

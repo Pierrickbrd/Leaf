@@ -3,7 +3,6 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import Qt5Compat.GraphicalEffects
 import Leaf
 
 Item {
@@ -206,22 +205,14 @@ Item {
                 cornerRadius: searchField.height / 2
             }
 
-            Image {
+            Glyph {
                 id: searchGlyph
 
                 x: 12
                 anchors.verticalCenter: parent.verticalCenter
-                width: 20
-                height: 20
+                side: 20
                 source: "assets/icons/search.svg"
-                sourceSize: Qt.size(20, 20)
-                visible: false
-            }
-
-            ColorOverlay {
-                anchors.fill: searchGlyph
-                source: searchGlyph
-                color: Theme.inkFaint
+                tint: Theme.inkFaint
             }
 
             Item {
@@ -266,6 +257,7 @@ Item {
                 }
 
                 TapHandler {
+                    gesturePolicy: TapHandler.ReleaseWithinBounds
                     onTapped: clearSearch.clear()
                 }
 
@@ -384,8 +376,11 @@ Item {
             id: settingsButton
 
             objectName: "settings-button"
-            // Gone from the page it opens: a button that takes you where you already are.
-            visible: bar.browsing && !bar.searchTakesBar
+            // Not one of the shelf's commands, so not gone with them: the settings are the
+            // application's, and a series page that dropped the gear left a reader there with
+            // no way to them but back to the shelf first. Gone only from the page it opens —
+            // a button that takes you where you already are.
+            visible: Navigation.destination !== Navigation.Settings && !bar.searchTakesBar
             source: "assets/icons/settings.svg"
             label: Captions.settingsLabel
             onTriggered: bar.settingsRequested()

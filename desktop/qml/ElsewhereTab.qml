@@ -25,7 +25,7 @@ Column {
     signal editionChosen(string seriesId)
 
     objectName: "elsewhere-tab"
-    spacing: 22
+    spacing: 16
 
     ElsewhereBlock {
         objectName: "editions-block"
@@ -64,7 +64,10 @@ Column {
                 font.pixelSize: 13
                 font.weight: Font.DemiBold
 
-                TapHandler { onTapped: ways.unfolded = !ways.unfolded }
+                TapHandler {
+                    gesturePolicy: TapHandler.ReleaseWithinBounds
+                    onTapped: ways.unfolded = !ways.unfolded
+                }
                 HoverHandler { cursorShape: Qt.PointingHandCursor }
             }
 
@@ -81,6 +84,7 @@ Column {
                     color: modelData.chosen ? Theme.emeraldWash : Theme.surface
 
                     TapHandler {
+                        gesturePolicy: TapHandler.ReleaseWithinBounds
                         onTapped: {
                             tab.block.chooseOrder(parent.modelData.identifier)
                             ways.unfolded = false

@@ -42,6 +42,7 @@ Item {
     Accessible.name: line.node.name
 
     TapHandler {
+        gesturePolicy: TapHandler.ReleaseWithinBounds
         enabled: line.node.expandable === true
         onTapped: line.folded()
     }

@@ -75,3 +75,8 @@ void Widths::setWindow(int width)
     if (bandFor(m_window) != before)
         emit changed();
 }
+
+int Widths::markOn(qreal coverWidth)
+{
+    return qBound(22, qRound(coverWidth / 8), 30);
+}

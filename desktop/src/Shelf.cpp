@@ -4,6 +4,7 @@
 
 #include "Words.h"
 
+#include <utility>
 #include <QDebug>
 
 #include <QJsonObject>
@@ -19,6 +20,8 @@ namespace {
 /// client did not choose is a page size no test here pins, and the server is free to move its
 /// own default without telling anyone.
 constexpr int Size = 100;
+/// What the server hands over in one answer at most; `size` beyond it is clamped.
+constexpr int MostAtOnce = 500;
 
 } // namespace
 
@@ -109,9 +112,12 @@ QVariant Shelf::data(const QModelIndex &index, int role) const
         // draws this same tile and a second copy of the arithmetic would drift from this one.
         return Api::howFarRead(one);
     case InProgress:
-        // A tile draws a mark or draws nothing. Read and never-opened are the same answer
-        // here — neither carries one — so this is a boolean and not three cases sent to QML.
         return one.holding.readStatus == Api::ReadStatus::InProgress;
+    case Finished:
+        // Its own role and not « in progress » stretched: a finished series draws the bar
+        // full *and* a check, and a never-opened one draws neither. One boolean for both
+        // made finished look exactly like never opened, which is what the design forbids.
+        return one.holding.readStatus == Api::ReadStatus::Read;
     default:
         // Reached for `Qt::DisplayRole` and everything else a view asks about by habit, so it
         // is an ordinary answer rather than a case that should not happen.
@@ -132,6 +138,7 @@ QHash<int, QByteArray> Shelf::roleNames() const
     named.insert(qToUnderlying(Medium), "medium");
     named.insert(qToUnderlying(Volumes), "volumes");
     named.insert(qToUnderlying(InProgress), "inProgress");
+    named.insert(qToUnderlying(Finished), "finished");
     named.insert(qToUnderlying(HowFarRead), "howFarRead");
     return named;
 }
@@ -147,7 +154,7 @@ bool Shelf::canFetchMore(const QModelIndex &parent) const
 void Shelf::fetchMore(const QModelIndex &parent)
 {
     if (canFetchMore(parent)) {
-        ask(m_next);
+        ask(m_next, Size);
     }
 }
 
@@ -204,7 +211,29 @@ void Shelf::filterBy(const QVariantMap &narrowing)
     // stop. Three genres ticked in a row are one request, not three of which two are thrown
     // away — the same settling the typing already uses, for the same reason.
     emit changed();
-    m_settling.start(Settling);
+    m_settling.start(Settling::Milliseconds);
+}
+
+void Shelf::narrowTo(const QVariantMap &narrowing)
+{
+    QVariantMap asked;
+    for (const QString &axis : axisNames()) {
+        const QStringList values = kept(narrowing.value(axis).toStringList());
+        if (!values.isEmpty())
+            asked.insert(axis, values);
+    }
+    m_settling.stop();
+    m_narrowing = asked;
+
+    // Emptied, which `reload` is careful never to do: here there is nothing worth keeping.
+    beginResetModel();
+    m_held.clear();
+    endResetModel();
+    m_total = 0;
+
+    emit criteriaChanged();
+    emit changed();
+    reload();
 }
 
 void Shelf::sortBy(const QString &order)
@@ -257,8 +286,27 @@ void Shelf::searchFor(const QString &query)
         return;
     }
 
-    m_settling.start(Settling);
+    m_settling.start(Settling::Milliseconds);
 }
+
+namespace {
+
+/// Whether a tile drawn from `before` would be drawn the same from `after`. Only what the
+/// model exposes counts: a field no delegate reads cannot change what anybody sees.
+bool showsTheSame(const Api::Series &before, const Api::Series &after)
+{
+    // How far, too, and not only the status: a volume marked read in a series already
+    // started moves its bar and leaves its status where it was, and the bar stood still.
+    return before.name == after.name && before.work == after.work
+           && before.medium == after.medium
+           && before.holding.ownedVolumes == after.holding.ownedVolumes
+           && before.holding.readStatus == after.holding.readStatus
+           && before.holding.readEntries == after.holding.readEntries
+           && before.holding.partRead == after.holding.partRead
+           && before.counts.entries == after.counts.entries;
+}
+
+} // namespace
 
 void Shelf::reload()
 {
@@ -269,22 +317,81 @@ void Shelf::reload()
     ++m_generation;
     m_replacing = true;
     m_trouble.clear();
-    ask(0);
+    ask(0, Size);
 }
 
-namespace {
-
-/// Whether a tile drawn from `before` would be drawn the same from `after`. Only what the
-/// model exposes counts: a field no delegate reads cannot change what anybody sees.
-bool showsTheSame(const Api::Series &before, const Api::Series &after)
+void Shelf::refresh()
 {
-    return before.name == after.name && before.work == after.work
-           && before.medium == after.medium
-           && before.holding.ownedVolumes == after.holding.ownedVolumes
-           && before.holding.readStatus == after.holding.readStatus;
+    ++m_generation;
+    m_replacing = true;
+    m_trouble.clear();
+    // Whole pages, so that the next one is still numbered in the shelf's own: what is held
+    // rounded up to a hundred, and never past the five hundred the server will hand over.
+    const int held = int(m_held.size());
+    ask(0, qBound(Size, (held + Size - 1) / Size * Size, MostAtOnce));
 }
 
-} // namespace
+void Shelf::take(const Api::Series &fresh)
+{
+    int at = -1;
+    for (int i = 0; i < int(m_held.size()); ++i) {
+        if (m_held.at(i).id == fresh.id) {
+            at = i;
+            break;
+        }
+    }
+    // -1 for a status the server did not say: nothing can be counted from it.
+    const auto statusOf = [](const Api::Series &one) {
+        return one.holding.readStatus ? std::to_underlying(*one.holding.readStatus) : -1;
+    };
+    const QStringList lit = chosen(u"read"_s);
+    // Unsaid is kept rather than dropped: the shelf does not take a tile down on a guess.
+    const bool stillLit = lit.isEmpty() || !fresh.holding.readStatus
+                          || lit.contains(Api::spell(*fresh.holding.readStatus));
+    const bool byReading = Api::sort(m_sort) == Api::Sort::Read;
+
+    if (at < 0) {
+        emit taken(false, -1, statusOf(fresh));
+        // Not on the wall. Either not loaded yet, which costs nothing, or kept off it by a lit
+        // status it may now have: « Terminées » lit, and a series just marked read.
+        if (!lit.isEmpty() && stillLit)
+            emit outOfOrder();
+        return;
+    }
+
+    emit taken(true, statusOf(m_held.at(at)), statusOf(fresh));
+    if (!stillLit) {
+        // « Non lues » lit, and this one was just read: it has no place here any more.
+        beginRemoveRows({}, at, at);
+        m_held.remove(at);
+        endRemoveRows();
+        m_total = qMax(0, m_total - 1);
+        emit changed();
+        return;
+    }
+    const bool repaint = !showsTheSame(m_held.at(at), fresh);
+    m_held[at] = fresh;
+    if (repaint)
+        emit dataChanged(index(at), index(at));
+    // Ordered by reading, what was just read moves — and where to, only the server knows.
+    if (byReading)
+        emit outOfOrder();
+}
+
+void Shelf::forget(const QString &seriesId)
+{
+    for (int at = 0; at < int(m_held.size()); ++at) {
+        if (m_held.at(at).id != seriesId)
+            continue;
+        beginRemoveRows({}, at, at);
+        m_held.remove(at);
+        endRemoveRows();
+        m_total = qMax(0, m_total - 1);
+        emit changed();
+        return;
+    }
+}
+
 
 void Shelf::replaceWith(const QList<Api::Series> &fresh)
 {
@@ -332,7 +439,7 @@ void Shelf::replaceWith(const QList<Api::Series> &fresh)
     }
 }
 
-void Shelf::ask(int page)
+void Shelf::ask(int page, int size)
 {
     if (!m_server) {
         // Only reachable when the `Server` singleton did not resolve, which `create` has
@@ -348,7 +455,7 @@ void Shelf::ask(int page)
 
     QUrlQuery query;
     query.addQueryItem(u"page"_s, QString::number(page));
-    query.addQueryItem(u"size"_s, QString::number(Size));
+    query.addQueryItem(u"size"_s, QString::number(size));
     query.addQueryItem(u"sort"_s, m_sort);
     query.addQueryItem(u"direction"_s, sortDirection());
     if (!m_query.isEmpty())
@@ -361,14 +468,14 @@ void Shelf::ask(int page)
     }
 
     const int mine = m_generation;
-    m_server->get(u"/series"_s, query, this, [this, mine, page](const Server::Answer &answer) {
+    m_server->get(u"/series"_s, query, this, [this, mine, page, size](const Server::Answer &answer) {
         if (mine == m_generation) {
-            took(page, answer);
+            took(page, size, answer);
         }
     });
 }
 
-void Shelf::took(int page, const Server::Answer &answer)
+void Shelf::took(int page, int size, const Server::Answer &answer)
 {
     m_loading = false;
 
@@ -392,7 +499,8 @@ void Shelf::took(int page, const Server::Answer &answer)
 
     const Api::Page &some = *read.value;
     m_total = some.total;
-    m_next = page + 1;
+    // Counted in the shelf's own pages, which a `refresh` asks several of at once.
+    m_next = page + size / Size;
     m_more = !some.items.isEmpty();
     m_trouble.clear();
 

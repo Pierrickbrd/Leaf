@@ -88,6 +88,13 @@ QString valueOf(const QVariantList &rows, const QString &label)
     return {};
 }
 
+/// One of the four columns `facts` hands over, by its name. The page groups them in a map;
+/// a test that reads one of them should not have to say `.toList()` twenty times.
+QVariantList rowsOf(const Series *page, const QString &which)
+{
+    return page->facts().value(which).toList();
+}
+
 } // namespace
 
 class HoldsTheSeries : public QObject
@@ -190,6 +197,30 @@ private slots:
         QCOMPARE(m_page->edition(), u"Intégrale"_s);
     }
 
+    /// A volume marked read changes the header's counts, handed over by `Library` from the
+    /// one answer it asked for: the page asks nothing itself. It asked for itself and then
+    /// for its siblings, two questions for « 4 lus » becoming « 5 lus ».
+    void a_series_taken_changes_the_page_without_a_question()
+    {
+        m_page->point(u"albums"_s);
+        settle();
+        m_pretend->heard.clear();
+        QSignalSpy changed(m_page, &Series::changed);
+
+        QJsonObject later = elfes();
+        later[u"edition"_s] = u"Albums cartonnés"_s;
+        m_page->take(*Api::series(later).value);
+        QCOMPARE(m_page->edition(), u"Albums cartonnés"_s);
+        QCOMPARE(changed.count(), 1);
+
+        // Another series, not on this page nor among its editions, changes nothing.
+        QJsonObject stranger = elfes();
+        stranger[u"id"_s] = u"ailleurs"_s;
+        m_page->take(*Api::series(stranger).value);
+        QCOMPARE(changed.count(), 1);
+        QVERIFY(m_pretend->heard.isEmpty());
+    }
+
     void a_series_with_nothing_above_it_says_nothing_above_it()
     {
         QJsonObject alone = integrale();
@@ -209,14 +240,14 @@ private slots:
         m_page->point(u"albums"_s);
         settle();
 
-        QCOMPARE(valueOf(m_page->credits(), u"Scénario"_s),
+        QCOMPARE(valueOf(rowsOf(m_page, u"credits"_s), u"Scénario"_s),
                  u"Jean-Luc Istin, Nicolas Jarry"_s);
-        QCOMPARE(valueOf(m_page->credits(), u"Éditeur"_s), u"Soleil"_s);
-        QCOMPARE(valueOf(m_page->credits(), u"Collection"_s), u"Soleil Celtic"_s);
+        QCOMPARE(valueOf(rowsOf(m_page, u"credits"_s), u"Éditeur"_s), u"Soleil"_s);
+        QCOMPARE(valueOf(rowsOf(m_page, u"credits"_s), u"Collection"_s), u"Soleil Celtic"_s);
         // What the publisher announces sits beside the state of the run: « en cours » alone
         // leaves « of how many? » unanswered.
-        QCOMPARE(valueOf(m_page->nature(), u"Statut"_s), u"En parution · 30 albums annoncés"_s);
-        QCOMPARE(valueOf(m_page->nature(), u"Couleur"_s), u"Couleur"_s);
+        QCOMPARE(valueOf(rowsOf(m_page, u"nature"_s), u"Statut"_s), u"En parution · 30 albums annoncés"_s);
+        QCOMPARE(valueOf(rowsOf(m_page, u"nature"_s), u"Couleur"_s), u"Couleur"_s);
 
         QJsonObject bare = elfes();
         for (const QString &gone : {u"collection"_s, u"colour"_s, u"ageRating"_s})
@@ -227,9 +258,9 @@ private slots:
 
         // Not drawn, rather than drawn empty: « Collection : — » says a fact is missing and
         // takes a line to do it.
-        QVERIFY(valueOf(m_page->credits(), u"Collection"_s).isEmpty());
-        QVERIFY(valueOf(m_page->nature(), u"Couleur"_s).isEmpty());
-        QVERIFY(valueOf(m_page->nature(), u"Âge"_s).isEmpty());
+        QVERIFY(valueOf(rowsOf(m_page, u"credits"_s), u"Collection"_s).isEmpty());
+        QVERIFY(valueOf(rowsOf(m_page, u"nature"_s), u"Couleur"_s).isEmpty());
+        QVERIFY(valueOf(rowsOf(m_page, u"nature"_s), u"Âge"_s).isEmpty());
     }
 
     void the_holding_block_is_the_only_place_a_missing_volume_is_named()
@@ -237,12 +268,12 @@ private slots:
         m_page->point(u"albums"_s);
         settle();
 
-        QCOMPARE(valueOf(m_page->holding(), u"Tomes détenus"_s), u"29 sur 30"_s);
-        QCOMPARE(valueOf(m_page->holding(), u"Manquant"_s), u"Tome 7"_s);
-        QCOMPARE(valueOf(m_page->holding(), u"Lus"_s), u"4 · le 5ᵉ en cours"_s);
+        QCOMPARE(valueOf(rowsOf(m_page, u"holding"_s), u"Tomes détenus"_s), u"29 sur 30"_s);
+        QCOMPARE(valueOf(rowsOf(m_page, u"holding"_s), u"Manquant"_s), u"Tome 7"_s);
+        QCOMPARE(valueOf(rowsOf(m_page, u"holding"_s), u"Lus"_s), u"4 · le 5ᵉ en cours"_s);
         // And it is the one line painted in the alert colour.
         bool marked = false;
-        for (const QVariant &row : m_page->holding()) {
+        for (const QVariant &row : rowsOf(m_page, u"holding"_s)) {
             if (row.toMap().value(u"label"_s).toString() == u"Manquant"_s)
                 marked = row.toMap().value(u"alarming"_s).toBool();
         }
@@ -260,7 +291,7 @@ private slots:
 
         // The label agrees and the value enumerates; no « et », because this is a list of
         // identifiers and not a sentence.
-        QCOMPARE(valueOf(m_page->holding(), u"Manquants"_s), u"Tomes 7, 9, 12, 18"_s);
+        QCOMPARE(valueOf(rowsOf(m_page, u"holding"_s), u"Manquants"_s), u"Tomes 7, 9, 12, 18"_s);
     }
 
     void a_complete_collection_says_nothing_about_missing_volumes()
@@ -272,7 +303,7 @@ private slots:
         m_page->point(u"albums"_s);
         settle();
 
-        for (const QVariant &row : m_page->holding())
+        for (const QVariant &row : rowsOf(m_page, u"holding"_s))
             QVERIFY(!row.toMap().value(u"label"_s).toString().startsWith(u"Manquant"_s));
     }
 
@@ -310,6 +341,30 @@ private slots:
 
     /// The page is perfectly readable without its switcher, so a refusal there must not put a
     /// banner over it. A work with one edition looks exactly like this.
+    /// Keeping is for a page being replaced under the eye, not for a page one has left.
+    /// Held on to, the next series opened on the last one's cover and title for as long as
+    /// its answer took — and a shelf seen in between did not make that any less wrong.
+    void leaving_the_page_lets_go_of_what_it_was_showing()
+    {
+        m_page->point(u"albums"_s);
+        settle();
+        QVERIFY(m_page->available());
+
+        m_page->forget();
+        QVERIFY(!m_page->available());
+        QVERIFY(m_page->identifier().isEmpty());
+        QVERIFY(m_page->editions().isEmpty());
+        QVERIFY(!m_page->loading());
+        QVERIFY(m_page->trouble().isEmpty());
+
+        // And an answer still on the wire for what was let go does not land on the page
+        // afterwards: it is the generation that says so, not the timing.
+        m_page->point(u"albums"_s);
+        m_page->forget();
+        QTest::qWait(250);
+        QVERIFY(!m_page->available());
+    }
+
     void a_refusal_of_the_other_editions_costs_the_switcher_and_nothing_else()
     {
         serve(body(elfes()), QByteArrayLiteral("{\"nope\":1}"));
@@ -358,7 +413,7 @@ private slots:
         QVERIFY(m_page->makers().startsWith(u"Manu Larcenet"_s));
         // And the description credits the same name: the two read the writers by different
         // routes, and only one of them was ever taught the old singular.
-        QCOMPARE(valueOf(m_page->credits(), u"Scénario"_s), u"Manu Larcenet"_s);
+        QCOMPARE(valueOf(rowsOf(m_page, u"credits"_s), u"Scénario"_s), u"Manu Larcenet"_s);
     }
 
     void the_dates_are_said_when_the_library_recorded_them()
@@ -371,8 +426,11 @@ private slots:
         m_page->point(u"albums"_s);
         settle();
 
-        QVERIFY(!valueOf(m_page->holding(), u"Premier reçu"_s).isEmpty());
-        QVERIFY(!valueOf(m_page->holding(), u"Dernier reçu"_s).isEmpty());
+        // Beside what is held and not among it: the card draws the two in two columns, so
+        // « quand » is a list of its own — a date is not a count of volumes.
+        QVERIFY(!valueOf(rowsOf(m_page, u"received"_s), u"Premier reçu"_s).isEmpty());
+        QVERIFY(!valueOf(rowsOf(m_page, u"received"_s), u"Dernier reçu"_s).isEmpty());
+        QVERIFY(valueOf(rowsOf(m_page, u"holding"_s), u"Premier reçu"_s).isEmpty());
     }
 
     /// Pointed at nothing is not an error: it is what a page holds before anything is opened,
@@ -395,9 +453,9 @@ private slots:
         QVERIFY(m_page->weights().isEmpty());
         QVERIFY(m_page->genres().isEmpty());
         QVERIFY(m_page->summary().isEmpty());
-        QVERIFY(m_page->credits().isEmpty());
-        QVERIFY(m_page->nature().isEmpty());
-        QVERIFY(m_page->holding().isEmpty());
+        QVERIFY(rowsOf(m_page, u"credits"_s).isEmpty());
+        QVERIFY(rowsOf(m_page, u"nature"_s).isEmpty());
+        QVERIFY(rowsOf(m_page, u"holding"_s).isEmpty());
         QVERIFY(m_page->missingVolumes().isEmpty());
         QVERIFY(m_page->oneShotEntry().isEmpty());
     }

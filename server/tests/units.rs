@@ -81,7 +81,7 @@ fn every_way_of_ordering_a_shelf_names_a_column() {
     // `added` is the *latest* volume the series received, not the first: a tome added to a
     // series already held is an arrival, and ordering on MIN left it where it was.
     assert!(natural(SeriesSort::Added).contains("last_added_at DESC"));
-    assert!(natural(SeriesSort::Read).contains("last_read_at DESC"));
+    assert!(natural(SeriesSort::Read).contains("last_read_at, 0) DESC"));
     assert!(natural(SeriesSort::Volumes).starts_with("entry_count DESC"));
 }
 
@@ -102,17 +102,29 @@ fn every_order_ends_on_something_that_cannot_tie() {
 }
 
 /// A date that is not there sorts with the other absences rather than with the oldest: a
-/// series nobody dated is not a series added in 1970, and one never opened is not one read
-/// at the epoch.
+/// series nobody dated is not a series added in 1970.
 #[test]
 fn a_shelf_ordered_by_date_keeps_the_undated_together() {
-    for sort in [SeriesSort::Added, SeriesSort::Read] {
-        for direction in [SortDirection::Ascending, SortDirection::Descending] {
-            assert!(
-                sort.sql(direction).contains("IS NULL"),
-                "{sort:?} {direction:?}"
-            );
-        }
+    for direction in [SortDirection::Ascending, SortDirection::Descending] {
+        assert!(
+            SeriesSort::Added.sql(direction).contains("IS NULL"),
+            "{direction:?}"
+        );
+    }
+}
+
+/// Reading is the exception, on purpose: never opened *is* older than any reading, so the
+/// unread follow the oldest and the order reversed opens on them. Kept at the far end both
+/// ways, « la plus ancienne » opened on the one series that had been read.
+#[test]
+fn a_series_never_opened_reads_as_the_oldest_reading() {
+    for direction in [SortDirection::Ascending, SortDirection::Descending] {
+        let sql = SeriesSort::Read.sql(direction);
+        assert!(!sql.contains("IS NULL"), "{direction:?}: {sql}");
+        assert!(
+            sql.starts_with("COALESCE(last_read_at, 0)"),
+            "{direction:?}: {sql}"
+        );
     }
 }
 

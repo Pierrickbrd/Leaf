@@ -133,6 +133,10 @@ Entries::Entries(Server *server, QObject *parent)
     : QAbstractListModel(parent)
     , m_server(server)
 {
+    // One shot per pause in the typing, and the list is narrowed once the pause is over —
+    // the arrangement `Shelf` uses for its own field, down to the number it waits.
+    m_settling.setSingleShot(true);
+    connect(&m_settling, &QTimer::timeout, this, &Entries::rebuild);
 }
 
 int Entries::rowCount(const QModelIndex &parent) const
@@ -197,6 +201,7 @@ QHash<int, QByteArray> Entries::roleNames() const
 
 void Entries::point(const QString &seriesId, const QVariantList &missing, int arcCount)
 {
+    m_settling.stop();
     m_id = seriesId;
     m_arcCount = arcCount;
     m_arcs.clear();
@@ -205,6 +210,27 @@ void Entries::point(const QString &seriesId, const QVariantList &missing, int ar
     for (const QVariant &one : missing)
         m_missing.append(one.toDouble());
     reload();
+}
+
+void Entries::forget()
+{
+    m_settling.stop();
+    ++m_generation;
+    if (m_id.isEmpty() && m_all.isEmpty())
+        return;
+    m_id.clear();
+    m_query.clear();
+    m_trouble.clear();
+    m_missing.clear();
+    m_arcs.clear();
+    m_arcCount = 0;
+    m_files.clear();
+    beginResetModel();
+    m_all.clear();
+    m_shown.clear();
+    endResetModel();
+    m_loading = false;
+    emit changed();
 }
 
 void Entries::reload()
@@ -306,14 +332,7 @@ void Entries::tookProgress(const Server::Answer &answer)
         return;
     }
 
-    QHash<QString, Api::Progress> where;
-    for (const QJsonValue &one : answer.body.array()) {
-        if (!one.isObject())
-            continue;
-        const Api::Read<Api::Progress> read = Api::progress(one.toObject());
-        if (read.ok())
-            where.insert(read.value->entryId, *read.value);
-    }
+    const QHash<QString, Api::Progress> where = statesIn(answer);
 
     for (Line &line : m_files) {
         if (line.missingNumber.has_value())
@@ -333,6 +352,72 @@ void Entries::tookProgress(const Server::Answer &answer)
         if (mine == m_generation)
             tookArcs(ranges);
     });
+}
+
+QHash<QString, Api::Progress> Entries::statesIn(const Server::Answer &answer)
+{
+    QHash<QString, Api::Progress> where;
+    for (const QJsonValue &one : answer.body.array()) {
+        if (!one.isObject())
+            continue;
+        const Api::Read<Api::Progress> read = Api::progress(one.toObject());
+        if (read.ok())
+            where.insert(read.value->entryId, *read.value);
+    }
+    return where;
+}
+
+void Entries::refreshProgress()
+{
+    if (m_id.isEmpty() || m_server == nullptr)
+        return;
+
+    // The generation is not bumped: this is not a new question about the list, and bumping
+    // it would drop the answer to a `reload` still in flight.
+    const int mine = m_generation;
+    m_server->get(u"/series/"_s + m_id + u"/progress"_s, this,
+                  [this, mine](const Server::Answer &answer) {
+        if (mine == m_generation)
+            tookProgressAgain(answer);
+    });
+}
+
+void Entries::tookProgressAgain(const Server::Answer &answer)
+{
+    // A refusal changes nothing on screen. What is drawn is what the server last said, and
+    // a state nobody could re-read is not a reason to blank a list that is still true.
+    if (!answer.went() || !answer.body.isArray())
+        return;
+
+    const QHash<QString, Api::Progress> where = statesIn(answer);
+    const auto put = [&where](Line &line) {
+        // A gap has no file to be read, and a separator is an arc rather than a volume.
+        if (line.missingNumber.has_value() || line.arc.has_value())
+            return;
+        const auto found = where.constFind(line.file.id);
+        line.read = found != where.constEnd() ? std::optional(*found) : std::nullopt;
+    };
+
+    // All three, because they are copies of one another: `m_files` is what a later
+    // `weaveArcs` builds from, `m_all` what a search filters, and `m_shown` what is drawn.
+    // Putting it in one of them only leaves the next search showing the state before.
+    for (Line &line : m_files) {
+        put(line);
+    }
+    for (Line &line : m_all) {
+        put(line);
+    }
+    for (Line &line : m_shown) {
+        put(line);
+    }
+
+    // One signal over the whole list rather than a reset: the delegates stay, so no cover is
+    // decoded again and the grid does not jump. A row whose state did not move re-reads the
+    // same values and draws the same thing.
+    if (!m_shown.isEmpty()) {
+        emit dataChanged(index(0), index(int(m_shown.size()) - 1));
+    }
+    emit changed();
 }
 
 void Entries::tookArcs(const Server::Answer &answer)
@@ -447,8 +532,20 @@ void Entries::searchFor(const QString &query)
     const QString asked = query.trimmed();
     if (asked == m_query)
         return;
+
     m_query = asked;
-    rebuild();
+    // What was typed, straight away: the field and the cross that clears it must not lag a
+    // key behind. Only the list waits.
+    emit changed();
+
+    if (asked.isEmpty()) {
+        // Clearing is not typing. The whole list comes back at once.
+        m_settling.stop();
+        rebuild();
+        return;
+    }
+
+    m_settling.start(Settling::Milliseconds);
 }
 
 void Entries::rebuild()

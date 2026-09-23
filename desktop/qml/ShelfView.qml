@@ -61,7 +61,7 @@ Item {
         grid.currentIndex = position
         navigationCursor.useKeyboard(grid, position)
         grid.forceActiveFocus(forward ? Qt.TabFocusReason : Qt.BacktabFocusReason)
-        grid.positionViewAtIndex(position, GridView.Contain)
+        grid.bringIntoSight(position)
         return true
     }
 
@@ -109,6 +109,12 @@ Item {
 
     function enterFromFocusChain() {
         if (!grid.activeFocus)
+            return
+        // The band's button is a child of the grid, so focusing it lights the grid's
+        // `activeFocus` too. Coming back from the chips that read as "arriving from above",
+        // the grid entered by its first cover and took the focus off the button it had just
+        // been given: Shift+Tab from the row looped into the covers instead of climbing.
+        if (above(grid.Window.activeFocusItem))
             return
         // A highlight the pointer is painting does not stop the keyboard from entering: the
         // focus has just arrived here, and the focus is what the keys follow. Only a keyboard
@@ -178,10 +184,9 @@ Item {
         grid.followed = true
         if (grid.count === 0)
             return false
-        // From where the *keyboard* stands, and never from what the pointer is over. Hovering
-        // writes `currentIndex` so that the cover under the pointer is the one highlighted;
-        // starting a key from it meant an arrow continued from wherever the mouse had been
-        // left, which is not where the reader is looking.
+        // From where the *keyboard* stands, and never from what the pointer is over: starting
+        // a key from the hovered cover meant an arrow continued from wherever the mouse had
+        // been left, which is not where the reader is looking.
         if (grid.keyboardIndex < 0) {
             const backwards = key === Qt.Key_Backtab
                     || (key === Qt.Key_Tab && (modifiers & Qt.ShiftModifier))
@@ -215,7 +220,7 @@ Item {
         grid.keyboardIndex = candidate
         grid.currentIndex = candidate
         navigationCursor.useKeyboard(grid, candidate)
-        grid.positionViewAtIndex(candidate, GridView.Contain)
+        grid.bringIntoSight(candidate)
         return true
     }
 
@@ -224,17 +229,17 @@ Item {
         // next key landed on the hovered tile — which meant that crossing the shelf with the
         // pointer emptied the search field of its focus mid-word. What moves the focus is a
         // click or a key; a pointer passing over something moves only what is highlighted.
+        // Nor does it write `currentIndex`: a view scrolls its current item into sight, so a
+        // cover cut by the bottom edge pulled the whole shelf up under a pointer that was only
+        // passing — with a jump, not a scroll. A key wants that; a hover never does.
         navigationCursor.usePointer(grid, position)
-        grid.currentIndex = position
     }
 
     function releasePointer(position) {
         if (navigationCursor.mode === navigationCursor.pointerMode
                 && navigationCursor.region === grid
-                && navigationCursor.index === position) {
+                && navigationCursor.index === position)
             navigationCursor.clear(grid)
-            grid.currentIndex = grid.keyboardIndex
-        }
     }
 
     function clearNavigation() {
@@ -260,6 +265,11 @@ Item {
         function onResetRequested(owner) {
             if (owner === grid)
                 root.clearPosition()
+        }
+
+        function onResumeRequested(owner) {
+            if (owner === grid && grid.activeFocus && grid.keyboardIndex >= 0)
+                root.navigationCursor.useKeyboard(grid, grid.keyboardIndex)
         }
     }
 
@@ -367,8 +377,36 @@ Item {
                 positionViewAtBeginning()
         }
 
-        onDragStarted: followed = true
+        onDragStarted: {
+            followed = true
+            glide.stop()
+        }
         onFlickStarted: followed = true
+
+        // Where a key lands, glided to rather than jumped to. `positionViewAtIndex` alone
+        // teleports the shelf a row at a time, and a reader holding Down lost track of which
+        // row was which. The view computes the destination — it knows its rows and its header
+        // — and is then put back where it was, so that only the animation moves it.
+        function bringIntoSight(position) {
+            const from = contentY
+            glide.stop()
+            positionViewAtIndex(position, GridView.Contain)
+            const to = contentY
+            if (to === from)
+                return
+            contentY = from
+            glide.to = to
+            glide.start()
+        }
+
+        NumberAnimation {
+            id: glide
+
+            target: grid
+            property: "contentY"
+            duration: 180
+            easing.type: Easing.OutCubic
+        }
         onCountChanged: {
             const wasEmpty = held === 0
             held = count

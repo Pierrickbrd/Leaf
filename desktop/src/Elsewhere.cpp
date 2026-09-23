@@ -74,6 +74,17 @@ QVariantMap Elsewhere::tileOf(const Api::Series *one, const QString &name,
             {u"here"_s, here}};
 }
 
+void Elsewhere::take(const Api::Series &fresh)
+{
+    for (Api::Series &one : m_siblings) {
+        if (one.id != fresh.id)
+            continue;
+        one = fresh;
+        emit changed();
+        return;
+    }
+}
+
 const Api::Series *Elsewhere::seriesOf(const Api::ReadingStep &step) const
 {
     // A volume step names the edition it counts in, « because volumes 1 to 7 is not the same
@@ -192,6 +203,22 @@ void Elsewhere::point(const QString &universeId, const QString &universeName,
         if (mine == m_generation)
             tookUniverses(all);
     });
+    emit changed();
+}
+
+void Elsewhere::forget()
+{
+    ++m_generation;
+    if (m_seriesId.isEmpty() && m_siblings.isEmpty())
+        return;
+    m_universeId.clear();
+    m_universe.clear();
+    m_seriesId.clear();
+    m_siblings.clear();
+    m_orders.clear();
+    m_chosen.clear();
+    m_at.reset();
+    m_pending = 0;
     emit changed();
 }
 

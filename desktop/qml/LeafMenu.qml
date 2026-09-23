@@ -22,28 +22,8 @@ Menu {
     delegate: LeafMenuItem { }
 
     background: Item {
-        implicitWidth: 286
+        implicitWidth: 248
         implicitHeight: 48
-
-        Rectangle {
-            x: 2
-            y: 6
-            width: parent.width
-            height: parent.height
-            radius: Theme.buttonRadius
-            color: "#000000"
-            opacity: Theme.dark ? 0.52 : 0.16
-        }
-
-        Rectangle {
-            x: 1
-            y: 2
-            width: parent.width
-            height: parent.height
-            radius: Theme.buttonRadius
-            color: "#000000"
-            opacity: Theme.dark ? 0.28 : 0.08
-        }
 
         Rectangle {
             id: panel
@@ -54,6 +34,8 @@ Menu {
             color: Theme.surface
             border.color: Theme.rule
             border.width: 1
+
+            CardLift { level: CardLift.Menu }
         }
     }
 

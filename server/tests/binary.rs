@@ -49,9 +49,28 @@ fn leaf(dir: &tempfile::TempDir) -> Command {
 }
 
 /// A port nothing is listening on, found by listening on it and stopping.
+/// A port nothing is listening on, and that no other test in this binary has been handed.
+///
+/// Binding to nought and reading the number back is the usual trick, and on its own it is not
+/// enough: the listener is dropped before the server is spawned, so the kernel is free to
+/// hand the same number to the next test that asks. Eight tests here ask, and they run side
+/// by side.
+///
+/// Given the same one, the second connected to the *first* test's server, read it as « mine
+/// is up », and signalled its own — which was still starting and had not armed its handlers,
+/// so the kernel killed it by default disposition. The failure said the server would not stop
+/// when it was asked to, and the server had not been asked. Seen once under coverage on a
+/// shared runner and never on an idle machine, which is what an interleaving costs to find.
 fn a_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
+    static HANDED_OUT: std::sync::Mutex<std::collections::BTreeSet<u16>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    loop {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        if HANDED_OUT.lock().unwrap().insert(port) {
+            return port;
+        }
+    }
 }
 
 #[test]
@@ -385,8 +404,14 @@ fn serve_over_tls_generates_its_own_certificate_and_answers_on_it() {
         }
         std::thread::sleep(Duration::from_millis(50));
     };
+    // Read before it is signalled. Signalled first, a server that never got as far as
+    // listening was reported as one that would not stop when asked — which is the other
+    // sentence, about the other fault.
+    if !listening {
+        let _ = server.kill();
+        panic!("nothing ever listened on the TLS port");
+    }
     stop(&mut server, Ask::Interrupt);
-    assert!(listening, "nothing ever listened on the TLS port");
     assert!(
         certificate.is_file(),
         "the pair is generated on first start"
