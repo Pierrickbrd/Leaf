@@ -451,6 +451,65 @@ private slots:
         QVERIFY(!got.ok());
     }
 
+    /// The client had never read a file. `UpNext` carried a few entry fields inline, so a
+    /// list of volumes had no type to be made of.
+    void an_entry_is_a_file_and_a_kind_it_does_not_have_to_know()
+    {
+        const QJsonObject file{
+            {u"id"_s, u"v5"_s},         {u"type"_s, u"VOLUME"_s},
+            {u"number"_s, 5.0},         {u"title"_s, u"La Dryade"_s},
+            {u"pageCount"_s, 54},       {u"chapterCount"_s, 0},
+            {u"file"_s, u"Tome 5.cbz"_s}, {u"size"_s, 48000000},
+            {u"sortKey"_s, 5.0},
+        };
+        const Api::Read<Api::Entry> got = Api::entry(file);
+        QVERIFY(got.ok());
+        QCOMPARE(got.value->id, u"v5"_s);
+        QCOMPARE(got.value->kind, Api::Entry::Kind::Volume);
+        QCOMPARE(got.value->number, std::optional<double>(5.0));
+        QCOMPARE(got.value->pageCount, 54);
+        QCOMPARE(got.value->file, u"Tome 5.cbz"_s);
+        QCOMPARE(got.value->size, qint64(48000000));
+
+        // A word this client has not been taught makes a volume rather than refusing the
+        // file: the server may learn a kind before the client does.
+        QJsonObject odd = file;
+        odd[u"type"_s] = u"OMNIBUS"_s;
+        QCOMPARE(Api::entry(odd).value->kind, Api::Entry::Kind::Volume);
+        odd[u"type"_s] = u"CHAPTER"_s;
+        QCOMPARE(Api::entry(odd).value->kind, Api::Entry::Kind::Chapter);
+    }
+
+    void an_entry_without_an_identifier_is_refused_by_name()
+    {
+        QJsonObject broken{{u"type"_s, u"VOLUME"_s}, {u"pageCount"_s, 54},
+                           {u"chapterCount"_s, 0}, {u"file"_s, u"x.cbz"_s}};
+        const Api::Read<Api::Entry> got = Api::entry(broken);
+        QVERIFY(!got.ok());
+        QVERIFY(got.trouble.startsWith(u"entry"_s));
+    }
+
+    /// `finished` says where the reader stands now; `timesFinished` says whether they ever
+    /// reached the end, and it is absent at nought like every other count in these answers.
+    void a_record_says_where_the_reader_stands_and_how_often_they_finished()
+    {
+        const QJsonObject where{{u"entryId"_s, u"v5"_s},
+                                {u"page"_s, 12},
+                                {u"pageCount"_s, 54},
+                                {u"finished"_s, false},
+                                {u"timesFinished"_s, 6}};
+        const Api::Read<Api::Progress> got = Api::progress(where);
+        QVERIFY(got.ok());
+        QCOMPARE(got.value->entryId, u"v5"_s);
+        QCOMPARE(got.value->page, 12);
+        QVERIFY(!got.value->finished);
+        QCOMPARE(got.value->timesFinished, 6);
+
+        QJsonObject fresh = where;
+        fresh.remove(u"timesFinished"_s);
+        QCOMPARE(Api::progress(fresh).value->timesFinished, 0);
+    }
+
     void a_whole_series_arrives_intact()
     {
         const Api::Read<Api::Series> got = Api::series(aSeries());

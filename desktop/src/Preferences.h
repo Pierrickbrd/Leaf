@@ -40,6 +40,15 @@ class Preferences : public QObject
     /// whatever default the desktop gives it.
     Q_PROPERTY(QUrl lastPlace READ lastPlace NOTIFY changed)
 
+    /// Whether the volumes of a series are shown as covers rather than as lines.
+    ///
+    /// Kept **once and not per series**: it is a reader's habit, not a state of one page.
+    /// Switching to the grid on Elfes and opening Nains gives a grid — the alternative is a
+    /// setting that answers differently depending on where you last were, which is a setting
+    /// nobody can predict. Lines are the default: they say the whole title, the pages and the
+    /// state on one row, where a grid shows covers and cuts long titles.
+    Q_PROPERTY(bool volumesAsGrid READ volumesAsGrid WRITE showVolumesAsGrid NOTIFY changed)
+
 public:
     enum class Appearance { System, Light, Dark };
     Q_ENUM(Appearance)
@@ -53,6 +62,9 @@ public:
     QVariantList appearances() const;
 
     Q_INVOKABLE void chooseAppearance(Appearance wanted);
+
+    bool volumesAsGrid() const { return m_volumesAsGrid; }
+    void showVolumesAsGrid(bool asGrid);
 
     QUrl lastPlace() const { return m_lastPlace; }
     /// Remembers where a picker was used. Takes the folder itself, or the folder a chosen
@@ -72,4 +84,5 @@ private:
                      QStringLiteral("preferences")};
     Appearance m_appearance = Appearance::System;
     QUrl m_lastPlace;
+    bool m_volumesAsGrid = false;
 };

@@ -65,8 +65,8 @@ WATCHED = {
     "ImportState": ("whole", ["session"]),
     "ImportResult": ("whole", ["installed"]),
     "FileReading": ("part", ["readingIn"]),
-    "Entry": ("part", ["upNext"]),
-    "Progress": ("part", ["upNext"]),
+    "Entry": ("part", ["upNext", "entry"]),
+    "Progress": ("part", ["upNext", "progress"]),
     "Chapter": ("part", ["upNext"]),
 }
 

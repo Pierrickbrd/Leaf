@@ -1582,6 +1582,11 @@ components:
           type: [string, "null"]
           enum: [ongoing, completed, null]
           description: Decides whether an extra volume files itself or asks.
+        summary:
+          type: [string, "null"]
+          description: |
+            The prose somebody wrote about the work, shown as it stands. Stored since the
+            first version and served nowhere until a page existed that had a place for it.
         readStatus:
           type: string
           enum: [UNREAD, IN_PROGRESS, READ]

@@ -122,6 +122,9 @@ struct Series {
     /// such a tile goes to the reader rather than to a series page, and the id is here so
     /// that the click needs no request of its own to find out what to open.
     std::optional<QString> oneShotEntry;
+    /// The prose about the work, shown as it stands — the one thing a description tab is
+    /// opened for.
+    std::optional<QString> summary;
     Credits credits;
     Publication publication;
     std::optional<Medium> medium;
@@ -226,6 +229,43 @@ struct Facets {
     QList<Facet> statuses;
     QList<Facet> languages;
     QList<Facet> publishers;
+};
+
+/// Where the reader stands in one file.
+///
+/// Absent means never opened — the contract answers 204 rather than an empty object, and a
+/// list of them holds « one record per entry that has been opened ». So a screen marries two
+/// answers rather than reading a state off the entry, which carries none.
+struct Progress {
+    QString entryId;
+    int page = 0;
+    int pageCount = 0;
+    bool finished = false;
+    /// How many times this file has been finished. `finished` says where the reader stands
+    /// now and a rewind clears it; this says whether they ever reached the end, and only the
+    /// second answers « have I read this ».
+    int timesFinished = 0;
+};
+
+/// One file of an edition — a volume, or a chapter that arrived on its own.
+///
+/// `number` identifies and `sortKey` orders, and they are not the same: two editions may
+/// number differently, so the order comes from the edition and the identity from the volume.
+/// The client never re-sorts what it receives — the server answers « in reading order », and
+/// sorting by file name is how « Tome 10 » lands before « Tome 2 ».
+struct Entry {
+    enum class Kind { Volume, Chapter };
+
+    QString id;
+    Kind kind = Kind::Volume;
+    std::optional<double> number;
+    std::optional<QString> title;
+    int pageCount = 0;
+    int chapterCount = 0;
+    /// The file name alone, never a path. What a deletion names, and all the client is told.
+    QString file;
+    qint64 size = 0;
+    std::optional<double> sortKey;
 };
 
 /// A card of the resume band. `reason` separates "you are inside this one" from "you finished
@@ -540,6 +580,8 @@ Read<Facets> facets(const QJsonObject &from);
 Read<Health> health(const QJsonObject &from);
 Read<ScanStatus> scanStatus(const QJsonObject &from);
 Read<UpNext> upNext(const QJsonObject &from);
+Read<Entry> entry(const QJsonObject &from);
+Read<Progress> progress(const QJsonObject &from);
 Read<Hit> hit(const QJsonObject &from);
 /// Both shapes, because both cross the wire: the envelope when a page was asked for, the bare
 /// list from a server that predates it.

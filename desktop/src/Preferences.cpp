@@ -56,6 +56,7 @@ Preferences::Preferences(QObject *parent)
 {
     m_appearance = read(m_file.value(u"appearance"_s).toString());
     m_lastPlace = QUrl(m_file.value(u"lastPlace"_s).toString());
+    m_volumesAsGrid = m_file.value(u"volumesAsGrid"_s, false).toBool();
 }
 
 QString Preferences::appearanceTitle() const
@@ -98,6 +99,15 @@ void Preferences::rememberPlace(const QUrl &place)
         return;
     m_lastPlace = place;
     m_file.setValue(u"lastPlace"_s, place.toString());
+}
+
+void Preferences::showVolumesAsGrid(bool asGrid)
+{
+    if (asGrid == m_volumesAsGrid)
+        return;
+    m_volumesAsGrid = asGrid;
+    m_file.setValue(u"volumesAsGrid"_s, asGrid);
+    emit changed();
     m_file.sync();
     emit changed();
 }

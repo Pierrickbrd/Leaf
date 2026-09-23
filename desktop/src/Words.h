@@ -204,6 +204,85 @@ QString fileContext(const Api::Hit &hit);
 /// the wording says how many are hidden rather than where they would be.
 QString seeTheOthers(int remaining);
 
+// ——— La fiche d'une série ————————————————————————————————————————————————————
+
+/// A number as French writes it: « 3,5 » and not « 3.5 », and « 12 » and not « 12,0 ». Volume
+/// numbers are halves as often as not — a 3.5 is a side story — so the column of a list is a
+/// column of these. Exported because a list of volumes is the first screen to show a number
+/// with no word in front of it.
+QString number(double value);
+
+/// The three tabs, in the order they are drawn. An enumeration and not three functions,
+/// because the tab bar repeats over them and a fourth would otherwise be a fourth call site.
+enum class Tab { Volumes, Description, Elsewhere };
+QString tab(Tab which);
+
+/// « Collectif · Soleil · BD · En cours » — who made it and what it is, in one line. Absent
+/// facts are left out rather than shown empty, the way the resume band does it.
+QString makers(const Api::Series &one);
+
+/// « 29 albums · 5 arcs · Tout public · Gauche à droite » — what it weighs. The count of
+/// volumes follows the medium, so a BD is counted in albums; the rest is left out when it is
+/// not recorded.
+QString weights(const Api::Series &one);
+
+/// « 2 éditions » — what the switcher offers. Never drawn below two: there is nothing to
+/// choose between when a work has one edition, and an implicit edition has no name to show.
+QString editions(int count);
+
+/// « 5 arcs », and nothing at all at nought.
+QString arcs(int count);
+
+/// « Non lu ». Written in full on a line, where an empty cell reads as an information that is
+/// missing rather than as a state — and never on a cover, where thirty of them over thirty
+/// illustrations would be thirty stains.
+QString neverRead();
+
+/// « ×6 » — how many times a file has been finished, shown from two. A series that is done
+/// would otherwise carry « ×1 » on every line for no news at all.
+QString timesFinished(int times);
+
+/// « Manquant » · « Manquants ». The label agrees, and the value below enumerates.
+QString missingLabel(int count);
+
+/// « Tome 7 », « Tomes 7, 9, 12, 18 » — commas to the end and no « et »: this is a list of
+/// identifiers, not a sentence, and « 7, 9, 12, 21, 24 et 30 » is a preciosity on a series
+/// with holes in it.
+QString missingVolumes(const QList<double> &numbers);
+
+/// « 29 sur 30 » — what this library holds of what the edition runs to.
+QString heldOutOf(int owned, int ceiling);
+
+/// « Dans cette bibliothèque » — the heading over the only block that speaks about you rather
+/// than about the work.
+QString inThisLibrary();
+
+/// The labels of the description, each a label and not a sentence.
+enum class Fact {
+    Writers, Artists, Publisher, Collection, Language, Kind, Direction, Status, Age, Colour,
+    Held, Read, FirstReceived, LastReceived
+};
+QString fact(Fact which);
+
+/// « Gauche à droite », « Droite à gauche », « Verticale ».
+QString readingDirection(Api::ReadingDirection value);
+
+/// « Couleur » · « Noir et blanc » — positive form on both sides, never « pas en couleur ».
+QString colour(bool coloured);
+
+/// « 4 · le 5ᵉ en cours » — how many of an edition are finished, and whether one is open. The
+/// ordinal is worth the trouble: « le 5 en cours » reads as a quantity.
+QString readEntries(int finished, bool oneOpen, int which);
+
+/// « les tomes » — the axis the field of a series page narrows, handed to `searchWithin`
+/// rather than spelled into a sentence of its own. One rule writes « Chercher dans … », and
+/// a second copy of it would be a second thing to keep in step.
+QString volumesAxis();
+
+/// « Aucun tome ne porte ce nom. » — said under an emptied list rather than leaving a blank,
+/// the way the shelf says it of a search that found nothing.
+QString noVolumeByThatName();
+
 /// « Vouliez-vous dire Tsugumi Ōba ? » — the approximate guess, and only when the search
 /// found nothing at all. A guess shown like an exact hit costs more trust than finding
 /// nothing, so it is phrased as a question, with the space French puts before the mark.

@@ -316,6 +316,7 @@ Read<Series> series(const QJsonObject &from)
     one.universe = field.maybeText(u"universe"_s);
     one.universeId = field.maybeText(u"universeId"_s);
     one.oneShotEntry = field.maybeText(u"oneShotEntry"_s);
+    one.summary = field.maybeText(u"summary"_s);
     one.edition = field.maybeText(u"edition"_s);
     one.credits.author = field.maybeText(u"author"_s);
     one.credits.authors = field.words(u"authors"_s);
@@ -619,6 +620,44 @@ Read<UpNext> upNext(const QJsonObject &from)
     }
 
     return {card, {}};
+}
+
+Read<Entry> entry(const QJsonObject &from)
+{
+    Fields field(from);
+    Entry one;
+    one.id = field.text(u"id"_s);
+    one.pageCount = field.whole(u"pageCount"_s);
+    one.chapterCount = field.whole(u"chapterCount"_s);
+    one.file = field.text(u"file"_s);
+    const QString kind = field.text(u"type"_s);
+    if (field.broken())
+        return refused<Entry>(QStringLiteral("entry"), field.trouble());
+
+    // An unfamiliar word makes a volume rather than refusing the file: the server may learn
+    // a kind before this client does, and a volume is what all but loose chapters are.
+    one.kind = (kind == u"CHAPTER"_s) ? Entry::Kind::Chapter : Entry::Kind::Volume;
+    one.number = field.maybeReal(u"number"_s);
+    one.title = field.maybeText(u"title"_s);
+    one.sortKey = field.maybeReal(u"sortKey"_s);
+    one.size = field.maybeWhole(u"size"_s).value_or(0);
+    return {one, {}};
+}
+
+Read<Progress> progress(const QJsonObject &from)
+{
+    Fields field(from);
+    Progress where;
+    where.entryId = field.text(u"entryId"_s);
+    where.page = field.whole(u"page"_s);
+    where.pageCount = field.whole(u"pageCount"_s);
+    if (field.broken())
+        return refused<Progress>(QStringLiteral("progress"), field.trouble());
+
+    where.finished = from.value(u"finished"_s).toBool(false);
+    // Absent at nought, like every other count in these answers.
+    where.timesFinished = field.maybeWhole(u"timesFinished"_s).value_or(0);
+    return {where, {}};
 }
 
 // ——— L'import ———————————————————————————————————————————————————————————————
