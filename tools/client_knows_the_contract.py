@@ -65,6 +65,14 @@ WATCHED = {
     "ImportState": ("whole", ["session"]),
     "ImportResult": ("whole", ["installed"]),
     "FileReading": ("part", ["readingIn"]),
+    # The series page is the first screen to read any of these four, which is why they join
+    # the watch only now. `whole` for all of them: nothing in an arc or a way through a
+    # universe is a field a screen takes a slice of — a range with no `to` is not a range,
+    # and a step whose edition went is a step pointing at the wrong volumes.
+    "Arc": ("whole", ["arc"]),
+    "ReadingStep": ("whole", ["readingStep"]),
+    "ReadingOrder": ("whole", ["readingOrder"]),
+    "Universe": ("whole", ["universe"]),
     "Entry": ("part", ["upNext", "entry"]),
     "Progress": ("part", ["upNext", "progress"]),
     "Chapter": ("part", ["upNext"]),

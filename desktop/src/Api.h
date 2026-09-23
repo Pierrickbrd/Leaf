@@ -149,6 +149,15 @@ struct Page {
     int size = 0;
 };
 
+/// How far through a series, as the fraction a tile draws. Nought when nothing is counted,
+/// so a series with no entries recorded draws nothing rather than a full bar out of a
+/// division by nought.
+///
+/// Here rather than in the shelf that first needed it: the universe block of a series page
+/// draws the same tile from the same answer, and two copies of this arithmetic would be two
+/// answers the day one of them is corrected.
+double howFarRead(const Series &one);
+
 /// What the server is, and whether it is up.
 ///
 /// Read rather than assumed: a client that guesses its server's version is a client that
@@ -266,6 +275,67 @@ struct Entry {
     QString file;
     qint64 size = 0;
     std::optional<double> sortKey;
+};
+
+/// A stretch of the story, and not a property of a volume.
+///
+/// **A range.** Four volumes can belong to two arcs, because an arc does not end where a
+/// volume ends — so it can be neither a column of a list nor a label on a line. `unit` says
+/// what the bounds are counted in, and the two do not mean the same thing: a CHAPTER range
+/// over volumes is the one case where a frontier falls inside a file.
+///
+/// `parentId` is a saga holding its arcs, declared and never deduced: two ranges that happen
+/// to contain one another do not make one.
+struct Arc {
+    enum class Unit { Volume, Chapter };
+
+    QString id;
+    QString name;
+    Unit unit = Unit::Chapter;
+    double from = 0;
+    double to = 0;
+    int position = 0;
+    std::optional<QString> parentId;
+};
+
+/// One stretch of one work, inside a named way through a universe.
+///
+/// `seriesId` is « always present on a VOLUME step and never on a CHAPTER one », because
+/// "volumes 1 to 7" is different content in a 42-volume edition and a 34-volume one, while a
+/// chapter number identifies the same story in both. `work` and `series` carry their names so
+/// a step can be drawn without a request of its own.
+struct ReadingStep {
+    enum class Unit { Volume, Chapter };
+
+    QString workId;
+    QString work;
+    /// Absent for the whole work, which the contract calls the common case.
+    std::optional<Unit> unit;
+    std::optional<QString> seriesId;
+    std::optional<QString> series;
+    std::optional<double> from;
+    std::optional<double> to;
+};
+
+/// One named way through a universe — ordered stretches of works, and not a flat list of
+/// editions. The same work may appear more than once, which is what lets an order say
+/// « work A part 1, work B, work A part 2 ».
+struct ReadingOrder {
+    QString id;
+    QString name;
+    /// At most one order of a universe carries it.
+    bool isDefault = false;
+    QList<ReadingStep> steps;
+};
+
+/// A universe, by name — and how many ways through it it declares.
+///
+/// `orderCount` is the guard: a screen knows before it asks whether there is anything to ask
+/// for, exactly as `counts.arcs` does for the arcs. Usually nought.
+struct Universe {
+    QString id;
+    QString name;
+    int orderCount = 0;
 };
 
 /// A card of the resume band. `reason` separates "you are inside this one" from "you finished
@@ -582,6 +652,10 @@ Read<ScanStatus> scanStatus(const QJsonObject &from);
 Read<UpNext> upNext(const QJsonObject &from);
 Read<Entry> entry(const QJsonObject &from);
 Read<Progress> progress(const QJsonObject &from);
+Read<Arc> arc(const QJsonObject &from);
+Read<ReadingStep> readingStep(const QJsonObject &from);
+Read<ReadingOrder> readingOrder(const QJsonObject &from);
+Read<Universe> universe(const QJsonObject &from);
 Read<Hit> hit(const QJsonObject &from);
 /// Both shapes, because both cross the wire: the envelope when a page was asked for, the bare
 /// list from a server that predates it.

@@ -3,8 +3,8 @@
 // What a series page says, as opposed to what it shows.
 //
 // The same arrangement as `Captions` and for the same reason: `Words` holds the French and
-// the typography, `Series` and `Entries` hold the state, and this binds the two so a caption
-// is refreshed by the change that refreshed what it quotes. Kept off both models, because a
+// the typography, `Series`, `Entries` and `Elsewhere` hold the state, and this binds the two
+// so a caption is refreshed by the change that refreshed what it quotes. Kept off both models, because a
 // page's words are not a list of volumes and a class carrying both is a class where neither
 // is easy to find.
 
@@ -15,6 +15,7 @@
 class QJSEngine;
 class QQmlEngine;
 class Entries;
+class Elsewhere;
 
 class SeriesCaptions final : public QObject
 {
@@ -38,8 +39,19 @@ class SeriesCaptions final : public QObject
     Q_PROPERTY(QString nothingFound READ nothingFound NOTIFY changed)
     Q_PROPERTY(bool narrowedToNothing READ narrowedToNothing NOTIFY changed)
 
+    /// The two headings of the last tab, and the third the one on the right grows when a way
+    /// through the universe is walked.
+    Q_PROPERTY(QString sameWorkHeading READ sameWorkHeading CONSTANT)
+    Q_PROPERTY(QString universeHeading READ universeHeading CONSTANT)
+    Q_PROPERTY(QString outsideHeading READ outsideHeading CONSTANT)
+    /// « Terres d'Arran · 3 autres », and « 2 séries » under the heading of what a walk leaves
+    /// out. Counted here rather than in the `.qml`, which would then be writing French.
+    Q_PROPERTY(QString universeLine READ universeLine NOTIFY changed)
+    Q_PROPERTY(QString outsideLine READ outsideLine NOTIFY changed)
+
 public:
-    explicit SeriesCaptions(Entries *entries, QObject *parent = nullptr);
+    explicit SeriesCaptions(Entries *entries, Elsewhere *elsewhere,
+                            QObject *parent = nullptr);
 
     static SeriesCaptions *create(QQmlEngine *engine, QJSEngine *);
 
@@ -51,10 +63,20 @@ public:
     QString volumesAxis() const;
     QString nothingFound() const;
     bool narrowedToNothing() const;
+    QString sameWorkHeading() const;
+    QString universeHeading() const;
+    QString outsideHeading() const;
+    QString universeLine() const;
+    QString outsideLine() const;
+    /// « 29 albums · ici » — a tile's grey line with the mark that it is the one being read.
+    /// A function and not a property: it is said of a tile, and there are as many as the
+    /// block draws.
+    Q_INVOKABLE QString hereToo(const QString &detail) const;
 
 signals:
     void changed();
 
 private:
     Entries *m_entries;
+    Elsewhere *m_elsewhere;
 };

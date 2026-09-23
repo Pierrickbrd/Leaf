@@ -759,6 +759,11 @@ private slots:
             engine.singletonInstance<Entries *>(qmlTypeId("Leaf", 1, 0, "Entries"));
         QVERIFY(volumes);
         QTRY_COMPARE(volumes->count(), 2);
+        // The count is not the end of the loading. The files and what has been read of them
+        // are two requests, and the rows are drawn the moment the first lands — carrying « non
+        // lu », which is true until the second one does. Read at `count`, the mark was right
+        // for as long as this page made three requests and wrong the day it made four.
+        QTRY_VERIFY(!volumes->loading());
 
         // Two answers, married: the first volume is finished and the second was never opened.
         QQuickItem *first = nullptr;
@@ -775,6 +780,189 @@ private slots:
         QVERIFY(QTest::qWaitForWindowActive(window));
         QTest::keyClick(window, Qt::Key_Escape);
         QTRY_COMPARE(navigation->destination(), Navigation::Destination::Shelf);
+    }
+
+    /// The two things this page does that no other screen does: it cuts its list where an arc
+    /// begins, and its last tab is a way out of the series — the editions of the work, and the
+    /// universe walked in the order a file declares.
+    void a_series_cuts_its_list_at_an_arc_and_says_where_to_go_from_there()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+
+        const auto aWork = [](const QString &id, const QString &edition, const QString &work,
+                              int volumes) {
+            return QJsonObject{{u"id"_s, id},
+                               {u"workId"_s, u"w-"_s + work.toLower()},
+                               {u"name"_s, u"Terres d'Arran · "_s + work},
+                               {u"universe"_s, u"Terres d'Arran"_s},
+                               {u"universeId"_s, u"u-arran"_s},
+                               {u"work"_s, work},
+                               {u"edition"_s, edition},
+                               {u"medium"_s, u"bd"_s},
+                               {u"ownedVolumes"_s, volumes},
+                               {u"entryCount"_s, volumes},
+                               {u"chapterCount"_s, 0},
+                               {u"arcCount"_s, 1}};
+        };
+        const auto shelfOf = [](const QJsonArray &rows) {
+            return QJsonDocument(QJsonObject{{u"items"_s, rows},
+                                             {u"total"_s, rows.size()},
+                                             {u"page"_s, 0},
+                                             {u"size"_s, rows.size()}})
+                .toJson(QJsonDocument::Compact);
+        };
+
+        const QByteArray one = QJsonDocument(aWork(u"albums"_s, u"Albums"_s, u"Elfes"_s, 2))
+                                   .toJson(QJsonDocument::Compact);
+        const QByteArray editions =
+            shelfOf({aWork(u"albums"_s, u"Albums"_s, u"Elfes"_s, 2),
+                     aWork(u"integrale"_s, u"Intégrale"_s, u"Elfes"_s, 1)});
+        const QByteArray universe = shelfOf({aWork(u"albums"_s, u"Albums"_s, u"Elfes"_s, 2),
+                                             aWork(u"nains"_s, QString(), u"Nains"_s, 26)});
+        const QByteArray universes =
+            QJsonDocument(QJsonArray{QJsonObject{{u"id"_s, u"u-arran"_s},
+                                                 {u"name"_s, u"Terres d'Arran"_s},
+                                                 {u"orderCount"_s, 1}}})
+                .toJson(QJsonDocument::Compact);
+        const auto aStep = [](const QString &work, const QString &seriesId, double from,
+                              double to) {
+            QJsonObject step{{u"workId"_s, u"w-"_s + work.toLower()}, {u"work"_s, work}};
+            if (!seriesId.isEmpty()) {
+                step[u"unit"_s] = u"VOLUME"_s;
+                step[u"seriesId"_s] = seriesId;
+                step[u"series"_s] = seriesId;
+                step[u"from"_s] = from;
+                step[u"to"_s] = to;
+            }
+            return step;
+        };
+        // The same work twice, which is the whole reason an order is not a sorted list.
+        const QByteArray ways =
+            QJsonDocument(QJsonArray{
+                              QJsonObject{{u"id"_s, u"chrono"_s},
+                                          {u"name"_s, u"Chronologique"_s},
+                                          {u"default"_s, true},
+                                          {u"steps"_s,
+                                           QJsonArray{aStep(u"Elfes"_s, u"albums"_s, 1, 1),
+                                                      aStep(u"Nains"_s, QString(), 0, 0),
+                                                      aStep(u"Elfes"_s, u"albums"_s, 2, 2)}}}})
+                .toJson(QJsonDocument::Compact);
+
+        const QByteArray files = QJsonDocument(QJsonArray{
+            QJsonObject{{u"id"_s, u"v1"_s}, {u"type"_s, u"VOLUME"_s}, {u"number"_s, 1},
+                        {u"title"_s, u"Le Crystal"_s}, {u"pageCount"_s, 54},
+                        {u"chapterCount"_s, 0}, {u"file"_s, u"T1.cbz"_s}, {u"size"_s, 1}},
+            QJsonObject{{u"id"_s, u"v2"_s}, {u"type"_s, u"VOLUME"_s}, {u"number"_s, 2},
+                        {u"title"_s, u"L'Honneur"_s}, {u"pageCount"_s, 54},
+                        {u"chapterCount"_s, 0}, {u"file"_s, u"T2.cbz"_s}, {u"size"_s, 1}},
+        }).toJson(QJsonDocument::Compact);
+        // The second volume is open, which is what puts « ici » on the second step and not on
+        // the first: two stretches of one work, one reader.
+        const QByteArray states = QJsonDocument(QJsonArray{
+            QJsonObject{{u"entryId"_s, u"v1"_s}, {u"page"_s, 54}, {u"pageCount"_s, 54},
+                        {u"finished"_s, true}},
+            QJsonObject{{u"entryId"_s, u"v2"_s}, {u"page"_s, 12}, {u"pageCount"_s, 54},
+                        {u"finished"_s, false}},
+        }).toJson(QJsonDocument::Compact);
+        const QByteArray arcs = QJsonDocument(QJsonArray{
+            QJsonObject{{u"id"_s, u"a2"_s}, {u"name"_s, u"La Guerre"_s},
+                        {u"unit"_s, u"VOLUME"_s}, {u"from"_s, 2}, {u"to"_s, 2},
+                        {u"position"_s, 1}},
+        }).toJson(QJsonDocument::Compact);
+
+        const auto reply = [](const QByteArray &body) {
+            return "HTTP/1.1 200 .\r\nContent-Type: application/json\r\nContent-Length: "
+                   + QByteArray::number(body.size()) + "\r\n\r\n" + body;
+        };
+        pretend.answerFor = [=](const QByteArray &request) -> QByteArray {
+            if (request.contains("/entries "))
+                return reply(files);
+            if (request.contains("/progress "))
+                return reply(states);
+            if (request.contains("/arcs "))
+                return reply(arcs);
+            if (request.contains("/orders "))
+                return reply(ways);
+            if (request.contains("GET /universes"))
+                return reply(universes);
+            if (request.contains("/cover"))
+                return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+            if (request.contains("universe="))
+                return reply(universe);
+            if (request.startsWith("GET /series/"))
+                return reply(one);
+            return reply(editions);
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        QVERIFY(navigation->open(Navigation::Destination::Series,
+                                 {{u"series"_s, u"albums"_s}}));
+
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+
+        // The list is cut where the arc begins: a separator between the two volumes, named
+        // and carrying its range — and the volume it begins on is still drawn. Looked up
+        // again at each try rather than held: every answer rebuilds the list, and a delegate
+        // kept across one is a pointer to an item that has been destroyed.
+        const auto separatorRange = [&] {
+            const QQuickItem *row = itemNamed(page, u"arc-La Guerre"_s);
+            return row == nullptr ? QString() : row->property("range").toString();
+        };
+        QTRY_COMPARE(separatorRange(), u"tome 2"_s);
+        QVERIFY(itemNamed(page, u"volume-v1"_s));
+        QVERIFY(itemNamed(page, u"volume-v2"_s));
+
+        // The last tab is reached by a click on it, like a reader reaches it.
+        QQuickItem *tab = nullptr;
+        QTRY_VERIFY((tab = itemNamed(page, u"series-tab-2"_s)));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          tab->mapToItem(window->contentItem(),
+                                         QPointF(tab->width() / 2.0, tab->height() / 2.0))
+                              .toPoint());
+        QQuickItem *elsewhere = nullptr;
+        QTRY_VERIFY((elsewhere = itemNamed(page, u"elsewhere-tab"_s)));
+        QTRY_VERIFY(elsewhere->isVisible());
+
+        // Both blocks are drawn, and neither is in the other's list.
+        QQuickItem *editionsBlock = itemNamed(elsewhere, u"editions-block"_s);
+        QQuickItem *universeBlock = itemNamed(elsewhere, u"universe-block"_s);
+        QVERIFY(editionsBlock);
+        QVERIFY(universeBlock);
+        QTRY_VERIFY(itemNamed(editionsBlock, u"tile-integrale"_s));
+        QTRY_VERIFY(itemNamed(universeBlock, u"tile-nains"_s));
+        QVERIFY(!itemNamed(universeBlock, u"tile-integrale"_s));
+
+        // A tile per step: the work being read is there twice, and « ici » is on the stretch
+        // holding the volume that is open — the second, because the first is finished.
+        //
+        // Which step carries the mark, and -1 for none, -2 for two: the answer that draws the
+        // steps and the answer that says which volume is open are not the same one, so the
+        // tiles are there before the mark is, and a run that read them once would be right
+        // only when the two landed in the order it happened to expect.
+        const auto marked = [&] {
+            const QList<QQuickItem *> steps = itemsNamed(universeBlock, u"tile-albums"_s);
+            if (steps.size() != 2)
+                return -3;
+            int which = -1;
+            for (int at = 0; at < steps.size(); ++at) {
+                if (steps.at(at)->property("volumes").toString().endsWith(u"· ici"_s))
+                    which = which < 0 ? at : -2;
+            }
+            return which;
+        };
+        QTRY_COMPARE(marked(), 1);
     }
 
     void the_resume_band_draws_the_one_offer_above_the_grid()

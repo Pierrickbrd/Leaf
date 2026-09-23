@@ -298,8 +298,26 @@ ApplicationWindow {
         target: Series
 
         function onChanged() {
-            if (Series.available && Series.identifier !== Entries.pointedAt)
-                Entries.point(Series.identifier, Series.missingVolumes)
+            if (!Series.available || Series.identifier === Entries.pointedAt)
+                return
+            Entries.point(Series.identifier, Series.missingVolumes, Series.arcCount)
+            // The universe block follows the same page. Pointed even at a series that belongs
+            // to no universe, because that is how it learns to draw nothing: a block still
+            // holding the last universe would offer the wrong places to go.
+            Elsewhere.point(Series.universeId, Series.universe, Series.identifier)
+        }
+    }
+
+    // Where the reader stands, handed to the block that writes « ici »: a reading order may
+    // send the same work round twice, and only the list of volumes knows which stretch is the
+    // one being read. Bound here rather than read by the block, which would then have to know
+    // about a model it has nothing else to do with.
+    Connections {
+        target: Entries
+
+        function onChanged() {
+            if (Series.identifier === Elsewhere.pointedAt)
+                Elsewhere.readAt(Entries.reading)
         }
     }
 }

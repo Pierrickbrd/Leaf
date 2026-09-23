@@ -298,8 +298,12 @@ private slots:
         QCOMPARE(offered.at(0).toMap().value(u"name"_s).toString(), u"Albums"_s);
         // The count is often the only thing that really tells two editions apart, so it is
         // on both — including the one being read.
-        QCOMPARE(offered.at(0).toMap().value(u"count"_s).toString(), u"29 albums"_s);
-        QCOMPARE(offered.at(1).toMap().value(u"count"_s).toString(), u"10 albums"_s);
+        QCOMPARE(offered.at(0).toMap().value(u"detail"_s).toString(), u"29 albums"_s);
+        QCOMPARE(offered.at(1).toMap().value(u"detail"_s).toString(), u"10 albums"_s);
+        // The same keys the universe block draws its tiles from, cover included: one shape,
+        // one delegate, and a series drawn the same way wherever it appears.
+        QVERIFY(offered.at(1).toMap().value(u"cover"_s).toString().endsWith(
+            u"/series/integrale/cover"_s));
         QVERIFY(offered.at(0).toMap().value(u"here"_s).toBool());
         QVERIFY(!offered.at(1).toMap().value(u"here"_s).toBool());
     }

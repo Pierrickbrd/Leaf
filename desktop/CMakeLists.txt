@@ -92,6 +92,8 @@ qt_add_executable(leaf-desktop
     src/Entries.cpp
     src/SeriesCaptions.h
     src/SeriesCaptions.cpp
+    src/Elsewhere.h
+    src/Elsewhere.cpp
     src/Covers.h
     src/Covers.cpp
 )
@@ -149,7 +151,13 @@ set(LEAF_QML
     qml/SeriesSkeleton.qml
     qml/FactColumn.qml
     qml/VolumeRow.qml
+    qml/ArcRow.qml
+    qml/ChapterRange.qml
     qml/VolumeState.qml
+    qml/ElsewhereTab.qml
+    qml/ElsewhereBlock.qml
+    qml/BlockHeading.qml
+    qml/TileShelf.qml
 )
 foreach(qml_file IN LISTS LEAF_QML)
     string(REGEX REPLACE "^qml/" "" alias "${qml_file}")
@@ -342,6 +350,7 @@ qt_add_executable(crosses-the-seam
     src/Series.h src/Series.cpp
     src/Entries.h src/Entries.cpp
     src/SeriesCaptions.h src/SeriesCaptions.cpp
+    src/Elsewhere.h src/Elsewhere.cpp
 )
 target_include_directories(crosses-the-seam PRIVATE src)
 qt_add_qml_module(crosses-the-seam
@@ -472,11 +481,28 @@ qt_add_executable(holds-the-volumes
     src/Api.h src/Api.cpp src/Words.h src/Words.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Entries.h src/Entries.cpp
-    src/SeriesCaptions.h src/SeriesCaptions.cpp)
+    # `SeriesCaptions` speaks for the universe block as well, so it carries that block with it
+    # wherever it is built: a caption bound to two models links against both.
+    src/SeriesCaptions.h src/SeriesCaptions.cpp
+    src/Elsewhere.h src/Elsewhere.cpp)
 target_include_directories(holds-the-volumes PRIVATE src)
 target_link_libraries(holds-the-volumes PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
 add_test(NAME holds-the-volumes COMMAND holds-the-volumes)
+
+# Where to go from a series that is not this series — and the ways through a universe, which
+# are steps of works and not a list of editions sorted differently.
+qt_add_executable(holds-elsewhere
+    tests/holds_elsewhere.cpp tests/Pretend.h
+    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
+    src/Entries.h src/Entries.cpp src/SeriesCaptions.h src/SeriesCaptions.cpp
+    src/Elsewhere.h src/Elsewhere.cpp)
+target_include_directories(holds-elsewhere PRIVATE src)
+target_link_libraries(holds-elsewhere PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME holds-elsewhere COMMAND holds-elsewhere)
 
 # The two axes the bandeau offers, and the rule that decides whether an axis exists at all.
 # Headless like the shelf: a filter that is not offered is a decision, not a drawing.

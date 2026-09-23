@@ -13,6 +13,9 @@ Item {
     required property int current
     required property bool asGrid
     required property string query
+    /// Whether the last tab has anything to show. Drawn or not at all: a tab that opens on
+    /// an empty page is worse than one tab fewer.
+    required property bool hasElsewhere
 
     signal chosen(int which)
     signal viewToggled()
@@ -27,13 +30,16 @@ Item {
         spacing: 2
 
         Repeater {
-            model: [SeriesCaptions.volumesTab, SeriesCaptions.descriptionTab,
-                    SeriesCaptions.elsewhereTab]
+            model: bar.hasElsewhere
+                   ? [SeriesCaptions.volumesTab, SeriesCaptions.descriptionTab,
+                      SeriesCaptions.elsewhereTab]
+                   : [SeriesCaptions.volumesTab, SeriesCaptions.descriptionTab]
 
             Item {
                 required property int index
                 required property string modelData
 
+                objectName: "series-tab-" + index
                 width: word.implicitWidth + 24
                 height: 32
 
