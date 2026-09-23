@@ -1230,6 +1230,152 @@ fn an_arc_counted_in_something_that_is_not_a_unit_leaves_the_shelf_standing() {
 /// work.json was reported against one edition folder and then the other — twice, each time
 /// naming an edition.json with no `arcs` in it at all. A report that sends somebody to the
 /// wrong file is worse than one that says nothing.
+/// A saga is an arc holding arcs, and nothing in two ranges says so.
+///
+/// A range of 1 to 100 with two ranges at 42 to 68 and 69 to 95 inside it — the shape a
+/// long serial takes, with the names borrowed from One Piece rather than its figures, which
+/// this file has no way to check. The containment is a coincidence of numbers until
+/// somebody writes down that it is not: the format already lets arcs overlap for reasons
+/// that have nothing to do with nesting, so reading a hierarchy out of the ranges would
+/// invent one.
+#[test]
+fn a_saga_holds_the_arcs_a_file_says_it_holds() {
+    let library = Library::new();
+    library.write(
+        "One Piece/work.json",
+        r#"{"leaf":1,"title":"One Piece","arcs":[
+             {"name":"East Blue","from":1,"to":100},
+             {"name":"Baratié","parent":"East Blue","from":42,"to":68},
+             {"name":"Arlong Park","parent":"East Blue","from":69,"to":95}]}"#,
+    );
+    archive(&library.folder("One Piece").join("Tome 1.cbz"), 2, None);
+
+    let report = library.scan();
+
+    assert_eq!(3, library.count("arc"));
+    assert!(report.disregarded.is_empty(), "{:?}", report.disregarded);
+    // The saga sits inside nothing, and the two arcs sit inside it — by its id and not by
+    // its numbers.
+    assert_eq!(
+        vec!["Arlong Park", "Baratié"],
+        library.all(
+            "SELECT a.name FROM arc a JOIN arc p ON p.id = a.parent_id
+             WHERE p.name = 'East Blue' ORDER BY a.name"
+        )
+    );
+    assert_eq!(
+        1,
+        library
+            .one::<i64>("SELECT COUNT(*) FROM arc WHERE parent_id IS NULL")
+            .unwrap()
+    );
+}
+
+/// The parent is resolved after every arc has an id, so an arc may name one declared below
+/// it. Asking a file to put its sagas first would be asking the order of the lines to carry
+/// a meaning the sidecar exists to state.
+#[test]
+fn an_arc_may_name_a_saga_declared_after_it() {
+    let library = Library::new();
+    library.write(
+        "One Piece/work.json",
+        r#"{"leaf":1,"title":"One Piece","arcs":[
+             {"name":"Baratié","parent":"East Blue","from":42,"to":68},
+             {"name":"East Blue","from":1,"to":100}]}"#,
+    );
+    archive(&library.folder("One Piece").join("Tome 1.cbz"), 2, None);
+
+    library.scan();
+
+    assert_eq!(
+        vec!["Baratié"],
+        library.all(
+            "SELECT a.name FROM arc a JOIN arc p ON p.id = a.parent_id WHERE p.name = 'East Blue'"
+        )
+    );
+}
+
+/// Three ways a file can say something the index must not claim. Each costs the link and
+/// never the arc: losing the range as well would turn one wrong word into a missing arc.
+#[test]
+fn a_parent_that_names_nothing_a_self_and_a_loop_are_all_refused() {
+    for (arcs, expected) in [
+        (
+            r#"[{"name":"Baratié","parent":"East Blue","from":42,"to":68}]"#,
+            "is not an arc of this edition",
+        ),
+        (
+            r#"[{"name":"Baratié","parent":"Baratié","from":42,"to":68}]"#,
+            "sits inside itself",
+        ),
+        (
+            r#"[{"name":"A","parent":"B","from":1,"to":9},
+                {"name":"B","parent":"A","from":2,"to":8}]"#,
+            "come back round",
+        ),
+    ] {
+        let library = Library::new();
+        library.write(
+            "One Piece/work.json",
+            &format!(r#"{{"leaf":1,"title":"One Piece","arcs":{arcs}}}"#),
+        );
+        archive(&library.folder("One Piece").join("Tome 1.cbz"), 2, None);
+
+        let report = library.scan();
+
+        assert!(
+            report.disregarded.iter().any(|l| l.contains(expected)),
+            "expected {expected:?} in {:?}",
+            report.disregarded
+        );
+        // The arcs are all there; only the links went.
+        assert_eq!(
+            0,
+            library
+                .one::<i64>("SELECT COUNT(*) FROM arc WHERE parent_id IS NOT NULL")
+                .unwrap()
+        );
+        assert!(library.count("arc") > 0);
+    }
+}
+
+/// Two arcs of one name leave a child unable to say which it belongs to. The first keeps
+/// the name, and the file is told — a silent choice between two right-looking answers is
+/// how an index comes to claim something nobody wrote.
+#[test]
+fn two_arcs_sharing_a_name_are_said_out_loud() {
+    let library = Library::new();
+    library.write(
+        "One Piece/work.json",
+        r#"{"leaf":1,"title":"One Piece","arcs":[
+             {"name":"East Blue","from":1,"to":50},
+             {"name":"East Blue","from":51,"to":100},
+             {"name":"Baratié","parent":"East Blue","from":42,"to":68}]}"#,
+    );
+    archive(&library.folder("One Piece").join("Tome 1.cbz"), 2, None);
+
+    let report = library.scan();
+
+    assert!(
+        report
+            .disregarded
+            .iter()
+            .any(|l| l.contains("two arcs are called")),
+        "{:?}",
+        report.disregarded
+    );
+    // The first keeps it, so the child hangs off the range starting at 1.
+    assert_eq!(
+        1,
+        library
+            .one::<i64>(
+                "SELECT CAST(p.from_number AS INT) FROM arc a JOIN arc p ON p.id = a.parent_id
+                 WHERE a.name = 'Baratié'"
+            )
+            .unwrap()
+    );
+}
+
 #[test]
 fn an_arc_a_work_declares_is_reported_against_the_work_and_said_once() {
     let library = Library::new();

@@ -1792,6 +1792,22 @@ components:
         from: { type: number }
         to: { type: number }
         position: { type: integer }
+        parentId:
+          type: [string, "null"]
+          description: |
+            The arc this one sits inside — a saga holding its arcs — and absent for an arc
+            that sits inside nothing.
+
+            **Declared, never deduced.** Two arcs whose ranges happen to contain one another
+            do not make a saga: this format lets arcs overlap for reasons that have nothing
+            to do with nesting, and reading a hierarchy out of two numbers would invent one
+            nobody wrote. The sidecar names the parent — a file has no ids to point with —
+            and the scan resolves it, reporting a parent that names no arc rather than
+            obeying it.
+
+            A chain never comes back round: an arc naming itself, and a loop of any length,
+            are refused at the scan and reported. The arc stays, the link goes — losing the
+            arc as well would turn one wrong word into a missing range.
       required: [id, name, unit, from, to, position]
 
     ArcInput:

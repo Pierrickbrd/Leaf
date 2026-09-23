@@ -1814,6 +1814,86 @@ impl Scanner {
         Ok(())
     }
 
+    /// Hangs each declared arc under the one it named, once they all have ids.
+    ///
+    /// A second pass and not a lookahead: an arc may name a parent declared after it, and
+    /// asking a file to put its sagas first would be asking the shape to carry a meaning the
+    /// sidecar is there to state.
+    ///
+    /// Three things are refused rather than obeyed, because each would make the index claim
+    /// something nobody wrote: a parent that names no arc of this edition, an arc naming
+    /// itself, and a chain that comes back round. The link goes, the arc stays — losing the
+    /// arc as well would turn one wrong word into a missing range.
+    fn link_sagas(
+        &self,
+        cx: &Cx<'_>,
+        where_: &str,
+        written: &[(String, ArcJson)],
+        by_name: &HashMap<String, String>,
+        report: &mut ScanReport,
+    ) -> Result<()> {
+        let mut parents: HashMap<String, String> = HashMap::new();
+        for (id, arc) in written {
+            let Some(named) = arc
+                .parent
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+            else {
+                continue;
+            };
+            let Some(parent) = by_name.get(named) else {
+                report.disregarded.push(format!(
+                    "{where_}: arc \"{}\" says it sits inside \"{named}\", which is not an arc \
+                     of this edition — the arc stands on its own",
+                    arc.name
+                ));
+                continue;
+            };
+            if parent == id {
+                report.disregarded.push(format!(
+                    "{where_}: arc \"{}\" says it sits inside itself",
+                    arc.name
+                ));
+                continue;
+            }
+            parents.insert(id.clone(), parent.clone());
+        }
+
+        // A chain that comes back round would have a client drawing one indentation for ever.
+        // Walked from each arc, bounded by how many there are: past that, it has looped.
+        let mut refused: Vec<String> = Vec::new();
+        for (id, arc) in written {
+            let mut at = id;
+            for _ in 0..=written.len() {
+                match parents.get(at) {
+                    Some(next) if next == id => {
+                        report.disregarded.push(format!(
+                            "{where_}: arc \"{}\" and the arcs it sits inside come back round \
+                             to it — the link was left out",
+                            arc.name
+                        ));
+                        refused.push(id.clone());
+                        break;
+                    }
+                    Some(next) => at = next,
+                    None => break,
+                }
+            }
+        }
+        for id in refused {
+            parents.remove(&id);
+        }
+
+        for (id, parent) in parents {
+            cx.execute(
+                "UPDATE arc SET parent_id = ?1 WHERE id = ?2",
+                rusqlite::params![parent, id],
+            )?;
+        }
+        Ok(())
+    }
+
     fn write_arcs(
         &self,
         cx: &Cx<'_>,
@@ -1833,6 +1913,11 @@ impl Scanner {
             // "the nth arc of this edition", and a count taken from the highest one is short
             // by however many were left out.
             let mut kept = 0usize;
+            // Name to id, for the parents to be resolved against once every arc has one. The
+            // first of a repeated name wins and the repeat is reported: a file that names two
+            // arcs the same has not said which one a child belongs to.
+            let mut by_name: HashMap<String, String> = HashMap::new();
+            let mut written: Vec<(String, ArcJson)> = Vec::new();
             for arc in declared {
                 // A unit the index refuses used to be handed to it anyway: the insert failed,
                 // and it failed inside the transaction that holds this whole shelf. One word
@@ -1870,8 +1955,19 @@ impl Scanner {
                         kept as i64,
                     ],
                 )?;
+                if by_name.contains_key(&arc.name) {
+                    report.disregarded.push(format!(
+                        "{where_}: two arcs are called \"{}\" — an arc saying it sits inside \
+                         that name cannot say which one, so the first keeps it",
+                        arc.name
+                    ));
+                } else {
+                    by_name.insert(arc.name.clone(), format!("{edition_id}-arc-{kept}"));
+                }
+                written.push((format!("{edition_id}-arc-{kept}"), arc.clone()));
                 kept += 1;
             }
+            self.link_sagas(cx, where_, &written, &by_name, report)?;
             return Ok(());
         }
 

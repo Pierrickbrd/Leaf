@@ -277,6 +277,7 @@ mod filled {
     pub fn arc() -> ArcJson {
         ArcJson {
             name: String::new(),
+            parent: Some(String::new()),
             // Not CHAPTER, for the same reason.
             unit: "VOLUME".to_string(),
             from: 0.0,

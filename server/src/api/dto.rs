@@ -248,6 +248,10 @@ pub struct ArcDto {
     pub from: f64,
     pub to: f64,
     pub position: i64,
+    /// The arc this one sits inside — a saga holding its arcs — and absent for an arc that
+    /// sits inside nothing. Declared in the sidecar, never read out of the ranges.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

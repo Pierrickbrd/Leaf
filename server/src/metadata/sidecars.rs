@@ -254,6 +254,15 @@ impl OneShotJson {
 #[serde(rename_all = "camelCase")]
 pub struct ArcJson {
     pub name: String,
+    /// The arc this one sits inside, by the name it carries in this same list.
+    ///
+    /// **Declared, never deduced.** Two arcs whose ranges happen to contain one another do
+    /// not make a saga: the format lets arcs overlap for reasons that have nothing to do
+    /// with nesting, and reading a hierarchy out of two numbers would invent one nobody
+    /// wrote. A file has no ids to point with, so it points with the name — and the scan
+    /// resolves it, reporting a parent that names nothing rather than obeying it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     #[serde(default = "chapter_unit", skip_serializing_if = "is_chapter")]
     pub unit: String,
     pub from: f64,

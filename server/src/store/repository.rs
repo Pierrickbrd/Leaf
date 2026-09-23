@@ -839,6 +839,7 @@ impl<'a> Repository<'a> {
                 |r| {
                     Ok(ArcDto {
                         id: r.get("id")?,
+                        parent_id: r.get("parent_id")?,
                         name: r.get("name")?,
                         unit: r.get("unit")?,
                         from: r.get("from_number")?,

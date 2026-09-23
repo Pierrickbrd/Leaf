@@ -220,6 +220,7 @@ fn arcs_are_replaced_whole() {
     let series = world.with_bleach();
     let arcs = vec![ArcJson {
         name: "Soul Society".into(),
+        parent: None,
         unit: "CHAPTER".into(),
         from: 1.0,
         to: 183.0,
