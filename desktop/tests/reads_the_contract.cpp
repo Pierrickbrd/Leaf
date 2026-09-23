@@ -462,7 +462,7 @@ private slots:
         QCOMPARE(one.counts.entries, 21);
         QCOMPARE(one.counts.chapters, 180);
         QCOMPARE(one.holding.ownedVolumes, 21);
-        QCOMPARE(one.declaredVolumes, std::optional<int>(21));
+        QCOMPARE(one.publication.declaredVolumes, std::optional<int>(21));
         QCOMPARE(one.credits.author, std::optional<QString>(u"Yūsei Matsui"_s));
         QCOMPARE(one.credits.authors, QList<QString>({u"Yūsei Matsui"_s}));
         QCOMPARE(one.credits.artists, QList<QString>({u"Yūsei Matsui"_s}));
@@ -474,7 +474,7 @@ private slots:
         QCOMPARE(one.genres, QList<QString>({u"Action"_s, u"Comédie"_s}));
         QCOMPARE(one.tags, QList<QString>({u"École"_s}));
         QCOMPARE(one.ageRating, std::optional<QString>(u"12+"_s));
-        QVERIFY(!one.collection.has_value());
+        QVERIFY(!one.publication.collection.has_value());
         QCOMPARE(one.colour, std::optional<bool>(true));
         QCOMPARE(one.holding.missingChapters, QList<double>({3.5}));
         QVERIFY(one.holding.missingVolumes.isEmpty());

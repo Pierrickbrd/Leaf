@@ -83,6 +83,22 @@ struct Counts {
     int arcs = 0;
 };
 
+/// What the publisher put out, and what it says exists — as opposed to `Holding`, which is
+/// what this library actually has of it.
+///
+/// `declaredVolumes` sits here and not beside the count of entries on purpose: it is the
+/// publisher speaking, not the shelf counting. Read against `holding.ownedVolumes`, the pair
+/// the contract insists on — « *what you own. Counted. The two do not say the same thing* » —
+/// finally reads as the two different claims it is.
+struct Publication {
+    std::optional<QString> publisher;
+    /// The publisher's imprint, a sibling of `publisher` rather than a replacement for it.
+    std::optional<QString> collection;
+    std::optional<QString> language;
+    /// What exists out in the world. Declared, never counted.
+    std::optional<int> declaredVolumes;
+};
+
 /// A row of the shelf. "Series" is the API's word; in the model it is an EDITION.
 struct Series {
     // Required by the contract.
@@ -96,16 +112,21 @@ struct Series {
     // string, because "no author recorded" and "author recorded as nothing" are different
     // facts and only one of them is worth showing.
     std::optional<QString> universe;
+    /// The same universe, addressable. `/universes/{id}/orders` wants an id, and a screen
+    /// holding only the name had to fetch every universe in the library and match strings
+    /// to find one — a whole request, and an answer that goes wrong the day somebody
+    /// renames a folder.
+    std::optional<QString> universeId;
     std::optional<QString> edition;
+    /// The one file of a book that is a whole book, and empty for everything else. Opening
+    /// such a tile goes to the reader rather than to a series page, and the id is here so
+    /// that the click needs no request of its own to find out what to open.
+    std::optional<QString> oneShotEntry;
     Credits credits;
-    std::optional<QString> publisher;
-    /// The publisher's imprint, a sibling of `publisher` rather than a replacement for it.
-    std::optional<QString> collection;
-    std::optional<QString> language;
+    Publication publication;
     std::optional<Medium> medium;
     std::optional<ReadingDirection> readingDirection;
     std::optional<Run> run;
-    std::optional<int> declaredVolumes;
     QList<QString> genres;
     /// Beside `genres`, never folded into them.
     QList<QString> tags;

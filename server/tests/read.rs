@@ -292,6 +292,32 @@ fn a_universe_the_work_already_names_is_not_repeated() {
     assert_eq!("Terres d'Arran · Elfes", elfes.name);
 }
 
+/// The name is what a screen shows; the id is what `/universes/{id}/orders` is addressed by.
+///
+/// A client holding only the name had to fetch every universe in the library and match
+/// strings to find one — a whole request to answer a question the series already knew, and
+/// a match that goes wrong the day somebody renames a folder.
+#[test]
+fn a_series_carries_the_id_of_its_universe_and_not_only_its_name() {
+    let library = Library::new();
+    let one = |id: &str| {
+        library
+            .repository()
+            .one_series(id)
+            .expect("reading")
+            .expect("there")
+    };
+
+    let elfes = one("e-elfes");
+    assert_eq!(Some("Terres d'Arran".to_string()), elfes.universe);
+    assert_eq!(Some("u-arran".to_string()), elfes.universe_id);
+
+    // And a work in no universe carries neither, rather than an empty string for one.
+    let death = one("e-death");
+    assert!(death.universe.is_none());
+    assert!(death.universe_id.is_none());
+}
+
 // ----------------------------------------------------------------- the facets
 
 #[test]

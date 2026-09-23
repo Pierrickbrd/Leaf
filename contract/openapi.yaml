@@ -415,6 +415,44 @@ paths:
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Progress" } }
+    patch:
+      operationId: recordSeriesProgress
+      tags: [progress]
+      summary: Mark a whole series read, or unread.
+      description: |
+        One statement, not one call per volume. A thirty-volume series costs the server the
+        same number of statements as a three-volume one, which is what makes this a route
+        rather than a loop in the client.
+
+        `finished: true` fills the page in as well — a volume finished at page nought is a
+        contradiction, and a shelf would draw it as an empty bar under the word "read".
+        `finished: false` clears the mark on the records that exist and creates none: saying
+        "not finished" about a book nobody opened is not a fact worth storing, and an absent
+        record already says it.
+
+        To forget the positions themselves rather than move them, use `DELETE`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SeriesProgressPatch" }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "200":
+          description: The records as they now stand.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Progress" } }
+    delete:
+      operationId: forgetSeriesProgress
+      tags: [progress]
+      summary: Forget every position in a series.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "204": { description: "Forgotten, whether or not there was anything to forget." }
 
   /entries/{id}:
     parameters: [{ $ref: "#/components/parameters/Id" }]
@@ -1456,6 +1494,13 @@ components:
             "Parasite · Parasite · Édition Deluxe".
           examples: ["Terres d'Arran · Elfes"]
         universe: { type: [string, "null"] }
+        universeId:
+          type: [string, "null"]
+          description: |
+            Beside the name, because `/universes/{id}/orders` is addressed by id. A client
+            holding only the name had to fetch every universe in the library and match
+            strings to find one — a whole request, and an answer that goes wrong the day a
+            universe is renamed under it.
         work: { type: string }
         edition: { type: [string, "null"] }
         author:
@@ -1490,6 +1535,12 @@ components:
             Computed, never declared. The one filter a reading application is asked for
             most, and the one you cannot reach by typing: a name is searched, a state is
             filtered.
+
+            READ means every entry has been finished **at least once**, and not that none is
+            currently open. Re-reading one volume of a series you had finished does not take
+            it out of this filter: having finished it is something that happened, and the
+            per-entry `finished` is what says where you are now. A series can therefore be
+            READ while one of its files is in progress — two facts, not a contradiction.
         declaredVolumes:
           type: [integer, "null"]
           description: What exists out in the world. Declared, not counted.
@@ -1513,6 +1564,23 @@ components:
 
             A false gap here is worth having: it means a volume you own declares no chapter
             markers, which is something to fix rather than to hide.
+        oneShotEntry:
+          type: [string, "null"]
+          description: |
+            The single file of a book that is a whole book — its own work, its own edition
+            and its own entry at once — and absent for everything else.
+
+            Declared by `oneshot.json` inside the archive and never counted out of the shape:
+            an album standing alone and a running series you own one volume of are the same
+            rows, and only somebody saying so tells them apart.
+
+            The id and not a flag, because a shelf tile that opens the reader has to know
+            *what* to open at the moment it is clicked. A boolean would send a client back
+            for the entry list first — a request between the click and the page.
+
+            Absent when the edition holds anything but exactly one entry, whatever it
+            declares: a client must not be handed one of three files as though it were the
+            answer.
         entryCount: { type: integer }
         readEntries:
           type: integer
@@ -1759,6 +1827,14 @@ components:
         page: { type: integer }
         pageCount: { type: integer }
         finished: { type: boolean }
+        timesFinished:
+          type: integer
+          description: |
+            How many times this entry has been finished. `finished` says where the reader
+            stands now and a rewind clears it; this says whether they ever reached the end,
+            and nothing but forgetting the record brings it back to nought.
+
+            Absent at nought, the way every other count in these answers is.
         updatedAt: { type: integer, description: Epoch millis. }
         chapter:
           description: |
@@ -1768,6 +1844,16 @@ components:
             - { $ref: "#/components/schemas/Chapter" }
             - { type: "null" }
       required: [entryId, page, pageCount, finished, updatedAt]
+
+    SeriesProgressPatch:
+      type: object
+      description: |
+        Only `finished`. A page number is a position inside one file and says nothing across
+        thirty, and moving a whole series backwards is `DELETE` — forgetting it, which is a
+        different act from being somewhere else in it.
+      required: [finished]
+      properties:
+        finished: { type: boolean }
 
     ProgressPatch:
       type: object

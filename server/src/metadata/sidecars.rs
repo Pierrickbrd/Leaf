@@ -182,6 +182,72 @@ pub struct EditionJson {
     pub arcs: Vec<ArcJson>,
 }
 
+/// A book that is a whole book: an album that is its own work, its own edition and its own
+/// entry at once.
+///
+/// **Inside the CBZ, beside `entry.json`, and its presence is the declaration.** No count
+/// separates an album standing alone from a series still running of which you happen to own
+/// one volume — they are the same rows. Only somebody saying so tells them apart, which is
+/// what every other level of this format already works by.
+///
+/// It carries what `work.json`, `edition.json` and `entry.json` carry together, because a
+/// one-shot has none of the three above it to hold them. That is the same reasoning the
+/// format already applies one level up, where a single-edition work keeps its edition fields
+/// in `work.json` for want of an edition folder.
+///
+/// An archive carrying this is lifted out of the work whose folder it sits in: two albums
+/// dropped side by side in `BD/` are two books, and not a two-volume series called `BD`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct OneShotJson {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leaf: Option<i32>,
+    /// What the book is called. Absent falls back to the file's own name, the way a work
+    /// falls back to its folder's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub medium: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub authors: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub artists: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reading_direction: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub genres: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// A free string, never an enum: "16+" at Kana, "T" elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_rating: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub colour: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isbn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published_on: Option<String>,
+}
+
+/// There is no `status` and no `volumeCount` here, and that is the point: a book that is
+/// whole has nothing to announce and nothing left to wait for. A one-shot is `completed`
+/// with one volume by being a one-shot, so asking a file to repeat it would be asking for a
+/// fact that can disagree with itself.
+impl OneShotJson {
+    /// The writers, and nothing legacy to resolve: this file was born after `authors`.
+    pub fn authors(&self) -> Vec<String> {
+        self.authors.clone()
+    }
+}
+
 /// A range, not a list: four Haikyū volumes belong to two arcs, because an arc does not end
 /// where a volume ends.
 #[derive(Debug, Clone, Deserialize, Serialize)]

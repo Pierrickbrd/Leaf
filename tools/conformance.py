@@ -40,6 +40,7 @@ SERIES = "/series"
 ONE_SERIES = "/series/{id}"
 ONE_ENTRY = "/entries/{id}"
 ENTRY_PROGRESS = "/entries/{id}/progress"
+SERIES_PROGRESS = "/series/{id}/progress"
 UP_NEXT = "/next"
 IMPORT = "/import"
 ONE_IMPORT = "/import/{id}"
@@ -189,7 +190,7 @@ def reading(run):
     entries = run.check("series entries", f"/series/{series}/entries", "/series/{id}/entries")
     run.check("series chapters", f"/series/{series}/chapters", "/series/{id}/chapters")
     run.check("series arcs", f"/series/{series}/arcs", "/series/{id}/arcs")
-    run.check("series progress", f"/series/{series}/progress", "/series/{id}/progress")
+    run.check("series progress", f"/series/{series}/progress", SERIES_PROGRESS)
     run.check("unknown series", "/series/nope", ONE_SERIES)
     entry = entries[0]["id"]
     run.check("one entry", f"/entries/{entry}", ONE_ENTRY)
@@ -203,12 +204,21 @@ def reading(run):
     return series, entry
 
 
-def progress(run, entry):
+def progress(run, series, entry):
     print("— progress —")
     run.check("record", f"/entries/{entry}/progress", ENTRY_PROGRESS, "PATCH", {"page": 1})
     run.check("read back", f"/entries/{entry}/progress", ENTRY_PROGRESS)
     run.check("up next after", UP_NEXT, UP_NEXT)
     run.check("forget", f"/entries/{entry}/progress", ENTRY_PROGRESS, "DELETE")
+    # The whole series at once. Driven here and not only in the server's own tests because
+    # what this checks is the other thing: that the answer matches the schema the contract
+    # publishes for it.
+    whole = f"/series/{series}/progress"
+    run.check("mark series read", whole, SERIES_PROGRESS, "PATCH", {"finished": True})
+    run.check("mark series unread", whole, SERIES_PROGRESS, "PATCH", {"finished": False})
+    run.check("unknown series", "/series/nope/progress", SERIES_PROGRESS, "PATCH",
+              {"finished": True})
+    run.check("forget the series", whole, SERIES_PROGRESS, "DELETE")
 
 
 def records(run, series, entry):
@@ -260,7 +270,7 @@ def main(argv=None, contract=CONTRACT):
 
     run = Run(Server(base, key, context), Contract.read(contract))
     series, entry = reading(run)
-    progress(run, entry)
+    progress(run, series, entry)
     records(run, series, entry)
     importing(run)
     if key:

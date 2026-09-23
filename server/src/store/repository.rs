@@ -21,16 +21,26 @@ use crate::store::{Cx, Db};
 
 /// Where a reader stands in a series, worked out from the progress kept per volume.
 ///
-/// Nothing started is UNREAD; every volume finished is READ; anything between is
-/// IN_PROGRESS. Written once and used three times — in the list, in the filter and in the
-/// counts — so those three can never tell different stories about the same shelf.
+/// Nothing started is UNREAD; every volume finished **at least once** is READ; anything
+/// between is IN_PROGRESS. Written once and used three times — in the list, in the filter
+/// and in the counts — so those three can never tell different stories about the same shelf.
 ///
 /// A volume counts as started once a page has been turned or it has been finished: opening
 /// a book and closing it on page zero is not reading it.
+///
+/// **`times_finished` and not `finished`**, because the two answer different questions.
+/// `finished` says where the reader stands now, and a rewind clears it — so re-opening one
+/// volume of a thirty-volume series you had finished dropped the whole series out of the
+/// READ filter. Having finished a volume is something that happened, and nothing later
+/// un-happens it. The per-volume mark keeps using `finished`, since a volume being re-read
+/// *is* in progress: a series can be read while one of its files is not, and that is the
+/// answer both were trying to give with one column.
 const READ_STATUS: &str = "CASE
     WHEN (SELECT COUNT(*) FROM progress p
-          WHERE p.edition_id = e.id AND (p.finished = 1 OR p.page > 0)) = 0 THEN 'UNREAD'
-    WHEN (SELECT COUNT(*) FROM progress p WHERE p.edition_id = e.id AND p.finished = 1)
+          WHERE p.edition_id = e.id AND (p.times_finished > 0 OR p.page > 0)) = 0
+         THEN 'UNREAD'
+    WHEN (SELECT COUNT(*) FROM progress p
+          WHERE p.edition_id = e.id AND p.times_finished > 0)
          >= (SELECT COUNT(*) FROM entry x WHERE x.edition_id = e.id) THEN 'READ'
     ELSE 'IN_PROGRESS'
   END";
@@ -189,9 +199,17 @@ impl<'a> Repository<'a> {
                     w.id AS work_id, w.name AS work,
                     w.age_rating, COALESCE(e.medium, w.medium) AS medium,
                     COALESCE(e.reading_direction, w.reading_direction) AS reading_direction,
-                    u.name AS universe,
+                    u.id AS universe_id, u.name AS universe,
                     {READ_STATUS} AS read_status,
                     (SELECT COUNT(*) FROM entry   x WHERE x.edition_id = e.id) AS entry_count,
+                    -- A whole book, and the file to open. Guarded on holding exactly one
+                    -- entry as well as on the declaration: an archive that says it is a
+                    -- book while its edition holds three is not one, and a client must not
+                    -- be handed one of the three as though it were the answer.
+                    CASE WHEN e.one_shot = 1
+                              AND (SELECT COUNT(*) FROM entry x WHERE x.edition_id = e.id) = 1
+                         THEN (SELECT x.id FROM entry x WHERE x.edition_id = e.id)
+                    END AS one_shot_entry,
                     -- How many of them are finished, and how far into the ones that are
                     -- not. Both in the same statement as the rest and not a question per
                     -- row: a shelf of two hundred series would be two hundred more reads
@@ -239,6 +257,8 @@ impl<'a> Repository<'a> {
                     id: r.get("id")?,
                     work_id: r.get("work_id")?,
                     name: composed_name(universe.as_deref(), &work, edition.as_deref()),
+                    universe_id: r.get("universe_id")?,
+                    one_shot_entry: r.get("one_shot_entry")?,
                     universe,
                     work,
                     edition,

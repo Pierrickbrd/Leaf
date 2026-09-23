@@ -110,6 +110,53 @@ fn an_older_database_is_brought_up_and_marked() {
     assert!(tables(&file).contains(&"work_tag".to_string()));
 }
 
+/// A library that had already finished volumes must go on having finished them.
+///
+/// `times_finished` is backfilled from `finished` for the same reason `added_at` is: a
+/// column added later leaves everything before it blank, and here that blank would mean
+/// « never read » about every book the reader had actually finished. Progress lives nowhere
+/// but the index, so no rescan brings it back.
+#[test]
+fn a_library_that_already_finished_volumes_keeps_having_finished_them() {
+    let dir = temp();
+    let file = dir.path().join("read.sqlite");
+    {
+        // A database at version 21: everything before this migration has run, and progress
+        // holds one volume finished and one merely started.
+        let conn = rusqlite::Connection::open(&file).expect("opening");
+        conn.execute_batch(
+            "CREATE TABLE progress (entry_id TEXT PRIMARY KEY, edition_id TEXT NOT NULL,
+                                    page INTEGER NOT NULL,
+                                    finished INTEGER NOT NULL DEFAULT 0,
+                                    updated_at INTEGER NOT NULL);
+             INSERT INTO progress (entry_id, edition_id, page, finished, updated_at)
+               VALUES ('done', 'e', 189, 1, 1);
+             INSERT INTO progress (entry_id, edition_id, page, finished, updated_at)
+               VALUES ('midway', 'e', 40, 0, 1);
+             PRAGMA user_version = 21;",
+        )
+        .expect("building the old schema");
+    }
+
+    drop(Db::open(&file).expect("migrating"));
+
+    let conn = rusqlite::Connection::open(&file).expect("opening");
+    let counted = |entry: &str| -> i64 {
+        conn.query_row(
+            "SELECT times_finished FROM progress WHERE entry_id = ?1",
+            [entry],
+            |r| r.get(0),
+        )
+        .expect("the row")
+    };
+    assert_eq!(
+        1,
+        counted("done"),
+        "a volume already finished had been read once"
+    );
+    assert_eq!(0, counted("midway"), "and one merely started had not");
+}
+
 /// The migration this feature actually depends on: not a fresh database, one that already
 /// held real names in the column being replaced.
 ///
