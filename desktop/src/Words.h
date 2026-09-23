@@ -321,6 +321,87 @@ QString universeLine(const QString &name, int others);
 QString outsideTheOrder();
 QString seriesCount(int count);
 
+// ——— What the three dots offer, and what a deletion says before it happens —————————
+
+/// The entries of the menu that commands an object where it is drawn. Two lists and not one:
+/// a series is not a file, and « enregistrer une copie » of thirty volumes is not a thing.
+///
+/// Every one of them names what it acts on — « ce tome », « la série » — because the menu is
+/// opened from a tile among fifty and the pointer has moved by the time it is read.
+enum class Command {
+    MarkSeriesRead,
+    MarkSeriesUnread,
+    ReimportSeries,
+    EraseSeries,
+    MarkEntryRead,
+    MarkEntryUnread,
+    ReimportEntry,
+    SaveACopy,
+    EraseEntry,
+};
+QString command(Command which);
+
+/// « Supprimer le tome 23 ? » — the question a deletion asks, naming the one thing that goes.
+QString eraseEntryQuestion(double number);
+
+/// « Supprimer « Elfes » ? » — with its guillemets, because an edition's name is a name and
+/// « Supprimer Elfes ? » reads as a sentence about elves.
+QString eraseSeriesQuestion(const QString &name);
+
+/// « La Dryade — 54 pages, 48,0 Mio » — what goes, and what it weighs. The title stands alone
+/// when a volume has none, rather than a dash leading nowhere.
+QString whatGoes(const QString &title, int pages, qint64 bytes);
+
+/// « Fichier : Elfes - Tome 23.cbz » — the name alone. `Entry.file` is « the file name alone,
+/// never a path », so the modal says the name and does not invent the place.
+QString whichFile(const QString &name);
+
+/// « Il restera 28 albums, et le 23 rejoindra les manquants. La numérotation ne bouge pas :
+/// le 24 reste le 24. »
+///
+/// The sentence changes with the volume, and that is the whole reason it is composed rather
+/// than written once: erasing the last or the first leaves no hole — the ceiling comes down,
+/// the floor goes up — while erasing one in the middle leaves one for ever. A confirmation
+/// that said the same thing every time would only ever be clicked.
+QString whatWouldRemain(int remaining, std::optional<Api::Medium> medium, double number,
+                        bool between, std::optional<double> nextHeld);
+
+/// « 29 fichiers, 1,4 Gio. Les 4 tomes lus et la position dans le 5ᵉ seront oubliés avec
+/// eux. » — what a whole edition takes with it. A deletion that speaks only of files hides
+/// half of what it carries away.
+QString whatAWholeEditionTakes(int files, qint64 bytes, int finished, bool oneOpen, int which);
+
+/// « Le fichier est supprimé du disque. Leaf n'a pas de corbeille — un scan ne le ramènera
+/// pas. » Plural when a whole edition goes, because thirty files are not a file.
+QString noTrash(bool several);
+
+/// « L'édition Intégrale de la même œuvre n'est pas touchée. » — said only when there is one.
+/// « Supprimer Elfes » is ambiguous the day two editions carry that name, and that is exactly
+/// the day one must not be wrong.
+QString otherEditionUntouched(const QString &name);
+
+/// « Tapez Elfes pour confirmer » — the only protection that works against a reflex, and it
+/// is worth its weight on thirty files where it would be ceremony on one.
+QString typeToConfirm(const QString &name);
+
+/// « Supprimer » — the button that does it, and the one word on the screen painted in the
+/// alert colour.
+QString eraseButton();
+
+/// « Il n'y a rien à supprimer ici. » — said when the modal was opened about nothing at all,
+/// which is a client fault and not a server one. It is still said rather than swallowed: a
+/// confirmation that comes up empty and does nothing is worse than one that explains itself.
+QString nothingToErase();
+
+/// « Tome 5.cbz n'a pas pu être écrit. » — a copy that did not reach the disk. Named by the
+/// file it was going to be, because that is the only part of it the reader chose.
+QString couldNotWrite(const QString &name);
+
+/// « 2 fichiers n'ont pas pu être supprimés : Tome 4.cbz, Tome 9.cbz » — what the server
+/// refused. Named, because « the caller is told exactly which files are still there instead
+/// of working it out from a count ».
+QString wouldNotGo(const QList<QString> &refused);
+
 /// « 29 albums · ici » — what a tile says under its name, with the mark that it is the one
 /// being read. Appended to that line rather than drawn beside it: a tile has one grey line,
 /// and a mark floating over a cover would have to be placed again at every size.

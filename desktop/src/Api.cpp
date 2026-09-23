@@ -45,6 +45,19 @@ public:
         return value.toInt();
     }
 
+    /// A count of bytes that has to be there. Apart from `whole` because an `int` stops at
+    /// two gigabytes and an edition passes that at forty volumes: `toInt` on a larger number
+    /// answers 0, which would report a deletion that took nothing.
+    qint64 big(QStringView name)
+    {
+        const QJsonValue value = m_from.value(name);
+        if (!value.isDouble()) {
+            complain(name, QStringLiteral("a number"));
+            return 0;
+        }
+        return value.toInteger();
+    }
+
     /// A number that has to be there, and may be a half: an arc bound is 68 or 68.5, and a
     /// volume number is a half as often as not.
     double real(QStringView name)
@@ -428,6 +441,20 @@ Read<Page> page(const QJsonObject &from)
         some.items.append(*one.value);
     }
     return {some, {}};
+}
+
+Read<Erased> erased(const QJsonObject &from)
+{
+    Fields field(from);
+    Erased gone;
+    gone.files = field.whole(u"files"_s);
+    gone.bytes = field.big(u"bytes"_s);
+    if (field.broken())
+        return refused<Erased>(QStringLiteral("erased"), field.trouble());
+
+    // Absent when every one of them went, which is the ordinary answer.
+    gone.refused = field.words(u"refused"_s);
+    return {gone, {}};
 }
 
 Read<Hit> hit(const QJsonObject &from)

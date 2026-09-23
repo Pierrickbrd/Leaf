@@ -76,6 +76,14 @@ QColor Theme::inkFaint() const     { return pick(m_dark, 0x666C63u, 0x6B756Du); 
 QColor Theme::emerald() const      { return pick(m_dark, 0x0A6A55u, 0x2FB98Bu); }
 QColor Theme::emeraldWash() const  { return pick(m_dark, 0xC9DCD3u, 0x12241Du); }
 QColor Theme::onEmerald() const    { return pick(m_dark, 0xF0ECE3u, 0x08110Du); }
-QColor Theme::alert() const        { return pick(m_dark, 0x96400Au, 0xF59E0Bu); }
-QColor Theme::alertWash() const    { return pick(m_dark, 0xEBDCCCu, 0x2A1C08u); }
+// Garnet, where this was amber. One alert colour and not two: a red beside an orange would
+// be the « one colour per value » the architecture refuses for pills, and what changes here is
+// the value, not the role. The eleven places that call these — the badge of a card that
+// failed, « Abandonner », the notes of the settings screen, the two breakdown banners, the
+// Attention tone of the import tree — do not move a line.
+//
+// The hollow of a hovered row decided the dark value: a deeper garnet fell to 4,44 there,
+// under the floor. `keeps_its_contrast` holds the four figures of each theme.
+QColor Theme::alert() const        { return pick(m_dark, 0x8E1F2Bu, 0xE0656Eu); }
+QColor Theme::alertWash() const    { return pick(m_dark, 0xF2DCE0u, 0x2C1116u); }
 QColor Theme::readerPaper() const  { return pick(m_dark, 0xDCD2BCu, 0x070908u); }

@@ -28,6 +28,10 @@ Item {
     readonly property bool elsewhereHasAnything:
         view.page.editions.length > 0 || Elsewhere.tiles.length > 0
 
+    /// Asked for a re-import, of this edition or of one of its files. It travels to the
+    /// window, because the import dialog belongs there and not to a row.
+    signal reimportAsked(string entryId)
+
     /// Changing edition is not a navigation: the page and its list are re-pointed under the
     /// same header. Here and not in two places, because the switcher in the header and the
     /// last tab both do it and the day one of them learns something the other must too.
@@ -84,8 +88,10 @@ Item {
                 weights: view.page.weights
                 genres: view.page.genres
                 editionsLabel: view.page.editionsLabel
+                seriesId: view.page.identifier
                 onUniverseAsked: Shelf.filterBy({ "universe": [view.page.universe] })
                 onEditionsAsked: switcher.visible = !switcher.visible
+                onReimportAsked: view.reimportAsked("")
             }
 
             // Opens on the spot rather than taking the page away: this is a change of
@@ -164,12 +170,16 @@ Item {
             // The list. The page scrolls, not a box inside it — one scroll, like the shelf,
             // and the cut is the bottom of the screen rather than a box with white under it.
             Column {
+                id: asList
+
                 width: parent.width
                 spacing: 0
-                visible: view.current === view.volumesTab
+                visible: view.current === view.volumesTab && !Preferences.volumesAsGrid
 
                 Repeater {
-                    model: view.volumes
+                    // Emptied rather than hidden: a repeater in an invisible column still
+                    // builds every one of its delegates, and this page has two of them.
+                    model: asList.visible ? view.volumes : null
 
                     // A row is a file, a gap, a separator or a stretch of chapters, and
                     // the four are read in one column. A loader picks the shape rather than
@@ -191,6 +201,7 @@ Item {
                         required property int kind
                         required property string detail
                         required property int depth
+                        required property string fileName
 
                         width: parent.width
                         sourceComponent: kind === 2 ? arcSeparator
@@ -209,6 +220,9 @@ Item {
                                 howFarRead: line.howFarRead
                                 timesFinished: line.timesFinished
                                 neverReadWord: SeriesCaptions.neverRead
+                                seriesId: view.page.identifier
+                                fileName: line.fileName
+                                onReimportAsked: view.reimportAsked(line.entryId)
                             }
                         }
 
@@ -238,6 +252,63 @@ Item {
                     font.family: Theme.textFamily
                     font.pixelSize: 12
                     topPadding: 12
+                }
+            }
+
+            // The same list, in covers. No separators here: a full-width marker would cut the
+            // grid into blocks of uneven height, and the grid exists to show covers. Arcs are
+            // a linear reading and they live in the list.
+            Flow {
+                id: asGrid
+
+                width: parent.width
+                spacing: Widths.shelfGap
+                visible: view.current === view.volumesTab && Preferences.volumesAsGrid
+
+                readonly property real side: 104
+
+                Repeater {
+                    model: asGrid.visible ? view.volumes : null
+
+                    Loader {
+                        id: cell
+
+                        required property string entryId
+                        required property string number
+                        required property string title
+                        required property string pages
+                        required property string cover
+                        required property string fileName
+                        required property int state
+                        required property real howFarRead
+                        required property int kind
+
+                        // A file and a gap are drawn; a separator and a stretch of chapters
+                        // are not, and an invisible item is one a `Flow` steps over rather
+                        // than laying out at nought by nought.
+                        visible: kind <= 1
+                        active: visible
+                        sourceComponent: oneVolume
+
+                        Component {
+                            id: oneVolume
+
+                            VolumeTile {
+                                entryId: cell.entryId
+                                number: cell.number
+                                title: cell.title
+                                pages: cell.pages
+                                cover: cell.cover
+                                fileName: cell.fileName
+                                state: cell.state
+                                howFarRead: cell.howFarRead
+                                seriesId: view.page.identifier
+                                coverWidth: asGrid.side
+                                coverHeight: asGrid.side * 1.5
+                                onReimportAsked: view.reimportAsked(cell.entryId)
+                            }
+                        }
+                    }
                 }
             }
 

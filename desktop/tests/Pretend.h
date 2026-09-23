@@ -42,15 +42,29 @@ public:
         socket->setSocketDescriptor(handle);
         connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
         connect(socket, &QTcpSocket::readyRead, this,
-                [this, socket, request = QByteArray{}, answered = false]() mutable {
-            if (answered)
-                return;
+                [this, socket, request = QByteArray{}]() mutable {
             const QByteArray arrived = socket->readAll();
             request += arrived;
             heard += arrived;
+            // Every request in the buffer, and not the first alone. A client that keeps a
+            // connection alive sends the next one down it without waiting, and three of them
+            // arrived in a single read the first time a screen asked for three things at
+            // once: answering one and going quiet read, on the client side, as a server that
+            // stopped — and as « the server said something this client cannot read », because
+            // the one answer written went to the wrong question.
+            while (answerOne(socket, request)) {
+            }
+        });
+    }
+
+private:
+    /// Answers the request at the front of the buffer and takes it off, or says there is not
+    /// a whole one there yet.
+    bool answerOne(QTcpSocket *socket, QByteArray &request)
+    {
             const qsizetype headerEnd = request.indexOf("\r\n\r\n");
             if (headerEnd < 0) {
-                return;
+                return false;
             }
             // A body several megabytes wide — the folder send path's own chunk — arrives
             // in more than the one `readyRead` headers alone would ever need, and the
@@ -68,18 +82,23 @@ public:
                 contentLength = trimmed.mid(trimmed.indexOf(':') + 1).trimmed().toLongLong();
                 break;
             }
-            if (request.size() < headerEnd + 4 + contentLength) {
-                return;
+            const qsizetype whole = headerEnd + 4 + contentLength;
+            if (request.size() < whole) {
+                return false;
             }
-            answered = true;
             // A cover leaving GridView's one-row buffer cancels its request. The peer can
             // disappear after sending the headers and before this deliberately tiny server
             // gets to reply; that is success for the client, not a socket warning in a test.
             if (socket->state() != QAbstractSocket::ConnectedState)
-                return;
-            socket->write(answerFor ? answerFor(request) : answer);
+                return false;
+            const QByteArray one = request.left(whole);
+            request.remove(0, whole);
+            socket->write(answerFor ? answerFor(one) : answer);
             socket->flush();
-            socket->disconnectFromHost();
-        });
+            // Closed only once there is nothing left to answer: a client that pipelined two
+            // requests down one connection is still waiting for the second.
+            if (request.isEmpty())
+                socket->disconnectFromHost();
+            return !request.isEmpty();
     }
 };

@@ -39,6 +39,14 @@ public:
         int status = 0;
         QJsonDocument body;
         QString trouble;
+        /// What came back before anything tried to read it, and empty unless it was asked
+        /// for. A `.cbz` is not JSON and parsing it would turn a good answer into « the
+        /// server said something this client cannot read ».
+        ///
+        /// Given a value here rather than left to the brace: every `Answer` in this file is
+        /// built with a brace list, warnings are errors, and a field added with none would
+        /// break the five of them that have nothing to say about it.
+        QByteArray file = {};
 
         bool went() const { return trouble.isEmpty(); }
     };
@@ -78,6 +86,12 @@ public:
     void get(const QString &path, const QObject *caller,
              std::function<void(const Answer &)> then);
 
+    /// The same request, for a route that answers with a file rather than with a document.
+    /// The bytes arrive in `Answer::file` and nothing is parsed — everything else about the
+    /// call is `get` word for word, which is why it goes through the same place.
+    void getFile(const QString &path, const QObject *caller,
+                 std::function<void(const Answer &)> then);
+
     /// The same path, the same waiting, the same refusals — with a body, and a verb the
     /// server reads as a command rather than a question.
     ///
@@ -106,6 +120,11 @@ public:
     void put(const QString &path, const QUrlQuery &query, const QByteArray &body, qint64 from,
              qint64 whole, const QObject *caller, std::function<void(const Answer &)> then);
 
+    /// What to make of the bytes that come back. A route that answers with an archive and a
+    /// route that answers with a document are read differently, and nothing else about the
+    /// call changes — so it is one word here rather than a second `send`.
+    enum class Reading { Document, Bytes };
+
     /// Whether anything more will be sent.
     ///
     /// A refused key is not a hiccup: it stays refused until somebody changes a file, and the
@@ -120,6 +139,12 @@ public:
     /// Why it stopped, in the words the server used. Empty while it will still send.
     QString whyStopped() const { return m_stopped; }
 
+    /// Changes part of something that is already there. The verb the contract uses wherever
+    /// a screen edits one field of many — a reading state, a sidecar — and never the one that
+    /// creates. `sendCustomRequest` carries it, as it carries DELETE.
+    void patch(const QString &path, const QByteArray &body, const QObject *caller,
+               std::function<void(const Answer &)> then);
+
     /// Takes something back off the server. No body either way.
     ///
     /// The import needs it: abandoning a file has to reach the server, because the server
@@ -133,7 +158,6 @@ public:
     static QString tidy(const QString &address);
 
 private:
-    Answer read(class QNetworkReply *reply) const;
 
     /// A request made before `Settings` had finished loading, kept until it can be sent.
     ///
@@ -171,6 +195,10 @@ private:
         /// rest, because a transfer replayed after the keyring answers and stripped of its
         /// offset would write the middle of a volume over its beginning.
         QByteArray range;
+        /// Whether the answer is a document or a file. Held with the rest: a download held
+        /// back until the keyring answers and then replayed as a document would come back
+        /// « unreadable », which is the one thing it is not.
+        Reading reading = Reading::Document;
         QPointer<const QObject> caller;
         std::function<void(const Answer &)> then;
     };
@@ -181,9 +209,24 @@ private:
     static_assert(std::is_nothrow_move_constructible_v<Waiting>,
                   "a held request has to move without throwing: QList relocates them");
 
-    void send(const QByteArray &verb, const QString &path, const QUrlQuery &query,
-              const QByteArray &body, const QByteArray &range, const QObject *caller,
-              std::function<void(const Answer &)> then);
+    /// One request, as the five things that make it. Grouped rather than passed loose: they
+    /// travel together everywhere — the queue holds them, the drain replays them — and a
+    /// function taking eight arguments is a call site where two of them get swapped.
+    struct Sending {
+        /// `GET`, `POST`, `PATCH`, `PUT` or `DELETE`.
+        QByteArray verb;
+        QString path;
+        QUrlQuery query;
+        QByteArray body;
+        /// What a PUT carries beyond the key: the range its body starts at.
+        QByteArray range;
+    };
+
+    void send(const Sending &what, const QObject *caller,
+              std::function<void(const Answer &)> then,
+              Reading reading = Reading::Document);
+
+    Answer read(class QNetworkReply *reply, Reading reading) const;
 
     Settings *m_settings;
     QNetworkAccessManager m_network;

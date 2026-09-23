@@ -290,6 +290,26 @@ private slots:
     }
 
     /// The words of the screen follow the list without asking it anything: a caption is
+    /// A cover and a file name, for the two things a list of lines has no use for: the grid
+    /// draws one and a deletion names the other. Spelled here rather than assembled out of
+    /// the address in every `.qml` that wants one.
+    void a_line_carries_its_cover_and_its_file_name()
+    {
+        serve(rows({volume(1, u"Le Crystal"_s)}), rows({}));
+        m_list->point(u"albums"_s);
+        settle();
+
+        QVERIFY(at(0, "cover").toString().endsWith(u"/entries/v1/cover"_s));
+        QCOMPARE(at(0, "fileName").toString(), u"Tome 1.cbz"_s);
+        // A gap is not a file: no cover to draw and no name to delete.
+        serve(rows({volume(1, u"Le Crystal"_s), volume(3, u"L'Élu"_s)}), rows({}));
+        m_list->point(u"albums"_s, QVariantList{2.0});
+        settle();
+        QCOMPARE(m_list->count(), 3);
+        QVERIFY(at(1, "cover").toString().isEmpty());
+        QVERIFY(at(1, "fileName").toString().isEmpty());
+    }
+
     /// Which volume is being read, for a block that is not this list: a reading order may
     /// send the same work round twice, and « ici » has to land on the stretch holding it.
     void the_list_says_which_volume_is_open()

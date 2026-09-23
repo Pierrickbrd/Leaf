@@ -67,6 +67,76 @@ private slots:
         QCOMPARE(Words::fromChapter(69), u"à partir du chapitre 69"_s);
     }
 
+    /// Nine entries and two lists: a series is not a file, and « enregistrer une copie » of
+    /// thirty volumes is not a thing. Each names what it acts on, because the menu is opened
+    /// from a tile among fifty and the pointer has moved by the time it is read.
+    void the_menu_names_what_each_entry_acts_on()
+    {
+        using enum Words::Command;
+        QCOMPARE(Words::command(MarkSeriesRead), u"Marquer toute la série comme lue"_s);
+        QCOMPARE(Words::command(MarkEntryRead), u"Marquer comme lu"_s);
+        QCOMPARE(Words::command(ReimportEntry), u"Réimporter ce tome…"_s);
+        QCOMPARE(Words::command(EraseSeries), u"Supprimer la série…"_s);
+        // The ellipsis is the promise that something else opens, and it is the real one and
+        // not three dots: three dots break across a line.
+        for (const Words::Command one : {ReimportSeries, ReimportEntry, SaveACopy, EraseSeries,
+                                         EraseEntry}) {
+            QVERIFY2(Words::command(one).endsWith(u"…"_s),
+                     qPrintable(Words::command(one)));
+        }
+    }
+
+    /// The sentence that changes with the volume, and the whole reason it is composed rather
+    /// than written once.
+    void a_deletion_says_what_it_leaves_behind()
+    {
+        // In the middle: a hole, and the numbering that does not move with it.
+        const QString middle =
+            Words::whatWouldRemain(28, Api::Medium::Bd, 23, true, std::optional<double>(24));
+        QCOMPARE(middle, u"Il restera 28 albums, et le 23 rejoindra les manquants."
+                         " La numérotation ne bouge pas : le 24 reste le 24."_s);
+        // At an end: the ceiling comes down and nothing is missing that was not before.
+        QCOMPARE(Words::whatWouldRemain(28, Api::Medium::Bd, 29, false, std::nullopt),
+                 u"Il restera 28 albums."_s);
+    }
+
+    /// What a whole edition takes with it. A deletion that speaks only of files hides half of
+    /// what it carries away.
+    void a_whole_edition_says_what_goes_besides_the_files()
+    {
+        QCOMPARE(Words::whatAWholeEditionTakes(29, 1503238553, 4, true, 5),
+                 u"29 fichiers, 1,4 Gio. Les 4 tomes lus et la position dans le 5ᵉ seront "
+                 "oubliés avec eux."_s);
+        // Nothing read: the files and nothing else, rather than a sentence about no readings.
+        QCOMPARE(Words::whatAWholeEditionTakes(29, 1503238553, 0, false, 1),
+                 u"29 fichiers, 1,4 Gio."_s);
+        // One file, and French keeps its singular.
+        QVERIFY(Words::whatAWholeEditionTakes(1, 4800, 0, false, 1).startsWith(u"1 fichier,"_s));
+    }
+
+    void the_words_a_deletion_uses_are_the_ones_it_means()
+    {
+        QCOMPARE(Words::eraseEntryQuestion(23), u"Supprimer le tome 23 ?"_s);
+        QCOMPARE(Words::eraseSeriesQuestion(u"Elfes"_s),
+                 u"Supprimer « Elfes » ?"_s);
+        QCOMPARE(Words::whatGoes(u"La Dryade"_s, 54, 48000000),
+                 u"La Dryade — 54 pages, 45,8 Mio"_s);
+        // A volume with no title of its own says what it weighs, not a dash leading nowhere.
+        QCOMPARE(Words::whatGoes(QString(), 54, 48000000), u"54 pages, 45,8 Mio"_s);
+        QCOMPARE(Words::whichFile(u"Tome 23.cbz"_s), u"Fichier : Tome 23.cbz"_s);
+        QCOMPARE(Words::typeToConfirm(u"Elfes"_s), u"Tapez Elfes pour confirmer"_s);
+        QVERIFY(Words::noTrash(true).contains(u"les ramènera pas"_s));
+        QVERIFY(Words::noTrash(false).contains(u"le ramènera pas"_s));
+        QCOMPARE(Words::wouldNotGo({u"Tome 4.cbz"_s}),
+                 u"Un fichier n’a pas pu être supprimé : Tome 4.cbz"_s);
+        QCOMPARE(Words::wouldNotGo({u"Tome 4.cbz"_s, u"Tome 9.cbz"_s}),
+                 u"2 fichiers n’ont pas pu être supprimés : Tome 4.cbz, Tome 9.cbz"_s);
+        // Nothing refused is nothing said, not « 0 fichiers ».
+        QVERIFY(Words::wouldNotGo({}).isEmpty());
+        QCOMPARE(Words::couldNotWrite(u"/home/quelqu'un/Tome 5.cbz"_s),
+                 u"Tome 5.cbz n’a pas pu être écrit."_s);
+    }
+
     /// The two blocks of the last tab, titled apart because they are not the same intention.
     void the_last_tab_titles_its_two_blocks_apart()
     {

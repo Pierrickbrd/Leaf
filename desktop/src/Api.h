@@ -596,6 +596,17 @@ struct Received {
     qint64 received = 0;
 };
 
+/// What a deletion took, and what would not go.
+///
+/// Reported rather than rolled back, which is the only honest answer: a deletion that half
+/// succeeded cannot be undone. `refused` names the files that are still there, so a screen
+/// says which ones rather than leaving somebody to work it out from a count.
+struct Erased {
+    int files = 0;
+    qint64 bytes = 0;
+    QList<QString> refused;
+};
+
 /// The offset asked for was past what the server holds, and here is what it holds.
 struct BadOffset {
     QString error;
@@ -656,6 +667,7 @@ Read<Arc> arc(const QJsonObject &from);
 Read<ReadingStep> readingStep(const QJsonObject &from);
 Read<ReadingOrder> readingOrder(const QJsonObject &from);
 Read<Universe> universe(const QJsonObject &from);
+Read<Erased> erased(const QJsonObject &from);
 Read<Hit> hit(const QJsonObject &from);
 /// Both shapes, because both cross the wire: the envelope when a page was asked for, the bare
 /// list from a server that predates it.

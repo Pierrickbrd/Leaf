@@ -1,6 +1,7 @@
 #include "Words.h"
 
 #include <QDateTime>
+#include <QFileInfo>
 #include <QLocale>
 
 #include <QStringList>
@@ -1468,6 +1469,144 @@ QString outsideTheOrder()
 QString seriesCount(int count)
 {
     return count <= 0 ? QString() : counted(count, u"série"_s, u"séries"_s);
+}
+
+QString command(Command which)
+{
+    using enum Command;
+    switch (which) {
+    case MarkSeriesRead:
+        return u"Marquer toute la série comme lue"_s;
+    case MarkSeriesUnread:
+        return u"Marquer toute la série comme non lue"_s;
+    case ReimportSeries:
+        return u"Réimporter…"_s;
+    case EraseSeries:
+        return u"Supprimer la série…"_s;
+    case MarkEntryRead:
+        return u"Marquer comme lu"_s;
+    case MarkEntryUnread:
+        return u"Marquer comme non lu"_s;
+    case ReimportEntry:
+        return u"Réimporter ce tome…"_s;
+    case SaveACopy:
+        return u"Enregistrer une copie…"_s;
+    case EraseEntry:
+        return u"Supprimer le tome…"_s;
+    }
+    return {};
+}
+
+QString eraseEntryQuestion(double number_)
+{
+    return u"Supprimer le tome %1 ?"_s.arg(number(number_));
+}
+
+QString eraseSeriesQuestion(const QString &name)
+{
+    return u"Supprimer « %1 » ?"_s.arg(name);
+}
+
+QString whatGoes(const QString &title, int pages, qint64 bytes)
+{
+    const QString weighs = pages > 0
+                               ? u"%1 pages, %2"_s.arg(pages).arg(size(bytes))
+                               : size(bytes);
+    // A volume with no title of its own says what it weighs and nothing else: a dash leading
+    // nowhere reads as a title that failed to load.
+    return title.isEmpty() ? weighs : u"%1 — %2"_s.arg(title, weighs);
+}
+
+QString whichFile(const QString &name)
+{
+    return u"Fichier : %1"_s.arg(name);
+}
+
+QString whatWouldRemain(int remaining, std::optional<Api::Medium> medium, double number_,
+                        bool between, std::optional<double> nextHeld)
+{
+    QString said = u"Il restera %1"_s.arg(volumes(remaining, medium));
+    // A hole only where there is something either side of it. Erasing the last brings the
+    // ceiling down and erasing the first raises the floor, and neither is reported as
+    // missing — `store/text.rs::gaps` answers that, and the sentence follows it.
+    if (between)
+        said += u", et le %1 rejoindra les manquants"_s.arg(number(number_));
+    said += u"."_s;
+    if (nextHeld.has_value()) {
+        said += u" La numérotation ne bouge pas : le %1 reste le %1."_s
+                    .arg(number(*nextHeld));
+    }
+    return said;
+}
+
+QString whatAWholeEditionTakes(int files, qint64 bytes, int finished, bool oneOpen, int which)
+{
+    QString said = u"%1 %2, %3."_s.arg(files)
+                       .arg(files == 1 ? u"fichier"_s : u"fichiers"_s, size(bytes));
+    if (finished <= 0 && !oneOpen)
+        return said;
+
+    // What a deletion carries away besides the files. Said in the same sentence, because a
+    // reader who has to look twice to find it is a reader who finds it afterwards.
+    QStringList lost;
+    if (finished > 0)
+        lost << (finished == 1 ? u"Le tome lu"_s : u"Les %1 tomes lus"_s.arg(finished));
+    if (oneOpen) {
+        lost << u"la position dans le %1%2"_s.arg(which).arg(which == 1 ? u"ᵉʳ"_s : u"ᵉ"_s);
+    }
+    QString what = lost.join(u" et "_s);
+    if (lost.size() == 1 && oneOpen)
+        what = u"La position dans le %1%2"_s.arg(which).arg(which == 1 ? u"ᵉʳ"_s : u"ᵉ"_s);
+    said += u" %1 %2 oubliés avec eux."_s.arg(what, lost.size() == 1 && oneOpen ? u"sera"_s
+                                                                                : u"seront"_s);
+    return said;
+}
+
+QString noTrash(bool several)
+{
+    // Each half carries its own `_s`: two raw tokens joined into one literal are two tokens
+    // `words_stay_french` cannot read, and it says so rather than passing them silently.
+    const QString files = several ? u"Les fichiers sont supprimés du disque."_s
+                                  : u"Le fichier est supprimé du disque."_s;
+    const QString back = several ? u"un scan ne les ramènera pas."_s
+                                 : u"un scan ne le ramènera pas."_s;
+    return files + u" Leaf n’a pas de corbeille — "_s + back;
+}
+
+QString otherEditionUntouched(const QString &name)
+{
+    return u"L’édition %1 de la même œuvre n’est pas touchée."_s.arg(name);
+}
+
+QString typeToConfirm(const QString &name)
+{
+    return u"Tapez %1 pour confirmer"_s.arg(name);
+}
+
+QString eraseButton()
+{
+    return u"Supprimer"_s;
+}
+
+QString couldNotWrite(const QString &name)
+{
+    return u"%1 n’a pas pu être écrit."_s.arg(QFileInfo(name).fileName());
+}
+
+QString nothingToErase()
+{
+    return u"Il n’y a rien à supprimer ici."_s;
+}
+
+QString wouldNotGo(const QList<QString> &refused)
+{
+    if (refused.isEmpty())
+        return {};
+    const QString said = QStringList(refused).join(u", "_s);
+    return refused.size() == 1
+               ? u"Un fichier n’a pas pu être supprimé : %1"_s.arg(said)
+               : u"%1 fichiers n’ont pas pu être supprimés : %2"_s
+                     .arg(refused.size()).arg(said);
 }
 
 QString hereToo(const QString &detail)

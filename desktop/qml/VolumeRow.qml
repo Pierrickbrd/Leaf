@@ -19,12 +19,16 @@ Item {
     required property string timesFinished
     /// « Non lu », worded in C++ like everything else on this screen.
     required property string neverReadWord
+    /// What the menu in the gutter commands this file through, and the name a copy of it is
+    /// offered under.
+    required property string seriesId
+    required property string fileName
 
     readonly property bool missing: state === 3
-    readonly property bool hovered: pointer.hovered
+    readonly property bool hovered: pointer.hovered || commands.opened
 
     signal opened()
-    signal commandsAsked()
+    signal reimportAsked()
 
     objectName: "volume-" + (row.entryId.length > 0 ? row.entryId : "missing-" + row.number)
     implicitHeight: 34
@@ -132,14 +136,19 @@ Item {
         }
     }
 
-    // In the reserved gutter, beside the state and never over it.
-    BarButton {
+    // In the reserved gutter, beside the state and never over it. Nothing to command on a
+    // file that is not there, so a gap carries no menu even under the pointer.
+    CommandMenu {
+        id: commands
+
         anchors.right: parent.right
         anchors.rightMargin: 2
         anchors.verticalCenter: parent.verticalCenter
         visible: row.hovered && !row.missing
-        source: "assets/icons/sort.svg"
+        seriesId: row.seriesId
+        entryId: row.entryId
+        fileName: row.fileName
         label: row.title
-        onTriggered: row.commandsAsked()
+        onReimportAsked: row.reimportAsked()
     }
 }

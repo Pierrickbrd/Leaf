@@ -26,10 +26,23 @@ Item {
     signal pointerEntered()
     signal pointerExited()
     signal opened()
+    signal reimportAsked()
+
+    readonly property bool hovered: pointer.hovered || commands.opened
 
     objectName: "tile-" + seriesId
     width: cellWidth
     height: cellHeight
+
+    // The keyboard reaches what the pointer reaches. A tile takes the focus from the grid,
+    // so the menu of the tile under it opens where a desktop reader expects it to.
+    Keys.onPressed: event => {
+        if (event.key === Qt.Key_Menu
+                || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
+            commands.show()
+            event.accepted = true
+        }
+    }
 
     Accessible.role: Accessible.ListItem
     Accessible.name: name
@@ -44,6 +57,8 @@ Item {
         onEntered: tile.pointerEntered()
         onExited: tile.pointerExited()
     }
+
+    HoverHandler { id: pointer }
 
     // Beside the hover area rather than inside it: that one takes no button on purpose, so
     // that a stationary pointer never steals the emphasis a key just gave somewhere else.
@@ -147,6 +162,21 @@ Item {
         FocusRing {
             objectName: "focus-" + tile.seriesId
             visible: tile.selected
+        }
+
+        // At the hover and at the focus, and never permanent: fifty « … » over fifty
+        // illustrations are fifty stains on the one wall this application exists to show.
+        // Inside the ring rather than beside it — the ring goes round the cover alone.
+        CommandMenu {
+            id: commands
+
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 4
+            visible: tile.hovered || tile.selected || opened
+            seriesId: tile.seriesId
+            label: tile.name
+            onReimportAsked: tile.reimportAsked()
         }
     }
 
