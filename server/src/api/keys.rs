@@ -10,7 +10,11 @@
 //! the phone and whoever finds it gets to look at comics, not to write to the disk.
 //!
 //! ```text
-//! LEAF_KEYS="desktop:8f3a92c1…:read,import  phone:2b71ef04…:read"
+//! LEAF_KEYS="desktop:8f3a92c1…:read,import,delete  phone:2b71ef04…:read"
+//!
+//! Three rights and not two: `delete` erases from the disk and there is no trash, so a
+//! key that was written before it existed says `read,import` and cannot do it. Closed
+//! until somebody opens it, which is the only default worth having for that one.
 //! ```
 
 use std::collections::BTreeSet;
@@ -27,6 +31,12 @@ pub const MINIMUM_SECRET: usize = 16;
 pub enum Permission {
     Read,
     Import,
+    /// Erasing from the library, which is erasing from the disk — there is no trash in this
+    /// model. Apart from `Import` and not folded into it: adding files and unmaking them are
+    /// not the same power, and a key that fills a shelf has no business emptying it unless
+    /// somebody said so. A key written before this right existed carries `read,import` and
+    /// therefore cannot delete, which is the answer that fails closed.
+    Delete,
 }
 
 impl Permission {
@@ -34,6 +44,7 @@ impl Permission {
         match self {
             Permission::Read => "read",
             Permission::Import => "import",
+            Permission::Delete => "delete",
         }
     }
 }
@@ -165,6 +176,7 @@ fn one_key(line: &str) -> Result<Option<Key>> {
         .filter_map(|p| match p.trim().to_ascii_lowercase().as_str() {
             "read" => Some(Permission::Read),
             "import" => Some(Permission::Import),
+            "delete" => Some(Permission::Delete),
             _ => None,
         })
         .collect();

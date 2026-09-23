@@ -12,7 +12,267 @@ use leaf_server::api::routes::{can_be_aimed_at, AppState};
 use leaf_server::metadata::sidecars::EntryJson;
 
 mod common;
-use common::{a_volume, archive_bytes, json_body, request, Server, IMPORTER, READ_ONLY};
+use common::{a_volume, archive_bytes, json_body, request, Server, ERASER, IMPORTER, READ_ONLY};
+
+// ------------------------------------------------------------------- erasing
+
+/// Erasing is not importing. A key that fills a shelf has no business emptying it unless
+/// somebody said so, and every key written before this right existed carries `read,import`.
+#[tokio::test]
+async fn the_import_right_does_not_carry_the_right_to_erase() {
+    let server = Server::new();
+    a_volume(&server);
+    let series = server.series();
+    let entry = server.entry();
+
+    for uri in [format!("/series/{series}"), format!("/entries/{entry}")] {
+        let (status, _) = server
+            .send(
+                request("DELETE", &uri, IMPORTER)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(StatusCode::FORBIDDEN, status, "{uri}");
+    }
+
+    // And the file is still there, which is the assertion that matters.
+    assert!(server.library().join("Bleach/Tome 1.cbz").exists());
+}
+
+/// The file goes and the folder stays. `work.json`, `edition.json` and a cover dropped
+/// beside a volume are files somebody wrote, not files somebody asked to erase — an empty
+/// folder is visible and can be swept up, a lost `work.json` is not.
+#[tokio::test]
+async fn erasing_a_volume_takes_the_file_and_leaves_what_was_not_asked_for() {
+    let server = Server::new();
+    a_volume(&server);
+    let folder = server.library().join("Bleach");
+    std::fs::write(folder.join("work.json"), r#"{"leaf":1,"title":"Bleach"}"#).unwrap();
+    std::fs::write(folder.join("Tome 1.jpg"), common::jpeg()).unwrap();
+    let entry = server.entry();
+
+    let (status, body) = server
+        .send(
+            request("DELETE", &format!("/entries/{entry}"), ERASER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(StatusCode::OK, status);
+    assert_eq!(serde_json::json!(1), body["files"]);
+    assert!(body["bytes"].as_i64().unwrap_or(0) > 0);
+    assert!(body.get("refused").is_none(), "{body}");
+
+    assert!(!folder.join("Tome 1.cbz").exists(), "the archive went");
+    assert!(folder.join("work.json").exists(), "and nothing else did");
+    assert!(folder.join("Tome 1.jpg").exists());
+    assert!(folder.exists());
+}
+
+/// The numbering does not move, so a hole stays a hole.
+///
+/// `number` identifies and `position` orders: erasing the second of three leaves the third
+/// as the third, and leaves the second among the missing for as long as the collection has
+/// a hole in it. That is not the interface being careful — it is the model, and the reason
+/// the confirmation can promise it.
+#[tokio::test]
+async fn erasing_a_volume_in_the_middle_leaves_a_gap_the_index_reports() {
+    let server = Server::new();
+    let folder = server.library().join("Bleach");
+    std::fs::create_dir_all(&folder).unwrap();
+    for number in 1..=3 {
+        std::fs::write(
+            folder.join(format!("Tome {number}.cbz")),
+            archive_bytes(Some(&EntryJson {
+                leaf: Some(1),
+                work: Some("Bleach".into()),
+                number: Some(f64::from(number)),
+                ..Default::default()
+            })),
+        )
+        .unwrap();
+    }
+    server.scan();
+    let series = server.series();
+
+    let second: String = server
+        .state()
+        .db
+        .read(|cx| {
+            cx.query_one("SELECT id FROM entry WHERE volume_number = 2.0", [], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap()
+        .expect("the second volume");
+
+    let (status, _) = server
+        .send(
+            request("DELETE", &format!("/entries/{second}"), ERASER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::OK, status);
+
+    let (status, body) = server
+        .send(
+            request("GET", &format!("/series/{series}"), READ_ONLY)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::OK, status);
+    assert_eq!(serde_json::json!([2.0]), body["missingVolumes"], "{body}");
+    assert_eq!(serde_json::json!(2), body["entryCount"]);
+}
+
+/// Asking twice is a 404 the second time: the row is gone with the file, so the id names
+/// nothing. A deletion that answered "done" about something it never saw would be a route
+/// nobody could trust to have acted.
+#[tokio::test]
+async fn erasing_something_that_is_not_there_is_a_404() {
+    let server = Server::new();
+    a_volume(&server);
+    let entry = server.entry();
+    let uri = format!("/entries/{entry}");
+
+    let (first, _) = server
+        .send(request("DELETE", &uri, ERASER).body(Body::empty()).unwrap())
+        .await;
+    assert_eq!(StatusCode::OK, first);
+
+    let (again, _) = server
+        .send(request("DELETE", &uri, ERASER).body(Body::empty()).unwrap())
+        .await;
+    assert_eq!(StatusCode::NOT_FOUND, again);
+
+    let (nowhere, _) = server
+        .send(
+            request("DELETE", "/series/nothing-like-it", ERASER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::NOT_FOUND, nowhere);
+}
+
+/// A whole edition, and the work above it when that was its last one — a work with no
+/// edition is a story the shelf cannot show.
+#[tokio::test]
+async fn erasing_a_series_takes_every_file_and_the_work_with_it() {
+    let server = Server::new();
+    a_volume(&server);
+    let series = server.series();
+
+    let (status, body) = server
+        .send(
+            request("DELETE", &format!("/series/{series}"), ERASER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(StatusCode::OK, status);
+    assert_eq!(serde_json::json!(1), body["files"]);
+    assert!(!server.library().join("Bleach/Tome 1.cbz").exists());
+
+    // Nothing is left to draw, and the folder is still on the disk.
+    let (status, _) = server
+        .send(
+            request("GET", &format!("/series/{series}"), READ_ONLY)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::NOT_FOUND, status);
+    assert!(server.library().join("Bleach").exists());
+}
+
+/// The disk first and the row second. A file that will not go keeps its row, because the
+/// other order leaves a library claiming to have lost something it still holds — and a
+/// rescan would put it back, which is a deletion that undoes itself.
+#[tokio::test]
+async fn a_file_that_will_not_go_keeps_its_row_and_is_named() {
+    let server = Server::new();
+    a_volume(&server);
+    let series = server.series();
+    let folder = server.library().join("Bleach");
+
+    common::read_only(&folder);
+    let (status, body) = server
+        .send(
+            request("DELETE", &format!("/series/{series}"), ERASER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    common::writable(&folder);
+
+    assert_eq!(StatusCode::OK, status);
+    assert_eq!(serde_json::json!(0), body["files"]);
+    assert_eq!(
+        serde_json::json!(["Tome 1.cbz"]),
+        body["refused"],
+        "the caller is told which file is still there"
+    );
+    assert!(folder.join("Tome 1.cbz").exists());
+
+    // And the series is still a series: an edition holding nothing would be drawn by the
+    // shelf and opened by nothing.
+    let (status, _) = server
+        .send(
+            request("GET", &format!("/series/{series}"), READ_ONLY)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::OK, status);
+}
+
+/// An id that resolves outside the library is the index disagreeing with the disk, and
+/// unlinking on that basis is how a server deletes somebody's home directory.
+#[tokio::test]
+async fn a_file_outside_the_library_is_refused_rather_than_unlinked() {
+    let server = Server::new();
+    a_volume(&server);
+    let entry = server.entry();
+
+    let elsewhere = server
+        .library()
+        .parent()
+        .unwrap()
+        .join("not-the-library.cbz");
+    std::fs::write(&elsewhere, b"not yours").unwrap();
+    server
+        .state()
+        .db
+        .write(|cx| {
+            cx.execute(
+                "UPDATE entry SET file = ?1 WHERE id = ?2",
+                rusqlite::params![elsewhere.to_string_lossy().to_string(), entry],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let (status, body) = server
+        .send(
+            request("DELETE", &format!("/entries/{entry}"), ERASER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+
+    assert_eq!(StatusCode::OK, status);
+    assert_eq!(serde_json::json!(0), body["files"]);
+    assert!(
+        elsewhere.exists(),
+        "a file outside the roots is not this server's to erase"
+    );
+}
 
 // -------------------------------------------------------------------- guards
 

@@ -27,6 +27,7 @@ use super::dto::{
     SeriesFilter, SeriesPageDto, SeriesSort, SortDirection, UniverseDto, API_VERSION,
     FORMAT_VERSION,
 };
+use super::erase::Erase;
 use super::intake::{Collision, FileRequest, Intake, Proposal};
 use super::keys::{Keys, Permission, HEADER};
 use super::local_drop::{DropListing, DropRequest, LocalDrop};
@@ -166,9 +167,15 @@ pub fn router(state: AppState) -> Router {
         .route("/series/{id}/cover", get(series_cover))
         .route("/entries/{id}/file", get(download_entry_file))
         .route("/scan", get(scan_status).post(start_scan))
-        .route("/series/{id}", get(get_series).patch(patch_series))
+        .route(
+            "/series/{id}",
+            get(get_series).patch(patch_series).delete(erase_series),
+        )
         .route("/series/{id}/arcs", get(list_series_arcs).patch(patch_arcs))
-        .route("/entries/{id}", get(get_entry).patch(patch_entry))
+        .route(
+            "/entries/{id}",
+            get(get_entry).patch(patch_entry).delete(erase_entry),
+        )
         .route("/drop", get(list_drop).post(take_from_drop))
         .route("/entries", post(receive_entry))
         // A staged file is not an entry: it is a proposal awaiting a confirmation, and
@@ -214,6 +221,9 @@ pub struct Reader;
 /// A key that carries the import right.
 pub struct Importer;
 
+/// A key that carries the delete right, which no key has unless it says so.
+pub struct Eraser;
+
 impl FromRequestParts<AppState> for Reader {
     type Rejection = Refused;
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Refused> {
@@ -225,6 +235,13 @@ impl FromRequestParts<AppState> for Importer {
     type Rejection = Refused;
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Refused> {
         allowed(parts, state, Permission::Import).map(|()| Importer)
+    }
+}
+
+impl FromRequestParts<AppState> for Eraser {
+    type Rejection = Refused;
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Refused> {
+        allowed(parts, state, Permission::Delete).map(|()| Eraser)
     }
 }
 
@@ -964,6 +981,36 @@ async fn forget_series_progress(
 ) -> Result<StatusCode, Failure> {
     blocking(move || Progress::new(&state.db).forget_series(&id)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// -------------------------------------------------------------------- erasing
+
+/// Takes a whole edition off the disk.
+///
+/// Behind `Eraser` and not `Importer`: filling a shelf and emptying it are not the same
+/// power, and a key written before this right existed cannot do it.
+async fn erase_series(
+    _: Eraser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, Failure> {
+    let roots = Arc::clone(&state.roots);
+    or_missing(
+        blocking(move || Erase::new(&state.db, &roots).series(&id)).await?,
+        "unknown series",
+    )
+}
+
+async fn erase_entry(
+    _: Eraser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, Failure> {
+    let roots = Arc::clone(&state.roots);
+    or_missing(
+        blocking(move || Erase::new(&state.db, &roots).entry(&id)).await?,
+        "unknown entry",
+    )
 }
 
 /// What to open next: what you are in the middle of, then what follows it.

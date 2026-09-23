@@ -20,10 +20,14 @@ use tower::ServiceExt;
 
 pub const READ_ONLY: &str = "1111111111111111";
 pub const IMPORTER: &str = "8f3a92c1d4e5b6a7";
+/// A key that may erase. Apart from `IMPORTER` on purpose: the tests that check a right is
+/// required are only worth anything if some key in the set does not carry it.
+pub const ERASER: &str = "c5d6e7f8a9b0c1d2";
 
 pub fn keys() -> Keys {
     Keys::parse(Some(
-        "phone:1111111111111111:read  desktop:8f3a92c1d4e5b6a7:read,import",
+        "phone:1111111111111111:read  desktop:8f3a92c1d4e5b6a7:read,import  \
+         cleaner:c5d6e7f8a9b0c1d2:read,delete",
     ))
     .expect("keys")
 }
