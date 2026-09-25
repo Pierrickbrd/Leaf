@@ -48,7 +48,7 @@ Rectangle {
     height: 32
     width: compact ? height : 14 + glyphs.width + 8 + word.implicitWidth + 14
     radius: height / 2
-    color: !ready ? Theme.rule : (danger ? Theme.alert : Theme.emerald)
+    color: !ready ? Theme.onPaper : (danger ? Theme.alert : Theme.emerald)
     opacity: ready ? 1.0 : 0.7
     activeFocusOnTab: visible
 
@@ -112,7 +112,9 @@ Rectangle {
         anchors.leftMargin: 8
         anchors.verticalCenter: parent.verticalCenter
         text: pill.label
-        color: Theme.onEmerald
+        // The word of a button that cannot fire is faint, not the dark that sits on emerald:
+        // on the sunk hollow of a disabled pill that dark was one shade off invisible.
+        color: pill.ready ? Theme.onEmerald : Theme.inkFaint
         font.family: Theme.textFamily
         font.pixelSize: 14
         font.weight: Font.Medium

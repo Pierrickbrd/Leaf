@@ -1,13 +1,13 @@
 // The sign of a level of the model: a universe, a work, an edition or a volume.
 //
-// An `Image` tinted rather than a glyph: the Material Symbols carry no `fill` of their own,
-// the colour comes from the theme, and `ColorOverlay` is what gives it to them without
-// touching the file. `SettingsChoice` already tints its own pill icons exactly this way —
-// see the note beside its own `ColorOverlay` — because the glyphs are shipped as Google
-// publishes them, unmodified.
+// A `Glyph`, which is how every tinted symbol in this client is drawn: the Material Symbols
+// carry no `fill` of their own and the colour comes from the theme. This one adds what the
+// others do not need — a name to be read aloud, and the level-to-symbol lookup.
+//
+// It used to write the `Image` and its `ColorOverlay` out for itself, and said so in a
+// comment pointing at `SettingsChoice`, which wrote the same six lines. Eleven places did.
 
 import QtQuick
-import Qt5Compat.GraphicalEffects
 import Leaf
 
 Item {
@@ -29,23 +29,13 @@ Item {
     Accessible.role: Accessible.Graphic
     Accessible.name: CardCaptions.levelLabel(mark.level)
 
-    Image {
-        id: glyph
-
+    Glyph {
         anchors.fill: parent
+        side: mark.size
+        // Twice what it is drawn at: this is the one glyph here that is scaled rather than
+        // placed, and an SVG rasterised at its own size then scaled is an SVG drawn soft.
+        resolution: mark.size * 2
         source: "assets/icons/" + CardCaptions.levelIcon(mark.level) + ".svg"
-        sourceSize.width: mark.size * 2
-        sourceSize.height: mark.size * 2
-        fillMode: Image.PreserveAspectFit
-        smooth: true
-        visible: false
-    }
-
-    // The glyphs ship without a fill, so one file serves both palettes and every level —
-    // see the note above.
-    ColorOverlay {
-        anchors.fill: glyph
-        source: glyph
-        color: mark.tint
+        tint: mark.tint
     }
 }

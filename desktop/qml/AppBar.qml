@@ -3,7 +3,6 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import Qt5Compat.GraphicalEffects
 import Leaf
 
 Item {
@@ -206,22 +205,14 @@ Item {
                 cornerRadius: searchField.height / 2
             }
 
-            Image {
+            Glyph {
                 id: searchGlyph
 
                 x: 12
                 anchors.verticalCenter: parent.verticalCenter
-                width: 20
-                height: 20
+                side: 20
                 source: "assets/icons/search.svg"
-                sourceSize: Qt.size(20, 20)
-                visible: false
-            }
-
-            ColorOverlay {
-                anchors.fill: searchGlyph
-                source: searchGlyph
-                color: Theme.inkFaint
+                tint: Theme.inkFaint
             }
 
             Item {

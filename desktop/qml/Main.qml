@@ -14,6 +14,21 @@ ApplicationWindow {
     /// underneath it otherwise. The shelf is no longer the Loader's business, so nothing
     /// may ask the Loader what is on screen.
     readonly property var showing: screen.item ? screen.item : shelf
+    /// Set when something changed a tile of the wall while the wall was not on screen, and
+    /// answered on the way back. Held here rather than on `Shelf`, because it is not a fact
+    /// about the library: it is a fact about what is drawn over it.
+    property bool shelfIsStale: false
+
+    /// The wall, brought up to date where somebody is looking at it and marked out of date
+    /// where nobody is. Both halves matter: asked for at every mark it would be five
+    /// libraries nobody looked at, and never asked for it would go on saying « 4 lus » under
+    /// a tile whose fifth was just marked from that tile's own menu.
+    function refreshTheShelf() {
+        if (Navigation.destination === Navigation.Shelf)
+            Shelf.reload()
+        else
+            window.shelfIsStale = true
+    }
 
     function belongsTo(owner, item) {
         let candidate = item
@@ -260,6 +275,65 @@ ApplicationWindow {
         }
     }
 
+    // Over everything and taking no room from it: a bubble is a layer, and the screen under
+    // it must not move when one appears.
+    ToastStack { }
+
+    // What warns, connected to what happens. Every sentence is written in C++ — a `.qml` that
+    // composed one would be a `.qml` writing French, and the next one would write it
+    // differently.
+    Connections {
+        target: Imports
+
+        function onSettled(went, subject, said) {
+            Toasts.importSettled(went, subject, said)
+        }
+    }
+
+    Connections {
+        target: Scan
+
+        function onFinished() {
+            if (Scan.trouble.length > 0)
+                Toasts.scanFailed(Scan.trouble)
+            else
+                Toasts.scanFinished(Scan.counts)
+        }
+    }
+
+    Connections {
+        target: Commands
+
+        function onSaved(where) {
+            Toasts.copySaved(where)
+        }
+
+        function onChanged() {
+            if (Commands.trouble.length > 0)
+                Toasts.commandRefused(Commands.trouble)
+        }
+    }
+
+    // What a bubble offered, done. The bubble knows what was said and not what to do about
+    // it, which is why it asks here.
+    Connections {
+        target: Toasts
+
+        function onActed(what, subject) {
+            // The shelf, refreshed: what just landed is on it, and there is no series
+            // identifier to open — an import knows the folder it was given and not what the
+            // scan made of it.
+            if (what === Toasts.See) {
+                Navigation.open(Navigation.Shelf, {})
+                window.refreshTheShelf()
+            }
+            else if (what === Toasts.Retry)
+                importDialog.show()
+            else if (what === Toasts.OpenFolder)
+                Commands.showTheFolder(subject)
+        }
+    }
+
     // The one confirmation that stands in front of something a scan will not undo. Here
     // rather than on the page: the same modal opens from a shelf tile, and the shelf is not
     // the page.
@@ -296,9 +370,22 @@ ApplicationWindow {
         target: Navigation
 
         function onChanged() {
+            // Back on the wall, once, with whatever changed under it while it was hidden.
+            if (Navigation.destination === Navigation.Shelf && window.shelfIsStale) {
+                Shelf.reload()
+                window.shelfIsStale = false
+            }
+            // Off the page: what it was holding is let go. Kept, the next series opened on
+            // the last one's cover and title for as long as its answer took — and a shelf
+            // seen in between did not make that any less wrong.
+            if (Navigation.destination !== Navigation.Series) {
+                Series.forget()
+                Entries.forget()
+                Elsewhere.forget()
+                return
+            }
             const asked = Navigation.parameters.series ?? ""
-            if (Navigation.destination === Navigation.Series && asked.length > 0
-                    && asked !== Series.identifier)
+            if (asked.length > 0 && asked !== Series.identifier)
                 Series.point(asked)
         }
     }
@@ -317,19 +404,27 @@ ApplicationWindow {
         }
     }
 
-    // What a command changed, brought back to what is showing it. The page does not guess:
+    // What a command changed, brought back to what is showing it. The page does not guess —
     // a mark set from a menu is a fact on the server, and the screen asks again rather than
-    // moving its own rows to match what it just sent.
+    // moving its own rows to match what it just sent — but it asks for what moved, and only
+    // where somebody is looking. Asking for all of it turned one word into four answers and
+    // a grid rebuilt from nothing, which is what a reader saw as the page reloading.
     Connections {
         target: Commands
 
         function onMarked(seriesId, entryId) {
             if (seriesId.length > 0 && seriesId === Series.identifier) {
+                // The counts in the header moved — « 4 lus · le 5ᵉ en cours ». One answer,
+                // and the page keeps what it shows until it lands.
                 Series.reload()
-                Entries.reload()
+                // Not `reload`: the list did not change. The same files, in the same order,
+                // with one state different — so only the states are asked for again.
+                Entries.refreshProgress()
             }
+            // The band is on this page as much as on the shelf, and marking a volume moves
+            // where one resumes.
             Resume.reload()
-            Shelf.reload()
+            window.refreshTheShelf()
         }
     }
 
@@ -339,7 +434,7 @@ ApplicationWindow {
         target: Erasure
 
         function onErased(seriesId, entryId) {
-            Shelf.reload()
+            window.refreshTheShelf()
             Resume.reload()
             if (entryId.length > 0) {
                 if (seriesId === Series.identifier) {

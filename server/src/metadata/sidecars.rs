@@ -154,6 +154,16 @@ pub struct EditionJson {
     pub leaf: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// What *this printing* is, where `work.json`'s says what the story is. A reader
+    /// choosing between « Édition originale colorée » and « Perfect Edition » is not asking
+    /// what the book is about — they know — they are asking what the difference is.
+    ///
+    /// Absent is the ordinary case, and an edition that says nothing is described by its
+    /// work: the fallback happens when the answer is read, never by copying the work's
+    /// sentence into the edition's row. Copied, the day somebody edits the work its editions
+    /// would go on saying what it used to say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub medium: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -14,6 +14,8 @@
 // never "Bd" — which is why this cannot be a `toUpper` on the first letter and nothing else.
 
 #include "Api.h"
+#include "Preferences.h"
+#include "Toasts.h"
 #include "Manifest.h"
 #include "Navigation.h"
 #include "Widths.h"
@@ -294,6 +296,12 @@ QString fromChapter(double from);
 /// contract calls the common case.
 QString stepRange(const Api::ReadingStep &step);
 
+/// « En liste » and « En grille » — the two ways of looking at the volumes of an edition.
+/// Each button says what it *does*, not what it acts on: two buttons side by side both
+/// labelled « Tomes » tell a reader nothing about which is which.
+QString viewAsList();
+QString viewAsGrid();
+
 /// « les tomes » — the axis the field of a series page narrows, handed to `searchWithin`
 /// rather than spelled into a sentence of its own. One rule writes « Chercher dans … », and
 /// a second copy of it would be a second thing to keep in step.
@@ -392,6 +400,44 @@ QString eraseButton();
 /// which is a client fault and not a server one. It is still said rather than swallowed: a
 /// confirmation that comes up empty and does nothing is worse than one that explains itself.
 QString nothingToErase();
+
+/// The headline of each thing that warns. The second line is the work's own words — an
+/// import says `whatLanded` and a refusal says what the server said — so only the first line
+/// is written here, and it names what happened rather than repeating why.
+QString couldNotSend(const QString &subject);
+QString scanEnded();
+QString scanStopped();
+QString copyKept();
+QString commandRefused();
+
+/// « Voir », « Réessayer », « Ouvrir le dossier » — the one thing a bubble may offer besides
+/// its cross. Nothing for the ones with nothing to propose: a button that only closes is the
+/// cross with a word written on it.
+QString bubbleOffer(Toasts::Offer what);
+
+/// « 4 autres » — what is said in place of the fourth bubble and everything after it. Forty
+/// volumes that fail do not make forty bubbles.
+QString moreBubbles(int how);
+
+/// « Imports terminés » and « un dossier installé, un fichier rangé » — the four families a
+/// switch can answer for, and what each one covers. The detail is not decoration: « Scans
+/// terminés » off does not silence a scan that *failed*, and a reader who is not told that
+/// finds out by being surprised.
+QString warns(Preferences::Warns which);
+QString warnsAbout(Preferences::Warns which);
+
+/// « En bas à droite » — where the bubbles are laid. The picture says where; the word is what
+/// a screen reader announces and what makes the setting findable by searching for it.
+QString corner(Preferences::Corner where);
+
+/// « Ce qui vous prévient » and « Où les bulles apparaissent » — the two cards of the third
+/// section of the settings, and the section's own name.
+QString notificationSettings();
+QString whatWarnsYou();
+QString whereBubblesAppear();
+/// The two columns of the list: « Bulle » and « Bureau ».
+QString bubbleColumn();
+QString desktopColumn();
 
 /// « Tome 5.cbz n'a pas pu être écrit. » — a copy that did not reach the disk. Named by the
 /// file it was going to be, because that is the only part of it the reader chose.

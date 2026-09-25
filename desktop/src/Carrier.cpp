@@ -108,11 +108,20 @@ void Carrier::announce(int row)
 
 void Carrier::settle(int row, Stage stage, const QString &trouble)
 {
+    using enum Card::Stage;
+
     if (row < 0 || row >= m_of->m_rows.size())
         return;
     m_of->m_rows[row].stage = stage;
     m_of->m_rows[row].trouble = trouble;
     announce(row);
+
+    // The end of the road, and only the end: a card is settled into `Filing` and `Sending` on
+    // its way there, and something that warned at each of those would warn four times about
+    // one folder.
+    if (stage == Filed || stage == Failed) {
+        emit m_of->settled(stage == Filed, m_of->m_rows.at(row).name, trouble);
+    }
 }
 
 void Carrier::appendRow(const QString &path, const QString &name, bool folder, qint64 size)

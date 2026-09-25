@@ -1434,6 +1434,16 @@ QString stepRange(const Api::ReadingStep &step)
                     *step.to);
 }
 
+QString viewAsList()
+{
+    return u"En liste"_s;
+}
+
+QString viewAsGrid()
+{
+    return u"En grille"_s;
+}
+
 QString volumesAxis()
 {
     return u"les tomes"_s;
@@ -1586,6 +1596,133 @@ QString typeToConfirm(const QString &name)
 QString eraseButton()
 {
     return u"Supprimer"_s;
+}
+
+QString couldNotSend(const QString &subject)
+{
+    return subject.isEmpty() ? u"L’envoi n’a pas abouti"_s
+                             : u"%1 n’a pas pu être envoyé"_s.arg(subject);
+}
+
+QString scanEnded()
+{
+    return u"Scan terminé"_s;
+}
+
+QString scanStopped()
+{
+    return u"Le scan s’est arrêté"_s;
+}
+
+QString copyKept()
+{
+    return u"Copie enregistrée"_s;
+}
+
+QString commandRefused()
+{
+    return u"L’action n’a pas abouti"_s;
+}
+
+QString bubbleOffer(Toasts::Offer what)
+{
+    using enum Toasts::Offer;
+    switch (what) {
+    case See:
+        return u"Voir"_s;
+    case Retry:
+        return u"Réessayer"_s;
+    case OpenFolder:
+        return u"Ouvrir le dossier"_s;
+    case Nothing:
+        break;
+    }
+    return {};
+}
+
+QString moreBubbles(int how)
+{
+    return how <= 0 ? QString() : counted(how, u"autre"_s, u"autres"_s);
+}
+
+QString warns(Preferences::Warns which)
+{
+    using enum Preferences::Warns;
+    switch (which) {
+    case Imports:
+        return u"Imports terminés"_s;
+    case Scans:
+        return u"Scans terminés"_s;
+    case Downloads:
+        return u"Téléchargements"_s;
+    case Failures:
+        break;
+    }
+    return u"Échecs"_s;
+}
+
+QString warnsAbout(Preferences::Warns which)
+{
+    using enum Preferences::Warns;
+    switch (which) {
+    case Imports:
+        return u"un dossier installé, un fichier rangé"_s;
+    case Scans:
+        return u"et ce que le balayage a trouvé"_s;
+    case Downloads:
+        return u"une copie enregistrée sur le disque"_s;
+    case Failures:
+        break;
+    }
+    // Said out loud, because it is the one line that crosses the other three: « Scans
+    // terminés » off does not silence a scan that stopped, and a reader who is not told finds
+    // out by being surprised.
+    return u"quel qu’en soit le sujet, même si sa ligne est éteinte"_s;
+}
+
+QString corner(Preferences::Corner where)
+{
+    using enum Preferences::Corner;
+    switch (where) {
+    case TopLeft:
+        return u"En haut à gauche"_s;
+    case Top:
+        return u"En haut"_s;
+    case TopRight:
+        return u"En haut à droite"_s;
+    case BottomLeft:
+        return u"En bas à gauche"_s;
+    case Bottom:
+        return u"En bas"_s;
+    case BottomRight:
+        break;
+    }
+    return u"En bas à droite"_s;
+}
+
+QString notificationSettings()
+{
+    return u"Notifications"_s;
+}
+
+QString whatWarnsYou()
+{
+    return u"Ce qui vous prévient"_s;
+}
+
+QString whereBubblesAppear()
+{
+    return u"Où les bulles apparaissent"_s;
+}
+
+QString bubbleColumn()
+{
+    return u"Bulle"_s;
+}
+
+QString desktopColumn()
+{
+    return u"Bureau"_s;
 }
 
 QString couldNotWrite(const QString &name)

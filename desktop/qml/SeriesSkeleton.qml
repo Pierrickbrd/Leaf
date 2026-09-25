@@ -22,8 +22,8 @@ Item {
         opacity: breath.running ? breath.value : 0.6
 
         Rectangle {
-            width: 112
-            height: 168
+            width: 138
+            height: 208
             radius: Theme.coverRadius
             color: Theme.onPaper
         }
@@ -35,7 +35,7 @@ Item {
             // Of different widths, because a title, an edition and two lines of facts are not
             // the same length. Four identical bars look like nothing at all.
             Rectangle { width: 90; height: 11; radius: 5; color: Theme.onPaper }
-            Rectangle { width: 230; height: 24; radius: 6; color: Theme.onPaper }
+            Rectangle { width: 280; height: 30; radius: 6; color: Theme.onPaper }
             Rectangle { width: 130; height: 12; radius: 5; color: Theme.onPaper }
             Item { width: 1; height: 6 }
             Rectangle { width: 280; height: 11; radius: 5; color: Theme.onPaper }

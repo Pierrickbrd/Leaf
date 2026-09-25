@@ -77,7 +77,12 @@ private slots:
         waitFor(settings);
         QCOMPARE(settings.storageLabel(), Words::keyStorage(Words::KeyFrom::Environment));
         QCOMPARE(settings.keyTitle(), Words::theKey());
-        QCOMPARE(settings.sections().size(), 2);
+        // Three: général, notifications, bibliothèque. Counted rather than named, because
+        // what this test is about is the key — but counted all the same, so that a section
+        // added without a word to put on its pill fails here rather than on screen.
+        QCOMPARE(settings.sections().size(), 3);
+        for (const QVariant &one : settings.sections())
+            QVERIFY(!one.toMap().value(QStringLiteral("label")).toString().isEmpty());
         QCOMPARE(settings.missing(), Words::noKey(Settings::configurationFile()));
         settings.setAddress({});
         settings.setKey(QStringLiteral("test-value"));

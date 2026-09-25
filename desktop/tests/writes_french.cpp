@@ -67,6 +67,54 @@ private slots:
         QCOMPARE(Words::fromChapter(69), u"à partir du chapitre 69"_s);
     }
 
+    /// Four families and four lines: eleven events, and a switch that cannot answer event by
+    /// event answers by family. The detail of the fourth says out loud that it crosses the
+    /// other three, because a reader who is not told finds out by being surprised.
+    void what_warns_is_worded_by_family()
+    {
+        using enum Preferences::Warns;
+        QCOMPARE(Words::warns(Imports), u"Imports terminés"_s);
+        QCOMPARE(Words::warns(Failures), u"Échecs"_s);
+        QSet<QString> said;
+        for (const Preferences::Warns which : {Imports, Scans, Downloads, Failures}) {
+            QVERIFY2(!Words::warns(which).isEmpty(), qPrintable(Words::warns(which)));
+            QVERIFY(!Words::warnsAbout(which).isEmpty());
+            said.insert(Words::warns(which));
+        }
+        QCOMPARE(said.size(), 4);
+        QVERIFY(Words::warnsAbout(Failures).contains(u"éteinte"_s));
+    }
+
+    /// Six zones, six words — the picture says where, and the word is what a screen reader
+    /// announces and what makes the setting findable by searching for it.
+    void the_six_zones_of_the_screen_are_each_named()
+    {
+        using enum Preferences::Corner;
+        QCOMPARE(Words::corner(BottomRight), u"En bas à droite"_s);
+        QCOMPARE(Words::corner(Top), u"En haut"_s);
+        QSet<QString> said;
+        for (const Preferences::Corner where :
+             {TopLeft, Top, TopRight, BottomLeft, Bottom, BottomRight})
+            said.insert(Words::corner(where));
+        QCOMPARE(said.size(), 6);
+    }
+
+    /// What a bubble says, and the one thing it may offer. A bubble with nothing to propose
+    /// has no button at all — an « OK » that only closes is the cross with a word on it.
+    void a_bubble_names_what_happened_and_offers_at_most_one_thing()
+    {
+        QCOMPARE(Words::couldNotSend(u"Elfes"_s), u"Elfes n’a pas pu être envoyé"_s);
+        // Nothing to name is still a sentence, rather than a dangling « n'a pas pu ».
+        QVERIFY(!Words::couldNotSend(QString()).isEmpty());
+        QCOMPARE(Words::bubbleOffer(Toasts::Offer::Retry), u"Réessayer"_s);
+        QCOMPARE(Words::bubbleOffer(Toasts::Offer::OpenFolder), u"Ouvrir le dossier"_s);
+        QVERIFY(Words::bubbleOffer(Toasts::Offer::Nothing).isEmpty());
+        QCOMPARE(Words::moreBubbles(4), u"4 autres"_s);
+        QCOMPARE(Words::moreBubbles(1), u"1 autre"_s);
+        // Nothing waiting is nothing said, not « 0 autres ».
+        QVERIFY(Words::moreBubbles(0).isEmpty());
+    }
+
     /// Nine entries and two lists: a series is not a file, and « enregistrer une copie » of
     /// thirty volumes is not a thing. Each names what it acts on, because the menu is opened
     /// from a tile among fifty and the pointer has moved by the time it is read.

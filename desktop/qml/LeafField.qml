@@ -12,14 +12,14 @@ import Leaf
 TextField {
     id: field
 
-    height: 30
+    height: 34
     activeFocusOnTab: false
     color: Theme.ink
     placeholderTextColor: Theme.inkFaint
     selectionColor: Theme.emerald
     selectedTextColor: Theme.onEmerald
     font.family: Theme.textFamily
-    font.pixelSize: 13
+    font.pixelSize: 14
     leftPadding: 10
     rightPadding: 10
     topPadding: 0

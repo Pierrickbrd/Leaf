@@ -5,7 +5,6 @@
 // is wrong, which is the one moment they help rather than clutter.
 
 import QtQuick
-import Qt5Compat.GraphicalEffects
 import Leaf
 
 Item {
@@ -20,23 +19,15 @@ Item {
     implicitHeight: Math.max(36, words.height)
     height: implicitHeight
 
-    Image {
+    Glyph {
         id: glyph
 
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.topMargin: 2
-        width: 22
-        height: 22
+        side: 22
         source: "assets/icons/" + state.icon + ".svg"
-        sourceSize: Qt.size(22, 22)
-        visible: false
-    }
-
-    ColorOverlay {
-        anchors.fill: glyph
-        source: glyph
-        color: state.alarming ? Theme.alert : Theme.emerald
+        tint: state.alarming ? Theme.alert : Theme.emerald
     }
 
     Column {

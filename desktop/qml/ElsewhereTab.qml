@@ -25,7 +25,7 @@ Column {
     signal editionChosen(string seriesId)
 
     objectName: "elsewhere-tab"
-    spacing: 22
+    spacing: 16
 
     ElsewhereBlock {
         objectName: "editions-block"

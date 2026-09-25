@@ -204,7 +204,29 @@ void Shelf::filterBy(const QVariantMap &narrowing)
     // stop. Three genres ticked in a row are one request, not three of which two are thrown
     // away — the same settling the typing already uses, for the same reason.
     emit changed();
-    m_settling.start(Settling);
+    m_settling.start(Settling::Milliseconds);
+}
+
+void Shelf::narrowTo(const QVariantMap &narrowing)
+{
+    QVariantMap asked;
+    for (const QString &axis : axisNames()) {
+        const QStringList values = kept(narrowing.value(axis).toStringList());
+        if (!values.isEmpty())
+            asked.insert(axis, values);
+    }
+    m_settling.stop();
+    m_narrowing = asked;
+
+    // Emptied, which `reload` is careful never to do: here there is nothing worth keeping.
+    beginResetModel();
+    m_held.clear();
+    endResetModel();
+    m_total = 0;
+
+    emit criteriaChanged();
+    emit changed();
+    reload();
 }
 
 void Shelf::sortBy(const QString &order)
@@ -257,7 +279,7 @@ void Shelf::searchFor(const QString &query)
         return;
     }
 
-    m_settling.start(Settling);
+    m_settling.start(Settling::Milliseconds);
 }
 
 void Shelf::reload()

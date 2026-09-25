@@ -89,7 +89,6 @@ qreal Resume::progress() const
 void Resume::reload()
 {
     ++m_generation;
-    m_card.reset();
     m_trouble.clear();
 
     if (!m_server) {
@@ -100,6 +99,12 @@ void Resume::reload()
     }
 
     m_loading = true;
+    // Nothing is cleared here, which `Series::reload` and `Entries::reload` both say of
+    // themselves and this one did not. Emptied at the moment of asking, the band went to
+    // nothing and its height with it, so everything under it jumped up and came back down
+    // when the answer landed — a sursaut on every volume marked read, for an answer that
+    // almost always says the same thing it said before. What is on screen stays until there
+    // is something to put in its place.
     emit changed();
 
     QUrlQuery query;
@@ -129,6 +134,10 @@ void Resume::took(const Server::Answer &answer)
 
     const QJsonArray offered = answer.body.array();
     if (offered.isEmpty()) {
+        // Nothing left to resume, which is an answer rather than an absence — so this is the
+        // one place the card goes. It used to be cleared before the question went out, which
+        // is why it had nothing to do here.
+        m_card.reset();
         m_trouble.clear();
         emit changed();
         return;

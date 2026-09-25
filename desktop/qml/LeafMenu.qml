@@ -22,7 +22,7 @@ Menu {
     delegate: LeafMenuItem { }
 
     background: Item {
-        implicitWidth: 286
+        implicitWidth: 248
         implicitHeight: 48
 
         Rectangle {

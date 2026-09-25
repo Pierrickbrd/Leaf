@@ -47,6 +47,17 @@ Item {
         }
     }
 
+    // What ties an arc to the saga above it. Indentation alone said « further right » and
+    // not « inside »: the line is what says inside.
+    Rectangle {
+        x: 12
+        y: 5
+        width: 1
+        height: parent.height - 8
+        visible: separator.depth > 0
+        color: Theme.rule
+    }
+
     // The rule sits under the name rather than through it: a separator marks a beginning, and
     // a line across the column would read as an end.
     Rectangle {
