@@ -140,6 +140,11 @@ pub struct SeriesDto {
     pub medium: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reading_direction: Option<String>,
+    /// What the reader chose instead, kept apart from `reading_direction` because that one is
+    /// what the files declare and this one is what a person decided. Absent means "by
+    /// default": the series is read the way it says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reading_direction_chosen: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     /// The prose somebody wrote about the work, shown as it stands.

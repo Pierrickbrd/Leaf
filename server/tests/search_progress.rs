@@ -10,6 +10,11 @@ use leaf_server::api::progress::{Progress, ProgressPatch};
 use leaf_server::store::text::search_key;
 use leaf_server::store::{Db, Repository};
 
+mod common;
+use axum::body::Body;
+use axum::http::StatusCode;
+use common::{a_volume, json_body, request, Server, READ_ONLY};
+
 struct Fixture {
     _dir: tempfile::TempDir,
     db: Arc<Db>,
@@ -1086,4 +1091,291 @@ fn forgetting_a_series_leaves_another_profiles_progress() {
         ],
         rows
     );
+}
+// ---------------------------------------------------------- the way a series is read
+
+/// A series declaring `RIGHT_TO_LEFT`, as a person's library would have it.
+fn a_right_to_left_series(server: &Server) -> String {
+    a_volume(server);
+    std::fs::write(
+        server.library().join("Bleach/work.json"),
+        br#"{"leaf":1,"title":"Bleach","readingDirection":"RIGHT_TO_LEFT"}"#,
+    )
+    .unwrap();
+    server.scan();
+    server.series()
+}
+
+async fn choose(
+    server: &Server,
+    series: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    server
+        .send(
+            request(
+                "PUT",
+                &format!("/series/{series}/reading-direction"),
+                READ_ONLY,
+            )
+            .header("content-type", "application/json")
+            .body(json_body(body))
+            .unwrap(),
+        )
+        .await
+}
+
+async fn the_series(server: &Server, series: &str) -> serde_json::Value {
+    let (status, body) = server
+        .send(
+            request("GET", &format!("/series/{series}"), READ_ONLY)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::OK, status, "{body}");
+    body
+}
+
+/// The reader's choice is not something the series says about itself, so it must not reach
+/// `work.json`: a file that changed whenever somebody turned a page the other way would be
+/// rewritten by a read-only key.
+#[tokio::test]
+async fn a_direction_chosen_for_a_series_comes_back_with_it_and_leaves_the_file_alone() {
+    let server = Server::new();
+    let series = a_right_to_left_series(&server);
+    let sidecar = server.library().join("Bleach/work.json");
+    let before = std::fs::read(&sidecar).unwrap();
+
+    let (status, body) = choose(
+        &server,
+        &series,
+        serde_json::json!({"readingDirection": "LEFT_TO_RIGHT"}),
+    )
+    .await;
+    assert_eq!(StatusCode::OK, status, "{body}");
+    assert_eq!(
+        serde_json::json!("LEFT_TO_RIGHT"),
+        body["readingDirectionChosen"]
+    );
+
+    let got = the_series(&server, &series).await;
+    assert_eq!(serde_json::json!("RIGHT_TO_LEFT"), got["readingDirection"]);
+    assert_eq!(
+        serde_json::json!("LEFT_TO_RIGHT"),
+        got["readingDirectionChosen"]
+    );
+    assert_eq!(before, std::fs::read(&sidecar).unwrap());
+}
+
+#[tokio::test]
+async fn choosing_nothing_goes_back_to_what_the_series_declares() {
+    let server = Server::new();
+    let series = a_right_to_left_series(&server);
+    choose(
+        &server,
+        &series,
+        serde_json::json!({"readingDirection": "VERTICAL"}),
+    )
+    .await;
+
+    let (status, body) = choose(
+        &server,
+        &series,
+        serde_json::json!({"readingDirection": null}),
+    )
+    .await;
+    assert_eq!(StatusCode::OK, status, "{body}");
+
+    let got = the_series(&server, &series).await;
+    assert!(got["readingDirectionChosen"].is_null(), "{got}");
+    assert_eq!(serde_json::json!("RIGHT_TO_LEFT"), got["readingDirection"]);
+    let rows: i64 = server
+        .db
+        .read(|cx| cx.query_one("SELECT COUNT(*) FROM reading_choice", [], |r| r.get(0)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(0, rows, "absence is what says \"by default\"");
+}
+
+/// The reason for a table of its own: the index is rebuilt from the files by a scan, and
+/// a column in it would have forgotten the choice at the next one.
+#[tokio::test]
+async fn a_chosen_direction_survives_a_rescan() {
+    let server = Server::new();
+    let series = a_right_to_left_series(&server);
+    choose(
+        &server,
+        &series,
+        serde_json::json!({"readingDirection": "VERTICAL"}),
+    )
+    .await;
+
+    server.scan();
+
+    let got = the_series(&server, &series).await;
+    assert_eq!(serde_json::json!("VERTICAL"), got["readingDirectionChosen"]);
+}
+
+#[tokio::test]
+async fn a_word_the_contract_does_not_have_is_refused_by_name() {
+    let server = Server::new();
+    let series = a_right_to_left_series(&server);
+
+    let (status, body) = choose(
+        &server,
+        &series,
+        serde_json::json!({"readingDirection": "SIDEWAYS"}),
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, status, "{body}");
+    let said = body["error"].as_str().unwrap_or_default();
+    for word in ["SIDEWAYS", "LEFT_TO_RIGHT", "RIGHT_TO_LEFT", "VERTICAL"] {
+        assert!(said.contains(word), "{said}");
+    }
+    assert!(the_series(&server, &series).await["readingDirectionChosen"].is_null());
+}
+
+/// An absent field is not `null`. `null` takes the choice away; a body that forgot the field
+/// said nothing, and answering it 200 erased whatever the reader had chosen — the contract
+/// marks the field required for exactly that reason.
+#[tokio::test]
+async fn a_body_without_the_field_is_refused_and_keeps_the_choice() {
+    let server = Server::new();
+    let series = a_right_to_left_series(&server);
+    choose(
+        &server,
+        &series,
+        serde_json::json!({"readingDirection": "VERTICAL"}),
+    )
+    .await;
+
+    let (status, body) = choose(&server, &series, serde_json::json!({})).await;
+    assert_eq!(StatusCode::BAD_REQUEST, status, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("readingDirection"),
+        "{body}"
+    );
+    assert_eq!(
+        serde_json::json!("VERTICAL"),
+        the_series(&server, &series).await["readingDirectionChosen"]
+    );
+}
+
+/// The choice belongs to an edition: when the files of that edition leave the library, the
+/// row goes with it rather than waiting for an edition of the same id to come back and
+/// inherit a choice nobody made for it.
+#[tokio::test]
+async fn a_choice_goes_with_the_edition_it_was_made_for() {
+    let server = Server::new();
+    let series = a_right_to_left_series(&server);
+    choose(
+        &server,
+        &series,
+        serde_json::json!({"readingDirection": "VERTICAL"}),
+    )
+    .await;
+    let rows = |server: &Server| -> i64 {
+        server
+            .db
+            .read(|cx| cx.query_one("SELECT COUNT(*) FROM reading_choice", [], |r| r.get(0)))
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(1, rows(&server));
+
+    std::fs::remove_dir_all(server.library().join("Bleach")).unwrap();
+    server.scan();
+
+    assert_eq!(0, rows(&server), "the edition is gone, so is its choice");
+}
+
+#[tokio::test]
+async fn choosing_for_no_series_is_a_404() {
+    let server = Server::new();
+    a_volume(&server);
+
+    let (status, _) = choose(
+        &server,
+        "nothing-like-it",
+        serde_json::json!({"readingDirection": "VERTICAL"}),
+    )
+    .await;
+    assert_eq!(StatusCode::NOT_FOUND, status);
+    let (status, _) = choose(
+        &server,
+        "nothing-like-it",
+        serde_json::json!({"readingDirection": null}),
+    )
+    .await;
+    assert_eq!(StatusCode::NOT_FOUND, status);
+}
+
+/// The choice rides the query that already builds the shelf, as a join. A lookup per
+/// series would return the same list and ask a question for each of its rows.
+#[test]
+fn the_shelf_still_costs_what_it_cost() {
+    let f = Fixture::new();
+    let list = |f: &Fixture| {
+        let before = f.db.statements();
+        Repository::new(&f.db)
+            .series(&SeriesFilter::default(), SeriesSort::Name, 0, 0)
+            .unwrap();
+        f.db.statements() - before
+    };
+    let without = list(&f);
+
+    f.db.write(|cx| {
+        for i in 0..12 {
+            cx.execute(
+                "INSERT INTO work (id, name, path) VALUES (?1, ?1, ?2)",
+                (format!("cw{i}"), format!("/cw{i}")),
+            )?;
+            cx.execute(
+                "INSERT INTO edition (id, work_id, path, implicit) VALUES (?1, ?2, ?3, 1)",
+                (format!("ce{i}"), format!("cw{i}"), format!("/cw{i}/e")),
+            )?;
+            cx.execute(
+                "INSERT INTO reading_choice (edition_id, reading_direction) VALUES (?1, 'VERTICAL')",
+                [format!("ce{i}")],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(
+        without,
+        list(&f),
+        "a choice must not add a query per series"
+    );
+    assert!(Repository::new(&f.db)
+        .choose_reading_direction("e", Some("VERTICAL"))
+        .unwrap());
+    assert_eq!(without, list(&f));
+    assert!(!Repository::new(&f.db)
+        .choose_reading_direction("nope", Some("VERTICAL"))
+        .unwrap());
+}
+
+/// Writing the choice is a fixed handful of statements whatever the library holds: one to
+/// ask whether the edition exists and one to write (or delete) the row. A write that
+/// scanned or listed to find its edition would cost more on a large library and say nothing.
+#[test]
+fn choosing_a_direction_costs_two_statements_and_an_unknown_edition_costs_one() {
+    let f = Fixture::new();
+    let cost = |edition: &str, chosen: Option<&str>| {
+        let before = f.db.statements();
+        Repository::new(&f.db)
+            .choose_reading_direction(edition, chosen)
+            .unwrap();
+        f.db.statements() - before
+    };
+
+    assert_eq!(2, cost("e", Some("VERTICAL")), "choosing");
+    assert_eq!(2, cost("e", None), "choosing nothing");
+    assert_eq!(1, cost("nope", Some("VERTICAL")), "an unknown edition");
 }

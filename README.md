@@ -508,6 +508,7 @@ GET    /entries/{id}/pages/{n}?width=
 GET    /entries/{id}/cover?width=
 GET    /entries/{id}/file             the original, stamped with its identity
 GET    /entries/{id}/progress   ·  PATCH  ·  DELETE
+PUT    /series/{id}/reading-direction the reader's own choice of direction, null for the default
 GET    /next                          what you are reading, then what follows it
 GET    /search?q=&kind=&limit=        ranked, accents folded, half-typed words match
 GET    /scan                          where a running scan has got to

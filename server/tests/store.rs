@@ -360,9 +360,9 @@ fn planted_positions() -> Vec<Position> {
 /// It is the shape of the production index this change exists for — the schema of old main
 /// (d73ae1c), `progress` keyed by entry alone and none of the tables profiles and devices
 /// brought — built from a current index and wound back rather than from a vendored copy of
-/// that old schema: every other table is the same, and these four are the difference. With
-/// `reading_choice`, it is that index exactly, as a branch build whose forty-first entry
-/// created the table left it.
+/// that old schema: every other table is the same, and these four are the difference, with
+/// `reading_choice`, which old main never had either. With it, it is that index exactly, as
+/// a branch build whose forty-first entry created the table left it.
 fn an_old_scheme_index_at(
     entries: i32,
     with_reading_choice: bool,
@@ -373,7 +373,7 @@ fn an_old_scheme_index_at(
     let conn = rusqlite::Connection::open(&file).expect("opening");
     conn.execute_batch(
         "DROP TABLE link_code; DROP TABLE device; DROP TABLE closed;
-         DROP TABLE progress; DROP TABLE profile;
+         DROP TABLE progress; DROP TABLE profile; DROP TABLE reading_choice;
          CREATE TABLE progress (
            entry_id    TEXT PRIMARY KEY REFERENCES entry(id) ON DELETE CASCADE,
            edition_id  TEXT NOT NULL REFERENCES edition(id) ON DELETE CASCADE,
@@ -430,8 +430,8 @@ fn assert_migrated_to_the_end_with_every_position(file: &std::path::Path) {
 /// migration 41, and there were twenty-nine.
 #[test]
 fn the_version_is_the_number_of_the_last_migration() {
-    assert_eq!(29, MIGRATIONS.len());
-    assert_eq!(29, schema_version());
+    assert_eq!(30, MIGRATIONS.len());
+    assert_eq!(30, schema_version());
 }
 
 #[test]
@@ -440,7 +440,7 @@ fn a_fresh_database_is_stamped_with_the_marker_and_the_last_migration() {
     let file = dir.path().join("fresh.sqlite");
     drop(Db::open(&file).expect("opening"));
 
-    assert_eq!(29, user_version(&file));
+    assert_eq!(30, user_version(&file));
     assert_eq!(LEAF_APPLICATION_ID, application_id(&file));
 }
 
@@ -478,7 +478,8 @@ fn an_old_scheme_index_at_40_is_brought_to_29_with_every_position_under_the_defa
 
 /// The production index: 41 in the old numbering, its forty-first entry a branch build's
 /// `reading_choice`. Read as entries of main, 41 falls inside migration 26, so 25 is the
-/// last complete one and 26 to 29 run on a database that holds a table none of them knows.
+/// last complete one and 26 to 29 run on a database that holds a table none of them knows;
+/// 30, the reader's, then finds that table already there.
 #[test]
 fn the_production_index_at_41_keeps_every_position_and_its_reading_choice() {
     let (_dir, file) = an_old_scheme_index_at(41, true);
@@ -498,8 +499,8 @@ fn the_production_index_at_41_keeps_every_position_and_its_reading_choice() {
 }
 
 /// Main as it was before this change: 47 entries, every migration run. Recognised as 29 and
-/// left alone — migration 6 would empty the search index, and a rebuilt `progress` would
-/// hand a second reader's places to the default profile.
+/// left alone but for what came after it — migration 6 would empty the search index, and a
+/// rebuilt `progress` would hand a second reader's places to the default profile.
 #[test]
 fn an_old_scheme_index_at_47_is_recognised_as_29_and_nothing_runs_again() {
     let dir = temp();
@@ -522,7 +523,7 @@ fn an_old_scheme_index_at_47_is_recognised_as_29_and_nothing_runs_again() {
 
     drop(Db::open(&file).expect("opening"));
 
-    assert_eq!(29, user_version(&file));
+    assert_eq!(schema_version(), user_version(&file));
     assert_eq!(LEAF_APPLICATION_ID, application_id(&file));
     assert_eq!(
         vec![
@@ -563,7 +564,7 @@ fn an_index_written_by_a_newer_leaf_is_refused() {
     drop(Db::open(&file).expect("creating"));
     rusqlite::Connection::open(&file)
         .expect("opening")
-        .execute_batch("PRAGMA user_version = 30;")
+        .execute_batch("PRAGMA user_version = 31;")
         .expect("pretending to be newer");
 
     let said = match Db::open(&file) {
@@ -572,7 +573,7 @@ fn an_index_written_by_a_newer_leaf_is_refused() {
     };
     assert!(said.contains("written by a newer Leaf"), "{said}");
     assert!(said.contains("must not run on it"), "{said}");
-    assert_eq!(30, user_version(&file), "and it is left as it was found");
+    assert_eq!(31, user_version(&file), "and it is left as it was found");
 }
 
 /// No release ever counted past 47 in the old numbering; a count beyond it comes from a
@@ -1288,4 +1289,61 @@ fn an_index_with_no_device_is_not_stamped_closed_by_the_migration() {
         .read(|cx| cx.query_one("SELECT COUNT(*) FROM closed", [], |r| r.get(0)))
         .expect("reading");
     assert_eq!(Some(0), rows);
+}
+
+// ------------------------------------------------- the reader's migration, on production
+
+/// The production index exactly as the reader's first build left it: the forty entries of
+/// main at d73ae1c, then that build's `reading_choice` as the forty-first, stamped 41 in the
+/// old numbering with no marker. Built from a current index wound back to that shape, the
+/// way [`an_old_scheme_index_at`] builds one, then `reading_choice` created by the statement
+/// that build ran, so the table is the one production holds and not the one this server's
+/// schema would have made.
+fn the_production_index_with_the_readers_first_build() -> (tempfile::TempDir, std::path::PathBuf) {
+    let (dir, file) = an_old_scheme_index_at(41, false);
+    rusqlite::Connection::open(&file)
+        .expect("opening")
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS reading_choice (
+               edition_id        TEXT PRIMARY KEY REFERENCES edition(id) ON DELETE CASCADE,
+               reading_direction TEXT NOT NULL
+             );
+             INSERT INTO reading_choice (edition_id, reading_direction) VALUES ('e', 'VERTICAL');",
+        )
+        .expect("the reader's first build");
+    assert_eq!(41, user_version(&file));
+    assert_eq!(0, application_id(&file));
+    (dir, file)
+}
+
+/// Read as entries of main, 41 falls inside migration 26, so the start resumes after 25:
+/// profiles, devices, progress keyed by profile and closing run as they would on any old
+/// index, and the reader's own migration, now 30, meets a table already there and leaves
+/// it as it found it.
+#[test]
+fn an_unmarked_index_at_41_holding_the_readers_table_is_brought_to_30() {
+    assert_eq!(30, schema_version());
+    assert!(MIGRATIONS[29][0].contains("CREATE TABLE IF NOT EXISTS reading_choice"));
+    let (_dir, file) = the_production_index_with_the_readers_first_build();
+
+    let db = Db::open(&file).expect("migrating");
+
+    assert_eq!(30, user_version(&file));
+    assert_eq!(LEAF_APPLICATION_ID, application_id(&file));
+    assert_eq!(
+        planted_positions(),
+        positions(&file),
+        "every place kept before profiles belongs to the default profile, nothing else changed"
+    );
+    for table in ["profile", "device", "link_code", "closed", "reading_choice"] {
+        assert!(tables(&file).contains(&table.to_string()), "{table}");
+    }
+    assert_eq!(
+        1,
+        count(
+            &db,
+            "SELECT COUNT(*) FROM reading_choice WHERE edition_id = 'e' AND reading_direction = 'VERTICAL'"
+        ),
+        "the reader's choice outlives the migrations that ran under it"
+    );
 }

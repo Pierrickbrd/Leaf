@@ -349,6 +349,24 @@ double howFarRead(const Series &one)
     return qBound(0.0, read / whole, 1.0);
 }
 
+namespace {
+/// One ladder for the two directions a series carries — what its files say and what somebody
+/// chose — so that a fourth word is taught in one place and not forgotten in the other.
+std::optional<ReadingDirection> directionNamed(const std::optional<QString> &word)
+{
+    if (!word)
+        return std::nullopt;
+    using enum ReadingDirection;
+    if (*word == u"RIGHT_TO_LEFT"_s)
+        return RightToLeft;
+    if (*word == u"VERTICAL"_s)
+        return Vertical;
+    if (*word == u"LEFT_TO_RIGHT"_s)
+        return LeftToRight;
+    return std::nullopt;
+}
+} // namespace
+
 Read<Series> series(const QJsonObject &from)
 {
     Fields field(from);
@@ -392,17 +410,10 @@ Read<Series> series(const QJsonObject &from)
     // Vocabulary the client may not know yet never refuses a row — see the note in Api.h.
     if (const auto word = field.maybeText(u"medium"_s))
         one.medium = medium(*word);
-    if (const auto word = field.maybeText(u"readingDirection"_s)) {
-        // Scoped to the block rather than the function: three names are worth shortening
-        // here, and everything around them belongs to other enums.
-        using enum ReadingDirection;
-        if (*word == u"RIGHT_TO_LEFT"_s)
-            one.readingDirection = RightToLeft;
-        else if (*word == u"VERTICAL"_s)
-            one.readingDirection = Vertical;
-        else if (*word == u"LEFT_TO_RIGHT"_s)
-            one.readingDirection = LeftToRight;
-    }
+    one.readingDirection = directionNamed(field.maybeText(u"readingDirection"_s));
+    // Null is « par défaut »; an unfamiliar word is left absent too, because guessing a
+    // direction would draw the book the wrong way round.
+    one.readingDirectionChosen = directionNamed(field.maybeText(u"readingDirectionChosen"_s));
     if (const auto word = field.maybeText(u"status"_s)) {
         // Two words today; a third — hiatus, cancelled — is a thing the server may learn
         // first. Everything that was not "completed" used to come out as Ongoing, so a
