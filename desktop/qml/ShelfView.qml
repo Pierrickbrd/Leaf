@@ -298,6 +298,7 @@ Item {
 
                 width: parent.width
                 suppressed: Search.active
+                echoed: root.sourceModel.trouble
 
             // The step from the band into the grid is made here rather than left to the focus
             // chain. `forceActiveFocus` on a GridView whose `currentIndex` is -1 does not take:
@@ -401,6 +402,8 @@ Item {
 
         NumberAnimation {
             id: glide
+            // Named so that the tests can wait for it to stop, and say so when it is gone.
+            objectName: "shelf-glide"
 
             target: grid
             property: "contentY"
@@ -472,7 +475,7 @@ Item {
             // just after a keyboard event selected somewhere else.
             onPointerEntered: root.followPointer(index)
             onPointerExited: root.releasePointer(index)
-            onOpened: Navigation.open(Navigation.Series, { "series": seriesId })
+            onOpened: go()
         }
     }
 

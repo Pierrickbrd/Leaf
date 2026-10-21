@@ -304,6 +304,21 @@ Sort sort(const QString &word)
     return Name;
 }
 
+QString spell(ReadingDirection value)
+{
+    using enum ReadingDirection;
+
+    switch (value) {
+    case RightToLeft:
+        return QStringLiteral("RIGHT_TO_LEFT");
+    case Vertical:
+        return QStringLiteral("VERTICAL");
+    case LeftToRight:
+        break;
+    }
+    return QStringLiteral("LEFT_TO_RIGHT");
+}
+
 QString spell(Sort value)
 {
     using enum Sort;
@@ -774,7 +789,9 @@ Read<UpNext> upNext(const QJsonObject &from)
         if (chapter.isObject()) {
             // Named, not a temporary: Fields keeps a reference to what it reads.
             const QJsonObject inChapter = chapter.toObject();
-            card.chapterLabel = Fields(inChapter).maybeText(u"label"_s);
+            Fields inside(inChapter);
+            card.chapterLabel = inside.maybeText(u"label"_s);
+            card.chapterTitle = inside.maybeText(u"title"_s);
         }
     }
 
@@ -800,6 +817,45 @@ Read<Entry> entry(const QJsonObject &from)
     one.title = field.maybeText(u"title"_s);
     one.sortKey = field.maybeReal(u"sortKey"_s);
     one.size = field.maybeWhole(u"size"_s).value_or(0);
+    one.isbn = field.maybeText(u"isbn"_s);
+    one.publishedOn = field.maybeText(u"publishedOn"_s);
+    one.summary = field.maybeText(u"summary"_s);
+    return {one, {}};
+}
+
+Read<PageInfo> pageInfo(const QJsonObject &from)
+{
+    Fields field(from);
+    PageInfo one;
+    one.number = field.whole(u"number"_s);
+    one.name = field.text(u"name"_s);
+    one.mediaType = field.text(u"mediaType"_s);
+    if (field.broken())
+        return refused<PageInfo>(QStringLiteral("page"), field.trouble());
+
+    one.width = field.maybeWhole(u"width"_s);
+    one.height = field.maybeWhole(u"height"_s);
+    one.size = field.maybeBig(u"size"_s);
+    one.spread = field.maybeBool(u"spread"_s).value_or(false);
+    return {one, {}};
+}
+
+Read<Chapter> chapter(const QJsonObject &from)
+{
+    Fields field(from);
+    Chapter one;
+    one.id = field.text(u"id"_s);
+    one.label = field.text(u"label"_s);
+    const QString kind = field.text(u"kind"_s);
+    one.entryId = field.text(u"entryId"_s);
+    if (field.broken())
+        return refused<Chapter>(QStringLiteral("chapter"), field.trouble());
+
+    // An unfamiliar word leaves a chapter standing: the server may learn a kind first.
+    one.kind = (kind == u"BONUS"_s) ? Chapter::Kind::Bonus : Chapter::Kind::Chapter;
+    one.number = field.maybeReal(u"number"_s);
+    one.title = field.maybeText(u"title"_s);
+    one.startPage = field.maybeWhole(u"startPage"_s);
     return {one, {}};
 }
 

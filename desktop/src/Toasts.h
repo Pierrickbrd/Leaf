@@ -11,8 +11,12 @@
 // not thirty. It is the commit that warns, not each byte — and forty volumes that fail do not
 // make forty bubbles either: past three, the rest are one line saying how many.
 //
-// **A failure stays until it is clicked.** A failure that fades on its own is a failure
-// nobody read. What succeeded goes after five seconds, because it is already true.
+// **Every bubble goes after ten seconds, and waits while the pointer is on it.** A failure
+// used to stay until it was clicked, so that none went unread; tried by hand on 22/10/2026,
+// a refusal left over from a moment's disconnection was still covering the corner of the page
+// being read long after it meant anything, and a success gone in five seconds went before
+// it was read. One duration for both, held while it is being looked at: a bubble that is
+// being read is never taken away, and one nobody reads does not stay over the book.
 //
 // The desktop is the same event escalated, and only when the window is not active: getting
 // both for one fact is the surest way to have notifications switched off altogether.
@@ -59,12 +63,15 @@ public:
     /// At most three at a time, the newest at the bottom.
     static constexpr int AtOnce = 3;
 
+    /// How long a bubble is left up, in milliseconds, success and failure alike.
+    static constexpr int Lifetime = 10000;
+
     /// `awake` says whether the window has the focus, and is given rather than read so that a
-    /// test can say. `lifetime` is how long a success is left up, in milliseconds — a
+    /// test can say. `lifetime` is how long a bubble is left up, in milliseconds — a
     /// condition of correctness and not a taste, which is why nothing in the settings screen
     /// offers to change it.
     explicit Toasts(Preferences *preferences, std::function<bool()> awake = {},
-                    int lifetime = 5000, QObject *parent = nullptr);
+                    int lifetime = Lifetime, QObject *parent = nullptr);
 
     static Toasts *create(QQmlEngine *engine, QJSEngine *);
 
@@ -83,7 +90,7 @@ public:
              const QString &detail, Offer offer = Offer::Nothing,
              const QString &subject = {});
 
-    /// The five things that warn, each worded where the words live. A `.qml` connecting a
+    /// The six things that warn, each worded where the words live. A `.qml` connecting a
     /// signal to one of these is a `.qml` that carries no French, which is the whole
     /// arrangement of this client.
     Q_INVOKABLE void importSettled(bool went, const QString &subject, const QString &said);
@@ -91,11 +98,24 @@ public:
     Q_INVOKABLE void scanFailed(const QString &why);
     Q_INVOKABLE void copySaved(const QString &path);
     Q_INVOKABLE void commandRefused(const QString &why);
+    /// « ISBN copié », the number under it. Outside every family the settings screen answers
+    /// for, and never sent to the desktop: it answers a click made in this window a moment
+    /// ago, and a reader who silenced the reports of imports and scans still wants to know
+    /// that their click did something — a copy shows nothing on the screen.
+    Q_INVOKABLE void isbnCopied(const QString &isbn);
+    /// Says, once, that Qt cannot read WebP — the format of every cover and every resized
+    /// page — and which package fixes it. `readable` is what `QImageReader` lists, given
+    /// rather than read so that a test can take the plugin away. Outside every family: it is
+    /// not news about the library but the reason none of it can be seen.
+    void readsImages(const QList<QByteArray> &readable);
 
     /// Takes one away — the cross, which is the way out and not an action of its own.
     Q_INVOKABLE void dismiss(int row);
     /// Does what the one button offers, and takes the bubble with it.
     Q_INVOKABLE void act(int row);
+    /// The pointer is over a bubble, or has left it: its time stops while it is being read,
+    /// and goes on from where it stopped once the pointer leaves.
+    Q_INVOKABLE void hold(int row, bool held);
     /// Sweeps what has been up long enough. Driven by a timer; called by a test.
     Q_INVOKABLE void sweep();
 
@@ -116,15 +136,22 @@ private:
         QString detail;
         Offer offer = Offer::Nothing;
         QString subject;
-        /// When it should go, and invalid for a failure: those stay until they are clicked.
+        /// When it should go.
         QDateTime until;
+        /// The pointer is on it, and how long it had left when the pointer came.
+        bool held = false;
+        qint64 left = 0;
     };
 
     void take(qsizetype row);
+    /// Lays the bubble, whatever the families say: `say` decides whether to call it.
+    void raise(Tone tone, const QString &headline, const QString &detail, Offer offer,
+               const QString &subject);
 
     Preferences *m_preferences;
     std::function<bool()> m_awake;
     int m_lifetime;
     QList<Bubble> m_shown;
     QTimer m_clock;
+    bool m_toldWebp = false;
 };

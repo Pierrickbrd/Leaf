@@ -14,12 +14,22 @@ Item {
     /// Drawn in the alert colour, for a command that throws something away. Emerald says
     /// "the one thing worth doing here"; a command that destroys is not that.
     property bool alarming: false
+    /// Written in soft ink instead of emerald, for a link that must not compete with the
+    /// filled button beside it (the end card's two ways out).
+    property bool quiet: false
+    /// Whether it follows the window (`Widths.scale`): only on the reader's end card yet, so
+    /// that its two ways out follow the card round them.
+    property bool scaled: false
+
+    function sized(drawn: real): int {
+        return action.scaled ? Widths.scale.size(drawn) : drawn
+    }
 
     signal triggered()
 
     objectName: "leaf-text-action"
-    implicitWidth: word.implicitWidth + 16
-    implicitHeight: 24
+    implicitWidth: word.implicitWidth + action.sized(16)
+    implicitHeight: action.sized(24)
     width: implicitWidth
     height: implicitHeight
     activeFocusOnTab: false
@@ -49,7 +59,7 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        radius: 6
+        radius: action.sized(6)
         color: pointer.hovered ? Theme.onPaper : "transparent"
     }
 
@@ -59,14 +69,14 @@ Item {
         objectName: "leaf-text-action-word"
         anchors.centerIn: parent
         text: action.label
-        color: action.alarming ? Theme.alert : Theme.emerald
+        color: action.alarming ? Theme.alert : (action.quiet ? Theme.inkSoft : Theme.emerald)
         font.family: Theme.textFamily
-        font.pixelSize: 13
+        font.pixelSize: action.scaled ? Widths.scale.caption(13) : 13
         font.weight: Font.Medium
     }
 
     FocusRing {
         objectName: "leaf-text-action-focus"
-        cornerRadius: 6
+        cornerRadius: action.sized(6)
     }
 }

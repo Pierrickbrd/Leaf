@@ -1,5 +1,6 @@
 #include "Words.h"
 
+#include <QDate>
 #include <QDateTime>
 #include <QFileInfo>
 #include <QLocale>
@@ -26,18 +27,35 @@ QString line(Api::UpNext::Kind kind, std::optional<double> number_, std::optiona
              int pageCount, const std::optional<QString> &chapter, bool briefly)
 {
     QStringList parts;
+    const bool named = chapter && !chapter->isEmpty();
 
-    if (number_.has_value())
+    // A chapter entry is named by its chapter when the band knows it — « Chap. 13 : Le
+    // réveil », as the reader names it — and from its number only when it does not.
+    if (kind == Api::UpNext::Kind::Chapter && named && !briefly)
+        parts << *chapter;
+    else if (number_.has_value())
         parts << entry(kind, *number_, briefly);
 
     if (page.has_value() && pageCount > 0)
         parts << u"Page %1/%2"_s.arg(*page).arg(pageCount);
 
-    // A chapter entry already said which chapter it is; repeating it would read as two.
-    if (chapter && !chapter->isEmpty() && kind != Api::UpNext::Kind::Chapter)
+    // A chapter entry already said which chapter it is; repeating it would read as two. The
+    // name is the server's, never rewritten here: the band once turned « #13 » into
+    // « Chapitre 13 » on its own (test of 22/10/2026), and was then the one screen of the
+    // application that named the chapter differently from the reader.
+    if (named && kind != Api::UpNext::Kind::Chapter)
         parts << *chapter;
 
     return parts.join(u" · "_s);
+}
+
+/// Whether a title says nothing its label has not said: empty once trimmed, or the label
+/// again, whatever its case or the spaces around it. The owner's test of 22/10/2026 read
+/// « Tome 3 · Tome 3 » over the panel of a volume whose files title it by its number.
+bool saysNothingMore(const QString &title, const QString &label)
+{
+    const QString said = title.trimmed();
+    return said.isEmpty() || said.compare(label.trimmed(), Qt::CaseInsensitive) == 0;
 }
 
 } // namespace
@@ -45,6 +63,17 @@ QString line(Api::UpNext::Kind kind, std::optional<double> number_, std::optiona
 namespace Words {
 
 const QChar Nbsp = QChar(0x00A0);
+const QChar NarrowNbsp = QChar(0x202F);
+
+QString chapterName(const QString &label, const QString &title)
+{
+    const QString said = label.trimmed();
+    if (said.isEmpty())
+        return title.trimmed();
+    if (saysNothingMore(title, said))
+        return said;
+    return said + Nbsp + u": "_s + title.trimmed();
+}
 
 QString volumes(int count, std::optional<Api::Medium> medium)
 {
@@ -522,13 +551,23 @@ QString fileContext(const Api::Hit &hit)
     // Reversi · Tome 2 · Tome 2 · 187 pages ». The title is worth a place only when it says
     // something the volume's own name did not.
     if (hit.entryTitle && !hit.entryTitle->isEmpty() && *hit.entryTitle != hit.label
-        && *hit.entryTitle != container)
+        && *hit.entryTitle != container && *hit.entryTitle != hitName(hit))
         parts << *hit.entryTitle;
     if (hit.entryPageCount.has_value() && *hit.entryPageCount > 0) {
         parts << (u"%1 page"_s.arg(*hit.entryPageCount)
                   + (*hit.entryPageCount >= 2 ? u"s"_s : QString()));
     }
     return parts.join(u" · "_s);
+}
+
+QString hitName(const Api::Hit &hit)
+{
+    // What was searched is a chapter's title, or what its file said when it has none — the
+    // « #13 » the rest of the application no longer shows. A chapter is named as the reader
+    // names it, whenever the server says how.
+    if (hit.kind == Api::Hit::Kind::Chapter && hit.chapterLabel)
+        return chapterName(*hit.chapterLabel, hit.chapterTitle.value_or(QString()));
+    return hit.label;
 }
 
 QString seeTheOthers(int remaining)
@@ -612,6 +651,443 @@ QString band(Widths::Band value)
     return {};
 }
 
+QString readerVolume(double number_)
+{
+    return entry(Api::UpNext::Kind::Volume, number_, false);
+}
+
+QString readerChapter(double number_)
+{
+    return entry(Api::UpNext::Kind::Chapter, number_, false);
+}
+
+QString readOn(Api::Entry::Kind kind, double number_)
+{
+    return (kind == Api::Entry::Kind::Chapter ? u"Lire le chapitre "_s : u"Lire le tome "_s)
+           + number(number_);
+}
+
+QString finishedVolume(double number_)
+{
+    return readerVolume(number_) + u" terminé"_s;
+}
+
+QString finishedChapter(double number_)
+{
+    return readerChapter(number_) + u" terminé"_s;
+}
+
+QString lastOfSeries(Api::Entry::Kind kind)
+{
+    return kind == Api::Entry::Kind::Chapter ? u"dernier chapitre de la série"_s
+                                             : u"dernier tome de la série"_s;
+}
+
+QString ending(Api::Entry::Kind kind, double number_, bool last)
+{
+    const QString finished = kind == Api::Entry::Kind::Chapter ? finishedChapter(number_)
+                                                               : finishedVolume(number_);
+    if (!last)
+        return finished;
+    return finished + Nbsp + u"· "_s + lastOfSeries(kind);
+}
+
+QString readerWhere(const QString &entry, const QString &chapter, const QString &title)
+{
+    const QString named = chapterName(chapter, title);
+    if (named.isEmpty())
+        return entry;
+    // A chapter that arrived on its own is named by its chapter, and saying it twice read
+    // « Chap. 13 · Chap. 13 : Le réveil ».
+    if (entry.isEmpty() || saysNothingMore(entry, chapter))
+        return named;
+    return entry + Nbsp + u"· "_s + named;
+}
+
+QString readerScrubbing(const QString &chapter, const QString &title, int page)
+{
+    // `chapterName` keeps the rule the bar follows: « #13 · #13 · page 4 » was still possible
+    // here after the bar's line had learned to say a chapter once (owner's test, 22/10/2026).
+    const QString named = chapterName(chapter, title);
+    return (named.isEmpty() ? QString() : named + Nbsp + u"· "_s) + u"page "_s
+           + QString::number(page);
+}
+
+QString readerBesideLabel(const QString &label, const QString &title)
+{
+    // Drawn right after the label, so a title that only repeats it read « #13 · #13 » under
+    // the bar (owner's test, 22/10/2026): it is the label's to say, once. What it does say
+    // follows the colon `chapterName` puts everywhere else a chapter is named.
+    if (label.trimmed().isEmpty())
+        return title.trimmed();
+    if (saysNothingMore(title, label))
+        return QString();
+    return Nbsp + u": "_s + title.trimmed();
+}
+
+QString readerVolumeEnd(const QString &label, const QString &title)
+{
+    const QString end = u"fin du tome"_s;
+    // The label alone, the line being half a caption wide; the title only for a chapter the
+    // file asked to be called by its title, which has no label to give.
+    const QString lastChapter = label.trimmed().isEmpty() ? title.trimmed() : label.trimmed();
+    return lastChapter.isEmpty() ? end : lastChapter + Nbsp + u"· "_s + end;
+}
+
+QString readerOutOf(int count)
+{
+    return u"/"_s + Nbsp + QString::number(count);
+}
+
+QString readerZoom(qreal level)
+{
+    return QString::number(qRound(level * 100)) + NarrowNbsp + u"%"_s;
+}
+
+QString readerChapterSpan(double from, double to)
+{
+    if (std::abs(to - from) < 0.0001)
+        return number(from);
+    return u"%1 à %2"_s.arg(number(from), number(to));
+}
+
+QString readerVolumeHead(const QString &entry, const QString &title)
+{
+    return saysNothingMore(title, entry) ? entry : entry + Nbsp + u"· "_s + title;
+}
+
+QString readerFact(ReaderFact which)
+{
+    switch (which) {
+    case ReaderFact::Series:
+        return u"Série"_s;
+    case ReaderFact::Pages:
+        return u"Pages"_s;
+    case ReaderFact::Chapters:
+        return u"Chapitres"_s;
+    case ReaderFact::Published:
+        return u"Paru le"_s;
+    case ReaderFact::Isbn:
+        return u"ISBN"_s;
+    case ReaderFact::Read:
+        return u"Lu"_s;
+    }
+    return {};
+}
+
+QString readerCopyIsbn()
+{
+    return u"Cliquer pour copier"_s;
+}
+
+QString readerPublished(const QString &iso)
+{
+    const QDate date = QDate::fromString(iso, Qt::ISODate);
+    if (!date.isValid())
+        return iso;
+    // « 1er » and not « 1 »: the first of the month is the one day French writes as an
+    // ordinal.
+    const QString day = date.day() == 1 ? u"1er"_s : QString::number(date.day());
+    return u"%1 %2 %3"_s.arg(day, QLocale(QLocale::French).monthName(date.month(), QLocale::LongFormat),
+                             QString::number(date.year()));
+}
+
+QString readerReadAt(int page, int count, bool finished)
+{
+    if (finished)
+        return u"terminé"_s;
+    return u"page %1"_s.arg(page) + Nbsp + u"/"_s + Nbsp + QString::number(count);
+}
+
+QString readerChapterPage(int page)
+{
+    return u"p."_s + Nbsp + QString::number(page);
+}
+
+QString readerVolumePanel()
+{
+    return u"Le tome"_s;
+}
+
+QString readerSettings()
+{
+    return u"Réglages de lecture"_s;
+}
+
+QString readerFullScreen(bool on)
+{
+    return on ? u"Plein écran"_s : u"Quitter le plein écran"_s;
+}
+
+QString readerPage(bool forward)
+{
+    return forward ? u"Page suivante"_s : u"Page précédente"_s;
+}
+
+QString readerChapterStep(bool forward)
+{
+    return forward ? u"Chapitre suivant"_s : u"Chapitre précédent"_s;
+}
+
+QString readerCardTitle()
+{
+    return u"Lecture"_s;
+}
+
+QString readerCloseCard()
+{
+    return u"Fermer les réglages"_s;
+}
+
+QString readerBackToSeries()
+{
+    return u"Revenir à la série"_s;
+}
+
+QString readerStayHere()
+{
+    return u"Rester sur cette page"_s;
+}
+
+QString readerThisSeries()
+{
+    return u"Pour cette série"_s;
+}
+
+QString readerThisDesk()
+{
+    return u"Sur cet appareil"_s;
+}
+
+QString readerDirection(std::optional<Api::ReadingDirection> which)
+{
+    if (!which)
+        return u"Par défaut"_s;
+    switch (*which) {
+    case Api::ReadingDirection::LeftToRight:
+        return u"De gauche à droite"_s;
+    case Api::ReadingDirection::RightToLeft:
+        return u"De droite à gauche"_s;
+    case Api::ReadingDirection::Vertical:
+        break;
+    }
+    return u"De haut en bas"_s;
+}
+
+QString readerLayout(Preferences::PageLayout which)
+{
+    switch (which) {
+    case Preferences::PageLayout::Single:
+        return u"Simple"_s;
+    case Preferences::PageLayout::Double:
+        return u"Deux pages"_s;
+    case Preferences::PageLayout::Auto:
+        break;
+    }
+    return u"Auto"_s;
+}
+
+QString readerFit(Preferences::Fit which)
+{
+    switch (which) {
+    case Preferences::Fit::Height:
+        return u"Hauteur"_s;
+    case Preferences::Fit::Width:
+        return u"Largeur"_s;
+    case Preferences::Fit::Original:
+        break;
+    }
+    return u"Original"_s;
+}
+
+QString readerBackdrop(Preferences::Backdrop which)
+{
+    switch (which) {
+    case Preferences::Backdrop::Grey:
+        return u"Gris"_s;
+    case Preferences::Backdrop::White:
+        return u"Blanc"_s;
+    case Preferences::Backdrop::Black:
+        break;
+    }
+    return u"Noir"_s;
+}
+
+QString readerMotion(Preferences::Motion which)
+{
+    switch (which) {
+    case Preferences::Motion::Fade:
+        return u"Fondu"_s;
+    case Preferences::Motion::Instant:
+        return u"Sans effet"_s;
+    case Preferences::Motion::Slide:
+        break;
+    }
+    return u"Glisser"_s;
+}
+
+QString readerDeskGroup(ReaderDeskGroup which)
+{
+    return which == ReaderDeskGroup::Pages ? u"Pages"_s : u"Confort"_s;
+}
+
+QString readerSetting(ReaderSetting which)
+{
+    switch (which) {
+    case ReaderSetting::Layout:
+        return u"Mise en page"_s;
+    case ReaderSetting::Fit:
+        return u"Ajustement"_s;
+    case ReaderSetting::Backdrop:
+        return u"Fond"_s;
+    case ReaderSetting::Motion:
+        break;
+    }
+    return u"Changement de page"_s;
+}
+
+QString readerDeclares(std::optional<Api::ReadingDirection> declared)
+{
+    // What the files say, as a path between two edges. A series that says nothing is read
+    // from the left, so « Par défaut » has something to mean even then.
+    const auto along = [](const QString &from, const QString &to) {
+        return u"<b>"_s + from + Nbsp + u"→"_s + Nbsp + to + u"</b>"_s;
+    };
+    QString said;
+    if (!declared) {
+        said = u"La série ne déclare rien"_s + Nbsp + u": "_s
+               + along(u"gauche"_s, u"droite"_s) + u" par défaut"_s;
+    } else {
+        using enum Api::ReadingDirection;
+        const QString way = *declared == RightToLeft ? along(u"droite"_s, u"gauche"_s)
+                            : *declared == Vertical  ? along(u"haut"_s, u"bas"_s)
+                                                     : along(u"gauche"_s, u"droite"_s);
+        said = u"La série déclare"_s + Nbsp + u": "_s + way;
+    }
+    return said + u". Ce que vous choisissez ici ne vaut que pour cette série, mais sur tous vos "
+                  u"appareils."_s;
+}
+
+QString readerDeskNote()
+{
+    return u"Pour tous les livres, sur ce bureau seulement."_s;
+}
+
+QString readerShortcuts()
+{
+    return u"Raccourcis"_s;
+}
+
+QString shortcutGroup(ShortcutGroup which)
+{
+    switch (which) {
+    case ShortcutGroup::Navigate:
+        return u"Naviguer"_s;
+    case ShortcutGroup::Display:
+        return u"Affichage"_s;
+    case ShortcutGroup::Zoom:
+        return u"Zoom"_s;
+    case ShortcutGroup::Leave:
+        return u"Quitter"_s;
+    }
+    return {};
+}
+
+QString shortcutDoes(ShortcutDoes which)
+{
+    using enum ShortcutDoes;
+    switch (which) {
+    case TurnByArrow:
+        return u"Page précédente, suivante"_s;
+    case TurnByArrowRightToLeft:
+        return u"Page suivante, précédente"_s;
+    case TurnBySpace:
+        return u"Page suivante, précédente"_s;
+    case ToTheEnds:
+        return u"Première, dernière page"_s;
+    case ToTheEndsRightToLeft:
+        return u"Dernière, première page"_s;
+    case BackAPage:
+        return u"Page précédente"_s;
+    case FullScreen:
+        return u"Plein écran"_s;
+    case VolumeInfo:
+        return u"Les infos du tome"_s;
+    case TheseShortcuts:
+        return u"Ces raccourcis"_s;
+    case ZoomByKey:
+        return u"Zoomer, dézoomer"_s;
+    case BackToWhole:
+        // « 100 % », the sign held to its figure as `readerZoom` holds it.
+        return u"Revenir à 100"_s + NarrowNbsp + u"%"_s;
+    case ZoomByWheel:
+        return u"Zoomer à la molette, autour du curseur"_s;
+    case ZoomWhereAimed:
+        return u"Zoomer là où l’on vise"_s;
+    case Pinch:
+        return u"Pincer au pavé tactile"_s;
+    case CloseWhatIsOpen:
+        return u"Fermer ce qui est ouvert"_s;
+    case BackToSeries:
+        return u"Revenir à la série"_s;
+    case CloseReader:
+        return u"Fermer le lecteur"_s;
+    }
+    return {};
+}
+
+QString keyName(KeyName which)
+{
+    using enum KeyName;
+    switch (which) {
+    case Space:
+        return u"Espace"_s;
+    case Shift:
+        return u"Maj"_s;
+    case Ctrl:
+        return u"Ctrl"_s;
+    case Alt:
+        return u"Alt"_s;
+    case Escape:
+        return u"Échap"_s;
+    case F:
+        return u"F"_s;
+    case F11:
+        return u"F11"_s;
+    case I:
+        return u"I"_s;
+    case Question:
+        return u"?"_s;
+    case F1:
+        return u"F1"_s;
+    case Zero:
+        return u"0"_s;
+    case W:
+        return u"W"_s;
+    }
+    return {};
+}
+
+QString shortcutAnd()
+{
+    return u"+"_s;
+}
+
+QString shortcutSlash()
+{
+    return u"/"_s;
+}
+
+QString shortcutOr()
+{
+    return u"ou"_s;
+}
+
+QString doubleClick()
+{
+    return u"double clic"_s;
+}
+
 QString notSetUp(Asking what)
 {
     using enum Asking;
@@ -632,6 +1108,9 @@ QString notSetUp(Asking what)
         break;
     case State:
         tail = u"demander"_s;
+        break;
+    case Reader:
+        tail = u"lire"_s;
         break;
     }
     if (tail.isEmpty())
@@ -1936,6 +2415,21 @@ QString alreadyLinked()
 QString commandRefused()
 {
     return u"L’action n’a pas abouti"_s;
+}
+
+QString isbnCopied()
+{
+    return u"ISBN copié"_s;
+}
+
+QString webpMissing()
+{
+    return u"Il manque le module d’images WebP de Qt"_s;
+}
+
+QString webpMissingRemedy()
+{
+    return u"Installez qt6-image-formats-plugins pour voir les couvertures et les pages."_s;
 }
 
 QString bubbleOffer(Toasts::Offer what)

@@ -82,6 +82,14 @@ QColor Theme::inkFaint() const     { return pick(m_dark, 0x666C63u, 0x6B756Du); 
 QColor Theme::emerald() const      { return pick(m_dark, 0x0A6A55u, 0x2FB98Bu); }
 QColor Theme::emeraldWash() const  { return pick(m_dark, 0xC9DCD3u, 0x12241Du); }
 QColor Theme::onEmerald() const    { return pick(m_dark, 0xF0ECE3u, 0x08110Du); }
+// The dark value is the mockup's (#1A7558 under #2FB98B); the light one keeps the same step
+// down from its own emerald.
+QColor Theme::emeraldLip() const   { return pick(m_dark, 0x054537u, 0x1A7558u); }
+// The dark values are `emerald`, `onEmerald` and `emeraldLip` as approved; the light ones a
+// paler emerald under a near-black, the lip the same step down. 7,69:1 and 8,54:1.
+QColor Theme::barcodeFace() const  { return pick(m_dark, 0x4CC59Bu, 0x2FB98Bu); }
+QColor Theme::barcodeInk() const   { return pick(m_dark, 0x0A1712u, 0x08110Du); }
+QColor Theme::barcodeLip() const   { return pick(m_dark, 0x2B8F6Cu, 0x1A7558u); }
 // Garnet, where this was amber. One alert colour and not two: a red beside an orange would
 // be the « one colour per value » the architecture refuses for pills, and what changes here is
 // the value, not the role. The eleven places that call these — the badge of a card that
@@ -93,3 +101,8 @@ QColor Theme::onEmerald() const    { return pick(m_dark, 0xF0ECE3u, 0x08110Du); 
 QColor Theme::alert() const        { return pick(m_dark, 0x8E1F2Bu, 0xE0656Eu); }
 QColor Theme::alertWash() const    { return pick(m_dark, 0xF2DCE0u, 0x2A1216u); }
 QColor Theme::readerPaper() const  { return pick(m_dark, 0xDCD2BCu, 0x070908u); }
+// A hair apart between the themes, only because a token must differ (see the header); the
+// dark theme's black is `readerPaper`'s own, the one the reader had before it was a choice.
+QColor Theme::readerBlack() const  { return pick(m_dark, 0x0A0C0Bu, 0x070908u); }
+QColor Theme::readerGrey() const   { return pick(m_dark, 0x2B2F2Cu, 0x292D2Au); }
+QColor Theme::readerWhite() const  { return pick(m_dark, 0xF4F3EFu, 0xF2F1EDu); }

@@ -38,6 +38,11 @@ Item {
     signal opened()
     signal reimportAsked()
 
+    // Opening a file is reading it: the line and the cover both lead to the reader, at the
+    // page where reading stopped. Here rather than where the row is placed, so the list and
+    // the grid cannot open one book two ways.
+    onOpened: Navigation.open(Navigation.Reader, { "series": row.seriesId, "entry": row.entryId })
+
     objectName: "volume-" + (row.entryId.length > 0 ? row.entryId : "missing-" + row.number)
     implicitHeight: 46
 

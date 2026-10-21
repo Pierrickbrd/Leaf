@@ -86,7 +86,13 @@ WATCHED = {
     "CodeState": ("whole", ["codeState"]),
     "Entry": ("part", ["upNext", "entry"]),
     "Progress": ("part", ["upNext", "progress"]),
-    "Chapter": ("part", ["upNext"]),
+    # `raw` (what the file said) and `position` (order inside the entry) stay unread on
+    # purpose: the server answers in order and settles the wording in `label`, so the reader
+    # has no use for either.
+    "Chapter": ("part", ["upNext", "chapter"]),
+    # The reader lays pages out from these; a field the server grows about a page is a fact
+    # about how to draw it.
+    "Page": ("whole", ["pageInfo"]),
 }
 
 ROOT = Path(__file__).resolve().parent.parent

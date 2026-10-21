@@ -84,7 +84,7 @@ QVariant Search::data(const QModelIndex &index, int role) const
     case ResultId:
         return hit.id;
     case Label:
-        return hit.label;
+        return Words::hitName(hit);
     case SeriesId:
         return hit.seriesId.value_or(QString());
     case SeriesName:

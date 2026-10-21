@@ -7,10 +7,14 @@
 // tested is the client's own behaviour and not a mock of the client's own behaviour.
 
 #include <QByteArray>
+#include <QList>
+#include <QPointer>
 #include <QTcpServer>
 #include <QTcpSocket>
 
+#include <algorithm>
 #include <functional>
+#include <utility>
 
 /// Answers with whatever it was told to, and remembers what it was asked.
 ///
@@ -26,6 +30,22 @@ public:
     QByteArray answer;
     QByteArray heard;
     std::function<QByteArray(const QByteArray &)> answerFor;
+    /// Requests kept unanswered until `release()`, for a test that needs an answer to land
+    /// *after* something else happened — an order the network would otherwise choose.
+    std::function<bool(const QByteArray &)> holdBack;
+
+    /// Answers everything `holdBack` kept, now, in the order it was asked — or the opposite
+    /// order with `backwards`, for a test that needs the older answer to land last.
+    void release(bool backwards = false)
+    {
+        auto kept = std::exchange(m_held, {});
+        if (backwards)
+            std::reverse(kept.begin(), kept.end());
+        for (const auto &[socket, one] : kept) {
+            if (socket && socket->state() == QAbstractSocket::ConnectedState)
+                reply(socket, one, true);
+        }
+    }
 
     /// Built rather than typed, because a hand-counted Content-Length is a way to fail a
     /// test for a reason that has nothing to do with what it is testing.
@@ -93,6 +113,17 @@ private:
                 return false;
             const QByteArray one = request.left(whole);
             request.remove(0, whole);
+            if (holdBack && holdBack(one)) {
+                m_held.append({socket, one});
+                return !request.isEmpty();
+            }
+            return reply(socket, one, request.isEmpty()) && !request.isEmpty();
+    }
+
+    /// Writes the answer to one request, and hangs up after it when it is the `last`.
+    /// False when there is nothing to say, which holds the connection open.
+    bool reply(QTcpSocket *socket, const QByteArray &one, bool last)
+    {
             QByteArray reply = answerFor ? answerFor(one) : answer;
             // Nothing to say is a server that never answers, so the connection is held open
             // rather than closed. Closed without a byte, it read as a server that hung up, the
@@ -107,15 +138,17 @@ private:
             // shelf's three questions failed before reaching here — one run in five alone,
             // most runs in the whole suite.
             const qsizetype statusEnd = reply.indexOf("\r\n");
-            if (request.isEmpty() && reply.startsWith("HTTP/") && statusEnd > 0
+            if (last && reply.startsWith("HTTP/") && statusEnd > 0
                 && !reply.toLower().contains("\r\nconnection:"))
                 reply.insert(statusEnd + 2, "Connection: close\r\n");
             socket->write(reply);
             socket->flush();
             // Closed only once there is nothing left to answer: a client that pipelined two
             // requests down one connection is still waiting for the second.
-            if (request.isEmpty())
+            if (last)
                 socket->disconnectFromHost();
-            return !request.isEmpty();
+            return true;
     }
+
+    QList<std::pair<QPointer<QTcpSocket>, QByteArray>> m_held;
 };

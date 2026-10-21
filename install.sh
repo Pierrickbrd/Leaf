@@ -768,7 +768,7 @@ install_client() {
         libqt6svg6-dev qml6-module-qtquick qml6-module-qtquick-controls \
         qml6-module-qtquick-layouts qml6-module-qtquick-templates qml6-module-qtqml \
         qml6-module-qtqml-workerscript qml6-module-qt5compat-graphicaleffects \
-        qtkeychain-qt6-dev
+        qt6-image-formats-plugins qtkeychain-qt6-dev
 
     cmake -S "$LEAF_ROOT/desktop" -B "$LEAF_ROOT/desktop/build" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local

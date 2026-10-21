@@ -621,7 +621,7 @@ sudo apt-get install cmake ninja-build qt6-base-dev qt6-declarative-dev libqt6sv
   qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-dialogs \
   qml6-module-qtquick-layouts qml6-module-qtquick-templates qml6-module-qtqml \
   qml6-module-qtqml-workerscript qml6-module-qt5compat-graphicaleffects \
-  xauth xvfb qtkeychain-qt6-dev
+  qt6-image-formats-plugins xauth xvfb qtkeychain-qt6-dev
 cd desktop
 cmake -S . -B build -G Ninja && cmake --build build
 ctest --test-dir build --output-on-failure                    # in a desktop session
@@ -656,4 +656,5 @@ the name has one.
 
 All rights reserved. This repository is public so the code can be read, not reused — see
 [LICENSE](LICENSE). The fonts under `assets/fonts/` are third-party and carry their own SIL
-Open Font Licence, included beside them.
+Open Font Licence, included beside them. The `tabler-` icons under `desktop/qml/assets/icons/`
+are Tabler Icons, under the MIT licence included beside them as `MIT-Tabler.txt`.

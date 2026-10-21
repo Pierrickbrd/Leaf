@@ -6,6 +6,8 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 
+#include <algorithm>
+
 using namespace Qt::StringLiterals;
 
 Toasts *Toasts::create(QQmlEngine *engine, QJSEngine *)
@@ -106,16 +108,18 @@ void Toasts::say(Preferences::Warns family, Tone tone, const QString &headline,
 
     if (m_preferences != nullptr && !m_preferences->bubbles(family))
         return;
+    raise(tone, headline, detail, offer, subject);
+}
 
-    // A failure stays until it is clicked. A failure that fades on its own is a failure
-    // nobody read.
-    const QDateTime until = tone == Tone::Failed
-                                ? QDateTime()
-                                : QDateTime::currentDateTime().addMSecs(m_lifetime);
+void Toasts::raise(Tone tone, const QString &headline, const QString &detail, Offer offer,
+                   const QString &subject)
+{
+    // One lifetime for every tone (the header says why).
+    const QDateTime until = QDateTime::currentDateTime().addMSecs(m_lifetime);
     const bool drawn = m_shown.size() < AtOnce;
     if (drawn)
         beginInsertRows(QModelIndex(), int(m_shown.size()), int(m_shown.size()));
-    m_shown.append({tone, headline, detail, offer, subject, until});
+    m_shown.append({tone, headline, detail, offer, subject, until, false, 0});
     if (drawn)
         endInsertRows();
 
@@ -159,6 +163,20 @@ void Toasts::commandRefused(const QString &why)
     say(Preferences::Warns::Failures, Tone::Failed, Words::commandRefused(), why);
 }
 
+void Toasts::isbnCopied(const QString &isbn)
+{
+    raise(Tone::Done, Words::isbnCopied(), isbn, Offer::Nothing, {});
+}
+
+void Toasts::readsImages(const QList<QByteArray> &readable)
+{
+    // Once: one missing package is one sentence, not one per cover that fails to draw.
+    if (m_toldWebp || readable.contains("webp"))
+        return;
+    m_toldWebp = true;
+    raise(Tone::Failed, Words::webpMissing(), Words::webpMissingRemedy(), Offer::Nothing, {});
+}
+
 void Toasts::dismiss(int row)
 {
     take(row);
@@ -200,12 +218,27 @@ void Toasts::take(qsizetype row)
     emit changed();
 }
 
+void Toasts::hold(int row, bool held)
+{
+    if (row < 0 || row >= rowCount())
+        return;
+    Bubble &one = m_shown[row];
+    if (one.held == held)
+        return;
+    one.held = held;
+    const QDateTime now = QDateTime::currentDateTime();
+    if (held)
+        one.left = std::max<qint64>(0, now.msecsTo(one.until));
+    else
+        one.until = now.addMSecs(one.left);
+}
+
 void Toasts::sweep()
 {
     const QDateTime now = QDateTime::currentDateTime();
     for (qsizetype row = m_shown.size() - 1; row >= 0; --row) {
-        const QDateTime &until = m_shown.at(row).until;
-        if (until.isValid() && until <= now)
+        const Bubble &one = m_shown.at(row);
+        if (!one.held && one.until <= now)
             take(row);
     }
 }

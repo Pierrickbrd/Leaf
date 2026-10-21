@@ -31,6 +31,18 @@ namespace Words {
 /// space lets the line break in front of the colon.
 extern const QChar Nbsp;
 
+/// A narrow non-breaking space, the one French sets before `%` — thinner than `Nbsp`, and as
+/// unbreakable: « 200 % » split at the end of a line leaves a sign opening the next.
+extern const QChar NarrowNbsp;
+
+/// « Level.01 : Nom », « Chap. 13 : Le réveil » — a chapter wherever it is named: the label
+/// the server settled (the entry's own, the edition's pattern, or « Chap. n »), a
+/// non-breaking space and a colon, then the title. The label alone when the title is empty
+/// or only says the label again; the title alone when the label is empty, which is how a
+/// file asks for a bonus to be called by its title. Built once here so that the bar, the
+/// panel, the bubble, the band and the search say a chapter the same way.
+QString chapterName(const QString &label, const QString &title);
+
 /// "21 tomes", "7 albums", "1 tome". A BD comes in albums and everything else in volumes —
 /// which is a fact about the medium, so it is read from the medium and not from the shelf.
 QString volumes(int count, std::optional<Api::Medium> medium);
@@ -178,6 +190,9 @@ QString labelled(const QString &label, const QString &value);
 ///
 /// Each segment is its own label, so each begins with a capital. Segments with nothing to say
 /// are left out rather than shown empty: a card reading "Page /" is worse than a shorter card.
+/// `chapter` is the chapter's whole name, as `chapterName` builds it, shown as the server
+/// settled it. A chapter entry is named by it rather than « Chapitre 98 » when it is known.
+/// `page` counts from 1, as the reader does — the caller turns the recorded index into it.
 QString where(Api::UpNext::Kind kind, std::optional<double> number, std::optional<int> page,
               int pageCount, const std::optional<QString> &chapter);
 
@@ -206,6 +221,9 @@ QString seeAllFiles(int count);
 /// The second line of a file hit: its series, containing volume and page count, with absent
 /// facts omitted. A chapter called « Assaut » is not useful without « Tome 8 » beside it.
 QString fileContext(const Api::Hit &hit);
+
+/// The first line of a file hit: a chapter named by `chapterName`, anything else by its label.
+QString hitName(const Api::Hit &hit);
 
 /// « Voir les 12 autres », and « Voir l’autre » when there is one. It unfolds in place, so
 /// the wording says how many are hidden rather than where they would be.
@@ -417,6 +435,16 @@ QString commandRefused();
 /// « Cet appareil est déjà relié à une bibliothèque : déliez-le d’abord pour en changer. » —
 /// what a clicked link is answered when there is already a library, which it never replaces.
 QString alreadyLinked();
+/// « ISBN copié » — the one bubble that answers a click rather than reports on something
+/// unseen: a copy to the clipboard changes nothing on the screen, so without it the click on
+/// the volume's ISBN looked like a click on nothing.
+QString isbnCopied();
+/// « Il manque le module d’images WebP de Qt », and what to install. Said at startup when Qt
+/// cannot read WebP: every cover and every resized page is WebP, and without the plugin the
+/// owner's desktop showed a shelf of « Format d'image non supporté » (22/10/2026) — an
+/// error on each image and nowhere a word about the one package that was missing.
+QString webpMissing();
+QString webpMissingRemedy();
 
 /// « Voir », « Réessayer », « Ouvrir le dossier » — the one thing a bubble may offer besides
 /// its cross. Nothing for the ones with nothing to propose: a button that only closes is the
@@ -499,6 +527,179 @@ QString destination(Navigation::Destination value);
 /// from inside QML.
 QString band(Widths::Band value);
 
+// ——— Le lecteur ——————————————————————————————————————————————————————————————
+
+/// « Tome 12 », « Chapitre 108 » — the entry the reader holds, named the way the resume band
+/// names it, from the same spelling: two screens saying « Tome 12 » and « T. 12 » of one
+/// book read as two books.
+QString readerVolume(double number);
+QString readerChapter(double number);
+
+/// « Lire le tome 13 », « Lire le chapitre 108 » — the one button of the end card, saying
+/// what it opens. A chapter that arrived on its own is not a volume, and « Lire le tome 108 »
+/// would send the reader looking for a book that does not exist.
+QString readOn(Api::Entry::Kind kind, double number);
+
+/// « Tome 12 terminé » — what the end card says first. A chapter has its own, for the
+/// button's reason.
+QString finishedVolume(double number);
+QString finishedChapter(double number);
+
+/// « dernier tome de la série », « dernier chapitre de la série » — said after the line
+/// above when nothing follows, so that a card with no button reads as an end and not as a
+/// suite that failed to load.
+QString lastOfSeries(Api::Entry::Kind kind);
+
+/// The end card's first line: « Tome 12 terminé », and « Tome 21 terminé · dernier tome de
+/// la série » when nothing follows. The space before « · » does not break, so the second
+/// half never opens a line on its separator.
+QString ending(Api::Entry::Kind kind, double number, bool last);
+
+/// « Tome 12 · Chap.099 : Coup de sifflet » — the second line of the reader's bar: the book,
+/// then the chapter the page on screen belongs to, named by `chapterName`. A book with no
+/// chapter known is its name alone, and a book that is its chapter is named once.
+QString readerWhere(const QString &entry, const QString &chapter, const QString &title);
+
+/// « Chap.099 : Coup de sifflet · page 47 » — what the bubble over the progress bar says of
+/// the page under the pointer while it slides, the chapter named by `chapterName`. `page`
+/// counts from 1, as a reader does.
+QString readerScrubbing(const QString &chapter, const QString &title, int page);
+
+/// « : Coup de sifflet » — what follows a chapter's label on the line under the progress bar,
+/// where the label is drawn apart, stronger: the second half of `chapterName`. Empty for a
+/// chapter with no title and for one whose title only repeats `label`; the title alone, with
+/// no colon, for a chapter with no label, so the line still names it. The space before « : »
+/// does not break.
+QString readerBesideLabel(const QString &label, const QString &title);
+
+/// « Chap.107 · fin du tome » — the other end of that line: the last chapter of the volume by
+/// its label, by its title when it has no label, and « fin du tome » alone when it has neither.
+QString readerVolumeEnd(const QString &label, const QString &title);
+
+/// « / 190 », drawn fainter after the page number. The slash never ends a line nor opens one.
+QString readerOutOf(int count);
+
+/// « 200 % » — the zoom reached, said a second in the bar at the foot of the page. `level` is
+/// 2 for 200 %; a pinch stops anywhere, and is said to the nearest whole percent.
+QString readerZoom(qreal level);
+
+/// « 98 à 106 » — the chapters a volume holds, by their numbers; one number alone when the
+/// stretch is a single chapter. The word « Chapitres » is the line's, not this.
+QString readerChapterSpan(double from, double to);
+
+/// « Tome 12 · Le temps des examens » — the head of the volume's panel. A volume with no title
+/// is its name alone, and so is one whose title is its name again, in whatever case.
+QString readerVolumeHead(const QString &entry, const QString &title);
+
+/// The names of the lines in the volume's panel.
+enum class ReaderFact { Series, Pages, Chapters, Published, Isbn, Read };
+QString readerFact(ReaderFact which);
+
+/// « Cliquer pour copier », under the ISBN drawn as a barcode in the volume's panel.
+QString readerCopyIsbn();
+
+/// « 4 mars 2015 », « 1er mars 2015 » — a date as the server writes it (« 2015-03-04 »). What
+/// does not read as a date is returned as it came, since a wrong date is worse than a plain one.
+QString readerPublished(const QString &iso);
+
+/// « page 47 / 190 », or « terminé » for a volume read to its end and not opened since.
+QString readerReadAt(int page, int count, bool finished);
+
+/// « p. 3 » — where a chapter begins, from 1.
+QString readerChapterPage(int page);
+
+/// The reader's buttons, said by their tooltips and to whoever reads the screen aloud.
+QString readerVolumePanel();
+QString readerSettings();
+QString readerFullScreen(bool on);
+QString readerPage(bool forward);
+QString readerChapterStep(bool forward);
+
+/// The settings card. Two groups, named for what they reach: what is kept for the series on the
+/// server and so follows the reader to every device, and what is kept on this desk alone.
+/// « Lecture » — the card's own heading — and what its cross says to whoever cannot see it.
+QString readerCardTitle();
+QString readerCloseCard();
+QString readerThisSeries();
+/// The two quiet links of the end card: leave for the series page, and put the card away to
+/// stay on the last page.
+QString readerBackToSeries();
+QString readerStayHere();
+QString readerThisDesk();
+/// The four directions, in words and nothing else: « Par défaut » when `std::nullopt`. A
+/// picture of an arrow beside « De droite à gauche » says it twice, and the order of one
+/// troubles the other.
+QString readerDirection(std::optional<Api::ReadingDirection> which);
+QString readerLayout(Preferences::PageLayout which);
+QString readerFit(Preferences::Fit which);
+/// « Noir », « Gris », « Blanc » — what is behind the pages.
+QString readerBackdrop(Preferences::Backdrop which);
+/// « Glisser », « Fondu », « Sans effet » — how a page that comes takes the place of the last.
+/// Not « Aucune »: alone on its row, under « Changement de page », it read as the change of
+/// page being switched off rather than drawn without a motion.
+QString readerMotion(Preferences::Motion which);
+/// The two halves of « Sur cet appareil », each over its rows: « Pages », what the book looks
+/// like, and « Confort », what is around it. The owner's critique of 22/10/2026 was four
+/// anonymous rows of pills, which a reader had to try to learn what each one was about.
+enum class ReaderDeskGroup { Pages, Comfort };
+QString readerDeskGroup(ReaderDeskGroup which);
+/// What each of those rows chooses, written beside its pills: « Mise en page »,
+/// « Ajustement », « Fond », « Changement de page ».
+enum class ReaderSetting { Layout, Fit, Backdrop, Motion };
+QString readerSetting(ReaderSetting which);
+/// « La série déclare : **droite → gauche**. Ce que vous choisissez ici ne vaut que pour cette
+/// série, mais sur tous vos appareils. » The bold is `<b>…</b>` for a `Text` in styled-text
+/// format, so the emphasis is decided here with the words and a `.qml` file carries neither.
+/// The arrow is held between non-breaking spaces so a line never ends on « droite ».
+QString readerDeclares(std::optional<Api::ReadingDirection> declared);
+/// « Pour tous les livres, sur ce bureau seulement. »
+QString readerDeskNote();
+
+/// « Raccourcis » — the card of the reader's keys: its title, and what the bar's button that
+/// opens it says under the pointer.
+QString readerShortcuts();
+
+/// The four groups of that card, in the order they are read: the left column, then the right.
+enum class ShortcutGroup { Navigate, Display, Zoom, Leave };
+QString shortcutGroup(ShortcutGroup which);
+
+/// What each line of the card does, worded as the approved mockup words it. The arrows are
+/// worded twice: in a book read right to left ← goes on, as the left third of the screen
+/// does, and a card that said « Page précédente, suivante » over ← → there said the opposite
+/// of what the keys do.
+enum class ShortcutDoes {
+    TurnByArrow,
+    TurnByArrowRightToLeft,
+    TurnBySpace,
+    ToTheEnds,
+    ToTheEndsRightToLeft,
+    BackAPage,
+    FullScreen,
+    VolumeInfo,
+    TheseShortcuts,
+    ZoomByKey,
+    BackToWhole,
+    ZoomByWheel,
+    ZoomWhereAimed,
+    Pinch,
+    CloseWhatIsOpen,
+    BackToSeries,
+    CloseReader,
+};
+QString shortcutDoes(ShortcutDoes which);
+
+/// What is written on a key. A letter and a function key are words of the card like the
+/// others, and kept here with them: « Échap », not « Esc », is a decision about French.
+enum class KeyName { Space, Shift, Ctrl, Alt, Escape, F, F11, I, Question, F1, Zero, W };
+QString keyName(KeyName which);
+
+/// « + » between the keys of one combination, « / » and « ou » between two that do the same,
+/// and « double clic » beside the mouse.
+QString shortcutAnd();
+QString shortcutSlash();
+QString shortcutOr();
+QString doubleClick();
+
 // ——— What Leaf says when something goes wrong ———————————————————————————————
 //
 // These sentences were `tr(...)` literals at their call sites, which meant English on the
@@ -511,7 +712,7 @@ QString band(Widths::Band value);
 /// Which screen was left with nothing when the client could not set itself up. One tail per
 /// screen and not one sentence for all of them: a reader who opened the shelf and a reader
 /// who typed in the field are owed different halves of it.
-enum class Asking { Shelf, Search, Filters, Resume, State };
+enum class Asking { Shelf, Search, Filters, Resume, State, Reader };
 
 /// « Leaf n’a pas pu s’installer : il n’y a rien à afficher. »
 QString notSetUp(Asking what);

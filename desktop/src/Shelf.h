@@ -74,6 +74,9 @@ public:
         InProgress,
         Finished,
         HowFarRead,
+        /// The one file of a book that is a whole book on its own, empty for any other
+        /// series: its tile opens the reader on it (spec §01).
+        OneShotEntry,
     };
     Q_ENUM(Role)
 

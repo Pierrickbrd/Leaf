@@ -304,6 +304,8 @@ Item {
                 width: parent.width - 2 * (Widths.shelfMargin + 4)
                 visible: Captions.suggestion.length > 0
                 text: Captions.suggestion
+                // It carries a series' name, which is the files' words.
+                textFormat: Text.PlainText
                 color: Theme.emerald
                 font.family: Theme.textFamily
                 font.pixelSize: 13

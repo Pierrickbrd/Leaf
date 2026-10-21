@@ -76,10 +76,14 @@ qt_add_executable(leaf-desktop
     src/Theme.cpp
     src/Words.h
     src/Words.cpp
+    src/Spreads.h
+    src/Spreads.cpp
     src/Fonts.h
     src/Fonts.cpp
     src/Widths.h
     src/Widths.cpp
+    src/Isbn.h
+    src/Isbn.cpp
     src/Navigation.h
     src/Navigation.cpp
     src/Settling.h
@@ -106,6 +110,8 @@ qt_add_executable(leaf-desktop
     src/ImportCaptions.cpp
     src/CardCaptions.h
     src/CardCaptions.cpp
+    src/ReaderCaptions.h
+    src/ReaderCaptions.cpp
     src/Search.h
     src/Search.cpp
     src/Captions.h
@@ -114,6 +120,8 @@ qt_add_executable(leaf-desktop
     src/Filters.cpp
     src/Resume.h
     src/Resume.cpp
+    src/Reader.h
+    src/Reader.cpp
     src/Series.h
     src/Series.cpp
     src/Entries.h
@@ -219,6 +227,18 @@ set(LEAF_QML
     qml/MiniTile.qml
     qml/LinkView.qml
     qml/RelayDialog.qml
+    qml/ReaderView.qml
+    qml/ReaderBar.qml
+    qml/ReaderDock.qml
+    qml/ReaderScrub.qml
+    qml/ReaderNextCard.qml
+    qml/ReaderPage.qml
+    qml/ReaderSettings.qml
+    qml/ReaderShortcuts.qml
+    qml/Keycap.qml
+    qml/IsbnKey.qml
+    qml/ReaderVolumePanel.qml
+    qml/ReaderStrip.qml
 )
 foreach(qml_file IN LISTS LEAF_QML)
     string(REGEX REPLACE "^qml/" "" alias "${qml_file}")
@@ -260,8 +280,25 @@ set(LEAF_IMAGES
     qml/assets/icons/settings.svg
     qml/assets/icons/sort.svg
     qml/assets/icons/tune.svg
+    qml/assets/icons/tabler-arrow-left.svg
+    qml/assets/icons/tabler-arrow-right.svg
+    qml/assets/icons/tabler-backspace.svg
+    qml/assets/icons/tabler-hand-two-fingers.svg
+    qml/assets/icons/tabler-keyboard.svg
+    qml/assets/icons/tabler-minus.svg
+    qml/assets/icons/tabler-mouse.svg
+    qml/assets/icons/tabler-plus.svg
+    qml/assets/icons/tabler-x.svg
     qml/assets/icons/upload.svg
     qml/assets/icons/view_list.svg
+    qml/assets/icons/chevron_left.svg
+    qml/assets/icons/chevron_right.svg
+    qml/assets/icons/fullscreen.svg
+    qml/assets/icons/fullscreen_exit.svg
+    qml/assets/icons/keyboard_double_arrow_left.svg
+    qml/assets/icons/keyboard_double_arrow_right.svg
+    qml/assets/icons/menu_book.svg
+    qml/assets/icons/play_arrow.svg
 )
 foreach(image_file IN LISTS LEAF_IMAGES)
     string(REGEX REPLACE "^qml/" "" alias "${image_file}")
@@ -389,6 +426,21 @@ target_include_directories(knows-its-widths PRIVATE src)
 target_link_libraries(knows-its-widths PRIVATE Qt6::Core Qt6::Qml Qt6::Test)
 add_test(NAME knows-its-widths COMMAND knows-its-widths)
 
+qt_add_executable(draws-the-isbn tests/draws_the_isbn.cpp src/Isbn.h src/Isbn.cpp)
+target_include_directories(draws-the-isbn PRIVATE src)
+target_link_libraries(draws-the-isbn PRIVATE Qt6::Core Qt6::Gui Qt6::Qml Qt6::Test)
+add_test(NAME draws-the-isbn COMMAND draws-the-isbn)
+
+# Every cover and every resized page arrives as WebP, which Qt reads only through a plugin
+# packaged apart from it: a client built without it compiles, links, opens, and shows nothing.
+qt_add_executable(reads-webp tests/reads_webp.cpp)
+target_link_libraries(reads-webp PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
+qt_add_resources(reads-webp "webp-fixture"
+    PREFIX "/fixtures"
+    BASE "${CMAKE_CURRENT_SOURCE_DIR}/tests"
+    FILES tests/page.webp)
+add_test(NAME reads-webp COMMAND reads-webp)
+
 qt_add_executable(finds-its-way-back tests/finds_its_way_back.cpp
     src/Navigation.h src/Navigation.cpp src/Words.h src/Words.cpp src/Api.h)
 target_include_directories(finds-its-way-back PRIVATE src)
@@ -409,6 +461,7 @@ qt_add_executable(crosses-the-seam
     src/Card.h src/Card.cpp src/Carrier.h src/Carrier.cpp
     src/Imports.h src/Imports.cpp src/ImportCaptions.h src/ImportCaptions.cpp
     src/CardCaptions.h src/CardCaptions.cpp
+    src/ReaderCaptions.h src/ReaderCaptions.cpp
     src/Cbz.h src/Cbz.cpp src/Manifest.h src/Manifest.cpp
     src/Settings.h src/Settings.cpp
     src/Server.h src/Server.cpp
@@ -420,6 +473,7 @@ qt_add_executable(crosses-the-seam
     src/Theme.h src/Theme.cpp
     src/Words.h src/Words.cpp
     src/Widths.h src/Widths.cpp
+    src/Isbn.h src/Isbn.cpp
     src/Navigation.h src/Navigation.cpp
     src/Api.h src/Api.cpp
     src/Rearrange.h src/Rearrange.cpp
@@ -431,6 +485,7 @@ qt_add_executable(crosses-the-seam
     src/Scan.h src/Scan.cpp
     src/Preferences.h src/Preferences.cpp
     src/Resume.h src/Resume.cpp
+    src/Reader.h src/Reader.cpp src/Spreads.h src/Spreads.cpp
     src/Series.h src/Series.cpp
     src/Entries.h src/Entries.cpp
     src/SeriesCaptions.h src/SeriesCaptions.cpp
@@ -461,7 +516,8 @@ qt_add_resources(crosses-the-seam "leaf-fonts-for-the-seam-test"
 target_link_libraries(crosses-the-seam PRIVATE
     Qt6::Core Qt6::Gui Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Qml Qt6::Concurrent
     Qt6::DBus Qt6::Test ZLIB::ZLIB qrcodegen ${QTKEYCHAIN_LIBRARIES})
-add_test(NAME crosses-the-seam COMMAND crosses-the-seam)
+# The test opens a real window, so it must never be registered bare: see the comment at the
+# bottom of this file, where its display is settled.
 
 # The shelf's model, against the same forty-line server. It holds rows, pages and says why it
 # is empty — none of which needs a window, so none of it waits on the grid being written.
@@ -612,6 +668,38 @@ target_include_directories(holds-elsewhere PRIVATE src)
 target_link_libraries(holds-elsewhere PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
 add_test(NAME holds-elsewhere COMMAND holds-elsewhere)
+
+# The open book. `Library` comes with it, and with `Library` everything it tells: a page read
+# is a series changed, and the test counts the one question that change is allowed to cost.
+qt_add_executable(holds-the-reader
+    tests/holds_the_reader.cpp tests/Pretend.h
+    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
+    src/Spreads.h src/Spreads.cpp src/Preferences.h src/Preferences.cpp
+    src/Reader.h src/Reader.cpp
+    src/Library.h src/Library.cpp
+    src/Rearrange.h src/Rearrange.cpp src/Shelf.h src/Shelf.cpp
+    src/Search.h src/Search.cpp src/Captions.h src/Captions.cpp
+    src/Series.h src/Series.cpp
+    src/Entries.h src/Entries.cpp src/SeriesCaptions.h src/SeriesCaptions.cpp
+    src/Elsewhere.h src/Elsewhere.cpp)
+target_include_directories(holds-the-reader PRIVATE src)
+target_link_libraries(holds-the-reader PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME holds-the-reader COMMAND holds-the-reader)
+
+# How a volume's pages are shared out between screens, alone or in pairs. A pure function:
+# no Qt object, so nothing here but the page list it is handed.
+qt_add_executable(lays-out-pages
+    tests/lays_out_pages.cpp
+    src/Spreads.h src/Spreads.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp)
+target_include_directories(lays-out-pages PRIVATE src)
+target_link_libraries(lays-out-pages PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME lays-out-pages COMMAND lays-out-pages)
 
 # What a deletion would take, asked before it is done. The one path in this client that
 # unmakes a file, so every branch of it is walked here rather than on a screen.
@@ -785,15 +873,37 @@ add_test(NAME taps-stay-where-they-land
 # These tests never need a scene graph, so the software-only offscreen platform keeps them
 # independent of a desktop session.
 set_tests_properties(keeps-the-key talks-to-the-server keeps-its-contrast embeds-its-fonts
-    holds-a-shelf holds-the-search holds-the-resume holds-the-filters
+    holds-a-shelf holds-the-search holds-the-resume holds-the-filters holds-the-reader
     puts-the-key-where-it-belongs pins-a-certificate links-a-device answers-the-doorbell
     keeps-the-bond
     PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # The seam test verifies the rounded shader one pixel at a time. It therefore needs the real
-# X11 scene graph; CI supplies its display with Xvfb.
-set_tests_properties(crosses-the-seam
-    PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=xcb")
+# X11 scene graph, and it moves the cursor and takes window activation.
+#
+# It is registered plainly because the binary protects itself: its `main` re-executes it under
+# `xvfb-run -a` with QT_QPA_PLATFORM=xcb and WAYLAND_DISPLAY removed, and fails naming xvfb-run
+# when that is missing (see crosses_the_seam.cpp). On 22/10/2026 a registration through
+# `xvfb-run` fixed `ctest` only, and a window still reached the desktop twice: a direct run of
+# the binary, and `xvfb-run -a` on it without QT_QPA_PLATFORM=xcb, so Qt took the Wayland
+# platform that a GNOME session advertises and ignored Xvfb. Nested under
+# CI's own `xvfb-run -a ctest`, the inner one starts a second server and points DISPLAY at it.
+add_test(NAME crosses-the-seam COMMAND crosses-the-seam)
+
+# Every test its own home, emptied before each run. `QStandardPaths` test mode puts the
+# preferences under `$HOME/.qttest`, one file for every executable: holds-the-reader left
+# « Simple » there, six seam tests passed only when it had run first, and failed whenever
+# ctest's ordering by cost put crosses-the-seam ahead of it — or after keeps-a-preference,
+# which empties the file. Nothing a test target writes can now be read by another, nor by its
+# own next run. Last in the file, so that it reaches every test above.
+get_property(leaf_tests DIRECTORY PROPERTY TESTS)
+set(leaf_test_homes ${CMAKE_CURRENT_BINARY_DIR}/test-homes)
+add_test(NAME empties-the-test-homes COMMAND ${CMAKE_COMMAND} -E rm -rf ${leaf_test_homes})
+set_tests_properties(empties-the-test-homes PROPERTIES FIXTURES_SETUP test-homes)
+foreach(leaf_test IN LISTS leaf_tests)
+    set_property(TEST ${leaf_test} APPEND PROPERTY ENVIRONMENT "HOME=${leaf_test_homes}/${leaf_test}")
+    set_property(TEST ${leaf_test} APPEND PROPERTY FIXTURES_REQUIRED test-homes)
+endforeach()
 
 install(TARGETS leaf-desktop
     BUNDLE  DESTINATION .

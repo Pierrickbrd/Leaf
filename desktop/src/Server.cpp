@@ -46,7 +46,8 @@ Server::Server(Settings *settings, QObject *parent) : QObject(parent), m_setting
             if (!one.caller) {
                 continue;
             }
-            send({one.verb, one.path, QUrlQuery(one.encodedQuery), one.body, one.range},
+            send({one.verb, one.path, QUrlQuery(one.encodedQuery), one.body, one.range,
+                  one.octets},
                  one.caller, one.then, one.reading);
         }
     });
@@ -150,7 +151,13 @@ void Server::put(const QString &path, const QUrlQuery &query, const QByteArray &
                 + QByteArray::number(from + body.size() - 1) + '/'
                 + QByteArray::number(whole);
     }
-    send({"PUT", path, query, body, range}, caller, std::move(then));
+    send({"PUT", path, query, body, range, true}, caller, std::move(then));
+}
+
+void Server::set(const QString &path, const QByteArray &body, const QObject *caller,
+                 std::function<void(const Answer &)> then)
+{
+    send({"PUT", path, QUrlQuery(), body, {}, false}, caller, std::move(then));
 }
 
 void Server::send(const Sending &what, const QObject *caller,
@@ -191,7 +198,8 @@ void Server::send(const Sending &what, const QObject *caller,
         // it is not the `QUrlQuery` itself. `FullyEncoded` is the only form that survives the
         // round trip: a `PrettyDecoded` query hands its own ampersands back to the parser.
         m_waiting.append({what.verb, what.path, what.query.toString(QUrl::FullyEncoded),
-                          what.body, what.range, reading, alive, std::move(then)});
+                          what.body, what.range, what.octets, reading, alive,
+                          std::move(then)});
         return;
     }
 
@@ -221,10 +229,10 @@ void Server::send(const Sending &what, const QObject *caller,
     // body is empty: `POST /scan` carries nothing, and a POST with no length at all is one
     // some proxies hold open waiting for it.
     if (what.verb != "GET") {
-        // A PUT in this client is always part of a file, and part of a file is never JSON.
+        // Part of a file is never JSON, and everything else this client sends is.
         request.setHeader(QNetworkRequest::ContentTypeHeader,
-                          what.verb == "PUT" ? QByteArrayLiteral("application/octet-stream")
-                                        : QByteArrayLiteral("application/json"));
+                          what.octets ? QByteArrayLiteral("application/octet-stream")
+                                      : QByteArrayLiteral("application/json"));
     }
     if (!what.range.isEmpty()) {
         request.setRawHeader("Content-Range", what.range);

@@ -750,6 +750,22 @@ private slots:
                  m_settings->address() + u"/series/dn/cover"_s);
     }
 
+    /// A book that is a whole book on its own says which file it is, so that its tile opens
+    /// the reader on it with no request of its own (spec §01); every other tile says nothing.
+    void a_book_on_its_own_hands_its_tile_the_file_to_open()
+    {
+        QJsonObject alone = aSeries(u"lco"_s, u"Le Combat ordinaire"_s);
+        alone[u"oneShotEntry"_s] = u"lco-1"_s;
+        m_pretend->answers(200, aPage({alone, aSeries(u"dn"_s, u"Death Note"_s)}, 2));
+        m_shelf->reload();
+        settle();
+
+        QCOMPARE(m_shelf->data(m_shelf->index(0), role(Shelf::Role::OneShotEntry)).toString(),
+                 u"lco-1"_s);
+        QCOMPARE(m_shelf->data(m_shelf->index(1), role(Shelf::Role::OneShotEntry)).toString(),
+                 QString());
+    }
+
     void a_finished_series_is_told_apart_from_one_never_opened()
     {
         // A partial bar for in progress, a full one and a check for finished, nothing for

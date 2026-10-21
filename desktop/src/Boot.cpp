@@ -12,6 +12,7 @@
 #include <QCoreApplication>
 #include <QDebug>
 #include <QGuiApplication>
+#include <QImageReader>
 #include <QQuickWindow>
 #include <QUrl>
 #include <utility>
@@ -172,10 +173,14 @@ void run(QQmlApplicationEngine &engine, const QGuiApplication &application,
     // the engine so it lives exactly as long as what raises the events, and it is connected
     // here rather than held by `Toasts`: what a bubble is has nothing to do with what D-Bus
     // is, and a model that opened a session bus could not be built in a test.
-    if (const auto *toasts =
+    if (auto *toasts =
             engine.singletonInstance<Toasts *>(qmlTypeId("Leaf", 1, 0, "Toasts"))) {
         QObject::connect(toasts, &Toasts::escalated,
                          new Notifier(std::move(notifications), &engine), &Notifier::show);
+        // Covers and pages arrive as WebP, read through a plugin Ubuntu packages apart from
+        // Qt: without it, 22/10/2026, every image on the owner's shelf failed on its own and
+        // nothing named the one package missing. Said here, once, before anything is drawn.
+        toasts->readsImages(QImageReader::supportedImageFormats());
     }
 }
 
