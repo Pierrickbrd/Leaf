@@ -731,6 +731,21 @@ private slots:
         QCOMPARE(got.value->name, u"Assassination Classroom"_s);
     }
 
+    void a_series_carries_the_direction_chosen_for_it()
+    {
+        QJsonObject chosen = aSeries();
+        chosen[u"readingDirectionChosen"_s] = u"VERTICAL"_s;
+        QCOMPARE(Api::series(chosen).value->readingDirectionChosen,
+                 std::optional<Api::ReadingDirection>(Api::ReadingDirection::Vertical));
+
+        // Null is « par défaut », and is not the direction the files say: the two are read
+        // side by side so that a screen can show which one is in force.
+        chosen[u"readingDirectionChosen"_s] = QJsonValue::Null;
+        QVERIFY(!Api::series(chosen).value->readingDirectionChosen);
+        chosen.remove(u"readingDirectionChosen"_s);
+        QVERIFY(!Api::series(chosen).value->readingDirectionChosen);
+    }
+
     void a_page_says_where_the_broken_item_is()
     {
         QJsonObject broken = aSeries();

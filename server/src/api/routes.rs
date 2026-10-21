@@ -259,6 +259,10 @@ pub fn router(state: AppState) -> Router {
                 .delete(forget_series_progress),
         )
         .route(
+            "/series/{id}/reading-direction",
+            axum::routing::put(choose_reading_direction),
+        )
+        .route(
             "/entries/{id}/progress",
             get(entry_progress)
                 .patch(record_progress)
@@ -1160,6 +1164,66 @@ async fn forget_series_progress(
     let profile = who.profile().to_owned();
     blocking(move || Progress::new(&state.db).forget_series(&profile, &id)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The way a reader chose to read a series, which is not what its files say.
+///
+/// Behind `Reader` like progress, and for the same reason: it is the reader's own state, and a
+/// phone with a read-only key could not remember that a manga is read the other way round.
+/// Not a `PATCH /series/{id}`, which writes into the sidecars and would put a reader's choice
+/// in a file somebody else describes the work in.
+async fn choose_reading_direction(
+    _: Reader,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ReadingChoice>,
+) -> Result<Response, Failure> {
+    let series = blocking(move || {
+        let said = body.reading_direction.ok_or_else(|| {
+            crate::api::invalid(
+                "readingDirection is required — null goes back to what the files declare",
+            )
+        })?;
+        let chosen = match said.as_deref() {
+            None => None,
+            Some(spelled) => Some(
+                crate::metadata::sidecars::reading_direction(spelled).ok_or_else(|| {
+                    crate::api::invalid(format!(
+                        "\"{spelled}\" is not a reading direction — {}",
+                        crate::metadata::sidecars::READING_DIRECTIONS.join(", ")
+                    ))
+                })?,
+            ),
+        };
+        let repository = Repository::new(&state.db);
+        if !repository.choose_reading_direction(&id, chosen)? {
+            return Ok(None);
+        }
+        repository.one_series(&id)
+    })
+    .await?;
+    or_missing(series, "unknown series")
+}
+
+/// `null` is a value here and not an absence: it says "go back to what the files declare".
+/// The two are told apart, outer `None` for a field left out and `Some(None)` for `null`: a
+/// plain `Option` read both as `None`, and a body of `{}` answered 200 and erased the choice
+/// the reader had made, where the contract says the field is required.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadingChoice {
+    #[serde(default, deserialize_with = "present")]
+    reading_direction: Option<Option<String>>,
+}
+
+/// Called only when the field is in the body, so whatever it holds — `null` included — is
+/// `Some`; `default` leaves an absent field `None`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 // -------------------------------------------------------------------- erasing

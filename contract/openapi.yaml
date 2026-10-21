@@ -690,6 +690,41 @@ paths:
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "204": { description: "Forgotten, whether or not there was anything to forget." }
 
+  /series/{id}/reading-direction:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    put:
+      operationId: chooseReadingDirection
+      tags: [progress]
+      summary: Choose the way a series is read, or go back to what it declares.
+      description: |
+        The reader's choice, kept on the server beside the progress and never in the files.
+        It is not a `PATCH /series/{id}`: that writes `work.json`, which says what the work
+        is, and a reader turning pages the other way is not a correction of the work. A
+        rescan leaves the choice alone, as it leaves the progress.
+
+        Requires the **read** right, like progress: it is the reader's own state.
+
+        `null` removes the choice, and `Series.readingDirectionChosen` is then absent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReadingChoice" }
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The series as it now stands.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Series" }
+        "400":
+          description: A word that is not one of the three, named with the three.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /entries/{id}:
     parameters: [{ $ref: "#/components/parameters/Id" }]
     get:
@@ -1876,6 +1911,12 @@ components:
         readingDirection:
           type: [string, "null"]
           enum: [LEFT_TO_RIGHT, RIGHT_TO_LEFT, VERTICAL, null]
+        readingDirectionChosen:
+          type: [string, "null"]
+          enum: [LEFT_TO_RIGHT, RIGHT_TO_LEFT, VERTICAL, null]
+          description: |
+            What the reader chose instead of `readingDirection`, which is what the files
+            declare. `null` is "by default". Set through `PUT /series/{id}/reading-direction`.
         status:
           type: [string, "null"]
           enum: [ongoing, completed, null]
@@ -2254,6 +2295,15 @@ components:
           items: { type: string }
           description: |
             The files that would not go, by name. Absent when every one of them went.
+
+    ReadingChoice:
+      type: object
+      required: [readingDirection]
+      properties:
+        readingDirection:
+          type: [string, "null"]
+          enum: [LEFT_TO_RIGHT, RIGHT_TO_LEFT, VERTICAL, null]
+          description: "`null` goes back to what the series declares."
 
     ProgressPatch:
       type: object

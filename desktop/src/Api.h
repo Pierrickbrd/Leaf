@@ -129,6 +129,10 @@ struct Series {
     Publication publication;
     std::optional<Medium> medium;
     std::optional<ReadingDirection> readingDirection;
+    /// What somebody chose for this series, beside what its files say. Absent is « par
+    /// défaut », not a direction: a screen shows which of the two is in force, and folding
+    /// them into one field would hide that a choice exists to be undone.
+    std::optional<ReadingDirection> readingDirectionChosen;
     std::optional<Run> run;
     QList<QString> genres;
     /// Beside `genres`, never folded into them.

@@ -200,6 +200,7 @@ impl<'a> Repository<'a> {
                     w.age_rating, COALESCE(e.summary, w.summary) AS summary,
                     COALESCE(e.medium, w.medium) AS medium,
                     COALESCE(e.reading_direction, w.reading_direction) AS reading_direction,
+                    rc.reading_direction AS reading_direction_chosen,
                     u.id AS universe_id, u.name AS universe,
                     {READ_STATUS} AS read_status,
                     (SELECT COUNT(*) FROM entry   x WHERE x.edition_id = e.id) AS entry_count,
@@ -239,6 +240,9 @@ impl<'a> Repository<'a> {
              FROM edition e
              JOIN work w ON w.id = e.work_id
              LEFT JOIN universe u ON u.id = w.universe_id
+             -- A join and not a subquery per row: the choice is one more column of the
+             -- statement that already builds the shelf, not one more question per series.
+             LEFT JOIN reading_choice rc ON rc.edition_id = e.id
              {}
              ORDER BY {}
              {window}",
@@ -269,6 +273,7 @@ impl<'a> Repository<'a> {
                     artists: Vec::new(),
                     medium: r.get("medium")?,
                     reading_direction: r.get("reading_direction")?,
+                    reading_direction_chosen: r.get("reading_direction_chosen")?,
                     status: r.get("status")?,
                     read_status: r.get("read_status")?,
                     declared_volumes: r.get("volume_count")?,
@@ -348,6 +353,36 @@ impl<'a> Repository<'a> {
             .series(&SeriesFilter::of(id), SeriesSort::Name, 0, 0)?
             .into_iter()
             .next())
+    }
+
+    /// Remembers the way the reader chose to read an edition, or forgets it on `None`.
+    ///
+    /// `false` when the edition does not exist, so the route can say 404 instead of writing
+    /// a row nothing points at. Forgetting is deleting: the absence of a row already means
+    /// "by default", and a row holding a null would be a second way to say it.
+    pub fn choose_reading_direction(&self, edition_id: &str, chosen: Option<&str>) -> Result<bool> {
+        self.db.write(|cx| {
+            let exists = cx
+                .query_one("SELECT 1 FROM edition WHERE id = ?1", [edition_id], |r| {
+                    r.get::<_, i64>(0)
+                })?
+                .is_some();
+            if !exists {
+                return Ok(false);
+            }
+            match chosen {
+                Some(direction) => cx.execute(
+                    "INSERT INTO reading_choice (edition_id, reading_direction) VALUES (?1, ?2)
+                     ON CONFLICT(edition_id) DO UPDATE SET reading_direction = excluded.reading_direction",
+                    (edition_id, direction),
+                )?,
+                None => cx.execute(
+                    "DELETE FROM reading_choice WHERE edition_id = ?1",
+                    [edition_id],
+                )?,
+            };
+            Ok(true)
+        })
     }
 
     /// The editions a filter admits — the set a search is then confined to.

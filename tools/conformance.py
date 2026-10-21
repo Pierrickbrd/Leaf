@@ -41,6 +41,7 @@ ONE_SERIES = "/series/{id}"
 ONE_ENTRY = "/entries/{id}"
 ENTRY_PROGRESS = "/entries/{id}/progress"
 SERIES_PROGRESS = "/series/{id}/progress"
+READING_DIRECTION = "/series/{id}/reading-direction"
 UP_NEXT = "/next"
 IMPORT = "/import"
 ONE_IMPORT = "/import/{id}"
@@ -233,6 +234,18 @@ def records(run, series, entry):
     run.check("patch arcs", f"/series/{series}/arcs", "/series/{id}/arcs", "PATCH",
               [{"name": "Un cycle", "unit": "VOLUME", "from": 1, "to": 2}])
     run.check("patch entry", f"/entries/{entry}", ONE_ENTRY, "PATCH", {"title": "Un titre"})
+    # The reader's own direction: its three answers, and the choice taken away at the end so
+    # a run aimed at a real library leaves the series read the way its files say. The word
+    # refused comes first — a 400 that answered 200 would have chosen it.
+    chosen = f"/series/{series}/reading-direction"
+    run.check("choose an unknown way", chosen, READING_DIRECTION, "PUT",
+              {"readingDirection": "SIDEWAYS"})
+    run.check("choose a way", chosen, READING_DIRECTION, "PUT",
+              {"readingDirection": "RIGHT_TO_LEFT"})
+    run.check("choose by default", chosen, READING_DIRECTION, "PUT",
+              {"readingDirection": None})
+    run.check("choose for nothing", "/series/nope/reading-direction", READING_DIRECTION,
+              "PUT", {"readingDirection": "VERTICAL"})
 
 
 def importing(run):

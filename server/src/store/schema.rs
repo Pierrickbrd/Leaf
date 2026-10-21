@@ -257,6 +257,13 @@ pub const SCHEMA: &[&str] = &[
     // Keyed by entry, but read by edition: the read status of a shelf asks "what has this
     // edition got" twice for every tile.
     "CREATE INDEX IF NOT EXISTS ix_progress_edition ON progress(edition_id, finished)",
+    // The reader's own choice of direction, apart from the files. See migration 30.
+    r#"
+    CREATE TABLE IF NOT EXISTS reading_choice (
+      edition_id        TEXT PRIMARY KEY REFERENCES edition(id) ON DELETE CASCADE,
+      reading_direction TEXT NOT NULL
+    )
+    "#,
     r#"
     CREATE TABLE IF NOT EXISTS reading_order (
       id          TEXT PRIMARY KEY,
@@ -655,6 +662,22 @@ pub const MIGRATIONS: &[&[&str]] = &[
         r#"
         INSERT OR IGNORE INTO closed (id, closed_at)
          SELECT 1, MIN(linked_at) FROM device HAVING COUNT(*) > 0
+        "#,
+    ],
+    // 30 — the way the reader chose to read a series, apart from the way its files say.
+    // That is not a fact about the series but a choice of whoever is reading it, and the
+    // files must not carry it: `work.json` is written by somebody describing the work, and a
+    // read-only key turning pages the other way would be rewriting it.
+    //
+    // A table of its own and not a column of `edition`, for the reason progress has one: the
+    // scanner rebuilds `edition` from the files, and a choice stored there would be forgotten
+    // at the next scan. Choosing "by default" deletes the row; its absence already says so.
+    &[
+        r#"
+        CREATE TABLE IF NOT EXISTS reading_choice (
+          edition_id        TEXT PRIMARY KEY REFERENCES edition(id) ON DELETE CASCADE,
+          reading_direction TEXT NOT NULL
+        )
         "#,
     ],
 ];
