@@ -17,6 +17,9 @@ Item {
     required property bool started
     required property bool finished
     required property real howFarRead
+    /// The shade under the track, for a bar laid on a cover. On paper it only darkens the
+    /// track, so the volume panel — the one bar not on a cover — turns it off.
+    property bool shaded: true
 
     anchors.fill: parent
     visible: bar.started || bar.finished
@@ -24,6 +27,7 @@ Item {
     // A green cover would swallow the emerald laid on it. The shade is invisible on a dark
     // one and saves the bar on every other.
     LinearGradient {
+        visible: bar.shaded
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom

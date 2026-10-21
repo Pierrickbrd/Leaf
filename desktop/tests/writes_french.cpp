@@ -348,6 +348,71 @@ private slots:
                  u"Tome 12 · Page 47/190 · Chapitre 98"_s);
     }
 
+    /// The reader's shortcuts card, as the owner approved it on 22/10/2026 — every line and
+    /// every key worded here, and the house typography held: « 100 % » keeps its sign on its
+    /// figure, « l’on » takes the curly apostrophe.
+    void the_shortcuts_card_is_worded_as_approved()
+    {
+        using enum Words::ShortcutDoes;
+        QCOMPARE(Words::readerShortcuts(), u"Raccourcis"_s);
+        QCOMPARE(Words::shortcutGroup(Words::ShortcutGroup::Navigate), u"Naviguer"_s);
+        QCOMPARE(Words::shortcutGroup(Words::ShortcutGroup::Display), u"Affichage"_s);
+        QCOMPARE(Words::shortcutGroup(Words::ShortcutGroup::Zoom), u"Zoom"_s);
+        QCOMPARE(Words::shortcutGroup(Words::ShortcutGroup::Leave), u"Quitter"_s);
+        QCOMPARE(Words::shortcutDoes(TurnByArrow), u"Page précédente, suivante"_s);
+        QCOMPARE(Words::shortcutDoes(TurnBySpace), u"Page suivante, précédente"_s);
+        QCOMPARE(Words::shortcutDoes(ToTheEnds), u"Première, dernière page"_s);
+        // In a book read right to left ← goes on: the arrows' lines read the other way round.
+        QCOMPARE(Words::shortcutDoes(TurnByArrowRightToLeft), u"Page suivante, précédente"_s);
+        QCOMPARE(Words::shortcutDoes(ToTheEndsRightToLeft), u"Dernière, première page"_s);
+        QCOMPARE(Words::shortcutDoes(BackAPage), u"Page précédente"_s);
+        QCOMPARE(Words::shortcutDoes(FullScreen), u"Plein écran"_s);
+        QCOMPARE(Words::shortcutDoes(VolumeInfo), u"Les infos du tome"_s);
+        QCOMPARE(Words::shortcutDoes(TheseShortcuts), u"Ces raccourcis"_s);
+        QCOMPARE(Words::shortcutDoes(ZoomByKey), u"Zoomer, dézoomer"_s);
+        QCOMPARE(Words::shortcutDoes(BackToWhole), u"Revenir à 100\u202F%"_s);
+        QCOMPARE(Words::shortcutDoes(ZoomByWheel), u"Zoomer à la molette, autour du curseur"_s);
+        QCOMPARE(Words::shortcutDoes(ZoomWhereAimed), u"Zoomer là où l’on vise"_s);
+        QCOMPARE(Words::shortcutDoes(Pinch), u"Pincer au pavé tactile"_s);
+        QCOMPARE(Words::shortcutDoes(CloseWhatIsOpen), u"Fermer ce qui est ouvert"_s);
+        QCOMPARE(Words::shortcutDoes(BackToSeries), u"Revenir à la série"_s);
+        QCOMPARE(Words::shortcutDoes(CloseReader), u"Fermer le lecteur"_s);
+        QCOMPARE(Words::keyName(Words::KeyName::Space), u"Espace"_s);
+        QCOMPARE(Words::keyName(Words::KeyName::Shift), u"Maj"_s);
+        QCOMPARE(Words::keyName(Words::KeyName::Escape), u"Échap"_s);
+        QCOMPARE(Words::shortcutOr(), u"ou"_s);
+        QCOMPARE(Words::doubleClick(), u"double clic"_s);
+    }
+
+    /// A chapter is its label, a non-breaking space, a colon and its title — « Level.01 :
+    /// Nom » — wherever it is named. The owner's request of 23/10/2026: every screen said
+    /// « #13 », when the data says how a chapter is to be called.
+    void a_chapter_is_named_by_its_label_and_its_title()
+    {
+        const QChar n = Words::Nbsp;
+        QCOMPARE(Words::chapterName(u"Level.01"_s, u"Nom"_s), u"Level.01"_s + n + u": Nom"_s);
+        QCOMPARE(Words::chapterName(u"Chap.\u00A013"_s, u"Le réveil"_s),
+                 u"Chap.\u00A013\u00A0: Le réveil"_s);
+        // No title: the label alone. A title that is the label again: the label, once.
+        QCOMPARE(Words::chapterName(u"Chap. 13"_s, QString()), u"Chap. 13"_s);
+        QCOMPARE(Words::chapterName(u"Chap. 13"_s, u" chap. 13 "_s), u"Chap. 13"_s);
+        // An empty label is a file asking for the title alone.
+        QCOMPARE(Words::chapterName(QString(), u"Épilogue"_s), u"Épilogue"_s);
+        QCOMPARE(Words::chapterName(QString(), QString()), QString());
+    }
+
+    /// The band says a chapter as the server named it and does not rewrite it: it once made
+    /// « Chapitre 13 » of « #13 » on its own, and was then the one screen naming a chapter
+    /// differently from the reader.
+    void the_band_names_a_chapter_as_the_server_did()
+    {
+        for (const QString &label : {u"#13"_s, u"Chap.13 : Assaut"_s, u"Prologue"_s,
+                                     u"Level.01\u00A0: Nom"_s, u"Chapitre 13 bis"_s}) {
+            QCOMPARE(Words::where(Api::UpNext::Kind::Volume, 2.0, std::nullopt, 0, label),
+                     u"Tome 2 · "_s + label);
+        }
+    }
+
     /// « Non lues 12 » — the count belongs to the pill, and the pill is one string.
     void a_pill_carries_its_count()
     {
@@ -573,6 +638,28 @@ private slots:
                  u"Parasite Reversi · Tome 2 · 187 pages"_s);
     }
 
+    /// A chapter found by a search is named as the reader names it, not by what was searched:
+    /// its title, or « #13 » when the file gave it nothing else.
+    void a_chapter_hit_is_named_as_the_reader_names_it()
+    {
+        Api::Hit chapter;
+        chapter.kind = Api::Hit::Kind::Chapter;
+        chapter.label = u"#13 : Le réveil"_s;
+        chapter.chapterLabel = u"Chap.\u00A013"_s;
+        chapter.chapterTitle = u"Le réveil"_s;
+        QCOMPARE(Words::hitName(chapter), u"Chap.\u00A013\u00A0: Le réveil"_s);
+
+        // From a server that does not say how, what was searched is all there is.
+        chapter.chapterLabel.reset();
+        QCOMPARE(Words::hitName(chapter), u"#13 : Le réveil"_s);
+
+        Api::Hit volume;
+        volume.kind = Api::Hit::Kind::Entry;
+        volume.label = u"Tome 1"_s;
+        volume.chapterLabel = u"ignored"_s;
+        QCOMPARE(Words::hitName(volume), u"Tome 1"_s);
+    }
+
     void the_band_distinguishes_resuming_from_the_next_entry()
     {
         QCOMPARE(Words::resumeAction(Api::UpNext::Reason::InProgress), u"Reprendre"_s);
@@ -590,10 +677,16 @@ private slots:
     }
 
     /// A chapter entry has already said which chapter it is. Saying it twice reads as two
-    /// different chapters.
+    /// different chapters. It says it with its chapter's name when the band knows it, and
+    /// from its number only when it does not.
     void a_chapter_entry_does_not_name_its_chapter_twice()
     {
-        QCOMPARE(Words::where(Api::UpNext::Kind::Chapter, 98.0, 47, 190, u"Chapitre 98"_s),
+        QCOMPARE(Words::where(Api::UpNext::Kind::Chapter, 98.0, 47, 190,
+                              Words::chapterName(u"Level.98"_s, u"Nom"_s)),
+                 u"Level.98\u00A0: Nom · Page 47/190"_s);
+        QCOMPARE(Words::where(Api::UpNext::Kind::Chapter, 98.0, 47, 190, std::nullopt),
+                 u"Chapitre 98 · Page 47/190"_s);
+        QCOMPARE(Words::where(Api::UpNext::Kind::Chapter, 98.0, 47, 190, QString()),
                  u"Chapitre 98 · Page 47/190"_s);
     }
 
@@ -715,7 +808,7 @@ private slots:
             every << Words::level(Manifest::Level(i));
         for (int i = 0; i <= int(Words::Importing::Failed); ++i)
             every << Words::importStage(Words::Importing(i));
-        for (int i = 0; i <= int(Words::Asking::State); ++i)
+        for (int i = 0; i <= int(Words::Asking::Reader); ++i)
             every << Words::notSetUp(Words::Asking(i));
         for (int i = 0; i <= int(Api::Medium::Other); ++i)
             every << Words::medium(Api::Medium(i));
@@ -1084,6 +1177,187 @@ private slots:
         // rows and never puts the bullet there itself.
         QVERIFY(Words::concern(Words::catalogueMissing()).endsWith(Words::catalogueMissing()));
         QVERIFY(Words::concern(u"x"_s).startsWith(u"·"_s));
+    }
+
+    /// What the reader says of the book in hand, and of the one after it. The entry is
+    /// « Tome 12 » as everywhere else in Leaf — the same spelling as the resume band, not a
+    /// second one — and the end card names what its one button opens.
+    void the_reader_names_the_book_and_what_follows()
+    {
+        QCOMPARE(Words::readerVolume(12), u"Tome 12"_s);
+        QCOMPARE(Words::readerVolume(3.5), u"Tome 3,5"_s);
+        QCOMPARE(Words::readerChapter(108), u"Chapitre 108"_s);
+        QCOMPARE(Words::readerVolume(12),
+                 Words::where(Api::UpNext::Kind::Volume, 12, std::nullopt, 0, std::nullopt));
+        QCOMPARE(Words::readOn(Api::Entry::Kind::Volume, 13), u"Lire le tome 13"_s);
+        QCOMPARE(Words::readOn(Api::Entry::Kind::Chapter, 108), u"Lire le chapitre 108"_s);
+        QCOMPARE(Words::finishedVolume(12), u"Tome 12 terminé"_s);
+        QCOMPARE(Words::finishedChapter(108), u"Chapitre 108 terminé"_s);
+        QCOMPARE(Words::lastOfSeries(Api::Entry::Kind::Volume), u"dernier tome de la série"_s);
+        QCOMPARE(Words::lastOfSeries(Api::Entry::Kind::Chapter),
+                 u"dernier chapitre de la série"_s);
+        QCOMPARE(Words::ending(Api::Entry::Kind::Volume, 12, false), u"Tome 12 terminé"_s);
+        // The separator never opens a line: the space before it does not break.
+        QCOMPARE(Words::ending(Api::Entry::Kind::Volume, 21, true),
+                 u"Tome 21 terminé"_s + Words::Nbsp + u"· dernier tome de la série"_s);
+        QCOMPARE(Words::ending(Api::Entry::Kind::Chapter, 108, true),
+                 u"Chapitre 108 terminé"_s + Words::Nbsp + u"· dernier chapitre de la série"_s);
+        QCOMPARE(Words::notSetUp(Words::Asking::Reader),
+                 u"Leaf n’a pas pu s’installer"_s + Words::Nbsp + u": il n’y a rien à lire."_s);
+    }
+
+    /// The bar's second line and the bubble over the progress bar, from the server's two
+    /// halves of a chapter — and each of them still a sentence when a half is missing,
+    /// rather than a separator hanging on nothing.
+    void the_reader_says_where_the_page_is_in_the_book()
+    {
+        const QChar n = Words::Nbsp;
+        QCOMPARE(Words::readerWhere(u"Tome 12"_s, u"Chap.099"_s, u"Coup de sifflet"_s),
+                 u"Tome 12"_s + n + u"· Chap.099"_s + n + u": Coup de sifflet"_s);
+        QCOMPARE(Words::readerWhere(u"Tome 12"_s, u"Chap.099"_s, QString()),
+                 u"Tome 12"_s + n + u"· Chap.099"_s);
+        QCOMPARE(Words::readerWhere(u"Tome 12"_s, QString(), QString()), u"Tome 12"_s);
+        QCOMPARE(Words::readerScrubbing(u"Chap.099"_s, u"Coup de sifflet"_s, 47),
+                 u"Chap.099"_s + n + u": Coup de sifflet"_s + n + u"· page 47"_s);
+        // A title alone when the label is empty, which is how a file asks for it.
+        QCOMPARE(Words::readerWhere(u"Tome 12"_s, QString(), u"Épilogue"_s),
+                 u"Tome 12"_s + n + u"· Épilogue"_s);
+        // A chapter that arrived on its own is named by its chapter, once.
+        QCOMPARE(Words::readerWhere(u"Chap. 13"_s, u"Chap. 13"_s, u"Le réveil"_s),
+                 u"Chap. 13"_s + n + u": Le réveil"_s);
+        QCOMPARE(Words::readerScrubbing(QString(), QString(), 3), u"page 3"_s);
+        QCOMPARE(Words::readerScrubbing(QString(), u"Coup de sifflet"_s, 3),
+                 u"Coup de sifflet"_s + n + u"· page 3"_s);
+        QCOMPARE(Words::readerOutOf(190), u"/"_s + n + u"190"_s);
+        // A narrow space and not `Nbsp` before the sign, and one that never breaks either.
+        QCOMPARE(Words::readerZoom(2), u"200"_s + Words::NarrowNbsp + u"%"_s);
+        QCOMPARE(Words::NarrowNbsp, QChar(0x202F));
+        QCOMPARE(Words::readerZoom(1.5), u"150\u202F%"_s);
+        QCOMPARE(Words::readerZoom(1.734), u"173\u202F%"_s);
+        QCOMPARE(Words::readerFullScreen(true), u"Plein écran"_s);
+        QCOMPARE(Words::readerFullScreen(false), u"Quitter le plein écran"_s);
+        QCOMPARE(Words::readerPage(true), u"Page suivante"_s);
+        QCOMPARE(Words::readerChapterStep(false), u"Chapitre précédent"_s);
+        QCOMPARE(Words::readerVolumePanel(), u"Le tome"_s);
+        QCOMPARE(Words::readerChapterSpan(98, 106), u"98 à 106"_s);
+        QCOMPARE(Words::readerChapterSpan(98, 98), u"98"_s);
+        QCOMPARE(Words::readerVolumeHead(u"Tome 12"_s, u"Coup de sifflet"_s),
+                 u"Tome 12\u00A0· Coup de sifflet"_s);
+        QCOMPARE(Words::readerVolumeHead(u"Tome 12"_s, QString()), u"Tome 12"_s);
+        // A title that is the label again is said once: « Tome 3 · Tome 3 » in the owner's
+        // test of 22/10/2026, from files that title a volume by its number.
+        QCOMPARE(Words::readerVolumeHead(u"Tome 3"_s, u"Tome 3"_s), u"Tome 3"_s);
+        QCOMPARE(Words::readerVolumeHead(u"Tome 3"_s, u" tome 3 "_s), u"Tome 3"_s);
+        QCOMPARE(Words::readerVolumeHead(u"Tome 3"_s, u"  "_s), u"Tome 3"_s);
+        QCOMPARE(Words::readerVolumeHead(u"Tome 3"_s, u"Tome 30"_s),
+                 u"Tome 3\u00A0· Tome 30"_s);
+        // The bar's line has the same two halves for a chapter, and says them once too.
+        QCOMPARE(Words::readerWhere(u"Tome 3"_s, u"#13"_s, u"#13"_s),
+                 u"Tome 3\u00A0· #13"_s);
+        QCOMPARE(Words::readerWhere(u"Tome 3"_s, u"Chap.13"_s, u"chap.13 "_s),
+                 u"Tome 3\u00A0· Chap.13"_s);
+        // And so does the bubble over the progress bar, which still read « #13 · #13 ».
+        QCOMPARE(Words::readerScrubbing(u"#13"_s, u"#13"_s, 4), u"#13"_s + n + u"· page 4"_s);
+        QCOMPARE(Words::readerScrubbing(u"Chap.13"_s, u" chap.13"_s, 4),
+                 u"Chap.13"_s + n + u"· page 4"_s);
+        QCOMPARE(Words::readerScrubbing(u"#13"_s, u"#130"_s, 4),
+                 u"#13"_s + n + u": #130"_s + n + u"· page 4"_s);
+        QCOMPARE(Words::readerPublished(u"2015-03-04"_s), u"4 mars 2015"_s);
+        QCOMPARE(Words::readerPublished(u"2011-03-01"_s), u"1er mars 2011"_s);
+        QCOMPARE(Words::readerPublished(u"mars 2011"_s), u"mars 2011"_s);
+        QCOMPARE(Words::readerReadAt(47, 190, false), u"page 47\u00A0/\u00A0190"_s);
+        QCOMPARE(Words::readerReadAt(190, 190, true), u"terminé"_s);
+        QCOMPARE(Words::readerChapterPage(3), u"p.\u00A03"_s);
+        QCOMPARE(Words::readerFact(Words::ReaderFact::Published), u"Paru le"_s);
+        QCOMPARE(Words::readerSettings(), u"Réglages de lecture"_s);
+    }
+
+    /// The line under the progress bar (spec §02): the chapter being read on the side reading
+    /// starts from, and where the volume ends on the other. The title follows the label
+    /// drawn apart from it, so it carries its own separator, which never opens a line.
+    void the_line_under_the_progress_bar_names_the_chapter_and_the_end()
+    {
+        const QChar n = Words::Nbsp;
+        QCOMPARE(Words::readerBesideLabel(u"Chap.099"_s, u"Coup de sifflet"_s),
+                 n + u": Coup de sifflet"_s);
+        // No label: the title stands in its place, with nothing in front of it.
+        QCOMPARE(Words::readerBesideLabel(QString(), u"Épilogue"_s), u"Épilogue"_s);
+        QCOMPARE(Words::readerBesideLabel(u"Chap.099"_s, QString()), QString());
+        // A title that is the label again is the label's to say, once (« #13 · #13 », owner's
+        // test of 22/10/2026), whatever its case or the spaces around it.
+        QCOMPARE(Words::readerBesideLabel(u"#13"_s, u"#13"_s), QString());
+        QCOMPARE(Words::readerBesideLabel(u"Chap.13"_s, u" CHAP.13 "_s), QString());
+        QCOMPARE(Words::readerBesideLabel(u"#13"_s, u"#130"_s), n + u": #130"_s);
+        QCOMPARE(Words::readerVolumeEnd(u"Chap.107"_s, u"Fin"_s),
+                 u"Chap.107"_s + n + u"· fin du tome"_s);
+        QCOMPARE(Words::readerVolumeEnd(QString(), u"Épilogue"_s),
+                 u"Épilogue"_s + n + u"· fin du tome"_s);
+        QCOMPARE(Words::readerVolumeEnd(QString(), QString()), u"fin du tome"_s);
+    }
+
+    /// The line under the four directions says what the files declare, in bold, and keeps its
+    /// colon off the end of the line it follows: an ordinary space let « La série déclare »
+    /// end a line and the colon start the next. The bold is markup the QML draws as styled
+    /// text, so no French and no emphasis rule lives in a `.qml` file.
+    void the_line_under_the_directions_names_what_the_series_declares()
+    {
+        using Direction = Api::ReadingDirection;
+        const QChar n = Words::Nbsp;
+        const QString tail = u". Ce que vous choisissez ici ne vaut que pour cette série, mais sur "
+                             u"tous vos appareils."_s;
+        QCOMPARE(Words::readerDeclares(Direction::RightToLeft),
+                 u"La série déclare"_s + n + u": <b>droite"_s + n + u"→"_s + n + u"gauche</b>"_s
+                     + tail);
+        QCOMPARE(Words::readerDeclares(Direction::LeftToRight),
+                 u"La série déclare"_s + n + u": <b>gauche"_s + n + u"→"_s + n + u"droite</b>"_s
+                     + tail);
+        QCOMPARE(Words::readerDeclares(Direction::Vertical),
+                 u"La série déclare"_s + n + u": <b>haut"_s + n + u"→"_s + n + u"bas</b>"_s
+                     + tail);
+        // A series that declares nothing is read left to right; the line says so, because
+        // « Par défaut » would otherwise mean nothing the reader can see.
+        QCOMPARE(Words::readerDeclares(std::nullopt),
+                 u"La série ne déclare rien"_s + n + u": <b>gauche"_s + n + u"→"_s + n
+                     + u"droite</b> par défaut"_s + tail);
+    }
+
+    /// The card's words: four directions in words alone, three layouts, three fits, three
+    /// backdrops, three motions, and the names of the rows and of the two halves they sit in.
+    void the_reader_card_words_its_choices()
+    {
+        using Direction = Api::ReadingDirection;
+        QCOMPARE(Words::readerCardTitle(), u"Lecture"_s);
+        QCOMPARE(Words::readerCloseCard(), u"Fermer les réglages"_s);
+        QCOMPARE(Words::readerThisSeries(), u"Pour cette série"_s);
+        QCOMPARE(Words::readerBackToSeries(), u"Revenir à la série"_s);
+        QCOMPARE(Words::readerStayHere(), u"Rester sur cette page"_s);
+        QCOMPARE(Words::readerThisDesk(), u"Sur cet appareil"_s);
+        QCOMPARE(Words::readerDirection(std::nullopt), u"Par défaut"_s);
+        QCOMPARE(Words::readerDirection(Direction::LeftToRight), u"De gauche à droite"_s);
+        QCOMPARE(Words::readerDirection(Direction::RightToLeft), u"De droite à gauche"_s);
+        QCOMPARE(Words::readerDirection(Direction::Vertical), u"De haut en bas"_s);
+        QCOMPARE(Words::readerLayout(Preferences::PageLayout::Single), u"Simple"_s);
+        QCOMPARE(Words::readerLayout(Preferences::PageLayout::Double), u"Deux pages"_s);
+        QCOMPARE(Words::readerLayout(Preferences::PageLayout::Auto), u"Auto"_s);
+        QCOMPARE(Words::readerFit(Preferences::Fit::Height), u"Hauteur"_s);
+        QCOMPARE(Words::readerFit(Preferences::Fit::Width), u"Largeur"_s);
+        QCOMPARE(Words::readerFit(Preferences::Fit::Original), u"Original"_s);
+        QCOMPARE(Words::readerBackdrop(Preferences::Backdrop::Black), u"Noir"_s);
+        QCOMPARE(Words::readerBackdrop(Preferences::Backdrop::Grey), u"Gris"_s);
+        QCOMPARE(Words::readerBackdrop(Preferences::Backdrop::White), u"Blanc"_s);
+        QCOMPARE(Words::readerMotion(Preferences::Motion::Slide), u"Glisser"_s);
+        QCOMPARE(Words::readerMotion(Preferences::Motion::Fade), u"Fondu"_s);
+        // Not « Aucune », which beside « Changement de page » said the change was switched off.
+        QCOMPARE(Words::readerMotion(Preferences::Motion::Instant), u"Sans effet"_s);
+        using Group = Words::ReaderDeskGroup;
+        QCOMPARE(Words::readerDeskGroup(Group::Pages), u"Pages"_s);
+        QCOMPARE(Words::readerDeskGroup(Group::Comfort), u"Confort"_s);
+        using Row = Words::ReaderSetting;
+        QCOMPARE(Words::readerSetting(Row::Layout), u"Mise en page"_s);
+        QCOMPARE(Words::readerSetting(Row::Fit), u"Ajustement"_s);
+        QCOMPARE(Words::readerSetting(Row::Backdrop), u"Fond"_s);
+        QCOMPARE(Words::readerSetting(Row::Motion), u"Changement de page"_s);
+        QCOMPARE(Words::readerDeskNote(), u"Pour tous les livres, sur ce bureau seulement."_s);
     }
 
     /// The stage and how far it has got, joined here — and the stage alone when there is no

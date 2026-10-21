@@ -120,6 +120,13 @@ public:
     void put(const QString &path, const QUrlQuery &query, const QByteArray &body, qint64 from,
              qint64 whole, const QObject *caller, std::function<void(const Answer &)> then);
 
+    /// A whole value replaced by the one given, as JSON — the PUT the contract uses for a
+    /// reader's choice (`/series/{id}/reading-direction`), which is not part of any file.
+    /// Apart from `put` because the two differ in the one thing a server reads first: what
+    /// the body is.
+    void set(const QString &path, const QByteArray &body, const QObject *caller,
+             std::function<void(const Answer &)> then);
+
     /// What to make of the bytes that come back. A route that answers with an archive and a
     /// route that answers with a document are read differently, and nothing else about the
     /// call changes — so it is one word here rather than a second `send`.
@@ -204,6 +211,9 @@ private:
         /// rest, because a transfer replayed after the keyring answers and stripped of its
         /// offset would write the middle of a volume over its beginning.
         QByteArray range;
+        /// Whether the body is part of a file rather than a document. Held for `range`'s reason:
+        /// a transfer replayed as JSON is refused by a server reading the type it was sent.
+        bool octets = false;
         /// Whether the answer is a document or a file. Held with the rest: a download held
         /// back until the keyring answers and then replayed as a document would come back
         /// « unreadable », which is the one thing it is not.
@@ -229,6 +239,10 @@ private:
         QByteArray body;
         /// What a PUT carries beyond the key: the range its body starts at.
         QByteArray range;
+        /// Part of a file, sent as octets; everything else this client sends is JSON. Said by
+        /// the caller rather than read off the verb, since `set` is a PUT that carries a
+        /// document — the one PUT in the contract that is not part of a file.
+        bool octets = false;
     };
 
     void send(const Sending &what, const QObject *caller,

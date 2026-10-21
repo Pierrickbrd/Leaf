@@ -121,7 +121,7 @@ private slots:
         // size catches a token dropped from the class or a `metaType().id()` filter that
         // stopped matching — neither of which the key comparison could ever see.
         QVERIFY(!pale.isEmpty());
-        QCOMPARE(pale.size(), 14);
+        QCOMPARE(pale.size(), 21);
         for (auto it = pale.constBegin(); it != pale.constEnd(); ++it)
             QVERIFY2(it.value() != deep.value(it.key()),
                      qPrintable(u"%1 is the same colour in both themes"_s.arg(it.key())));
@@ -150,6 +150,48 @@ private slots:
                      qPrintable(u"%1 is %2:1, not its recorded %3:1"_s
                                     .arg(what).arg(measured, 0, 'f', 2).arg(pair.documented)));
         }
+    }
+
+    /// The lip under a key is what makes it a key: a lip lighter than its face reads as a
+    /// key lit from below, which is no key at all.
+    void the_lip_of_a_key_is_darker_than_its_face_in_both_themes()
+    {
+        for (const bool dark : {false, true}) {
+            Theme theme;
+            theme.setDark(dark);
+            QVERIFY2(theme.emeraldLip().lightnessF() < theme.emerald().lightnessF(),
+                     dark ? "dark lip" : "light lip");
+        }
+    }
+
+    /// The ISBN's barcode is dark bars on a lighter ground in both themes, or a scanner reads
+    /// it inverted: in the light theme the emerald key drew light bars on dark (22/10/2026).
+    /// The dark theme stays the key that was approved.
+    void the_barcode_is_dark_on_light_in_both_themes()
+    {
+        struct Pair {
+            bool dark;
+            double documented;
+        };
+        static const Pair pairs[] = {{false, 8.54}, {true, 7.69}};
+        for (const Pair &pair : pairs) {
+            Theme theme;
+            theme.setDark(pair.dark);
+            const QString what = pair.dark ? u"dark barcode"_s : u"light barcode"_s;
+            QVERIFY2(theme.barcodeInk().lightnessF() < theme.barcodeFace().lightnessF(),
+                     qPrintable(what));
+            QVERIFY2(theme.barcodeLip().lightnessF() < theme.barcodeFace().lightnessF(),
+                     qPrintable(what));
+            const double measured = contrast(theme.barcodeInk(), theme.barcodeFace());
+            QVERIFY2(std::abs(measured - pair.documented) <= 0.01,
+                     qPrintable(u"%1 is %2:1, not its recorded %3:1"_s
+                                    .arg(what).arg(measured, 0, 'f', 2).arg(pair.documented)));
+        }
+        Theme dark;
+        dark.setDark(true);
+        QCOMPARE(dark.barcodeFace(), dark.emerald());
+        QCOMPARE(dark.barcodeInk(), dark.onEmerald());
+        QCOMPARE(dark.barcodeLip(), dark.emeraldLip());
     }
 
     /// The alert colour is not read on the paper alone: it is written on a card, in the

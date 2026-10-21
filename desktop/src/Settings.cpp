@@ -71,6 +71,12 @@ QString Settings::configurationFile()
            + QStringLiteral("/Leaf/leaf.conf");
 }
 
+QString Settings::formerConfigurationFile()
+{
+    return QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
+           + QStringLiteral("/leaf.conf");
+}
+
 void Settings::setAddress(const QString &address)
 {
     if (m_address == address) {
@@ -451,7 +457,12 @@ void Settings::load()
 
 void Settings::fromFile()
 {
-    const QString path = configurationFile();
+    // The installer's place first; the former one only when nothing is there, so a file the
+    // update left behind is not lost, and never mixed with the one that replaced it.
+    QString path = configurationFile();
+    if (!QFile::exists(path)) {
+        path = formerConfigurationFile();
+    }
     if (!QFile::exists(path)) {
         return;
     }

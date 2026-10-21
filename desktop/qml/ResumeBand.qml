@@ -32,8 +32,13 @@ Item {
     readonly property Item button: action
 
     readonly property bool compact: Widths.band !== Widths.Band.Wide
-    readonly property bool showing: !suppressed
-                                    && (sourceModel.available || sourceModel.trouble.length > 0)
+    /// What the screen around the band already says went wrong. A trouble that only repeats
+    /// it is not drawn: with no address configured, the shelf's card and this band carried
+    /// the same sentence one above the other in the test of 22/10/2026.
+    property string echoed: ""
+    readonly property bool troubled: sourceModel.trouble.length > 0
+                                     && sourceModel.trouble !== echoed
+    readonly property bool showing: !suppressed && (sourceModel.available || troubled)
 
     objectName: "resume-band"
     visible: showing
@@ -131,6 +136,9 @@ Item {
                 objectName: "resume-name"
                 width: parent.width
                 text: band.sourceModel.seriesName
+                // The series' name and the chapter's are the files' words: a title such as
+                // « <b>x</b> » is shown as written, never drawn as markup.
+                textFormat: Text.PlainText
                 color: Theme.ink
                 font.family: Theme.displayFamily
                 font.pixelSize: 22
@@ -142,6 +150,7 @@ Item {
                 objectName: "resume-where"
                 width: parent.width
                 text: band.compact ? band.sourceModel.whereShort : band.sourceModel.where
+                textFormat: Text.PlainText
                 color: Theme.inkSoft
                 font.family: Theme.textFamily
                 font.pixelSize: 15
@@ -197,6 +206,11 @@ Item {
             // In the keyboard chain with the covers below, deliberately before the reader it
             // will open exists: a control put into the workflow "later" is one nobody puts in.
             Accessible.description: band.sourceModel.seriesName
+            // Where one was, opened: the volume, at the page the band is offering.
+            onTriggered: Navigation.open(Navigation.Reader, {
+                "series": band.sourceModel.seriesId,
+                "entry": band.sourceModel.entryId
+            })
 
             // The arrow, drawn rather than typed — see ActionButton's header for why the glyph
             // comes from the caller.
@@ -242,7 +256,7 @@ Item {
             font.pixelSize: 15
             wrapMode: Text.Wrap
             verticalAlignment: Text.AlignVCenter
-            visible: !band.sourceModel.available && band.sourceModel.trouble.length > 0
+            visible: !band.sourceModel.available && band.troubled
         }
     }
 }

@@ -73,6 +73,7 @@ Rectangle {
     Text {
         id: resultName
 
+        objectName: "search-name-" + row.resultId
         anchors.left: coverFrame.right
         anchors.leftMargin: 12
         anchors.right: arrow.left
@@ -80,6 +81,9 @@ Rectangle {
         anchors.top: parent.top
         anchors.topMargin: 13
         text: row.label
+        // What a hit is called and where it lives are the files' words: a chapter titled
+        // « <b>x</b> » is shown as written, never drawn as markup.
+        textFormat: Text.PlainText
         color: Theme.ink
         font.family: Theme.displayFamily
         font.pixelSize: 16
@@ -94,6 +98,7 @@ Rectangle {
         anchors.top: resultName.bottom
         anchors.topMargin: 5
         text: row.context
+        textFormat: Text.PlainText
         color: Theme.inkFaint
         font.family: Theme.textFamily
         font.pixelSize: 13

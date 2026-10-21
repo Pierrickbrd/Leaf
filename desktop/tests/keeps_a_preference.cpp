@@ -11,6 +11,7 @@
 #include <QUrl>
 
 #include <QSettings>
+#include <QSizeF>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTest>
@@ -271,6 +272,135 @@ private slots:
         }
         QCOMPARE(icons, QStringList({u"contrast"_s, u"light_mode"_s, u"dark_mode"_s}));
         QVERIFY(!offered.appearanceTitle().isEmpty());
+    }
+
+    /// Auto is two pages on a landscape window; nothing in the spec defines it, so a fresh
+    /// install saying anything else would be a second, silent decision.
+    void a_fresh_install_reads_auto_and_fits_the_height()
+    {
+        const Preferences fresh;
+        QCOMPARE(fresh.pageLayout(), Preferences::PageLayout::Auto);
+        QCOMPARE(fresh.fit(), Preferences::Fit::Height);
+    }
+
+    void the_layout_chosen_survives_a_restart()
+    {
+        {
+            Preferences chosen;
+            QSignalSpy moved(&chosen, &Preferences::changed);
+            chosen.choosePageLayout(Preferences::PageLayout::Double);
+            chosen.chooseFit(Preferences::Fit::Width);
+            QCOMPARE(moved.size(), 2);
+            // Asking again for what is already so announces nothing.
+            chosen.choosePageLayout(Preferences::PageLayout::Double);
+            chosen.chooseFit(Preferences::Fit::Width);
+            QCOMPARE(moved.size(), 2);
+        }
+        const Preferences again;
+        QCOMPARE(again.pageLayout(), Preferences::PageLayout::Double);
+        QCOMPARE(again.fit(), Preferences::Fit::Width);
+    }
+
+    void auto_shows_two_pages_only_on_a_landscape_window()
+    {
+        const Preferences fresh;
+        QCOMPARE(fresh.layoutFor(QSizeF(1600, 900)), Spreads::Layout::Double);
+        QCOMPARE(fresh.layoutFor(QSizeF(900, 1600)), Spreads::Layout::Single);
+        // Strictly wider: a square window has no room for a second page.
+        QCOMPARE(fresh.layoutFor(QSizeF(1000, 1000)), Spreads::Layout::Single);
+        // Wider than tall and still under 1100: two pages would each be under four hundred
+        // pixels, which is the width `Widths` says a page stops being readable at.
+        QCOMPARE(fresh.layoutFor(QSizeF(1000, 700)), Spreads::Layout::Single);
+        QCOMPARE(fresh.layoutFor(QSizeF(1099, 700)), Spreads::Layout::Single);
+        QCOMPARE(fresh.layoutFor(QSizeF(1100, 700)), Spreads::Layout::Double);
+    }
+
+    void a_fixed_layout_ignores_the_window()
+    {
+        Preferences chosen;
+        chosen.choosePageLayout(Preferences::PageLayout::Single);
+        QCOMPARE(chosen.layoutFor(QSizeF(1600, 900)), Spreads::Layout::Single);
+        chosen.choosePageLayout(Preferences::PageLayout::Double);
+        QCOMPARE(chosen.layoutFor(QSizeF(900, 1600)), Spreads::Layout::Double);
+    }
+
+    void the_reader_settings_are_written_as_words()
+    {
+        {
+            Preferences chosen;
+            chosen.choosePageLayout(Preferences::PageLayout::Single);
+            chosen.chooseFit(Preferences::Fit::Original);
+        }
+        const QSettings file(QSettings::IniFormat, QSettings::UserScope, u"Leaf"_s,
+                             u"preferences"_s);
+        QCOMPARE(file.value(u"reader/layout"_s).toString(), u"single"_s);
+        QCOMPARE(file.value(u"reader/fit"_s).toString(), u"original"_s);
+    }
+
+    void a_reader_word_from_another_version_reads_as_the_default()
+    {
+        {
+            QSettings file(QSettings::IniFormat, QSettings::UserScope, u"Leaf"_s,
+                           u"preferences"_s);
+            file.setValue(u"reader/layout"_s, u"triple"_s);
+            file.setValue(u"reader/fit"_s, u"cover"_s);
+            file.sync();
+        }
+        const Preferences puzzled;
+        QCOMPARE(puzzled.pageLayout(), Preferences::PageLayout::Auto);
+        QCOMPARE(puzzled.fit(), Preferences::Fit::Height);
+    }
+
+    /// Black paper and a slide: what the reader was before either was a choice (owner's choice
+    /// of 22/10/2026). Qt 6.4 does not say whether the desktop asks for less motion, so a
+    /// fresh install slides whatever the desktop wants.
+    void a_fresh_install_reads_black_and_slides()
+    {
+        const Preferences fresh;
+        QCOMPARE(fresh.backdrop(), Preferences::Backdrop::Black);
+        QCOMPARE(fresh.motion(), Preferences::Motion::Slide);
+    }
+
+    void the_backdrop_and_the_motion_survive_a_restart_written_as_words()
+    {
+        {
+            Preferences chosen;
+            QSignalSpy moved(&chosen, &Preferences::changed);
+            chosen.chooseBackdrop(Preferences::Backdrop::White);
+            chosen.chooseMotion(Preferences::Motion::Instant);
+            QCOMPARE(moved.size(), 2);
+            chosen.chooseBackdrop(Preferences::Backdrop::White);
+            chosen.chooseMotion(Preferences::Motion::Instant);
+            QCOMPARE(moved.size(), 2);
+        }
+        {
+            const QSettings file(QSettings::IniFormat, QSettings::UserScope, u"Leaf"_s,
+                                 u"preferences"_s);
+            QCOMPARE(file.value(u"reader/backdrop"_s).toString(), u"white"_s);
+            QCOMPARE(file.value(u"reader/motion"_s).toString(), u"instant"_s);
+        }
+        Preferences again;
+        QCOMPARE(again.backdrop(), Preferences::Backdrop::White);
+        QCOMPARE(again.motion(), Preferences::Motion::Instant);
+        again.chooseBackdrop(Preferences::Backdrop::Grey);
+        again.chooseMotion(Preferences::Motion::Fade);
+        const Preferences third;
+        QCOMPARE(third.backdrop(), Preferences::Backdrop::Grey);
+        QCOMPARE(third.motion(), Preferences::Motion::Fade);
+    }
+
+    void a_backdrop_or_a_motion_from_another_version_reads_as_the_default()
+    {
+        {
+            QSettings file(QSettings::IniFormat, QSettings::UserScope, u"Leaf"_s,
+                           u"preferences"_s);
+            file.setValue(u"reader/backdrop"_s, u"sepia"_s);
+            file.setValue(u"reader/motion"_s, u"curl"_s);
+            file.sync();
+        }
+        const Preferences puzzled;
+        QCOMPARE(puzzled.backdrop(), Preferences::Backdrop::Black);
+        QCOMPARE(puzzled.motion(), Preferences::Motion::Slide);
     }
 };
 

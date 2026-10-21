@@ -51,11 +51,34 @@ class Theme : public QObject
     /// the light theme and bright in the dark one, so its label turns over with it; a
     /// single fixed tone is unreadable on one of the two.
     Q_PROPERTY(QColor onEmerald READ onEmerald NOTIFY changed)
+    /// The deeper emerald under a key of the reader's shortcuts card: the lip that makes a
+    /// flat pill read as a key that can be pressed. Darker than `emerald` in both themes.
+    Q_PROPERTY(QColor emeraldLip READ emeraldLip NOTIFY changed)
+    /// The key that carries a volume's ISBN as a barcode: its face, its bars and words, its
+    /// lip. Not `emerald` and `onEmerald`, which turn over with the theme — in the light one
+    /// they drew light bars on a dark ground, a code a scanner reads inverted or not at all
+    /// (ruling of 22/10/2026). Dark bars on a light emerald in both themes; the dark values are
+    /// the approved key's, the light ones a paler emerald.
+    Q_PROPERTY(QColor barcodeFace READ barcodeFace NOTIFY changed)
+    Q_PROPERTY(QColor barcodeInk READ barcodeInk NOTIFY changed)
+    Q_PROPERTY(QColor barcodeLip READ barcodeLip NOTIFY changed)
     Q_PROPERTY(QColor alert READ alert NOTIFY changed)
     Q_PROPERTY(QColor alertWash READ alertWash NOTIFY changed)
     /// The reader has paper of its own, deeper than the application's: a white page needs
     /// 1.50:1 behind it to keep an edge, and an application background cannot go that dark.
+    /// No longer behind the pages, which take `readerBlack` and its two siblings: what is left
+    /// of it is the veil of the reader's shortcuts card, which belongs to the theme.
     Q_PROPERTY(QColor readerPaper READ readerPaper NOTIFY changed)
+    /// The three backdrops a reader may put behind the pages (`Preferences.backdrop`, owner's
+    /// choice of 22/10/2026). They are chosen for the pages and not for the application: black
+    /// is black and white is white whichever theme is on, so `readerPaper` — cream in the light
+    /// theme — is not one of them. A grey with the palette's lean to green, so it reads as
+    /// Leaf's and not as a window manager's; and a paper white rather than #FFFFFF, which
+    /// beside a scanned page — never pure white — makes the page look dirty. The two themes
+    /// differ by a hair only because every token must (`keeps_its_contrast`).
+    Q_PROPERTY(QColor readerBlack READ readerBlack NOTIFY changed)
+    Q_PROPERTY(QColor readerGrey READ readerGrey NOTIFY changed)
+    Q_PROPERTY(QColor readerWhite READ readerWhite NOTIFY changed)
 
     Q_PROPERTY(int cardRadius READ cardRadius CONSTANT)
     Q_PROPERTY(int coverRadius READ coverRadius CONSTANT)
@@ -100,9 +123,16 @@ public:
     QColor emerald() const;
     QColor emeraldWash() const;
     QColor onEmerald() const;
+    QColor emeraldLip() const;
+    QColor barcodeFace() const;
+    QColor barcodeInk() const;
+    QColor barcodeLip() const;
     QColor alert() const;
     QColor alertWash() const;
     QColor readerPaper() const;
+    QColor readerBlack() const;
+    QColor readerGrey() const;
+    QColor readerWhite() const;
 
     int cardRadius() const { return 18; }
     int coverRadius() const { return 12; }

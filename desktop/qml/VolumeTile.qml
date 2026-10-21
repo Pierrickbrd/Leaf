@@ -39,6 +39,11 @@ Item {
     signal opened()
     signal reimportAsked()
 
+    // Opening a file is reading it: the line and the cover both lead to the reader, at the
+    // page where reading stopped. Here rather than where the tile is placed, so the list and
+    // the grid cannot open one book two ways.
+    onOpened: Navigation.open(Navigation.Reader, { "series": tile.seriesId, "entry": tile.entryId })
+
     objectName: "tile-volume-" + (entryId.length > 0 ? entryId : "missing-" + number)
     width: coverWidth
     height: coverHeight + 6 + 34 + 2 + 16

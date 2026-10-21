@@ -118,6 +118,8 @@ QVariant Shelf::data(const QModelIndex &index, int role) const
         // full *and* a check, and a never-opened one draws neither. One boolean for both
         // made finished look exactly like never opened, which is what the design forbids.
         return one.holding.readStatus == Api::ReadStatus::Read;
+    case OneShotEntry:
+        return one.oneShotEntry.value_or(QString());
     default:
         // Reached for `Qt::DisplayRole` and everything else a view asks about by habit, so it
         // is an ordinary answer rather than a case that should not happen.
@@ -140,6 +142,7 @@ QHash<int, QByteArray> Shelf::roleNames() const
     named.insert(qToUnderlying(InProgress), "inProgress");
     named.insert(qToUnderlying(Finished), "finished");
     named.insert(qToUnderlying(HowFarRead), "howFarRead");
+    named.insert(qToUnderlying(OneShotEntry), "oneShotEntry");
     return named;
 }
 

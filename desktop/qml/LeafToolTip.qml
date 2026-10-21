@@ -9,6 +9,11 @@ import Leaf
 ToolTip {
     id: tip
 
+    /// Auto by default, as every hint written by the application is: a bubble that says
+    /// something the library holds — a chapter's title in the reader — sets it to plain, so
+    /// that a title spelled with « < » is shown and not read as markup.
+    property int textFormat: Text.AutoText
+
     x: parent ? (parent.width - implicitWidth) / 2 : 0
     y: parent ? parent.height + 8 : 0
 
@@ -27,6 +32,7 @@ ToolTip {
     contentItem: Text {
         objectName: tip.objectName.length > 0 ? tip.objectName + "-text" : ""
         text: tip.text
+        textFormat: tip.textFormat
         color: Theme.ink
         font: tip.font
         wrapMode: Text.Wrap

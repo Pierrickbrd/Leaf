@@ -51,6 +51,7 @@ Item {
             Toast {
                 onActed: Toasts.act(index)
                 onDismissed: Toasts.dismiss(index)
+                onHeld: on => Toasts.hold(index, on)
             }
         }
     }

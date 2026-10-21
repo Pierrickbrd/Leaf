@@ -16,6 +16,8 @@ Item {
     required property bool inProgress
     required property bool finished
     required property real howFarRead
+    /// The file to read when the series is one book on its own, empty otherwise.
+    required property string oneShotEntry
     required property real cellWidth
     required property real cellHeight
     required property real coverWidth
@@ -29,6 +31,18 @@ Item {
     signal reimportAsked()
 
     readonly property bool hovered: pointer.hovered || commands.opened
+
+    /// Goes where a click on this tile leads: the reader on a book that is a whole book on its
+    /// own — the third way in spec §01 names — and the series page for anything else, which
+    /// for one book was a page of one volume to click again. Here and not in each grid, so the
+    /// shelf and the search results never disagree.
+    function go() {
+        if (tile.oneShotEntry.length > 0)
+            Navigation.open(Navigation.Reader,
+                            { "series": tile.seriesId, "entry": tile.oneShotEntry })
+        else
+            Navigation.open(Navigation.Series, { "series": tile.seriesId })
+    }
 
     objectName: "tile-" + seriesId
     width: cellWidth

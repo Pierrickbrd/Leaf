@@ -14,11 +14,13 @@
 #include "ImportCaptions.h"
 #include "Imports.h"
 #include "Preferences.h"
+#include "Reader.h"
 #include "Toasts.h"
 #include "Entries.h"
 #include "Filters.h"
 #include "Navigation.h"
 #include "Series.h"
+#include "Settings.h"
 #include "Pretend.h"
 
 #include <QDBusConnection>
@@ -31,8 +33,10 @@
 
 #include <QAccessible>
 #include <QBuffer>
+#include <QClipboard>
 #include <QColor>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFont>
 #include <QGuiApplication>
@@ -42,6 +46,8 @@
 #include <QJsonObject>
 #include <QPalette>
 #include <QPointer>
+#include <QScopeGuard>
+#include <QSignalSpy>
 #include <QQmlApplicationEngine>
 #include <QQuickItem>
 #include <QQuickStyle>
@@ -51,10 +57,31 @@
 #include <QMutex>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QUrl>
+#include <QWheelEvent>
+#include <QWindow>
+
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
+#include <unistd.h>
+#include <vector>
 
 using Qt::Literals::StringLiterals::operator""_s;
 
 namespace {
+/// One notch of a wheel, sent to the window. `QTest::wheelEvent` does not exist in the Qt of
+/// Ubuntu 24.04, where the client is built in CI and where its absence broke this file; the
+/// event is built here and handed to the window, which handles it before this returns.
+void wheel(QWindow *window, const QPoint &at, const QPoint &angle, const QPoint &pixels = {},
+           Qt::KeyboardModifiers modifiers = Qt::NoModifier,
+           Qt::ScrollPhase phase = Qt::NoScrollPhase)
+{
+    QWheelEvent event(QPointF(at), QPointF(window->mapToGlobal(at)), pixels, angle,
+                      Qt::NoButton, modifiers, phase, false);
+    QGuiApplication::sendEvent(window, &event);
+}
+
 /// Puts the process-wide palette back on scope exit, failed assertion included — see
 /// `keeps_its_contrast.cpp`'s `RestoresThePalette`, which this copies rather than shares: two
 /// four-line classes cost less than a header neither test otherwise needs.
@@ -113,7 +140,10 @@ QByteArray anOffer(const QString &reason = u"IN_PROGRESS"_s)
          QJsonObject{
              {u"page"_s, 47},
              {u"pageCount"_s, 190},
-             {u"chapter"_s, QJsonObject{{u"label"_s, u"Chapitre 98"_s}}},
+             // Label and title, the two halves the band joins as the reader does. The title
+             // is markup on purpose: it is the files' words, and must be shown as written.
+             {u"chapter"_s,
+              QJsonObject{{u"label"_s, u"Chap.\u00A098"_s}, {u"title"_s, u"<b>x</b> & y"_s}}},
          }},
     };
     return QJsonDocument(QJsonArray{row}).toJson(QJsonDocument::Compact);
@@ -314,6 +344,502 @@ QQuickItem *reachableFilterButton(QQuickWindow *window)
             found = one;
     }
     return found;
+}
+
+/// The animation that glides the shelf to where a key sent it, or null.
+///
+/// A key lands on a cover by animating `contentY` over 180 ms (`glide` in ShelfView.qml),
+/// and the pills row follows `contentY`, so for those 180 ms every chip is moving.
+/// `currentIndex` already holds its new value when the glide begins, so waiting on it waits
+/// for nothing: on an idle machine 180 ms pass before the test aims, and under load (40 busy
+/// loops on 32 cores) they do not — the click was computed from a chip's position mid-glide
+/// and released where the chip no longer was, and `shelf->media()` stayed empty. It is found
+/// by its name, not by its class: a first version took any NumberAnimation under the grid,
+/// so a renamed glide, or a delegate's own animation, would have made the wait pass or stall
+/// for the wrong reason. The caller fails when it is missing rather than call it stopped.
+QObject *shelfGlide(QQuickItem *grid)
+{
+    return grid->findChild<QObject *>(u"shelf-glide"_s);
+}
+
+/// One series of one volume, as the reader asks for it: the volume, its 190 pages, no
+/// chapter, a position at page 46, and every page a small image. `direction` is what the
+/// series declares. The shelf, the band and the series' own list get what they need to
+/// draw and nothing more. With `recorded`, a write moves the position the server answers
+/// with afterwards — when it is answered, not when it arrives, so a test holding the write
+/// back sees exactly what a slow server would serve meanwhile. With `chosen`, the reader's
+/// own direction is kept there (empty is « Par défaut ») and served back on the series;
+/// `refuseChoice` makes the server answer that write with a failure instead.
+///
+/// `extras` is what the volume carries beyond its number and its pages — fields, chapters —
+/// and whether it was ever opened; the panel beside the pages draws all of it.
+struct BookExtras {
+    QJsonObject volume;
+    QJsonArray chapters;
+    bool unopened = false;
+    /// The series holds a volume 13 after this one, which is what the end card offers.
+    bool followed = false;
+    /// What follows is a chapter, number 108, and not a volume.
+    bool followedByChapter = false;
+    /// The list of the series' entries is refused.
+    bool entriesFail = false;
+    /// The series holds a volume 11 of thirty pages before this one, never opened.
+    bool preceded = false;
+    /// The series' name, when not « Assassination Classroom »: a long one, to see it elided.
+    QString seriesName;
+};
+
+QByteArray aBookAnswers(const QByteArray &request, const QString &direction,
+                        int *recorded = nullptr, const QString &medium = u"manga"_s,
+                        QString *chosen = nullptr, const bool *refuseChoice = nullptr,
+                        const BookExtras *extras = nullptr)
+{
+    int fallback = 46;
+    int &at = recorded ? *recorded : fallback;
+    const QByteArray line = request.left(request.indexOf("\r\n"));
+    const QString path = QString::fromUtf8(line.split(' ').value(1).split('?').first());
+    const auto json = [](const QJsonValue &value) {
+        return aReply(200, QByteArrayLiteral("application/json"),
+                      value.isArray()
+                          ? QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact)
+                          : QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact));
+    };
+    QJsonObject volume{{u"id"_s, u"e12"_s}, {u"type"_s, u"VOLUME"_s},
+                       {u"number"_s, 12}, {u"title"_s, u"Le temps des examens"_s},
+                       {u"pageCount"_s, 190}, {u"chapterCount"_s, 0},
+                       {u"file"_s, u"T12.cbz"_s}, {u"size"_s, 1}};
+    if (extras) {
+        for (auto it = extras->volume.begin(); it != extras->volume.end(); ++it)
+            volume[it.key()] = it.value();
+    }
+
+    const QJsonObject before{{u"id"_s, u"e11"_s}, {u"type"_s, u"VOLUME"_s},
+                             {u"number"_s, 11}, {u"title"_s, u"Le temps des adieux"_s},
+                             {u"pageCount"_s, 30}, {u"chapterCount"_s, 0},
+                             {u"file"_s, u"T11.cbz"_s}, {u"size"_s, 1}};
+    if (extras && extras->preceded && path.startsWith(u"/entries/e11"_s)) {
+        if (path == u"/entries/e11"_s)
+            return json(before);
+        if (path == u"/entries/e11/pages"_s) {
+            QJsonArray pages;
+            for (int i = 0; i < 30; ++i)
+                pages.append(QJsonObject{{u"number"_s, i},
+                                         {u"name"_s, u"%1.png"_s.arg(i, 3, 10, QChar(u'0'))},
+                                         {u"mediaType"_s, u"image/png"_s},
+                                         {u"width"_s, 1000}, {u"height"_s, 1500}});
+            return json(pages);
+        }
+        if (path == u"/entries/e11/chapters"_s)
+            return json(QJsonArray{});
+        if (path == u"/entries/e11/progress"_s && !line.startsWith("PATCH "))
+            return "HTTP/1.1 204 .\r\nContent-Length: 0\r\n\r\n";
+        if (path.startsWith(u"/entries/e11/pages/"_s))
+            return aReply(200, QByteArrayLiteral("image/png"), aCover());
+    }
+
+    if (line.startsWith("PATCH ")) {
+        at = QJsonDocument::fromJson(request.mid(request.indexOf("\r\n\r\n") + 4))
+                 .object()
+                 .value(u"page"_s)
+                 .toInt(at);
+        return json(QJsonObject{{u"entryId"_s, u"e12"_s}, {u"page"_s, at},
+                                {u"pageCount"_s, 190}});
+    }
+    const QString seriesName = extras && !extras->seriesName.isEmpty()
+                                   ? extras->seriesName
+                                   : u"Assassination Classroom"_s;
+    const auto theSeries = [&]() {
+        QJsonObject one{{u"id"_s, u"s1"_s}, {u"workId"_s, u"w1"_s},
+                        {u"name"_s, seriesName},
+                        {u"work"_s, u"Assassination Classroom"_s},
+                        {u"medium"_s, medium}, {u"readingDirection"_s, direction},
+                        {u"ownedVolumes"_s, 1}, {u"entryCount"_s, 1},
+                        {u"chapterCount"_s, 0}, {u"arcCount"_s, 0}};
+        if (chosen && !chosen->isEmpty())
+            one[u"readingDirectionChosen"_s] = *chosen;
+        return one;
+    };
+    if (line.startsWith("PUT ") && path == u"/series/s1/reading-direction"_s) {
+        if (refuseChoice && *refuseChoice)
+            return "HTTP/1.1 500 .\r\nContent-Length: 0\r\n\r\n";
+        if (chosen)
+            *chosen = QJsonDocument::fromJson(request.mid(request.indexOf("\r\n\r\n") + 4))
+                          .object()
+                          .value(u"readingDirection"_s)
+                          .toString();
+        return json(theSeries());
+    }
+    if (path == u"/series/s1"_s)
+        return json(theSeries());
+    if (path == u"/series/s1/entries"_s && extras && extras->entriesFail)
+        return "HTTP/1.1 500 .\r\nContent-Length: 0\r\n\r\n";
+    if (path == u"/series/s1/entries"_s) {
+        QJsonArray all{volume};
+        if (extras && extras->preceded)
+            all.prepend(before);
+        if (extras && extras->followedByChapter)
+            all.append(QJsonObject{{u"id"_s, u"e13"_s}, {u"type"_s, u"CHAPTER"_s},
+                                   {u"number"_s, 108}, {u"title"_s, u"Suite"_s},
+                                   {u"pageCount"_s, 20}, {u"chapterCount"_s, 0},
+                                   {u"file"_s, u"C108.cbz"_s}, {u"size"_s, 1}});
+        if (extras && extras->followed)
+            all.append(QJsonObject{{u"id"_s, u"e13"_s}, {u"type"_s, u"VOLUME"_s},
+                                   {u"number"_s, 13}, {u"title"_s, u"Le temps des retrouvailles"_s},
+                                   {u"pageCount"_s, 192}, {u"chapterCount"_s, 0},
+                                   {u"file"_s, u"T13.cbz"_s}, {u"size"_s, 1}});
+        return json(all);
+    }
+    if (path == u"/series/s1/progress"_s)
+        return json(QJsonArray{QJsonObject{{u"entryId"_s, u"e12"_s}, {u"page"_s, at},
+                                           {u"pageCount"_s, 190}, {u"finished"_s, false}}});
+    if (path == u"/entries/e12"_s)
+        return json(volume);
+    if (path == u"/entries/e12/pages"_s) {
+        QJsonArray pages;
+        for (int i = 0; i < 190; ++i)
+            pages.append(QJsonObject{{u"number"_s, i},
+                                     {u"name"_s, u"%1.png"_s.arg(i, 3, 10, QChar(u'0'))},
+                                     {u"mediaType"_s, u"image/png"_s},
+                                     {u"width"_s, 1000},
+                                     // A webtoon ends on a sliver: too short to ever cross
+                                     // the middle of the view, which is the case where only
+                                     // the bottom of the strip can say it was read.
+                                     {u"height"_s, medium == u"webtoon"_s && i == 189 ? 100
+                                                                                      : 1500}});
+        return json(pages);
+    }
+    if (path == u"/entries/e12/chapters"_s)
+        return json(extras ? extras->chapters : QJsonArray{});
+    if (path == u"/entries/e12/progress"_s && extras && extras->unopened)
+        return "HTTP/1.1 204 .\r\nContent-Length: 0\r\n\r\n";
+    if (path == u"/entries/e12/progress"_s)
+        return json(QJsonObject{{u"entryId"_s, u"e12"_s}, {u"page"_s, 46},
+                                {u"pageCount"_s, 190}, {u"finished"_s, false}});
+    if (path.startsWith(u"/entries/e12/pages/"_s))
+        return aReply(200, QByteArrayLiteral("image/png"), aCover());
+    if (path == u"/entries/e13/cover"_s && extras && extras->followed)
+        return aReply(200, QByteArrayLiteral("image/png"), aCover());
+    if (path.startsWith(u"/next"_s) || path.endsWith(u"/cover"_s))
+        return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+    return json(QJsonObject{{u"items"_s, QJsonArray{}}, {u"total"_s, 0}, {u"page"_s, 0},
+                            {u"size"_s, 0}});
+}
+
+/// One page at a time until the guard goes, then the layout there was. For the tests that go to
+/// a page and read it back as the first on screen: in a pair, page 120 is the second of 119's.
+/// They used to pass only when another test executable had left « Simple » in a preferences
+/// file both read; each has its own file now (`CMakeLists.txt`), so each says what it needs.
+[[nodiscard]] auto onePageAtATime(QQmlApplicationEngine &engine)
+{
+    auto *preferences =
+        engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+    const Preferences::PageLayout was = preferences->pageLayout();
+    preferences->choosePageLayout(Preferences::PageLayout::Single);
+    return qScopeGuard([preferences, was] { preferences->choosePageLayout(was); });
+}
+
+/// The reader, open on that book and done loading, from the series page so that leaving it
+/// goes back there.
+Reader *readerOpenOnTheBook(QQmlApplicationEngine &engine)
+{
+    auto *navigation =
+        engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+    auto *reader = engine.singletonInstance<Reader *>(qmlTypeId("Leaf", 1, 0, "Reader"));
+    if (!navigation || !reader)
+        return nullptr;
+    navigation->open(Navigation::Destination::Series, {{u"series"_s, u"s1"_s}});
+    navigation->open(Navigation::Destination::Reader,
+                     {{u"series"_s, u"s1"_s}, {u"entry"_s, u"e12"_s}});
+    return reader;
+}
+
+/// One frame drawn from now. Layouts — a row, a column — place what they hold when the
+/// window is next polished, a frame after what changed them; a position read before that is
+/// where things were, and a click aimed there misses.
+bool aFrameDrawn(QQuickWindow *window)
+{
+    QSignalSpy swapped(window, &QQuickWindow::frameSwapped);
+    window->update();
+    return QTest::qWaitFor([&] { return swapped.count() > 0; });
+}
+
+/// The reader open on its last screen with the window active, and the card that the next
+/// turn forward raises — null when none came.
+QQuickItem *raiseTheEndCard(QQuickWindow *window, QQuickItem *view, Reader *reader)
+{
+    window->requestActivate();
+    if (!QTest::qWaitForWindowActive(window))
+        return nullptr;
+    reader->goToPage(189);
+    // The page drawn and the keys still the reader's, not only `Reader` moved: under load the
+    // space bar was once sent while the window had handed its activation elsewhere, went to
+    // nothing, and no card came.
+    if (!QTest::qWaitFor([&] {
+            QQuickItem *last = itemNamed(view, u"reader-page-189"_s);
+            return reader->firstPage() == 189 && last && last->isVisible() && window->isActive()
+                   && view->hasActiveFocus();
+        }))
+        return nullptr;
+    QTest::keyClick(window, Qt::Key_Space);
+    QQuickItem *card = nullptr;
+    (void)QTest::qWaitFor([&] {
+        card = itemNamed(view, u"reader-end"_s);
+        return reader->atTheEnd() && card && card->isVisible();
+    });
+    // Its buttons placed: a click aimed at « Lire le tome 13 » the moment the card showed
+    // once landed where the button had not yet been put, and nothing opened.
+    if (!card || !card->isVisible() || !aFrameDrawn(window))
+        return nullptr;
+    return card;
+}
+
+/// The animation that carries the strip a screen down, or null — found by name, for the
+/// reason `shelfGlide` is: a key lands by animating `contentY`, and a test that aims or reads
+/// a position before it ends reads a strip in motion. The incident is that one's.
+QObject *stripGlide(QQuickItem *strip)
+{
+    return strip->findChild<QObject *>(u"strip-glide"_s);
+}
+
+/// The page whose top is at or above `y` in the strip's content, or −1.
+int stripPageAt(QQuickItem *strip, qreal y)
+{
+    int index = -1;
+    QMetaObject::invokeMethod(strip, "indexAt", Q_RETURN_ARG(int, index),
+                              Q_ARG(double, strip->width() / 2), Q_ARG(double, y));
+    return index;
+}
+
+/// The centre of an item, in the window's coordinates: where a hand aims at it.
+QPoint centreOf(QQuickItem *item)
+{
+    return item->mapToScene(QPointF(item->width() / 2.0, item->height() / 2.0)).toPoint();
+}
+
+/// The bars called — unless they are up already, as a volume opens with them — then the
+/// reader's settings opened under `tune`; the card, once it is there. Null when either did
+/// not happen.
+QQuickItem *openTheSettings(QQuickWindow *window, QQuickItem *view)
+{
+    if (!view->property("barsShown").toBool())
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          view->mapToScene(QPointF(view->width() / 2.0, view->height() / 2.0))
+                              .toPoint());
+    QQuickItem *tune = itemNamed(view, u"reader-settings-button"_s);
+    QQuickItem *card = itemNamed(view, u"reader-settings"_s);
+    if (!tune || !card || !QTest::qWaitFor([&] { return tune->isVisible() && tune->opacity() > 0
+                                                         && view->property("barsShown").toBool(); }))
+        return nullptr;
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(tune));
+    return QTest::qWaitFor([&] { return card->isVisible(); }) ? card : nullptr;
+}
+
+/// Where a click lands at that fraction of the reader's width, halfway down it.
+QPoint across(QQuickItem *view, qreal fraction)
+{
+    return view->mapToScene(QPointF(view->width() * fraction, view->height() / 2.0)).toPoint();
+}
+
+/// The bars called, then the volume's panel opened from the book button; the panel, once it
+/// is there. Null when either did not happen.
+QQuickItem *openTheVolumePanel(QQuickWindow *window, QQuickItem *view)
+{
+    if (!view->property("barsShown").toBool())
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.5));
+    QQuickItem *book = itemNamed(view, u"reader-volume-button"_s);
+    QQuickItem *panel = itemNamed(view, u"reader-volume"_s);
+    if (!book || !panel || !QTest::qWaitFor([&] { return book->isVisible() && book->opacity() > 0
+                                                          && view->property("barsShown").toBool(); }))
+        return nullptr;
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(book));
+    return QTest::qWaitFor([&] { return panel->isVisible(); }) ? panel : nullptr;
+}
+
+/// The bars up — called by a click in the middle unless they are already there — and the
+/// named button in them once it can be clicked, or null.
+QQuickItem *barsCalled(QQuickWindow *window, QQuickItem *view, const QString &name)
+{
+    if (!view->property("barsShown").toBool())
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.5));
+    QQuickItem *button = itemNamed(view, name);
+    if (!button || !QTest::qWaitFor([&] {
+            return view->property("barsShown").toBool() && button->isVisible()
+                   && button->opacity() > 0;
+        }))
+        return nullptr;
+    // Faded in all the way and placed: a click on a dock still rising lands on nothing.
+    QQuickItem *dock = itemNamed(view, u"reader-dock"_s);
+    if (dock && !QTest::qWaitFor([&] { return dock->opacity() >= 1; }))
+        return nullptr;
+    return aFrameDrawn(window) ? button : nullptr;
+}
+
+/// The bars a volume opens with sent away, as a turn sends them, and gone from the screen:
+/// where a test that starts from a bare page starts. False when they did not go.
+bool atRest(QQuickItem *view)
+{
+    QMetaObject::invokeMethod(view, "sendTheBarsAway");
+    QQuickItem *bar = itemNamed(view, u"reader-bar"_s);
+    QQuickItem *dock = itemNamed(view, u"reader-dock"_s);
+    return bar && dock
+           && QTest::qWaitFor([&] { return !bar->isVisible() && !dock->isVisible(); });
+}
+
+/// A line of the panel is there when an item of that name is drawn. A line that is not
+/// drawn may be absent or merely hidden: both are « no line ».
+bool drawn(QQuickItem *root, const QString &name)
+{
+    QQuickItem *one = itemNamed(root, name);
+    return one && one->isVisible();
+}
+/// The view's zoom: 1 for the whole page, 2 for 200 %.
+qreal zoomOf(QQuickItem *view)
+{
+    return view->property("zoom").toReal();
+}
+
+/// The book open in the reader with the window active and the keys the reader's: what every
+/// test of the zoom starts from. Null when it did not get there.
+QQuickItem *aReaderAtHand(QQmlApplicationEngine &engine, Reader *&reader)
+{
+    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+    if (!window || !QTest::qWaitForWindowExposed(window))
+        return nullptr;
+    reader = readerOpenOnTheBook(engine);
+    QQuickItem *view = nullptr;
+    if (!reader || !QTest::qWaitFor([&] {
+            view = itemNamed(window->contentItem(), u"reader-view"_s);
+            return view && !reader->loading() && reader->pageCount() == 190;
+        }))
+        return nullptr;
+    // The pages laid out in their row, which is done a frame after they are made: a zoom
+    // asked before that measured a row 0 pixels wide, and centred nothing.
+    if (!reader->webtoon() && !QTest::qWaitFor([&] {
+            QQuickItem *first = itemNamed(view, u"reader-page-%1"_s.arg(reader->firstPage()));
+            return first && first->width() > 0 && first->parentItem()
+                   && first->parentItem()->width() >= first->width();
+        }))
+        return nullptr;
+    window->requestActivate();
+    if (!QTest::qWaitFor([&] { return window->isActive() && view->hasActiveFocus(); }))
+        return nullptr;
+    if (!atRest(view))
+        return nullptr;
+    return aFrameDrawn(window) ? view : nullptr;
+}
+
+/// The windows the reader is tried in: the owner's 1920 × 1200 and its neighbours, the usual
+/// laptops, a short window, and one in the narrow band.
+struct AWindow {
+    int width;
+    int height;
+};
+const AWindow theWindows[] = {{900, 600},   {1280, 720},  {1366, 768}, {1920, 1080},
+                              {1920, 1200}, {2560, 1440}, {560, 700}};
+
+/// Laid out for this window: resized, and the view at its width and height.
+bool laidOutFor(QQuickItem *view, const AWindow &at)
+{
+    view->window()->resize(at.width, at.height);
+    return QTest::qWaitFor(
+        [&] { return view->width() == at.width && view->height() == at.height; });
+}
+
+/// Where an item is in the window, without what it is scaled or slid by while it fades.
+QRectF placed(QQuickItem *item)
+{
+    return item->parentItem()->mapRectToScene(QRectF(item->position(), item->size()));
+}
+
+/// The size of a text's words.
+int lettersOf(QQuickItem *text)
+{
+    return text->property("font").value<QFont>().pixelSize();
+}
+
+/// Every text drawn under `root`, shown or not.
+void textsUnder(QQuickItem *root, QList<QQuickItem *> &all)
+{
+    if (root->inherits("QQuickText"))
+        all << root;
+    for (QQuickItem *child : root->childItems())
+        textsUnder(child, all);
+}
+
+/// What is wrong with one of the reader's cards in each of `theWindows`, or nothing: `face`
+/// as wide as drawn (`width`) scaled as a card of words is (`Scale::columnFor`, half the
+/// window's growth since 23/10/2026, when a card grown at the full rate round words that no
+/// longer grew was a band of empty paper), but never wider than `share` of
+/// the window nor than the window less `margin`, and inside the window; its words `words` at
+/// what `role` makes of their drawn `size`. In the owner's test of 22/10/2026 on a full-screen
+/// window of 1920, the dock had grown and the cards beside it had kept their drawn size.
+/// Measured as laid out, open or not: their geometry is bound to the window, not to being shown.
+QString aCardThatDoesNotFollow(QQuickItem *view, const QString &face, const QString &words,
+                               qreal width, int size, int (*role)(int, qreal), qreal share,
+                               int margin)
+{
+    QQuickItem *card = itemNamed(view, face);
+    QQuickItem *text = itemNamed(view, words);
+    if (!card || !text)
+        return u"no %1 or no %2"_s.arg(face, words);
+    for (const AWindow &at : theWindows) {
+        if (!laidOutFor(view, at))
+            return u"the view never reached %1 × %2"_s.arg(at.width).arg(at.height);
+        const qreal factor = Widths::controlsFor(at.width);
+        const qreal wide = std::min({qreal(Scale::columnFor(width, factor)), at.width * share,
+                                     qreal(at.width - margin)});
+        const int letters = role(size, factor);
+        if (!QTest::qWaitFor([&] {
+                return qAbs(card->width() - wide) < 0.01 && lettersOf(text) == letters;
+            }))
+            return u"at %1: %2 is %3 wide for %4, %5 at %6 px for %7"_s.arg(at.width)
+                .arg(face)
+                .arg(card->width())
+                .arg(wide)
+                .arg(words)
+                .arg(lettersOf(text))
+                .arg(letters);
+        const QRectF window(0, 0, at.width, at.height);
+        if (!window.contains(placed(card)))
+            return u"at %1 × %2: %3 is outside the window"_s.arg(at.width).arg(at.height).arg(face);
+    }
+    return {};
+}
+
+/// The key pressed again each time the page has stopped gliding, until the sheet is at that
+/// edge — `atXEnd`, `atYEnd` — and never once it is: one press more would be the turn the
+/// caller is about to test. A press while the page still glides would aim from where it is
+/// passing, not from where it is going.
+bool pressedToTheEdge(QQuickWindow *window, QQuickItem *view, Qt::Key key, const char *edge)
+{
+    QQuickItem *sheet = itemNamed(view, u"reader-sheet"_s);
+    QObject *glide = sheet ? sheet->findChild<QObject *>(u"reader-sheet-glide"_s) : nullptr;
+    if (!glide)
+        return false;
+    return QTest::qWaitFor([&] {
+        if (sheet->property(edge).toBool() && !glide->property("running").toBool())
+            return true;
+        if (!glide->property("running").toBool())
+            QTest::keyClick(window, key);
+        return false;
+    }, 10000);
+}
+
+/// The page drawn under a point of the window, and where in that page the point falls, in
+/// the page's own unzoomed pixels. Null when no page is there.
+QQuickItem *pageUnder(QQuickItem *view, Reader *reader, QPointF scene, QPointF &inside)
+{
+    for (const int page : {reader->firstPage(), reader->secondPage()}) {
+        QQuickItem *one = page >= 0 ? itemNamed(view, u"reader-page-%1"_s.arg(page)) : nullptr;
+        if (!one)
+            continue;
+        const QPointF at = one->mapFromScene(scene);
+        if (at.x() >= 0 && at.y() >= 0 && at.x() < one->width() && at.y() < one->height()) {
+            inside = at;
+            return one;
+        }
+    }
+    return nullptr;
 }
 } // namespace
 
@@ -1339,8 +1865,8 @@ private slots:
             preferences->showBubble(which, false);
         QTRY_VERIFY(!itemNamed(screen, u"settings-corner"_s)->isVisible());
 
-        // And a bubble, raised over the shelf. It says its two lines and it stays, because a
-        // failure that fades on its own is a failure nobody read.
+        // And a bubble, raised over the shelf. It says its two lines and stays its ten seconds,
+        // or until its cross.
         preferences->showBubble(Failures, true);
         QVERIFY(navigation->open(Navigation::Destination::Shelf, {}));
         auto *bubbles = engine.singletonInstance<Toasts *>(qmlTypeId("Leaf", 1, 0, "Toasts"));
@@ -1355,7 +1881,7 @@ private slots:
         QTest::qWait(250);
         QCOMPARE(bubbles->count(), 1);
 
-        // The cross is the way out, and it is the only way out of a failure.
+        // The cross is the way out before the time is up.
         QQuickItem *cross = nullptr;
         QTRY_VERIFY((cross = itemNamed(window->contentItem(), u"toast-0-close"_s)));
         QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
@@ -1415,8 +1941,11 @@ private slots:
         QVERIFY(shadow);
 
         QTRY_COMPARE(name->property("text").toString(), u"Assassination Classroom"_s);
+        // Written by the files, so never read as markup: « <b>x</b> » stays seven characters.
+        QCOMPARE(name->property("textFormat").toInt(), int(Qt::PlainText));
+        QCOMPARE(where->property("textFormat").toInt(), int(Qt::PlainText));
         QCOMPARE(where->property("text").toString(),
-                 u"Tome 12 · Page 47/190 · Chapitre 98"_s);
+                 u"Tome 12 · Page 48/190 · Chap.\u00A098\u00A0: <b>x</b> & y"_s);
         QCOMPARE(label->property("text").toString(), u"Reprendre"_s);
         QVERIFY(label->isVisible());
         QCOMPARE(cover->property("source").toString(),
@@ -1867,6 +2396,11 @@ private slots:
         // Lighting one sends the contract's spelling to the shelf, and the shelf asks again.
         auto *shelf = engine.singletonInstance<Shelf *>(qmlTypeId("Leaf", 1, 0, "Shelf"));
         QVERIFY(shelf);
+        // Backtab sent the shelf gliding to the last cover; the chip is aimed at only once
+        // the row that carries it has stopped.
+        QObject *glide = shelfGlide(grid);
+        QVERIFY2(glide, "no object named shelf-glide under the grid: the wait would be empty");
+        QTRY_VERIFY(!glide->property("running").toBool());
         const QPointF middle = bd->mapToItem(nullptr, QPointF(bd->width() / 2,
                                                              bd->height() / 2));
         QTest::mouseMove(window, QPoint(window->width() / 2, window->height() - 4));
@@ -2250,7 +2784,7 @@ private slots:
             aReply(200, QByteArrayLiteral("application/json"), someFilters());
         QJsonArray foundFiles;
         for (int number = 1; number <= 4; ++number) {
-            foundFiles << QJsonObject{
+            QJsonObject hit{
                 {u"kind"_s, u"ENTRY"_s},
                 {u"id"_s, u"pd-v%1"_s.arg(number)},
                 {u"label"_s, u"Tome %1"_s.arg(number)},
@@ -2261,6 +2795,14 @@ private slots:
                 {u"entryNumber"_s, double(number)},
                 {u"entryPageCount"_s, 190},
             };
+            // The last is a chapter whose title is markup: the files' words, shown as written.
+            if (number == 4) {
+                hit[u"kind"_s] = u"CHAPTER"_s;
+                hit[u"label"_s] = u"<b>x</b>"_s;
+                hit[u"chapterLabel"_s] = u"Chap.\u00A031"_s;
+                hit[u"chapterTitle"_s] = u"<b>x</b>"_s;
+            }
+            foundFiles << hit;
         }
         const QByteArray hitsReply = aReply(
             200, QByteArrayLiteral("application/json"),
@@ -2359,6 +2901,19 @@ private slots:
         QVERIFY(context);
         QCOMPARE(context->property("text").toString(),
                  u"Parasite · Édition Deluxe · 190 pages"_s);
+
+        // A chapter is named as the reader names it, and its title — markup here — is drawn
+        // as the characters it is, on both lines of the row.
+        QQuickItem *chapterRow = nullptr;
+        QTRY_VERIFY((chapterRow = itemNamed(results, u"search-result-pd-v4"_s)));
+        auto *chapterName = itemNamed(chapterRow, u"search-name-pd-v4"_s);
+        auto *chapterContext = itemNamed(chapterRow, u"search-context-pd-v4"_s);
+        QVERIFY(chapterName);
+        QVERIFY(chapterContext);
+        QCOMPARE(chapterName->property("text").toString(),
+                 u"Chap.\u00A031\u00A0: <b>x</b>"_s);
+        QCOMPARE(chapterName->property("textFormat").toInt(), int(Qt::PlainText));
+        QCOMPARE(chapterContext->property("textFormat").toInt(), int(Qt::PlainText));
 
         auto *heading = itemNamed(workspace, u"search-files-heading"_s);
         QVERIFY(heading);
@@ -3215,10 +3770,10 @@ private slots:
         QVERIFY(label);
         QVERIFY(action);
         QTRY_COMPARE(where->property("text").toString(),
-                     u"Tome 12 · Page 47/190 · Chapitre 98"_s);
+                     u"Tome 12 · Page 48/190 · Chap.\u00A098\u00A0: <b>x</b> & y"_s);
 
         window->setWidth(800);
-        QTRY_COMPARE(where->property("text").toString(), u"T12 · Page 47/190"_s);
+        QTRY_COMPARE(where->property("text").toString(), u"T12 · Page 48/190"_s);
         QVERIFY(!label->isVisible());
         QCOMPARE(action->width(), action->height());
     }
@@ -3328,6 +3883,32 @@ private slots:
         QTRY_VERIFY(trouble->isVisible());
         QVERIFY(!grid->property("activeFocusOnTab").toBool());
         QVERIFY(!said->property("text").toString().isEmpty());
+    }
+
+    /// No address: the shelf says so in its card, and the band above it said the same
+    /// sentence again — seen twice on one screen in the test of 22/10/2026. Said once.
+    void a_missing_address_is_said_once_and_not_twice()
+    {
+        qunsetenv("LEAF_ADDRESS");
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *trouble = window->findChild<QQuickItem *>(u"shelf-trouble"_s);
+        auto *said = window->findChild<QQuickItem *>(u"shelf-trouble-text"_s);
+        auto *band = window->findChild<QQuickItem *>(u"resume-band"_s);
+        QVERIFY(trouble);
+        QVERIFY(said);
+        QVERIFY(band);
+        QTRY_VERIFY(trouble->isVisible());
+        QCOMPARE(said->property("text").toString(),
+                 Words::noAddress(Settings::configurationFile()));
+        auto *echo = itemNamed(band, u"resume-trouble"_s);
+        QVERIFY(echo);
+        QVERIFY(!band->isVisible());
+        QVERIFY(!echo->isVisible());
     }
 
     /// `Main.qml` has exactly one line that hands a value only QML knows to a C++ singleton:
@@ -3569,8 +4150,6 @@ private slots:
                          && itemNamed(rows, u"import-row-Koro-pause"_s)->isVisible(),
                      "nothing on the card could stop a transfer that had started");
 
-
-
         // The word is not in the QML: the elision in front of a vowel is not a rule a
         // binding could apply, and « créera le UNIVERSE » is what leaving it there looks
         // like.
@@ -3602,6 +4181,4396 @@ private slots:
                     || !itemNamed(rows, u"import-row-Koro-accept"_s)->isVisible());
     }
 
+    /// A line of the series page opens the book where reading stopped, over the whole
+    /// window: the application's bar goes, because a reader at rest sees nothing but pages.
+    void a_volume_clicked_on_the_series_page_opens_the_reader_at_its_page()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        auto *reader = engine.singletonInstance<Reader *>(qmlTypeId("Leaf", 1, 0, "Reader"));
+        QVERIFY(navigation && reader);
+
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"s1"_s}}));
+        auto *volumes = engine.singletonInstance<Entries *>(qmlTypeId("Leaf", 1, 0, "Entries"));
+        QTRY_VERIFY(volumes->count() == 1 && !volumes->loading());
+        QQuickItem *row = nullptr;
+        QTRY_VERIFY((row = itemNamed(window->contentItem(), u"volume-e12"_s))
+                    && row->isVisible() && row->width() > 0);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          row->mapToScene(QPointF(row->width() / 2.0, row->height() / 2.0))
+                              .toPoint());
+
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Reader);
+        QCOMPARE(navigation->parameters().value(u"entry"_s).toString(), u"e12"_s);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        // Heard from the moment the view is made: the bars it opens with are sent away by this
+        // timer, and what the test checks is that it did so, not that a page arrived within
+        // its three seconds — under a loaded suite the page once took longer, and the bars
+        // were already gone when they were looked for.
+        QObject *welcome = view->findChild<QObject *>(u"reader-welcome"_s);
+        QVERIFY(welcome);
+        QSignalSpy welcomed(welcome, SIGNAL(triggered()));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        // Page 46 is on screen, alone or in its pair.
+        QVERIFY2(reader->firstPage() == 46 || reader->secondPage() == 46,
+                 qPrintable(u"first %1, second %2"_s.arg(reader->firstPage())
+                                .arg(reader->secondPage())));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(view, u"reader-page-46"_s)) && page->isVisible()
+                    && page->width() > 0);
+        // The whole window is the reader's.
+        QCOMPARE(view->height(), qreal(window->height()));
+        QVERIFY(!window->findChild<QQuickItem *>(u"app-bar"_s)->isVisible());
+        // A volume opens with its bars up, and after three seconds without input there is
+        // nothing but the pages (the owner's test of 22/10/2026 found a bare page, and nothing
+        // saying the commands were a click away).
+        QQuickItem *bar = itemNamed(view, u"reader-bar"_s);
+        QQuickItem *dock = itemNamed(view, u"reader-dock"_s);
+        QVERIFY(bar && dock);
+        QCOMPARE(welcome->property("interval").toInt(), 3000);
+        // Up while the welcome holds them, if it still does; whether it does depends on how long
+        // the page took, which is not what is under test.
+        if (welcomed.count() == 0) {
+            QVERIFY(view->property("barsShown").toBool());
+            QTRY_VERIFY((bar->isVisible() && dock->isVisible()) || welcomed.count() > 0);
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(!bar->isVisible() && !dock->isVisible(), 8000);
+        // Sent away by the welcome, which only runs for bars a volume opened with.
+        QCOMPARE(welcomed.count(), 1);
+        // The image is asked at the width the list was asked at.
+        QTRY_VERIFY(pretend.heard.contains(
+            "GET /entries/e12/pages/46?width=" + QByteArray::number(reader->askedWidth())));
+    }
+
+    /// In a manga the page read next lies to the left, so the left third goes forward —
+    /// the physical side, not the word « next ».
+    void in_a_manga_the_left_third_turns_forward()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        QString direction = u"RIGHT_TO_LEFT"_s;
+        pretend.answerFor = [&direction](const QByteArray &request) {
+            return aBookAnswers(request, direction);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+
+        const int before = reader->display();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.10));
+        QTRY_COMPARE(reader->display(), before + 1);
+        // What lies ahead of the new screen is fetched before it is needed — each turn, and
+        // not only once: the list is asked of `Reader` again whenever the screen changes.
+        const QStringList ahead = reader->ahead(reader->askedWidth());
+        QVERIFY(!ahead.isEmpty());
+        for (const QString &one : ahead) {
+            const QByteArray path = QUrl(one).path(QUrl::FullyEncoded).toUtf8() + "?width="
+                                    + QByteArray::number(reader->askedWidth());
+            QTRY_VERIFY2(pretend.heard.contains("GET " + path), path.constData());
+        }
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.90));
+        QTRY_COMPARE(reader->display(), before);
+        // And the arrow on the same side as the third.
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+        QTest::keyClick(window, Qt::Key_Left);
+        QTRY_COMPARE(reader->display(), before + 1);
+        // The wheel goes down to go on, whatever the side.
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_COMPARE(reader->display(), before + 2);
+
+        // Left to right, the same third goes back.
+        direction = u"LEFT_TO_RIGHT"_s;
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        navigation->back();
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Series);
+        navigation->open(Navigation::Destination::Reader,
+                         {{u"series"_s, u"s1"_s}, {u"entry"_s, u"e12"_s}});
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->direction() == int(Reader::Direction::LeftToRight));
+        const int then = reader->display();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.10));
+        QTRY_COMPARE(reader->display(), then - 1);
+    }
+
+    /// A webtoon is one strip: the side thirds turn nothing, the wheel and the space bar move
+    /// it, and the page it records is the one that crosses the middle — never a pair.
+    void a_webtoon_scrolls_and_never_pairs_pages()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QVERIFY(reader->webtoon());
+        QQuickItem *strip = nullptr;
+        QTRY_VERIFY((strip = itemNamed(view, u"reader-strip"_s)) && strip->isVisible());
+        QObject *glide = stripGlide(strip);
+        QVERIFY2(glide, "no object named strip-glide under the strip: the wait would be empty");
+        // The recorded page opens at the top of the view, one page and never two.
+        QTRY_COMPARE(stripPageAt(strip, strip->property("contentY").toReal() + 1), 46);
+        QCOMPARE(reader->firstPage(), 46);
+        QCOMPARE(reader->secondPage(), -1);
+        // No page lies to one side of the first: the pages run edge to edge, and the strip
+        // is as wide as the window.
+        QCOMPARE(strip->width(), view->width());
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+
+        QVERIFY(atRest(view));
+        // The thirds turn nothing in a strip.
+        const qreal top = strip->property("contentY").toReal();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.10));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.90));
+        QTest::qWait(100);
+        QCOMPARE(reader->firstPage(), 46);
+        QCOMPARE(strip->property("contentY").toReal(), top);
+        QVERIFY(!view->property("barsShown").toBool());
+
+        // The wheel moves it, and the page recorded follows what crosses the middle.
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_VERIFY(strip->property("contentY").toReal() > top);
+        QTRY_VERIFY(!strip->property("moving").toBool());
+        const qreal wheeled = strip->property("contentY").toReal();
+        QTRY_COMPARE(reader->firstPage(),
+                     stripPageAt(strip, wheeled + strip->height() / 2));
+        QCOMPARE(reader->secondPage(), -1);
+
+        // The space bar moves it by most of a screen, and Shift+Space back by the same.
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY(strip->property("contentY").toReal() > wheeled + strip->height() * 0.8);
+        QTRY_VERIFY(!glide->property("running").toBool());
+        const qreal paged = strip->property("contentY").toReal();
+        QVERIFY(paged < wheeled + strip->height());
+        QTest::keyClick(window, Qt::Key_Space, Qt::ShiftModifier);
+        QTRY_VERIFY(strip->property("contentY").toReal() < paged - strip->height() * 0.8);
+        QTRY_VERIFY(!glide->property("running").toBool());
+        QTRY_COMPARE(reader->firstPage(),
+                     stripPageAt(strip, strip->property("contentY").toReal()
+                                            + strip->height() / 2));
+
+        // The middle still calls the bars.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.5));
+        QTRY_VERIFY(view->property("barsShown").toBool());
+
+        // And the scrub still goes where it is told: the strip follows the page it is sent
+        // to, and does not send it back.
+        reader->goToPage(120);
+        QTRY_COMPARE(stripPageAt(strip, strip->property("contentY").toReal() + 1), 120);
+        QTRY_VERIFY(!strip->property("moving").toBool());
+        QCOMPARE(reader->firstPage(), 120);
+    }
+
+    /// The bottom of the strip is the last page shown, even when that page is a sliver that
+    /// never crosses the middle: the volume is finished the moment its end is reached.
+    void reaching_the_bottom_of_a_webtoon_says_it_is_finished()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *strip = nullptr;
+        QTRY_VERIFY((strip = itemNamed(view, u"reader-strip"_s)) && strip->isVisible());
+        QTRY_COMPARE(stripPageAt(strip, strip->property("contentY").toReal() + 1), 46);
+
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+        QTest::keyClick(window, Qt::Key_End);
+        QTRY_VERIFY(strip->property("atYEnd").toBool());
+        QTRY_COMPARE(reader->firstPage(), 189);
+        QTRY_VERIFY2(pretend.heard.contains("\"finished\":true"), pretend.heard.constData());
+    }
+
+    /// Long names are elided where a line has no room for more, and wrapped where there is
+    /// room below, and never cut: the owner asked on 22/10/2026 to see it with a long series
+    /// and a long chapter, on a small window and on his own.
+    void long_names_are_elided_or_wrapped_never_cut()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.seriesName = u"Les Chroniques de la Lune Noire et de tout ce qui s’ensuivit "
+                            u"au royaume de Lhynn quand l’Empereur Haghendorf revint d’exil, "
+                            u"édition intégrale revue, corrigée et augmentée de ses annexes"_s;
+        extras.volume = QJsonObject{
+            {u"title"_s, u"Le temps des examens, des adieux et des retrouvailles au bord de "
+                         u"la mer, quand tout le monde est parti"_s}};
+        extras.chapters = QJsonArray{
+            QJsonObject{{u"id"_s, u"c98"_s}, {u"label"_s, u"Chap.098"_s}, {u"number"_s, 98},
+                        {u"title"_s, u"Où l’on apprend enfin pourquoi la classe entière avait "
+                                     u"décidé de se taire pendant trois semaines, et ce que "
+                                     u"le professeur fit de ce silence le jour de l’examen "
+                                     u"blanc, sous la pluie, devant le lycée tout entier"_s},
+                        {u"kind"_s, u"CHAPTER"_s}, {u"entryId"_s, u"e12"_s},
+                        {u"startPage"_s, 0}},
+        };
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const auto putBack = qScopeGuard([&] { window->resize(1100, 760); });
+        QTRY_VERIFY(reader->chapters().size() == 1);
+        QQuickItem *panel = itemNamed(view, u"reader-volume"_s);
+        QQuickItem *title = itemNamed(view, u"reader-title"_s);
+        QQuickItem *where = itemNamed(view, u"reader-where"_s);
+        QQuickItem *head = itemNamed(view, u"reader-volume-head"_s);
+        QQuickItem *series = itemNamed(view, u"reader-volume-series"_s);
+        QQuickItem *chapter = itemNamed(view, u"reader-volume-chapter-0-text"_s);
+        QQuickItem *row = itemNamed(view, u"reader-volume-chapter-0"_s);
+        QVERIFY(panel && title && where && head && series && chapter && row);
+        QTRY_COMPARE(title->property("text").toString(), extras.seriesName);
+
+        for (const AWindow &at : {AWindow{900, 600}, AWindow{1920, 1200}}) {
+            QVERIFY(laidOutFor(view, at));
+            const QString said = u"%1 × %2"_s.arg(at.width).arg(at.height);
+            const QRectF drawn = panel->mapRectToScene(panel->boundingRect());
+            // One line each, elided when it does not fit — which on the small window none of
+            // them does: the bar's two lines and the card's title.
+            for (QQuickItem *line : {title, where, head}) {
+                const QString which = said + u": "_s + line->objectName();
+                QTRY_VERIFY2(line->property("truncated").toBool()
+                                 || line->implicitWidth() <= line->width(),
+                             qPrintable(which));
+                if (at.width == 900)
+                    QVERIFY2(line->property("truncated").toBool(), qPrintable(which));
+                QVERIFY2(placed(line).right() <= at.width, qPrintable(which));
+            }
+            // Wrapped where there is room below, inside the card and inside its row.
+            QTRY_VERIFY2(series->property("lineCount").toInt() > 1, qPrintable(said));
+            QVERIFY2(chapter->property("lineCount").toInt() > 1, qPrintable(said));
+            QVERIFY2(placed(series).right() <= drawn.right() + 0.5, qPrintable(said));
+            QVERIFY2(placed(chapter).right() <= drawn.right() + 0.5, qPrintable(said));
+            QVERIFY2(row->height() >= chapter->height(), qPrintable(said));
+        }
+    }
+
+    /// The end card follows the window as the dock does; see `aCardThatDoesNotFollow`.
+    void the_end_card_follows_the_window_as_the_dock_does()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        const auto putBack = qScopeGuard([&] { view->window()->resize(1100, 760); });
+
+        QString wrong = aCardThatDoesNotFollow(view, u"reader-end-card"_s, u"reader-end-done"_s,
+                                               380, 14, Scale::bodyFor, 1, 32);
+        QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
+        wrong = aCardThatDoesNotFollow(view, u"reader-end-card"_s, u"reader-end-title"_s, 380,
+                                       20, Scale::titleFor, 1, 32);
+        QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
+    }
+
+    /// Past the last page the book is not cut off: a card says what was finished and offers
+    /// what follows, over the last page, which stays there under a veil.
+    void past_the_last_page_a_card_offers_the_next_volume()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.followed = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *panel = itemNamed(view, u"reader-volume"_s);
+        QVERIFY(panel);
+        QQuickItem *settings = itemNamed(view, u"reader-settings"_s);
+        QVERIFY(settings);
+        QQuickItem *hidden = itemNamed(view, u"reader-end"_s);
+        QVERIFY(hidden);
+        QVERIFY(!hidden->isVisible());
+        // A panel left open is shut by the card: one thing at a time beside the pages.
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+        QTest::keyClick(window, Qt::Key_I);
+        QTRY_VERIFY(panel->isVisible());
+
+        QQuickItem *card = raiseTheEndCard(window, view, reader);
+        QVERIFY(card);
+        QTRY_VERIFY(!panel->isVisible());
+        QVERIFY(!settings->isVisible());
+        QCOMPARE(textNamed(card, u"reader-end-done"_s), u"Tome 12 terminé"_s);
+        QTRY_COMPARE(textNamed(card, u"reader-end-title"_s), u"Tome 13"_s);
+        QCOMPARE(itemNamed(card, u"reader-end-go"_s)->property("label").toString(),
+                 u"Lire le tome 13"_s);
+        QVERIFY(itemNamed(card, u"reader-end-back"_s)->isVisible());
+        QVERIFY(itemNamed(card, u"reader-end-stay"_s)->isVisible());
+        // The cover was fetched ahead three pages from the end, and the card draws that one:
+        // asked once. Fetched with another fill than the card's, it was asked twice.
+        QTRY_VERIFY(pretend.heard.contains("GET /entries/e13/cover "));
+        QVERIFY(aFrameDrawn(window));
+        QCOMPARE(pretend.heard.count("GET /entries/e13/cover "), 1);
+        QVERIFY(itemNamed(card, u"reader-end-title"_s)->isVisible());
+        QVERIFY(itemNamed(card, u"reader-end-go"_s)->isVisible());
+        // Centred on the pages, and still the last page behind it.
+        QQuickItem *face = itemNamed(card, u"reader-end-card"_s);
+        QVERIFY(face);
+        QVERIFY(qAbs(face->mapToScene(QPointF(face->width() / 2, 0)).x() - view->width() / 2)
+                <= 2);
+        QVERIFY(qAbs(face->mapToScene(QPointF(0, face->height() / 2)).y() - view->height() / 2)
+                <= 2);
+        QCOMPARE(reader->firstPage(), 189);
+
+        // « Rester sur cette page » closes it and keeps the page.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(card, u"reader-end-stay"_s)));
+        QTRY_VERIFY(!card->isVisible());
+        QVERIFY(!reader->atTheEnd());
+        QCOMPARE(reader->firstPage(), 189);
+
+        // The button opens what follows.
+        QVERIFY(raiseTheEndCard(window, view, reader));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(card, u"reader-end-go"_s)));
+        QTRY_COMPARE(reader->entryId(), u"e13"_s);
+    }
+
+    /// A turn forward is what the button is: the same Space that brought the card opens
+    /// the volume.
+    void turning_again_opens_it()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.followed = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *card = raiseTheEndCard(window, view, reader);
+        QVERIFY(card);
+        // The way on arrives a moment after the card does.
+        QTRY_VERIFY(!reader->next().isEmpty());
+
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_COMPARE(reader->entryId(), u"e13"_s);
+        QVERIFY(!reader->atTheEnd());
+    }
+
+    /// Enter on the end card is its button: what follows opens, as a turn forward would.
+    void enter_on_the_end_card_opens_what_follows()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.followed = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QVERIFY(raiseTheEndCard(window, view, reader));
+        QTRY_VERIFY(!reader->next().isEmpty());
+
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(reader->entryId(), u"e13"_s);
+        QVERIFY(!reader->atTheEnd());
+    }
+
+    /// The back button on the first page opens the volume before, at its last page, and in
+    /// the first volume of the series going back does nothing. Tried by hand on 22/10/2026,
+    /// the button did nothing on a first page.
+    void back_from_the_first_page_opens_the_volume_before_at_its_end()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.preceded = true;
+        extras.unopened = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QCOMPARE(reader->firstPage(), 0);
+
+        QQuickItem *back = barsCalled(window, view, u"reader-page-backward"_s);
+        QVERIFY(back);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(back));
+        QTRY_COMPARE(reader->entryId(), u"e11"_s);
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 30);
+        QCOMPARE(reader->firstPage(), 29);
+        QQuickItem *last = nullptr;
+        QTRY_VERIFY((last = itemNamed(view, u"reader-page-29"_s)) && last->isVisible());
+
+        // Tome 11 is the first: back from its first page stays there. In a manga, back is
+        // the arrow on the right.
+        reader->goToPage(0);
+        QTRY_VERIFY(!reader->next().isEmpty());
+        window->requestActivate();
+        QVERIFY(QTest::qWaitFor([&] { return window->isActive() && view->hasActiveFocus(); }));
+        QTest::keyClick(window, Qt::Key_Right);
+        QVERIFY(aFrameDrawn(window));
+        QCOMPARE(reader->entryId(), u"e11"_s);
+        QCOMPARE(reader->firstPage(), 0);
+        QVERIFY(!reader->loading());
+    }
+
+    void escape_closes_the_card_and_stays_on_the_last_page()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.followed = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *card = raiseTheEndCard(window, view, reader);
+        QVERIFY(card);
+
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!card->isVisible());
+        QTest::qWait(50);
+        QCOMPARE(navigation->destination(), Navigation::Destination::Reader);
+        QCOMPARE(reader->entryId(), u"e12"_s);
+        QCOMPARE(reader->firstPage(), 189);
+
+        // And the next Escape leaves the reader, as it always did.
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Series);
+    }
+
+    /// Nothing follows: the card says so and keeps the one way out, back to the series.
+    void the_last_volume_offers_only_the_way_back()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *card = raiseTheEndCard(window, view, reader);
+        QVERIFY(card);
+
+        QTRY_COMPARE(textNamed(card, u"reader-end-done"_s),
+                     u"Tome 12 terminé"_s + QChar(0x00A0) + u"· dernier tome de la série"_s);
+        QVERIFY(!itemNamed(card, u"reader-end-go"_s)->isVisible());
+        QVERIFY(!itemNamed(card, u"reader-end-stay"_s)->isVisible());
+        QVERIFY(!itemNamed(card, u"reader-end-title"_s)->isVisible());
+        QQuickItem *back = itemNamed(card, u"reader-end-back"_s);
+        QVERIFY(back->isVisible());
+
+        // A turn forward has nothing to open, and the card stays.
+        QTest::keyClick(window, Qt::Key_Space);
+        QTest::qWait(50);
+        QVERIFY(reader->atTheEnd());
+        QCOMPARE(reader->entryId(), u"e12"_s);
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(back));
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Series);
+    }
+
+    /// A webtoon is scrolled and not turned, yet it ends like any book: forward at the bottom
+    /// of the strip raises the card instead of scrolling a strip that has no more to give.
+    void the_bottom_of_a_webtoon_raises_the_card_on_the_next_forward()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.followed = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *strip = nullptr;
+        QTRY_VERIFY((strip = itemNamed(view, u"reader-strip"_s)) && strip->isVisible());
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+
+        QTest::keyClick(window, Qt::Key_End);
+        QTRY_VERIFY(strip->property("atYEnd").toBool());
+        QTRY_COMPARE(reader->firstPage(), 189);
+        QVERIFY(!reader->atTheEnd());
+        QQuickItem *card = itemNamed(view, u"reader-end"_s);
+        QVERIFY(card);
+        QVERIFY(!card->isVisible());
+
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY(reader->atTheEnd());
+        QTRY_VERIFY(card->isVisible());
+        QTRY_COMPARE(reader->next().value(u"entryId"_s).toString(), u"e13"_s);
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_COMPARE(reader->entryId(), u"e13"_s);
+    }
+
+    /// A turn back with the card up puts it away in a book, on the same page.
+    void turning_back_closes_the_card_in_a_book()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.followed = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *card = raiseTheEndCard(window, view, reader);
+        QVERIFY(card);
+        QTest::keyClick(window, Qt::Key_Space, Qt::ShiftModifier);
+        QTRY_VERIFY(!card->isVisible());
+        QCOMPARE(reader->firstPage(), 189);
+        QCOMPARE(reader->entryId(), u"e12"_s);
+    }
+
+    /// And in a webtoon, whose turn back used to scroll the strip and leave the card up.
+    void turning_back_closes_the_card_in_a_webtoon()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.followed = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *strip = nullptr;
+        QTRY_VERIFY((strip = itemNamed(view, u"reader-strip"_s)) && strip->isVisible());
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+        QTest::keyClick(window, Qt::Key_End);
+        QTRY_VERIFY(strip->property("atYEnd").toBool());
+        QTRY_COMPARE(reader->firstPage(), 189);
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY(reader->atTheEnd());
+        QQuickItem *card = itemNamed(view, u"reader-end"_s);
+        QTRY_VERIFY(card->isVisible());
+
+        QTest::keyClick(window, Qt::Key_Space, Qt::ShiftModifier);
+        QTRY_VERIFY(!card->isVisible());
+        QVERIFY(strip->property("atYEnd").toBool());
+        QCOMPARE(reader->firstPage(), 189);
+    }
+
+    /// While the rest of the series has not answered, nothing is known of what follows: the
+    /// card says the volume is finished, never that it is the last, and offers no button.
+    void the_card_does_not_claim_the_last_volume_while_the_way_on_is_out()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.followed = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        pretend.holdBack = [](const QByteArray &request) {
+            return request.startsWith("GET /series/s1/entries");
+        };
+        QQuickItem *card = raiseTheEndCard(window, view, reader);
+        QVERIFY(card);
+        QCOMPARE(textNamed(card, u"reader-end-done"_s), u"Tome 12 terminé"_s);
+        QVERIFY(!itemNamed(card, u"reader-end-go"_s)->isVisible());
+        QVERIFY(itemNamed(card, u"reader-end-back"_s)->isVisible());
+        QVERIFY(itemNamed(card, u"reader-end-stay"_s)->isVisible());
+
+        pretend.holdBack = nullptr;
+        pretend.release();
+        QTRY_VERIFY(itemNamed(card, u"reader-end-go"_s)->isVisible());
+    }
+
+    /// A way on that failed is not « nothing follows »: the card does not say last volume, and
+    /// the next turn asks again, then the card offers the volume and the one after opens it.
+    void a_failed_way_on_is_asked_again_by_the_next_turn()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.followed = true;
+        extras.entriesFail = true;
+        // The rest of the series asked near the end of the volume, which is the reader's way
+        // on: the series page under the reader asks for the same list, at page 46.
+        Reader *reader = nullptr;
+        int wayOnAsked = 0;
+        pretend.answerFor = [&extras, &reader, &wayOnAsked](const QByteArray &request) {
+            if (request.startsWith("GET /series/s1/entries ") && reader
+                && reader->firstPage() > 180)
+                ++wayOnAsked;
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *card = raiseTheEndCard(window, view, reader);
+        QVERIFY(card);
+        // A turn asks again only once the refusal before it has landed, so the turns go on
+        // until the server hears the question that many times. A fixed wait in place of this
+        // was a guess at how long a refusal takes to come back, and a loaded machine guessed
+        // longer.
+        const auto askedAgain = [&](int times) {
+            if (wayOnAsked >= times)
+                return true;
+            QTest::keyClick(window, Qt::Key_Space);
+            return false;
+        };
+        QTRY_VERIFY(askedAgain(2));
+        QCOMPARE(textNamed(card, u"reader-end-done"_s), u"Tome 12 terminé"_s);
+        QVERIFY(!itemNamed(card, u"reader-end-go"_s)->isVisible());
+        QVERIFY(itemNamed(card, u"reader-end-back"_s)->isVisible());
+        QVERIFY(itemNamed(card, u"reader-end-stay"_s)->isVisible());
+
+        extras.entriesFail = false;
+        QTRY_VERIFY(askedAgain(3));
+        QTRY_VERIFY(itemNamed(card, u"reader-end-go"_s)->isVisible());
+        QVERIFY(card->isVisible());
+        QCOMPARE(reader->entryId(), u"e12"_s);
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_COMPARE(reader->entryId(), u"e13"_s);
+    }
+
+    /// What follows may be a chapter, and the button says so.
+    void the_card_offers_a_chapter_as_a_chapter()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.followedByChapter = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *card = raiseTheEndCard(window, view, reader);
+        QVERIFY(card);
+        QTRY_COMPARE(itemNamed(card, u"reader-end-go"_s)->property("label").toString(),
+                     u"Lire le chapitre 108"_s);
+    }
+
+    /// The bars a volume opens with leave on the first turn, without waiting their three
+    /// seconds — and come back with the next volume opened.
+    void the_bars_a_volume_opens_with_leave_on_the_first_turn()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QObject *welcome = view->findChild<QObject *>(u"reader-welcome"_s);
+        QVERIFY(welcome);
+        QVERIFY(view->property("barsShown").toBool());
+        QVERIFY(welcome->property("running").toBool());
+        window->requestActivate();
+        QVERIFY(QTest::qWaitFor([&] { return window->isActive() && view->hasActiveFocus(); }));
+
+        const int before = reader->display();
+        QTest::keyClick(window, Qt::Key_Left);
+        QTRY_COMPARE(reader->display(), before + 1);
+        QVERIFY(!view->property("barsShown").toBool());
+        QVERIFY(!welcome->property("running").toBool());
+
+        // Opened again, the volume comes with its bars.
+        reader->open(u"s1"_s, u"e12"_s);
+        QTRY_VERIFY(!reader->loading());
+        QTRY_VERIFY(view->property("barsShown").toBool());
+        QVERIFY(welcome->property("running").toBool());
+    }
+
+    /// The dock, the bar and what the reader says in place of a book follow the window: tried
+    /// by hand on 22/10/2026 in full screen on a window of 1920, the dock was a strip of specks
+    /// at the foot of the page at its drawn size; on a small window its words kept that size
+    /// over a page that had shrunk.
+    void the_dock_follows_the_window_both_ways()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const auto putBack = qScopeGuard([&] { window->resize(1100, 760); });
+        QQuickItem *forward = barsCalled(window, view, u"reader-page-forward"_s);
+        QVERIFY(forward);
+        QQuickItem *dock = itemNamed(view, u"reader-dock"_s);
+        QQuickItem *bar = itemNamed(view, u"reader-bar"_s);
+        QQuickItem *number = itemNamed(view, u"reader-page-number"_s);
+        QQuickItem *title = itemNamed(view, u"reader-title"_s);
+        // What went wrong instead of the book, said where the bar and the dock are.
+        QQuickItem *trouble = itemNamed(view, u"reader-trouble"_s);
+        QVERIFY(number && title && trouble);
+        const auto letters = [](QQuickItem *text) {
+            return text->property("font").value<QFont>().pixelSize();
+        };
+
+        // Drawn for 1280, and exactly as drawn there.
+        window->resize(1280, 800);
+        QTRY_COMPARE(view->width(), 1280.0);
+        QTRY_COMPARE(forward->width(), 26.0);
+        QCOMPARE(bar->height(), 58.0);
+        QCOMPARE(letters(number), 13);
+        QCOMPARE(letters(title), 19);
+        QCOMPARE(letters(trouble), 15);
+        const qreal tall = dock->height();
+
+        // Half as large again at 2560, and still inside the window, centred; its words at
+        // their drawn size, which on 23/10/2026 at 1920 had grown with the rest and read too
+        // big, and its glyphs at half the rate.
+        window->resize(2560, 1440);
+        QTRY_COMPARE(view->width(), 2560.0);
+        QTRY_COMPARE(forward->width(), 39.0);
+        QCOMPARE(forward->property("side").toInt(), 25);
+        QCOMPARE(bar->height(), 87.0);
+        QVERIFY(dock->height() >= tall * 1.2);
+        QCOMPARE(letters(number), 13);
+        QCOMPARE(letters(title), 19);
+        QCOMPARE(letters(trouble), 15);
+        QVERIFY(dock->width() <= view->width());
+        QVERIFY(qAbs(dock->x() + dock->width() / 2 - view->width() / 2) <= 1);
+
+        // Smaller on a small window, 0.85 at 900 and no further, and its words with it down
+        // to their floors: a caption to 11, the title to 15, what is read to 13.
+        window->resize(900, 700);
+        QTRY_COMPARE(view->width(), 900.0);
+        QTRY_COMPARE(forward->width(), 22.0);
+        QCOMPARE(bar->height(), 49.0);
+        QCOMPARE(letters(number), 11);
+        QCOMPARE(letters(title), 15);
+        QCOMPARE(letters(trouble), 13);
+        QVERIFY(dock->width() <= view->width());
+
+        window->resize(560, 700);
+        QTRY_COMPARE(view->width(), 560.0);
+        QCOMPARE(forward->width(), 22.0);
+        QCOMPARE(letters(number), 11);
+        QVERIFY(dock->x() >= 0 && dock->x() + dock->width() <= view->width());
+    }
+
+    /// The owner's screen is 2560 × 1600 at a scale of 1.333, so the window Qt lays out in
+    /// full screen is 1920 × 1200. In the test of 22/10/2026 the dock was a strip of specks
+    /// there at its drawn size, and too large at half as large again: a quarter, now.
+    void the_dock_is_a_quarter_larger_at_a_full_screen_of_1920_by_1200()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const auto putBack = qScopeGuard([&] { window->resize(1100, 760); });
+        QQuickItem *forward = barsCalled(window, view, u"reader-page-forward"_s);
+        QVERIFY(forward);
+        QQuickItem *dock = itemNamed(view, u"reader-dock"_s);
+        QQuickItem *bar = itemNamed(view, u"reader-bar"_s);
+
+        window->resize(1920, 1200);
+        QTRY_COMPARE(view->width(), 1920.0);
+        QTRY_COMPARE(forward->width(), 33.0);
+        QCOMPARE(bar->height(), 73.0);
+        QCOMPARE(dock->width(), 800.0);
+        // On 23/10/2026 there its words and glyphs read too big and its buttons had gained no
+        // room between them: the words at their drawn size, the glyphs an eighth larger, and
+        // the gaps between a step and the progress bar twice the window's growth: 4 and 6
+        // drawn, 6 and 9 here.
+        QQuickItem *scrub = itemNamed(view, u"reader-scrub"_s);
+        QVERIFY(scrub);
+        const QRectF step = placed(forward);
+        const QRectF progress = placed(scrub);
+        QCOMPARE(std::max(step.left() - progress.right(), progress.left() - step.right()), 15.0);
+        QCOMPARE(forward->property("side").toInt(), 23);
+        QCOMPARE(itemNamed(view, u"reader-page-number"_s)->property("font").value<QFont>()
+                     .pixelSize(), 13);
+        QCOMPARE(itemNamed(view, u"reader-title"_s)->property("font").value<QFont>().pixelSize(),
+                 19);
+    }
+
+    /// The settings card follows the window as the dock does; see `aCardThatDoesNotFollow`.
+    void the_settings_card_follows_the_window_as_the_dock_does()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        const auto putBack = qScopeGuard([&] { view->window()->resize(1100, 760); });
+
+        const QString wrong =
+            aCardThatDoesNotFollow(view, u"reader-settings"_s, u"reader-settings-title"_s, 640,
+                                   17, Scale::titleFor, 1, 24);
+        QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
+        // Its pills with it, which the Settings screen draws at their own size: smaller on a
+        // small window, never larger on a large one.
+        QQuickItem *pill = itemNamed(view, u"reader-direction-0-text"_s);
+        QVERIFY(pill);
+        view->window()->resize(1920, 1200);
+        QTRY_COMPARE(view->width(), 1920.0);
+        QCOMPARE(pill->property("font").value<QFont>().pixelSize(), 14);
+        view->window()->resize(900, 700);
+        QTRY_COMPARE(pill->property("font").value<QFont>().pixelSize(), 13);
+    }
+
+    /// The volume's card follows the window as the dock does: its words by the dock's factor,
+    /// its width by its share of the window up to its drawn width so grown.
+    void the_volume_panel_follows_the_window_as_the_dock_does()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const auto putBack = qScopeGuard([&] { window->resize(1100, 760); });
+        QQuickItem *panel = itemNamed(view, u"reader-volume"_s);
+        QVERIFY(panel);
+        const auto letters = [view](const QString &name) {
+            QQuickItem *text = itemNamed(view, name);
+            return text ? text->property("font").value<QFont>().pixelSize() : -1;
+        };
+
+        // At 1280, as drawn.
+        window->resize(1280, 800);
+        QTRY_COMPARE(view->width(), 1280.0);
+        QTRY_COMPARE(panel->width(), 460.8);
+        QCOMPARE(letters(u"reader-volume-head"_s), 17);
+        QCOMPARE(letters(u"reader-volume-summary"_s), 14);
+        QCOMPARE(letters(u"reader-volume-series-name"_s), 13);
+
+        // Wider at half the window's rate, its words at their drawn size (23/10/2026).
+        window->resize(1920, 1200);
+        QTRY_COMPARE(view->width(), 1920.0);
+        QTRY_COMPARE(panel->width(), 540.0);
+        QCOMPARE(letters(u"reader-volume-head"_s), 17);
+        QCOMPARE(letters(u"reader-volume-summary"_s), 14);
+        QCOMPARE(letters(u"reader-volume-series-name"_s), 13);
+
+        window->resize(2560, 1600);
+        QTRY_COMPARE(view->width(), 2560.0);
+        QTRY_COMPARE(panel->width(), 600.0);
+        QCOMPARE(letters(u"reader-volume-head"_s), 17);
+
+        window->resize(900, 700);
+        QTRY_COMPARE(view->width(), 900.0);
+        QTRY_COMPARE(letters(u"reader-volume-head"_s), 15);
+        QCOMPARE(letters(u"reader-volume-summary"_s), 13);
+        // Never more than two fifths of a window that has the pages beside it.
+        QVERIFY(panel->width() <= 900 * 0.4);
+
+        window->resize(560, 700);
+        QTRY_COMPARE(view->width(), 560.0);
+        QTRY_VERIFY(panel->width() <= 560 - 2 * view->property("margin").toReal());
+    }
+
+    void a_click_in_the_middle_shows_the_bars_and_a_second_hides_them()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *bar = itemNamed(view, u"reader-bar"_s);
+        QQuickItem *dock = itemNamed(view, u"reader-dock"_s);
+        QVERIFY(bar && dock);
+        // Up as the volume opens; a click in the middle sends them away, and leaving on
+        // their own is no longer theirs to do.
+        QTRY_VERIFY(bar->isVisible() && dock->isVisible());
+        QTRY_COMPARE(bar->opacity(), 1.0);
+        QVERIFY(aFrameDrawn(window));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.5));
+        QTRY_VERIFY(!bar->isVisible() && !dock->isVisible());
+        QVERIFY(!view->findChild<QObject *>(u"reader-welcome"_s)->property("running").toBool());
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.5));
+        QTRY_VERIFY(bar->isVisible() && dock->isVisible());
+        QTRY_COMPARE(bar->opacity(), 1.0);
+        // The bar is the application's height for this window — drawn for 1280, and the test
+        // window is narrower — and the card floats clear of the edge.
+        QCOMPARE(bar->height(), qRound(58 * Widths::controlsFor(int(view->width()))) * 1.0);
+        QVERIFY(dock->y() + dock->height() < view->height());
+        // The book's name and where in it, as the bar's two lines.
+        QCOMPARE(textNamed(bar, u"reader-title"_s), u"Assassination Classroom"_s);
+        QCOMPARE(textNamed(dock, u"reader-page-number"_s),
+                 QString::number(reader->firstPage() + 1));
+        // A click on the bar is the bar's: it does not reach the page under it.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          bar->mapToScene(QPointF(bar->width() / 2.0, bar->height() / 2.0))
+                              .toPoint());
+        QTest::qWait(50);
+        // The view's own state and not the bar's visibility, which a fade keeps true for a
+        // moment whatever was decided.
+        QVERIFY(view->property("barsShown").toBool());
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.5));
+        QTRY_VERIFY(!bar->isVisible() && !dock->isVisible());
+
+        // Turning a page sends them away too.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.5));
+        QTRY_VERIFY(bar->isVisible());
+        const int before = reader->display();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.10));
+        QTRY_COMPARE(reader->display(), before + 1);
+        QTRY_VERIFY(!bar->isVisible() && !dock->isVisible());
+    }
+
+    /// Leaving straight after a turn: the volume's line shows the page just reached, once the
+    /// server has kept it. Asked at the moment of leaving, the server could still answer with
+    /// the page before — and nothing asked again after.
+    void leaving_right_after_a_turn_shows_the_page_reached_once_it_is_kept()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        int recorded = 46;
+        pretend.answerFor = [&recorded](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, &recorded);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QTRY_VERIFY(itemNamed(window->contentItem(), u"reader-view"_s));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+
+        pretend.holdBack = [](const QByteArray &request) { return request.startsWith("PATCH "); };
+        reader->forward();
+        const int reached = std::max(reader->firstPage(), reader->secondPage());
+        QVERIFY(reached > 46);
+        navigation->back();
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Series);
+        QTRY_VERIFY(pretend.heard.contains("PATCH /entries/e12/progress"));
+        QTest::qWait(300);
+
+        pretend.holdBack = nullptr;
+        pretend.release();
+        QQuickItem *row = nullptr;
+        QTRY_VERIFY((row = itemNamed(window->contentItem(), u"volume-e12"_s)));
+        QTRY_COMPARE(row->property("howFarRead").toReal(), reached / 190.0);
+    }
+
+    /// Escape takes away one thing at a time: the full screen first, and only then the
+    /// reader — a reader who pressed it to get their desktop back did not mean to close
+    /// the book.
+    void escape_leaves_full_screen_before_it_leaves_the_reader()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QTRY_VERIFY(itemNamed(window->contentItem(), u"reader-view"_s));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+
+        QTest::keyClick(window, Qt::Key_F);
+        QTRY_COMPARE(window->visibility(), QWindow::FullScreen);
+
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(window->visibility() != QWindow::FullScreen);
+        QTest::qWait(50);
+        QCOMPARE(navigation->destination(), Navigation::Destination::Reader);
+
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Series);
+    }
+
+    /// A direction chosen in the card is the direction the next page is turned: a book that
+    /// declared left to right, chosen right to left, goes forward by the left third. The card
+    /// is under `tune`, which stays lit while it is open, and a click on the page outside it
+    /// closes it and does nothing else.
+    void choosing_a_direction_in_the_reader_turns_the_next_page_the_new_way()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        QString chosen;
+        pretend.answerFor = [&chosen](const QByteArray &request) {
+            return aBookAnswers(request, u"LEFT_TO_RIGHT"_s, nullptr, u"manga"_s, &chosen);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QVERIFY(!itemNamed(view, u"reader-settings"_s)->isVisible());
+
+        QQuickItem *card = openTheSettings(window, view);
+        QVERIFY(card);
+        QCOMPARE(itemNamed(view, u"reader-settings-button"_s)->property("held").toBool(), true);
+        // Under the button, inside the window.
+        QQuickItem *tune = itemNamed(view, u"reader-settings-button"_s);
+        QVERIFY(card->mapToScene(QPointF(0, 0)).y() >= tune->mapToScene(QPointF(0, 0)).y());
+        QVERIFY(card->mapToScene(QPointF(card->width(), 0)).x() <= view->width());
+        // The four directions are words alone, « Par défaut » lit, the line names the files'.
+        QQuickItem *ltr = itemNamed(card, u"reader-direction-0"_s);
+        QQuickItem *rtl = itemNamed(card, u"reader-direction-1"_s);
+        QQuickItem *byDefault = itemNamed(card, u"reader-direction--1"_s);
+        QVERIFY(ltr && rtl && byDefault && itemNamed(card, u"reader-direction-2"_s));
+        QCOMPARE(textNamed(card, u"reader-direction-1-text"_s), u"De droite à gauche"_s);
+        QVERIFY(byDefault->property("lit").toBool());
+        QVERIFY(textNamed(card, u"reader-declares"_s).contains(u"gauche"_s));
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(rtl));
+        QTRY_COMPARE(reader->direction(), int(Reader::Direction::RightToLeft));
+        QTRY_VERIFY(rtl->property("lit").toBool());
+        QVERIFY(!byDefault->property("lit").toBool());
+        QVERIFY(pretend.heard.contains("PUT /series/s1/reading-direction"));
+        QCOMPARE(chosen, u"RIGHT_TO_LEFT"_s);
+
+        // A click on the page outside the card shuts it and turns nothing.
+        const int before = reader->display();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.10));
+        QTRY_VERIFY(!card->isVisible());
+        QCOMPARE(itemNamed(view, u"reader-settings-button"_s)->property("held").toBool(), false);
+        QCOMPARE(reader->display(), before);
+        // The next one turns it the new way: the left third goes forward.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.10));
+        QTRY_COMPARE(reader->display(), before + 1);
+    }
+
+    /// The card has a title and a cross, as the mockup draws it, and the cross closes it the
+    /// way Escape does — without touching the page under it.
+    void the_cross_on_the_settings_card_closes_it_and_leaves_the_page_alone()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *card = openTheSettings(window, view);
+        QVERIFY(card);
+        QCOMPARE(textNamed(card, u"reader-settings-title"_s), u"Lecture"_s);
+        QQuickItem *cross = itemNamed(card, u"reader-settings-close"_s);
+        QVERIFY(cross && cross->isVisible());
+
+        const int before = reader->display();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(cross));
+        QTRY_VERIFY(!card->isVisible());
+        QCOMPARE(reader->display(), before);
+        QVERIFY(view->property("barsShown").toBool());
+    }
+
+    /// Escape takes the settings card first, then the full screen, then the reader.
+    void escape_closes_the_settings_card_before_the_full_screen_and_the_reader()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+        QTest::keyClick(window, Qt::Key_F);
+        QTRY_COMPARE(window->visibility(), QWindow::FullScreen);
+        QQuickItem *card = openTheSettings(window, view);
+        QVERIFY(card);
+
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!card->isVisible());
+        QCOMPARE(window->visibility(), QWindow::FullScreen);
+        QCOMPARE(navigation->destination(), Navigation::Destination::Reader);
+
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(window->visibility() != QWindow::FullScreen);
+        QCOMPARE(navigation->destination(), Navigation::Destination::Reader);
+
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Series);
+    }
+
+    /// A refused choice leaves no pill lit for it: the pill that was lit stays, and the
+    /// refusal is said. A pill lit on the click and put back on the answer would flicker a
+    /// lie for as long as the server took.
+    void a_direction_the_server_refused_leaves_the_previous_pill_lit()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        QString chosen;
+        bool refuse = false;
+        pretend.answerFor = [&chosen, &refuse](const QByteArray &request) {
+            return aBookAnswers(request, u"LEFT_TO_RIGHT"_s, nullptr, u"manga"_s, &chosen,
+                                &refuse);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *card = openTheSettings(window, view);
+        QVERIFY(card);
+        QQuickItem *rtl = itemNamed(card, u"reader-direction-1"_s);
+        QQuickItem *vertical = itemNamed(card, u"reader-direction-2"_s);
+        QVERIFY(rtl && vertical);
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(rtl));
+        QTRY_VERIFY(rtl->property("lit").toBool());
+
+        refuse = true;
+        QSignalSpy refused(reader, &Reader::refused);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(vertical));
+        QTRY_COMPARE(refused.count(), 1);
+        QTest::qWait(50);
+        QVERIFY(!vertical->property("lit").toBool());
+        QVERIFY(rtl->property("lit").toBool());
+        QCOMPARE(reader->chosenDirection(), int(Reader::Direction::RightToLeft));
+        QCOMPARE(reader->direction(), int(Reader::Direction::RightToLeft));
+    }
+
+    /// The book button lays a card over the right of the pages, which keep their width: it
+    /// took the right half and shrank the pages into the left one until the owner's test of
+    /// 22/10/2026. Closing it — the cross, `i`, Escape, a click on the page — and Escape
+    /// closes it before the reader.
+    void the_book_button_lays_a_card_over_the_pages_and_leaves_their_width_alone()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+        QQuickItem *stage = itemNamed(view, u"reader-stage"_s);
+        QVERIFY(stage);
+        QQuickItem *panel = itemNamed(view, u"reader-volume"_s);
+        QVERIFY(panel);
+        QVERIFY(!panel->isVisible());
+        const qreal whole = stage->width();
+        const int askedAt = reader->pageWidth();
+        QQuickItem *page = itemNamed(view, u"reader-page-%1"_s.arg(reader->firstPage()));
+        QVERIFY(page);
+        const qreal pageWide = page->width();
+
+        QQuickItem *opened = openTheVolumePanel(window, view);
+        QVERIFY(opened);
+        QCOMPARE(itemNamed(view, u"reader-volume-button"_s)->property("held").toBool(), true);
+        // Slid in and faded in, then still: on the right of the window, inside it.
+        QTRY_COMPARE(panel->opacity(), 1.0);
+        const qreal left = panel->mapToScene(QPointF(0, 0)).x();
+        QVERIFY(left > view->width() / 2);
+        QVERIFY(panel->mapToScene(QPointF(panel->width(), 0)).x() <= view->width());
+        // Over the pages, which have not moved nor shrunk.
+        QVERIFY(aFrameDrawn(window));
+        QCOMPARE(stage->width(), whole);
+        QCOMPARE(reader->pageWidth(), askedAt);
+        QCOMPARE(page->width(), pageWide);
+
+        // The cross closes it, fading, and the pages are as they were.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(panel, u"reader-volume-close"_s)));
+        QTRY_VERIFY(!panel->isVisible());
+        QCOMPARE(stage->width(), whole);
+        QCOMPARE(itemNamed(view, u"reader-volume-button"_s)->property("held").toBool(), false);
+
+        // `i` toggles it, with no bar called.
+        QTest::keyClick(window, Qt::Key_I);
+        QTRY_VERIFY(panel->isVisible());
+        QTest::keyClick(window, Qt::Key_I);
+        QTRY_VERIFY(!panel->isVisible());
+
+        // A click on the page closes it and turns nothing.
+        QTest::keyClick(window, Qt::Key_I);
+        QTRY_VERIFY(panel->isVisible());
+        const int before = reader->display();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.10));
+        QTRY_VERIFY(!panel->isVisible());
+        QCOMPARE(reader->display(), before);
+
+        // Escape closes it first and only then leaves the reader.
+        QTest::keyClick(window, Qt::Key_I);
+        QTRY_VERIFY(panel->isVisible());
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!panel->isVisible());
+        QTest::qWait(50);
+        QCOMPARE(navigation->destination(), Navigation::Destination::Reader);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Series);
+    }
+
+    /// A webtoon the same: the strip keeps the width of the window under the card, and the
+    /// page being read stays at its top.
+    void a_webtoon_under_the_panel_keeps_its_width_and_the_page_being_read()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *strip = nullptr;
+        QTRY_VERIFY((strip = itemNamed(view, u"reader-strip"_s)) && strip->isVisible());
+        QTRY_COMPARE(stripPageAt(strip, strip->property("contentY").toReal() + 1), 46);
+        window->requestActivate();
+        QVERIFY(QTest::qWaitForWindowActive(window));
+
+        const qreal wide = strip->width();
+        QCOMPARE(wide, view->width());
+        QQuickItem *panel = openTheVolumePanel(window, view);
+        QVERIFY(panel);
+        QTRY_COMPARE(panel->opacity(), 1.0);
+        QVERIFY(aFrameDrawn(window));
+        QCOMPARE(strip->width(), wide);
+        QTRY_COMPARE(stripPageAt(strip, strip->property("contentY").toReal() + 1), 46);
+        QTRY_VERIFY(!strip->property("moving").toBool());
+        QCOMPARE(reader->firstPage(), 46);
+    }
+
+    /// The chapters are listed, the one being read is lit, a click goes to its page — and a
+    /// chapter that does not say where it begins is listed and goes nowhere.
+    void a_chapter_clicked_in_the_panel_jumps_to_its_page()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.chapters = QJsonArray{
+            QJsonObject{{u"id"_s, u"c98"_s}, {u"label"_s, u"Chap.098"_s}, {u"number"_s, 98},
+                        {u"title"_s, u"Le temps des examens"_s}, {u"kind"_s, u"CHAPTER"_s},
+                        {u"entryId"_s, u"e12"_s}, {u"startPage"_s, 0}},
+            QJsonObject{{u"id"_s, u"c99"_s}, {u"label"_s, u"Chap.099"_s}, {u"number"_s, 99},
+                        {u"title"_s, u"Coup de sifflet"_s}, {u"kind"_s, u"CHAPTER"_s},
+                        {u"entryId"_s, u"e12"_s}, {u"startPage"_s, 30}},
+            QJsonObject{{u"id"_s, u"c100"_s}, {u"label"_s, u"Chap.100"_s}, {u"number"_s, 100},
+                        {u"title"_s, u"Ridicule"_s}, {u"kind"_s, u"CHAPTER"_s},
+                        {u"entryId"_s, u"e12"_s}},
+            QJsonObject{{u"id"_s, u"c101"_s}, {u"label"_s, u"Chap.101"_s}, {u"number"_s, 101},
+                        {u"title"_s, u"Le temps des remords"_s}, {u"kind"_s, u"CHAPTER"_s},
+                        {u"entryId"_s, u"e12"_s}, {u"startPage"_s, 120}},
+        };
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        const auto single = onePageAtATime(engine);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *panel = openTheVolumePanel(window, view);
+        QVERIFY(panel);
+
+        // « Chapitres 98 à 101 », four rows, the one holding page 46 lit.
+        QCOMPARE(textNamed(panel, u"reader-volume-chapters"_s), u"98 à 101"_s);
+        for (int i = 0; i < 4; ++i)
+            QVERIFY(drawn(panel, u"reader-volume-chapter-%1"_s.arg(i)));
+        QVERIFY(itemNamed(panel, u"reader-volume-chapter-1"_s)->property("current").toBool());
+        QVERIFY(!itemNamed(panel, u"reader-volume-chapter-0"_s)->property("current").toBool());
+        QVERIFY(textNamed(panel, u"reader-volume-chapter-2-text"_s).contains(u"Ridicule"_s));
+        QCOMPARE(textNamed(panel, u"reader-volume-chapter-3-page"_s), u"p. 121"_s);
+        QVERIFY(textNamed(panel, u"reader-volume-chapter-2-page"_s).isEmpty());
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(panel, u"reader-volume-chapter-3"_s)));
+        QTRY_COMPARE(reader->firstPage(), 120);
+        QTRY_VERIFY(itemNamed(panel, u"reader-volume-chapter-3"_s)->property("current").toBool());
+        // The panel stays open while the reader reads on beside it.
+        QVERIFY(panel->isVisible());
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(panel, u"reader-volume-chapter-2"_s)));
+        QTest::qWait(100);
+        QCOMPARE(reader->firstPage(), 120);
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(panel, u"reader-volume-chapter-0"_s)));
+        QTRY_COMPARE(reader->firstPage(), 0);
+    }
+
+    /// The panel says what the volume has and nothing else: an ISBN is a line when there is
+    /// one, and a label over nothing when there is not is the one thing it must never be.
+    void a_volume_without_an_isbn_has_no_isbn_line()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.volume = QJsonObject{{u"publishedOn"_s, u"2015-03-04"_s},
+                                    {u"summary"_s, u"Les examens approchent."_s}};
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        const auto single = onePageAtATime(engine);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *panel = openTheVolumePanel(window, view);
+        QVERIFY(panel);
+
+        QVERIFY(!drawn(panel, u"reader-volume-isbn"_s));
+        QVERIFY(!drawn(panel, u"reader-volume-isbn-name"_s));
+        QVERIFY(!drawn(panel, u"reader-volume-isbn-key"_s));
+        QCOMPARE(textNamed(panel, u"reader-volume-published"_s), u"4 mars 2015"_s);
+        QCOMPARE(textNamed(panel, u"reader-volume-pages"_s), u"190"_s);
+        QCOMPARE(textNamed(panel, u"reader-volume-series"_s), u"Assassination Classroom"_s);
+        QCOMPARE(textNamed(panel, u"reader-volume-head"_s),
+                 u"Tome 12 · Le temps des examens"_s);
+        QCOMPARE(textNamed(panel, u"reader-volume-summary"_s), u"Les examens approchent."_s);
+        QCOMPARE(textNamed(panel, u"reader-volume-read"_s), u"page 47 / 190"_s);
+        // No chapters: no line for them and no list.
+        QVERIFY(!drawn(panel, u"reader-volume-chapters"_s));
+        QVERIFY(!drawn(panel, u"reader-volume-chapters-heading"_s));
+    }
+
+    /// What the server wrote is shown as written: a ComicInfo summary or title with markup in
+    /// it is characters, not formatting.
+    void markup_in_a_summary_or_a_title_is_shown_as_text()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.volume = QJsonObject{{u"title"_s, u"Le <i>temps</i>"_s},
+                                    {u"isbn"_s, u"<b>978</b>"_s},
+                                    {u"summary"_s, u"<b>x</b> & <3"_s}};
+        extras.chapters = QJsonArray{QJsonObject{
+            {u"id"_s, u"c1"_s}, {u"label"_s, u"Chap.<b>1</b>"_s}, {u"number"_s, 1},
+            {u"title"_s, u"A & <br>B"_s}, {u"kind"_s, u"CHAPTER"_s},
+            {u"entryId"_s, u"e12"_s}, {u"startPage"_s, 0}}};
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *panel = openTheVolumePanel(window, view);
+        QVERIFY(panel);
+        for (const QString &name : {u"reader-volume-summary"_s, u"reader-volume-head"_s,
+                                    u"reader-volume-isbn"_s}) {
+            QQuickItem *one = itemNamed(panel, name);
+            QVERIFY(one);
+            QCOMPARE(one->property("textFormat").toInt(), int(Qt::PlainText));
+        }
+        // Not an ISBN, so no key: the line shows it as written.
+        QVERIFY(!drawn(panel, u"reader-volume-isbn-key"_s));
+        QCOMPARE(textNamed(panel, u"reader-volume-isbn"_s), u"<b>978</b>"_s);
+        QCOMPARE(textNamed(panel, u"reader-volume-summary"_s), u"<b>x</b> & <3"_s);
+        QVERIFY(textNamed(panel, u"reader-volume-head"_s).contains(u"<i>temps</i>"_s));
+        QQuickItem *chapter = itemNamed(panel, u"reader-volume-chapter-0-text"_s);
+        QVERIFY(chapter);
+        QCOMPARE(chapter->property("textFormat").toInt(), int(Qt::PlainText));
+        QVERIFY(textNamed(panel, u"reader-volume-chapter-0-text"_s)
+                    .contains(u"Chap.<b>1</b>"_s));
+        QVERIFY(textNamed(panel, u"reader-volume-chapter-0-text"_s).contains(u"A & <br>B"_s));
+    }
+
+    /// The card opens at its top, on what the volume is, with the chapter being read lit far
+    /// down a list of forty and not scrolled to — opened on that chapter, it hid the cover and
+    /// the facts it is opened for (owner's test of 22/10/2026). Once open, it follows the
+    /// reader into the next chapter; closed and opened again, it is back at its top. A title
+    /// that is only the volume's label again is not said twice over it.
+    void the_panel_opens_at_its_top_and_follows_the_reader_once_open()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.volume = QJsonObject{{u"title"_s, u"tome 12 "_s},
+                                    {u"summary"_s, u"Les examens approchent."_s}};
+        for (int i = 0; i < 40; ++i)
+            extras.chapters.append(QJsonObject{
+                {u"id"_s, u"c%1"_s.arg(i)}, {u"label"_s, u"Chap.%1"_s.arg(i)},
+                {u"number"_s, i}, {u"kind"_s, u"CHAPTER"_s}, {u"entryId"_s, u"e12"_s},
+                {u"startPage"_s, i * 4}});
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *panel = openTheVolumePanel(window, view);
+        QVERIFY(panel);
+
+        const auto inView = [&](int chapter) {
+            QQuickItem *row = itemNamed(panel, u"reader-volume-chapter-%1"_s.arg(chapter));
+            if (!row)
+                return false;
+            const qreal top = row->mapToScene(QPointF(0, 0)).y();
+            return top >= panel->mapToScene(QPointF(0, 0)).y()
+                   && top + row->height()
+                          <= panel->mapToScene(QPointF(0, panel->height())).y() + 1;
+        };
+        QCOMPARE(textNamed(panel, u"reader-volume-head"_s), u"Tome 12"_s);
+        QQuickItem *sheet = itemNamed(panel, u"reader-volume-sheet"_s);
+        QVERIFY(sheet);
+        // Page 46 is in chapter 11: lit, and left where it is, under the cover and the facts.
+        QTRY_VERIFY(itemNamed(panel, u"reader-volume-chapter-11"_s));
+        QTRY_VERIFY(itemNamed(panel, u"reader-volume-chapter-11"_s)->property("current").toBool());
+        QTRY_VERIFY(sheet->property("contentHeight").toReal() > sheet->height());
+        QVERIFY(aFrameDrawn(window));
+        QTest::qWait(100);
+        QCOMPARE(sheet->property("contentY").toReal(), 0.0);
+        QVERIFY(!inView(37));
+        // A turn within a chapter moves nothing but the lit row: the rows are the same items.
+        QQuickItem *rowBefore = itemNamed(panel, u"reader-volume-chapter-11"_s);
+        reader->goToPage(150);
+        QTRY_VERIFY(inView(37));
+        QVERIFY(sheet->property("contentY").toReal() > 0);
+        QCOMPARE(itemNamed(panel, u"reader-volume-chapter-11"_s), rowBefore);
+        QVERIFY(itemNamed(panel, u"reader-volume-chapter-37"_s)->property("current").toBool());
+
+        // Closed, and opened again: at its top, the reader still in chapter 37.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(panel, u"reader-volume-close"_s)));
+        QTRY_VERIFY(!panel->isVisible());
+        QVERIFY(openTheVolumePanel(window, view));
+        QVERIFY(aFrameDrawn(window));
+        QCOMPARE(sheet->property("contentY").toReal(), 0.0);
+        QVERIFY(itemNamed(panel, u"reader-volume-chapter-37"_s)->property("current").toBool());
+    }
+
+    /// An ISBN that does not add up — 978-2-505-06215 checks to 8, not 9 — is no barcode: it
+    /// stays a line, in the same place as every other, shown as the file wrote it.
+    void an_isbn_that_does_not_add_up_stays_a_line()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.volume = QJsonObject{{u"isbn"_s, u"978-2-505-06215-9"_s}};
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *panel = openTheVolumePanel(window, view);
+        QVERIFY(panel);
+        QCOMPARE(textNamed(panel, u"reader-volume-isbn"_s), u"978-2-505-06215-9"_s);
+        QVERIFY(drawn(panel, u"reader-volume-isbn-name"_s));
+        QVERIFY(!drawn(panel, u"reader-volume-isbn-key"_s));
+        QVERIFY(!drawn(panel, u"reader-volume-published"_s));
+        QVERIFY(!drawn(panel, u"reader-volume-summary"_s));
+    }
+
+    /// An ISBN that adds up is the key the owner chose on 22/10/2026: bars and the number as
+    /// the file hyphenated it, the last thing in the sheet after the chapters and scrolled
+    /// with them — never over them, as when it stood at the foot of the card and cut the
+    /// seventeenth chapter in half (owner's test of 22/10/2026) — and no line among the facts. A click copies the thirteen digits and a bubble says so;
+    /// Enter does the same from the keyboard.
+    void a_volume_with_an_isbn_shows_it_as_a_key_that_copies_it()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.volume = QJsonObject{{u"isbn"_s, u"978-2-505-06533-3"_s},
+                                    {u"summary"_s, u"Les examens approchent."_s}};
+        // Long enough that the sheet scrolls: the key comes after its last row.
+        for (int i = 0; i < 40; ++i)
+            extras.chapters.append(QJsonObject{
+                {u"id"_s, u"c%1"_s.arg(i)}, {u"label"_s, u"Chap.%1"_s.arg(i)},
+                {u"number"_s, i}, {u"kind"_s, u"CHAPTER"_s}, {u"entryId"_s, u"e12"_s},
+                {u"startPage"_s, i * 4}});
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *panel = openTheVolumePanel(window, view);
+        QVERIFY(panel);
+        QTRY_COMPARE(panel->opacity(), 1.0);
+
+        QQuickItem *key = itemNamed(panel, u"reader-volume-isbn-key"_s);
+        QQuickItem *sheet = itemNamed(panel, u"reader-volume-sheet"_s);
+        QQuickItem *bars = itemNamed(panel, u"reader-volume-isbn-bars"_s);
+        QVERIFY(key && sheet && bars);
+        QVERIFY(key->isVisible());
+        QVERIFY(!drawn(panel, u"reader-volume-isbn"_s));
+        QVERIFY(!drawn(panel, u"reader-volume-isbn-name"_s));
+        QCOMPARE(textNamed(panel, u"reader-volume-isbn-line-0"_s), u"978-2-505"_s);
+        QCOMPARE(textNamed(panel, u"reader-volume-isbn-line-1"_s), u"06533-3"_s);
+        QCOMPARE(textNamed(panel, u"reader-volume-isbn-label"_s), u"ISBN"_s);
+        QCOMPARE(textNamed(panel, u"reader-volume-isbn-hint"_s), u"Cliquer pour copier"_s);
+        // Dark bars on a lighter face in both themes, or the code reads inverted.
+        auto *theme = engine.singletonInstance<Theme *>(qmlTypeId("Leaf", 1, 0, "Theme"));
+        QVERIFY(theme);
+        QQuickItem *face = itemNamed(panel, u"reader-volume-isbn-face"_s);
+        QVERIFY(face);
+        const bool wasDark = theme->dark();
+        for (const bool dark : {false, true}) {
+            theme->setDark(dark);
+            QQuickItem *bar = nullptr;
+            for (QQuickItem *one : bars->childItems())
+                if (one->inherits("QQuickRectangle"))
+                    bar = one;
+            QVERIFY(bar);
+            QTRY_VERIFY2(bar->property("color").value<QColor>().lightnessF()
+                             < face->property("color").value<QColor>().lightnessF(),
+                         dark ? "dark" : "light");
+        }
+        theme->setDark(wasDark);
+        // Thirty bars, as every EAN-13 has; the Repeater that made them is an item too.
+        const QList<QQuickItem *> drawnBars = bars->childItems();
+        QCOMPARE(std::count_if(drawnBars.begin(), drawnBars.end(),
+                               [](QQuickItem *one) { return one->inherits("QQuickRectangle"); }),
+                 30);
+
+        // The key is in the scrolled content, after the last chapter; the sheet runs to the
+        // foot of the card. Scrolled to the end, the key is whole inside the sheet.
+        QVERIFY(sheet->property("contentHeight").toReal() > sheet->height());
+        auto *content = sheet->property("contentItem").value<QQuickItem *>();
+        QVERIFY(content);
+        QVERIFY(content->isAncestorOf(key));
+        QQuickItem *last = itemNamed(panel, u"reader-volume-chapter-39"_s);
+        QVERIFY(last);
+        QVERIFY(key->mapToItem(content, QPointF(0, 0)).y()
+                >= last->mapToItem(content, QPointF(0, last->height())).y());
+        QVERIFY(qAbs(placed(panel).bottom() - panel->property("padding").toReal()
+                     - placed(sheet).bottom())
+                < 1);
+        sheet->setProperty("contentY", sheet->property("contentHeight").toReal()
+                                           - sheet->height());
+        QVERIFY(aFrameDrawn(window));
+        QVERIFY(placed(sheet).contains(placed(key)));
+        QVERIFY(placed(key).left() > placed(panel).left());
+        QVERIFY(placed(key).right() < placed(panel).right());
+
+        auto *bubbles = engine.singletonInstance<Toasts *>(qmlTypeId("Leaf", 1, 0, "Toasts"));
+        QVERIFY(bubbles);
+        QClipboard *board = QGuiApplication::clipboard();
+        board->setText(u"rien"_s);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(key));
+        QTRY_COMPARE(board->text(), u"9782505065333"_s);
+        QTRY_COMPARE(bubbles->count(), 1);
+        QCOMPARE(bubbles->data(bubbles->index(0, 0), qToUnderlying(Toasts::Role::Headline))
+                     .toString(),
+                 u"ISBN copié"_s);
+
+        board->setText(u"rien"_s);
+        key->forceActiveFocus();
+        QTRY_VERIFY(key->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(board->text(), u"9782505065333"_s);
+        board->setText(u"rien"_s);
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_COMPARE(board->text(), u"9782505065333"_s);
+    }
+
+    /// The key follows the window as the rest of the card does: its words at what their role
+    /// makes of their drawn size, its bars a whole number of the screen's pixels per module,
+    /// and inside the sheet — at 1280, where it is drawn, and at the owner's 1920.
+    void the_isbn_key_follows_the_window()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.volume = QJsonObject{{u"isbn"_s, u"9782505065333"_s}};
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const auto putBack = qScopeGuard([&] { window->resize(1100, 760); });
+        QQuickItem *panel = itemNamed(view, u"reader-volume"_s);
+        QQuickItem *key = itemNamed(view, u"reader-volume-isbn-key"_s);
+        QQuickItem *sheet = itemNamed(view, u"reader-volume-sheet"_s);
+        QQuickItem *bars = itemNamed(view, u"reader-volume-isbn-bars"_s);
+        QQuickItem *number = itemNamed(view, u"reader-volume-isbn-number"_s);
+        QQuickItem *label = itemNamed(view, u"reader-volume-isbn-label"_s);
+        QQuickItem *line = itemNamed(view, u"reader-volume-isbn-line-0"_s);
+        QVERIFY(panel && key && sheet && bars && number && label && line);
+        auto *content = sheet->property("contentItem").value<QQuickItem *>();
+        QVERIFY(content && content->isAncestorOf(key));
+        // Bare digits: grouped, never hyphenated by guess.
+        QCOMPARE(line->property("text").toString(), u"978 2505"_s);
+
+        const qreal ratio = window->devicePixelRatio();
+        for (const AWindow &at : {AWindow{1280, 800}, AWindow{1920, 1200}, AWindow{560, 700}}) {
+            QVERIFY(laidOutFor(view, at));
+            const QString where = u"%1 × %2"_s.arg(at.width).arg(at.height);
+            const qreal factor = Widths::controlsFor(at.width);
+            const int padding = Scale::sizeFor(18, factor);
+            QTRY_VERIFY2(qAbs(key->width() - (panel->width() - 2 * padding)) < 0.01,
+                         qPrintable(where));
+            QCOMPARE(lettersOf(label), Scale::captionFor(11, factor));
+            QCOMPARE(lettersOf(line), Scale::titleFor(19, factor));
+            QCOMPARE(key->property("radius").toReal(), qreal(Scale::sizeFor(12, factor)));
+            // A module in whole pixels of the screen, as drawn and scaled and rounded up, and
+            // never under one.
+            const qreal module = bars->width() / 95;
+            QVERIFY2(module * ratio >= 1, qPrintable(where));
+            QCOMPARE(module * ratio, std::round(module * ratio));
+            if (at.width >= 1280)
+                QCOMPARE(module, std::max(1.0, std::ceil(1.6 * factor * ratio)) / ratio);
+            // The bars and the number inside the face, beside one another or one under the
+            // other; and the sheet, scrolled to its end, holding the key whole.
+            const QRectF face = placed(key);
+            QVERIFY2(face.contains(placed(bars)), qPrintable(where));
+            QVERIFY2(face.contains(placed(number)), qPrintable(where));
+            QVERIFY2(!placed(bars).intersects(placed(number)), qPrintable(where));
+            sheet->setProperty("contentY",
+                               std::max(0.0, sheet->property("contentHeight").toReal()
+                                                 - sheet->height()));
+            QVERIFY2(placed(sheet).contains(placed(key)), qPrintable(where));
+            sheet->setProperty("contentY", 0.0);
+        }
+    }
+
+    /// A volume nobody has opened has no « Lu » line and no bar on its cover.
+    void a_volume_never_opened_has_no_read_line()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.unopened = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *panel = openTheVolumePanel(window, view);
+        QVERIFY(panel);
+        QVERIFY(!drawn(panel, u"reader-volume-read"_s));
+        QVERIFY(!drawn(panel, u"reader-volume-read-name"_s));
+        QVERIFY(!drawn(panel, u"read-so-far-e12"_s));
+        QVERIFY(!drawn(panel, u"reader-volume-read-bar"_s));
+    }
+
+    /// The settings card and the volume's panel are one or the other: opening either puts
+    /// the other away, and the button of the one put away goes out.
+    void the_settings_card_and_the_volume_panel_never_stand_together()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+
+        QQuickItem *panel = openTheVolumePanel(window, view);
+        QVERIFY(panel);
+        QQuickItem *card = itemNamed(view, u"reader-settings"_s);
+        QVERIFY(card);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(view, u"reader-settings-button"_s)));
+        QTRY_VERIFY(card->isVisible());
+        QTRY_VERIFY(!panel->isVisible());
+        QCOMPARE(itemNamed(view, u"reader-volume-button"_s)->property("held").toBool(), false);
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(view, u"reader-volume-button"_s)));
+        QTRY_VERIFY(panel->isVisible());
+        QTRY_VERIFY(!card->isVisible());
+        QCOMPARE(itemNamed(view, u"reader-settings-button"_s)->property("held").toBool(), false);
+    }
+
+    /// A strip has no sense and no pair: the card keeps only the fit, and of the fit only the
+    /// two that mean something for an endless column — « Hauteur » would be the height of
+    /// a thing with none. « Original » draws each page at the width of its file, centred.
+    void a_webtoon_offers_only_the_fit()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        const auto putBack = qScopeGuard([&] {
+            preferences->chooseFit(Preferences::Fit::Height);
+        });
+        preferences->chooseFit(Preferences::Fit::Height);
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *strip = nullptr;
+        QTRY_VERIFY((strip = itemNamed(view, u"reader-strip"_s)) && strip->isVisible());
+
+        QQuickItem *card = openTheSettings(window, view);
+        QVERIFY(card);
+        const auto shown = [&](const QString &name) {
+            QQuickItem *one = itemNamed(card, name);
+            return one && one->isVisible();
+        };
+        QVERIFY(!shown(u"reader-direction"_s));
+        QVERIFY(!shown(u"reader-direction-1"_s));
+        QVERIFY(!shown(u"reader-layout"_s));
+        QVERIFY(!shown(u"reader-declares"_s));
+        QVERIFY(!shown(u"reader-fit-height"_s));
+        QVERIFY(shown(u"reader-fit-width"_s));
+        QVERIFY(shown(u"reader-fit-original"_s));
+        // A fit chosen for books that means nothing here is shown as the one it behaves as.
+        QVERIFY(itemNamed(card, u"reader-fit-width"_s)->property("lit").toBool());
+
+        // « Largeur » is the strip as it was: every page the width of the window.
+        QTRY_VERIFY(itemNamed(strip, u"strip-image-46"_s));
+        QCOMPARE(itemNamed(strip, u"strip-image-46"_s)->width(), strip->width());
+
+        // « Original » is the file's own width — 1000 in a window of 1100 — centred.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(card, u"reader-fit-original"_s)));
+        QTRY_COMPARE(preferences->fit(), Preferences::Fit::Original);
+        QQuickItem *image = itemNamed(strip, u"strip-image-46"_s);
+        QVERIFY(image);
+        QTRY_COMPARE(image->width(), 1000.0);
+        QCOMPARE(image->x(), (strip->width() - 1000) / 2);
+        QCOMPARE(image->height(), 1500.0);
+        // A file wider than the window is held to the window, not cut by it.
+        window->resize(800, window->height());
+        QTRY_COMPARE(strip->width(), 800.0);
+        QTRY_COMPARE(itemNamed(strip, u"strip-image-46"_s)->width(), 800.0);
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(card, u"reader-fit-width"_s)));
+        QTRY_COMPARE(preferences->fit(), Preferences::Fit::Width);
+        QTRY_COMPARE(itemNamed(strip, u"strip-image-46"_s)->width(), strip->width());
+    }
+
+    /// Narrowing the window re-measures every page, and a strip left alone stays at the same
+    /// pixel offset while the pages above it get shorter: the page being read slid up out of
+    /// the top. It is put back at the top, as the scrub puts it there.
+    void narrowing_the_window_keeps_the_page_being_read_at_the_top_of_a_strip()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *strip = nullptr;
+        QTRY_VERIFY((strip = itemNamed(view, u"reader-strip"_s)) && strip->isVisible());
+        const auto putBack = qScopeGuard([&] { window->resize(1100, 760); });
+
+        reader->goToPage(120);
+        QTRY_COMPARE(stripPageAt(strip, strip->property("contentY").toReal() + 1), 120);
+        QTRY_VERIFY(!strip->property("moving").toBool());
+        // Part-way down the page, as a reader is: a list keeps the offset inside the page it
+        // keeps on screen, which is not the page's top.
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_VERIFY(!strip->property("moving").toBool());
+        QQuickItem *page = itemNamed(strip, u"strip-page-120"_s);
+        QVERIFY(page);
+        const auto offsetInPage = [&] {
+            return strip->property("contentY").toReal() - page->y();
+        };
+        QTRY_VERIFY(offsetInPage() > 50);
+        QCOMPARE(reader->firstPage(), 120);
+
+        window->resize(700, window->height());
+        QTRY_COMPARE(strip->width(), 700.0);
+        QTRY_COMPARE(offsetInPage(), 0.0);
+        QCOMPARE(reader->firstPage(), 120);
+    }
+
+    /// Ctrl + zooms a step at a time, and a zoomed page is moved by the arrows rather than
+    /// turned; Ctrl − steps back, Ctrl 0 goes straight back to the whole page, and whole, the
+    /// arrow turns again (spec §09).
+    void ctrl_plus_zooms_and_the_arrow_then_moves_the_page()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"LEFT_TO_RIGHT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *sheet = itemNamed(view, u"reader-sheet"_s);
+        QVERIFY(sheet);
+        QCOMPARE(zoomOf(view), 1.0);
+        const int before = reader->display();
+
+        // Three steps, 150 then 200 then 300 %: a portrait page in a landscape window runs
+        // off the sides only from there, and the arrows have somewhere to move it.
+        QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QTRY_COMPARE(zoomOf(view), 1.5);
+        QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QTRY_COMPARE(zoomOf(view), 2.0);
+        QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QTRY_COMPARE(zoomOf(view), 3.0);
+        QTRY_VERIFY(sheet->property("contentWidth").toReal() > sheet->width());
+        QTRY_VERIFY(sheet->property("contentHeight").toReal() > sheet->height());
+
+        const qreal x = sheet->property("contentX").toReal();
+        QTest::keyClick(window, Qt::Key_Right);
+        QTRY_VERIFY(sheet->property("contentX").toReal() > x);
+        const qreal y = sheet->property("contentY").toReal();
+        QTest::keyClick(window, Qt::Key_Down);
+        QTRY_VERIFY(sheet->property("contentY").toReal() > y);
+        QCOMPARE(reader->display(), before);
+
+        QTest::keyClick(window, Qt::Key_Minus, Qt::ControlModifier);
+        QTRY_COMPARE(zoomOf(view), 2.0);
+        QTest::keyClick(window, Qt::Key_0, Qt::ControlModifier);
+        QTRY_COMPARE(zoomOf(view), 1.0);
+        QCOMPARE(reader->display(), before);
+        QTest::keyClick(window, Qt::Key_Right);
+        QTRY_COMPARE(reader->display(), before + 1);
+    }
+
+    /// The arrow moves a zoomed page until its edge is in view, and the next press turns it;
+    /// the space bar goes down the page the same way, and turns at its foot.
+    void at_the_edge_of_a_zoomed_page_the_arrow_turns_it()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"LEFT_TO_RIGHT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *sheet = itemNamed(view, u"reader-sheet"_s);
+        QVERIFY(sheet);
+        const int before = reader->display();
+
+        for (int step = 0; step < 3; ++step)
+            QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QTRY_COMPARE(zoomOf(view), 3.0);
+        QVERIFY(!sheet->property("atXEnd").toBool());
+        QVERIFY(pressedToTheEdge(window, view, Qt::Key_Right, "atXEnd"));
+        QCOMPARE(reader->display(), before);
+        // A zoomed page turned does not slide: nothing moves while the page is enlarged.
+        QObject *slide = view->findChild<QObject *>(u"reader-turn"_s);
+        QObject *fade = view->findChild<QObject *>(u"reader-fade"_s);
+        QVERIFY(slide && fade);
+        QSignalSpy slid(slide, SIGNAL(started()));
+        QSignalSpy faded(fade, SIGNAL(started()));
+        QTest::keyClick(window, Qt::Key_Right);
+        QTRY_COMPARE(reader->display(), before + 1);
+        QVERIFY(aFrameDrawn(window));
+        QCOMPARE(slid.count(), 0);
+        QCOMPARE(faded.count(), 0);
+
+        QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QTRY_COMPARE(zoomOf(view), 1.5);
+        QVERIFY(!sheet->property("atYEnd").toBool());
+        QVERIFY(pressedToTheEdge(window, view, Qt::Key_Space, "atYEnd"));
+        QCOMPARE(reader->display(), before + 1);
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_COMPARE(reader->display(), before + 2);
+    }
+
+    /// A turn slides the screen that comes in from the side reading goes towards, and the one
+    /// left out the other way: from the left going on in a manga, from the right in a book
+    /// read left to right, and the reverse going back. Tried by hand on 22/10/2026, a page
+    /// replaced in one frame read as a flash. The screen leaving is drawn from the image
+    /// cache: its page is never asked of the server twice.
+    void a_turn_slides_in_from_the_side_reading_goes_towards()
+    {
+        for (const QString &direction : {u"RIGHT_TO_LEFT"_s, u"LEFT_TO_RIGHT"_s}) {
+            Pretend pretend;
+            QVERIFY(pretend.listen(QHostAddress::LocalHost));
+            pretend.answerFor = [direction](const QByteArray &request) {
+                return aBookAnswers(request, direction);
+            };
+            qputenv("LEAF_ADDRESS",
+                    u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+            QQmlApplicationEngine engine;
+            Boot::run(engine, *qGuiApp, nowhere());
+            Reader *reader = nullptr;
+            QQuickItem *view = aReaderAtHand(engine, reader);
+            QVERIFY(view);
+            auto *window = view->window();
+            const bool manga = direction == u"RIGHT_TO_LEFT"_s;
+            QObject *slide = view->findChild<QObject *>(u"reader-turn"_s);
+            QObject *in = view->findChild<QObject *>(u"reader-turn-in"_s);
+            QObject *out = view->findChild<QObject *>(u"reader-turn-out"_s);
+            QQuickItem *ghost = itemNamed(view, u"reader-ghost"_s);
+            QObject *shift = view->findChild<QObject *>(u"reader-sheet-shift"_s);
+            QVERIFY(slide && in && out && ghost && shift);
+            QSignalSpy slid(slide, SIGNAL(started()));
+            const int left = reader->firstPage();
+            QTRY_VERIFY(itemNamed(view, u"reader-page-image-%1"_s.arg(left))
+                            ->property("status").toInt() == 1);
+            const QByteArray asked =
+                "GET /entries/e12/pages/" + QByteArray::number(left) + "?";
+            QCOMPARE(pretend.heard.count(asked), 1);
+
+            // Going on: the arrow on the side the next page lies.
+            const int before = reader->display();
+            QTest::keyClick(window, manga ? Qt::Key_Left : Qt::Key_Right);
+            QTRY_COMPARE(reader->display(), before + 1);
+            QTRY_COMPARE(slid.count(), 1);
+            QCOMPARE(in->property("property").toString(), u"x"_s);
+            const qreal from = in->property("from").toReal();
+            QVERIFY2(manga ? from < 0 : from > 0, qPrintable(QString::number(from)));
+            QCOMPARE(in->property("to").toReal(), 0.0);
+            QCOMPARE(out->property("to").toReal(), -from);
+            // What leaves is the screen that was there.
+            QCOMPARE(ghost->property("first").toInt(), left);
+            QTRY_VERIFY(!slide->property("running").toBool());
+            QCOMPARE(shift->property("x").toReal(), 0.0);
+            QVERIFY(!ghost->isVisible());
+            QCOMPARE(pretend.heard.count(asked), 1);
+            // And the page turned to was fetched ahead once, and drawn from that.
+            const QByteArray arrived =
+                "GET /entries/e12/pages/" + QByteArray::number(reader->firstPage()) + "?";
+            QCOMPARE(pretend.heard.count(arrived), 1);
+
+            // Going back: the other side.
+            QTest::keyClick(window, manga ? Qt::Key_Right : Qt::Key_Left);
+            QTRY_COMPARE(reader->display(), before);
+            QTRY_COMPARE(slid.count(), 2);
+            const qreal back = in->property("from").toReal();
+            QVERIFY2(manga ? back > 0 : back < 0, qPrintable(QString::number(back)));
+            QTRY_VERIFY(!slide->property("running").toBool());
+            QCOMPARE(pretend.heard.count(asked), 1);
+        }
+    }
+
+    /// Turns made faster than they slide never queue: each ends the one running, and three
+    /// quick turns land on the third screen with nothing left moving.
+    void three_quick_turns_end_on_the_third_screen()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"LEFT_TO_RIGHT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QObject *slide = view->findChild<QObject *>(u"reader-turn"_s);
+        QObject *shift = view->findChild<QObject *>(u"reader-sheet-shift"_s);
+        QQuickItem *ghost = itemNamed(view, u"reader-ghost"_s);
+        QVERIFY(slide && shift && ghost);
+        const int before = reader->display();
+
+        for (int i = 0; i < 3; ++i)
+            QTest::keyClick(window, Qt::Key_Right);
+        QTRY_COMPARE(reader->display(), before + 3);
+        QTRY_VERIFY(!slide->property("running").toBool()
+                    && view->property("pending").toString().isEmpty());
+        QCOMPARE(shift->property("x").toReal(), 0.0);
+        QVERIFY(!ghost->isVisible());
+        QQuickItem *page = itemNamed(view, u"reader-page-%1"_s.arg(reader->firstPage()));
+        QVERIFY(page && page->isVisible());
+        const QPointF at = page->mapToScene(QPointF(0, 0));
+        QVERIFY(at.x() >= 0 && at.x() < view->width());
+    }
+
+    /// A jump — here the progress bar's — fades across and slides nothing.
+    void a_jump_fades_and_slides_nothing()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"LEFT_TO_RIGHT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        QObject *slide = view->findChild<QObject *>(u"reader-turn"_s);
+        QObject *fade = view->findChild<QObject *>(u"reader-fade"_s);
+        QQuickItem *sheet = itemNamed(view, u"reader-sheet"_s);
+        QVERIFY(slide && fade && sheet);
+        QSignalSpy slid(slide, SIGNAL(started()));
+        QSignalSpy faded(fade, SIGNAL(started()));
+
+        reader->goToPage(100);
+        QTRY_COMPARE(faded.count(), 1);
+        QTRY_VERIFY(!fade->property("running").toBool());
+        QCOMPARE(slid.count(), 0);
+        QCOMPARE(sheet->opacity(), 1.0);
+    }
+
+    /// « Sur cet appareil » names what each of its rows chooses, under « Pages » and
+    /// « Confort »: the owner's critique of 22/10/2026 was four anonymous rows of pills. The
+    /// names stand in one column with every row's pills starting at one edge; the pills are
+    /// words alone, the paper's three showing the paper; and on a card too narrow for both
+    /// side by side, each name goes above its pills.
+    void the_desk_rows_are_named_beside_their_pills_and_above_them_when_narrow()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"LEFT_TO_RIGHT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *theme = engine.singletonInstance<Theme *>(qmlTypeId("Leaf", 1, 0, "Theme"));
+        QVERIFY(theme);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const auto putBack = qScopeGuard([&] { window->resize(1100, 760); });
+        window->resize(1280, 900);
+        QTRY_COMPARE(view->width(), 1280.0);
+        QQuickItem *card = openTheSettings(window, view);
+        QVERIFY(card);
+
+        using Group = Words::ReaderDeskGroup;
+        using Row = Words::ReaderSetting;
+        QCOMPARE(textNamed(card, u"reader-pages-heading"_s), Words::readerDeskGroup(Group::Pages));
+        QCOMPARE(textNamed(card, u"reader-comfort-heading"_s),
+                 Words::readerDeskGroup(Group::Comfort));
+        const QList<std::pair<QString, Row>> rows = {{u"reader-layout"_s, Row::Layout},
+                                                      {u"reader-fit"_s, Row::Fit},
+                                                      {u"reader-backdrop"_s, Row::Backdrop},
+                                                      {u"reader-motion"_s, Row::Motion}};
+        for (const auto &[key, row] : rows)
+            QCOMPARE(textNamed(card, key + u"-name"_s), Words::readerSetting(row));
+        for (const QString &name : {u"reader-pages-heading"_s, u"reader-comfort-heading"_s,
+                                    u"reader-layout-name"_s, u"reader-fit-name"_s,
+                                    u"reader-backdrop-name"_s, u"reader-motion-name"_s}) {
+            QQuickItem *text = itemNamed(card, name);
+            QVERIFY2(text && text->isVisible() && text->width() > 0, qPrintable(name));
+        }
+
+        // Beside: each name left of its pills, and the pills of all four rows on one edge.
+        const auto pillsOf = [&](const QString &key) {
+            // The row's own `SettingsChoice`, and not the reader's paper of the same name.
+            return itemNamed(itemNamed(card, key + u"-row"_s), key);
+        };
+        QVERIFY(!card->property("stacked").toBool());
+        const qreal edge = placed(pillsOf(u"reader-layout"_s)).left();
+        for (const auto &[key, row] : rows) {
+            const QRectF name = placed(itemNamed(card, key + u"-name"_s));
+            const QRectF pills = placed(pillsOf(key));
+            QVERIFY2(name.right() <= pills.left(), qPrintable(key));
+            QVERIFY2(qAbs(pills.left() - edge) < 0.5, qPrintable(key));
+            QVERIFY2(name.top() < pills.bottom() && pills.top() < name.bottom(), qPrintable(key));
+        }
+
+        // Words alone: no picto in any of the twelve pills, and the paper's three show it.
+        const QStringList pills = {u"reader-layout-single"_s,   u"reader-layout-double"_s,
+                                   u"reader-layout-auto"_s,     u"reader-fit-height"_s,
+                                   u"reader-fit-width"_s,       u"reader-fit-original"_s,
+                                   u"reader-backdrop-black"_s,  u"reader-backdrop-grey"_s,
+                                   u"reader-backdrop-white"_s,  u"reader-motion-slide"_s,
+                                   u"reader-motion-fade"_s,     u"reader-motion-instant"_s};
+        for (const QString &name : pills) {
+            QQuickItem *pill = itemNamed(card, name);
+            QVERIFY2(pill && pill->isVisible(), qPrintable(name));
+            QVERIFY2(!pill->property("pictured").toBool(), qPrintable(name));
+            for (const QQuickItem *inside : pill->childItems())
+                QVERIFY2(!QString::fromUtf8(inside->metaObject()->className()).startsWith(u"Glyph")
+                             || !inside->isVisible(),
+                         qPrintable(name));
+        }
+        QCOMPARE(textNamed(card, u"reader-motion-instant-text"_s),
+                 Words::readerMotion(Preferences::Motion::Instant));
+        const QList<std::pair<QString, QColor>> papers = {
+            {u"reader-backdrop-black-swatch"_s, theme->readerBlack()},
+            {u"reader-backdrop-grey-swatch"_s, theme->readerGrey()},
+            {u"reader-backdrop-white-swatch"_s, theme->readerWhite()}};
+        for (const auto &[name, colour] : papers) {
+            QQuickItem *swatch = itemNamed(card, name);
+            QVERIFY2(swatch && swatch->isVisible(), qPrintable(name));
+            QCOMPARE(swatch->property("color").value<QColor>(), colour);
+        }
+        QVERIFY(!itemNamed(card, u"reader-fit-height-swatch"_s)->isVisible());
+
+        // Narrow: each name above its pills, both on the card's left edge. At 420 the three
+        // pills of a row still stand beside a name; at 360 they no longer do.
+        window->resize(420, 760);
+        QTRY_COMPARE(view->width(), 420.0);
+        QVERIFY(!card->property("stacked").toBool());
+        window->resize(360, 760);
+        QTRY_COMPARE(view->width(), 360.0);
+        QTRY_VERIFY(card->property("stacked").toBool());
+        for (const auto &[key, row] : rows) {
+            const QRectF name = placed(itemNamed(card, key + u"-name"_s));
+            const QRectF pills = placed(pillsOf(key));
+            QVERIFY2(name.bottom() <= pills.top(), qPrintable(key));
+            QVERIFY2(qAbs(name.left() - pills.left()) < 0.5, qPrintable(key));
+            QVERIFY2(pills.right() <= placed(card).right(), qPrintable(key));
+        }
+    }
+
+    /// The backdrop and the motion chosen on the card are this desk's: lit when the book is
+    /// opened again, and read back from the file by a later run. « Blanc » paints what is
+    /// behind the pages — sampled in the margin beside them — and not only a property.
+    void the_backdrop_and_the_motion_are_kept_when_the_book_is_opened_again()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"LEFT_TO_RIGHT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        const auto putBack = qScopeGuard([&] {
+            preferences->chooseBackdrop(Preferences::Backdrop::Black);
+            preferences->chooseMotion(Preferences::Motion::Slide);
+        });
+        preferences->chooseBackdrop(Preferences::Backdrop::Black);
+        preferences->chooseMotion(Preferences::Motion::Slide);
+        auto *theme = engine.singletonInstance<Theme *>(qmlTypeId("Leaf", 1, 0, "Theme"));
+        QVERIFY(theme);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const auto sampled = [window](const QPointF &point) {
+            const QImage rendered = window->grabWindow();
+            if (rendered.isNull())
+                return QColor();
+            const qreal xScale = rendered.width() / qreal(window->width());
+            const qreal yScale = rendered.height() / qreal(window->height());
+            return rendered.pixelColor(qRound(point.x() * xScale), qRound(point.y() * yScale));
+        };
+        // The margin beside the page, halfway down: nothing but the backdrop is drawn there.
+        const QPointF margin = view->mapToScene(QPointF(1, view->height() / 2.0));
+
+        // « Noir » is chosen for the pages, not for the application: black in the light theme
+        // too, where the reader's paper used to be cream.
+        const bool wasDark = theme->dark();
+        const auto themeBack = qScopeGuard([&] { theme->setDark(wasDark); });
+        theme->setDark(false);
+        QTRY_COMPARE(sampled(margin), theme->readerBlack());
+        QVERIFY2(sampled(margin).lightness() < 20, qPrintable(sampled(margin).name()));
+
+        QQuickItem *card = openTheSettings(window, view);
+        QVERIFY(card);
+        QVERIFY(aFrameDrawn(window));
+        // A short window scrolls the card's groups: a pill is brought into sight before it is
+        // aimed at, or the click lands on whatever is drawn where it would be.
+        const auto aimAt = [&](const QString &name) {
+            QQuickItem *pill = itemNamed(card, name);
+            auto *sheet = qobject_cast<QQuickItem *>(itemNamed(card, u"reader-settings-sheet"_s));
+            if (!pill || !sheet)
+                return QPoint(-1, -1);
+            auto *content = sheet->property("contentItem").value<QQuickItem *>();
+            const qreal top = pill->mapToItem(content, QPointF(0, 0)).y();
+            const qreal most =
+                std::max(0.0, sheet->property("contentHeight").toReal() - sheet->height());
+            sheet->setProperty("contentY", std::clamp(top - 10.0, 0.0, most));
+            (void)aFrameDrawn(window);
+            return centreOf(pill);
+        };
+        using B = Preferences::Backdrop;
+        using M = Preferences::Motion;
+        QCOMPARE(textNamed(card, u"reader-backdrop-black-text"_s), Words::readerBackdrop(B::Black));
+        QCOMPARE(textNamed(card, u"reader-backdrop-grey-text"_s),
+                 Words::readerBackdrop(B::Grey));
+        QCOMPARE(textNamed(card, u"reader-backdrop-white-text"_s), Words::readerBackdrop(B::White));
+        QCOMPARE(textNamed(card, u"reader-motion-slide-text"_s), Words::readerMotion(M::Slide));
+        QCOMPARE(textNamed(card, u"reader-motion-fade-text"_s), Words::readerMotion(M::Fade));
+        QCOMPARE(textNamed(card, u"reader-motion-instant-text"_s),
+                 Words::readerMotion(M::Instant));
+        QVERIFY(itemNamed(card, u"reader-backdrop-black"_s)->property("lit").toBool());
+        QVERIFY(itemNamed(card, u"reader-motion-slide"_s)->property("lit").toBool());
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          aimAt(u"reader-backdrop-white"_s));
+        QTRY_COMPARE(preferences->backdrop(), B::White);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          aimAt(u"reader-motion-instant"_s));
+        QTRY_COMPARE(preferences->motion(), M::Instant);
+        QQuickItem *backdrop = itemNamed(view, u"reader-backdrop"_s);
+        QVERIFY(backdrop);
+        QCOMPARE(backdrop->property("color").value<QColor>(), theme->readerWhite());
+
+        // Painted: the margin beside the page, with the card and the bars gone.
+        view->setProperty("settingsOpen", false);
+        QVERIFY(atRest(view));
+        QTRY_COMPARE(sampled(margin), theme->readerWhite());
+
+        // The book opened again finds both as they were left.
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        navigation->back();
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Series);
+        navigation->open(Navigation::Destination::Reader,
+                         {{u"series"_s, u"s1"_s}, {u"entry"_s, u"e12"_s}});
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        card = openTheSettings(window, view);
+        QVERIFY(card);
+        QVERIFY(itemNamed(card, u"reader-backdrop-white"_s)->property("lit").toBool());
+        QVERIFY(!itemNamed(card, u"reader-backdrop-black"_s)->property("lit").toBool());
+        QVERIFY(itemNamed(card, u"reader-motion-instant"_s)->property("lit").toBool());
+        QCOMPARE(itemNamed(view, u"reader-backdrop"_s)->property("color").value<QColor>(),
+                 theme->readerWhite());
+
+        // And a later run reads them from the file.
+        const Preferences later;
+        QCOMPARE(later.backdrop(), B::White);
+        QCOMPARE(later.motion(), M::Instant);
+    }
+
+    /// « Sans effet »: a turn puts the next page up with nothing running — no slide, no fade — and
+    /// still never on bare paper: until its images are there the new screen is hidden and the
+    /// old one stands.
+    void with_no_motion_a_turn_changes_the_page_and_moves_nothing()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"LEFT_TO_RIGHT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        const auto putBack =
+            qScopeGuard([&] { preferences->chooseMotion(Preferences::Motion::Slide); });
+        preferences->chooseMotion(Preferences::Motion::Instant);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QObject *slide = view->findChild<QObject *>(u"reader-turn"_s);
+        QObject *fade = view->findChild<QObject *>(u"reader-fade"_s);
+        QQuickItem *sheet = itemNamed(view, u"reader-sheet"_s);
+        QQuickItem *ghost = itemNamed(view, u"reader-ghost"_s);
+        QVERIFY(slide && fade && sheet && ghost);
+        QSignalSpy slid(slide, SIGNAL(started()));
+        QSignalSpy faded(fade, SIGNAL(started()));
+
+        const int before = reader->display();
+        QTest::keyClick(window, Qt::Key_Right);
+        QCOMPARE(reader->display(), before + 1);
+        // Shown only with its images: either they are there, or the screen is hidden.
+        QVERIFY(view->property("pagesReady").toBool() || sheet->opacity() == 0.0);
+        QTRY_VERIFY(view->property("pending").toString().isEmpty());
+        QCOMPARE(sheet->opacity(), 1.0);
+        QVERIFY(!ghost->isVisible());
+        QVERIFY(!slide->property("running").toBool());
+        QVERIFY(!fade->property("running").toBool());
+        QCOMPARE(slid.count(), 0);
+        QCOMPARE(faded.count(), 0);
+        QQuickItem *page = itemNamed(view, u"reader-page-%1"_s.arg(reader->firstPage()));
+        QVERIFY(page && page->isVisible() && page->property("loaded").toBool());
+
+        // A jump neither.
+        reader->goToPage(100);
+        QTRY_VERIFY(reader->firstPage() == 100 || reader->secondPage() == 100);
+        QTRY_VERIFY(view->property("pending").toString().isEmpty());
+        QCOMPARE(sheet->opacity(), 1.0);
+        QCOMPARE(slid.count(), 0);
+        QCOMPARE(faded.count(), 0);
+    }
+
+    /// « Fondu »: a turn fades across as a jump does, and slides nothing.
+    void with_the_fade_chosen_a_turn_fades()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"LEFT_TO_RIGHT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        const auto putBack =
+            qScopeGuard([&] { preferences->chooseMotion(Preferences::Motion::Slide); });
+        preferences->chooseMotion(Preferences::Motion::Fade);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QObject *slide = view->findChild<QObject *>(u"reader-turn"_s);
+        QObject *fade = view->findChild<QObject *>(u"reader-fade"_s);
+        QQuickItem *sheet = itemNamed(view, u"reader-sheet"_s);
+        QVERIFY(slide && fade && sheet);
+        QSignalSpy slid(slide, SIGNAL(started()));
+        QSignalSpy faded(fade, SIGNAL(started()));
+
+        const int before = reader->display();
+        QTest::keyClick(window, Qt::Key_Right);
+        QTRY_COMPARE(reader->display(), before + 1);
+        QTRY_COMPARE(faded.count(), 1);
+        QTRY_VERIFY(!fade->property("running").toBool());
+        QCOMPARE(slid.count(), 0);
+        QCOMPARE(sheet->opacity(), 1.0);
+    }
+
+    /// However a page is left — here from the progress bar — the one that comes is seen whole,
+    /// from its top (spec §09).
+    void a_turned_page_starts_whole()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        const auto single = onePageAtATime(engine);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *sheet = itemNamed(view, u"reader-sheet"_s);
+        QVERIFY(sheet);
+
+        QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QTRY_COMPARE(zoomOf(view), 2.0);
+        const qreal y = sheet->property("contentY").toReal();
+        QTest::keyClick(window, Qt::Key_Down);
+        QTRY_VERIFY(sheet->property("contentY").toReal() > y);
+
+        reader->goToPage(120);
+        QTRY_COMPARE(reader->firstPage(), 120);
+        QTRY_COMPARE(zoomOf(view), 1.0);
+        QTRY_COMPARE(sheet->property("contentY").toReal(), 0.0);
+        QTRY_COMPARE(sheet->property("contentX").toReal(), 0.0);
+        QCOMPARE(sheet->property("contentHeight").toReal(), sheet->height());
+    }
+
+    /// A double click zooms with the point it aimed at staying under the pointer, and a
+    /// second one gives the whole page back. Neither calls the bars, which a single click in
+    /// the middle does.
+    void a_double_click_zooms_where_it_points()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        // Narrow enough for a page at 200 % to run off both sides, which is where the point
+        // aimed at can be held under the pointer across as well as down.
+        const QSize sized = window->size();
+        const auto putBack = qScopeGuard([&] { window->resize(sized); });
+        window->resize(600, 760);
+        QQuickItem *sheet = itemNamed(view, u"reader-sheet"_s);
+        QVERIFY(sheet);
+        QTRY_VERIFY(sheet->width() < 600);
+        QVERIFY(aFrameDrawn(window));
+        const int before = reader->display();
+
+        // Off the middle on both axes, so that a zoom about the centre would move the point.
+        const QPointF aimed = view->mapToScene(QPointF(view->width() * 0.45,
+                                                       view->height() * 0.3));
+        QPointF was;
+        QQuickItem *page = nullptr;
+        // Once the pages are laid out: the row places them a frame after they are made.
+        QTRY_VERIFY((page = pageUnder(view, reader, aimed, was)));
+        // And once the narrower window has given the stage its narrower margin: a page whose
+        // height is fitted starts at the stage's top.
+        QTRY_COMPARE(page->mapToScene(QPointF()).y(), sheet->mapToScene(QPointF()).y());
+        QVERIFY(pageUnder(view, reader, aimed, was) == page);
+        QTest::mouseDClick(window, Qt::LeftButton, Qt::NoModifier, aimed.toPoint());
+        QTRY_COMPARE(zoomOf(view), 2.0);
+        const QPointF now = page->mapFromScene(aimed);
+        QVERIFY(sheet->property("contentWidth").toReal() > sheet->width());
+        QVERIFY(sheet->property("contentHeight").toReal() > sheet->height());
+        QVERIFY2(qAbs(now.x() - was.x()) < 1.5 && qAbs(now.y() - was.y()) < 1.5,
+                 qPrintable(u"aimed at %1,%2 of the page, and %3,%4 is under the pointer"_s
+                                .arg(was.x()).arg(was.y()).arg(now.x()).arg(now.y())));
+        QCOMPARE(reader->display(), before);
+        QObject *later = view->findChild<QObject *>(u"reader-bars-later"_s);
+        QVERIFY(later);
+        QVERIFY(!later->property("running").toBool());
+        QVERIFY(!view->property("barsShown").toBool());
+
+        QTest::mouseDClick(window, Qt::LeftButton, Qt::NoModifier, aimed.toPoint());
+        QTRY_COMPARE(zoomOf(view), 1.0);
+        QVERIFY(!later->property("running").toBool());
+        QVERIFY(!view->property("barsShown").toBool());
+        QCOMPARE(reader->display(), before);
+    }
+
+    /// The level reached is said in the bar at the foot of the page for a second, and then
+    /// nothing is (spec §09) — with a narrow space before the sign, which never breaks.
+    void the_zoom_level_is_said_in_the_bottom_bar_for_a_second()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *dock = itemNamed(view, u"reader-dock"_s);
+        QQuickItem *level = itemNamed(view, u"reader-zoom-level"_s);
+        QVERIFY(dock && level);
+        QVERIFY(!level->isVisible());
+
+        QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QElapsedTimer since;
+        since.start();
+        QTRY_VERIFY(level->isVisible());
+        QCOMPARE(level->property("text").toString(), u"200 %"_s);
+        QVERIFY(dock->isAncestorOf(level));
+        QTRY_VERIFY_WITH_TIMEOUT(!level->isVisible(), 5000);
+        QVERIFY2(since.elapsed() >= 900, qPrintable(QString::number(since.elapsed())));
+        QVERIFY(!view->property("barsShown").toBool());
+    }
+
+    /// Under the end card, the settings card or the volume's panel a zoom key does nothing to
+    /// the page: what is up is what the reader is looking at.
+    void a_zoom_key_under_a_card_leaves_the_page_alone()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+
+        // Escape after the key, and its effect awaited: keys are handled in the order they
+        // come, so once the card is gone the zoom key before it has been handled too.
+        QQuickItem *settings = openTheSettings(window, view);
+        QVERIFY(settings);
+        QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!settings->isVisible());
+        QCOMPARE(zoomOf(view), 1.0);
+
+        QQuickItem *panel = openTheVolumePanel(window, view);
+        QVERIFY(panel);
+        QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!panel->isVisible());
+        QCOMPARE(zoomOf(view), 1.0);
+
+        QQuickItem *card = raiseTheEndCard(window, view, reader);
+        QVERIFY(card);
+        QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!reader->atTheEnd());
+        QCOMPARE(zoomOf(view), 1.0);
+    }
+
+    /// Past the width it was fetched at, a zoomed page asks for its file as it is, once,
+    /// rather than drawing the screen's copy larger and blurred.
+    void a_page_zoomed_past_its_width_asks_for_its_file_whole()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const QByteArray whole = "GET /entries/e12/pages/"
+                                 + QByteArray::number(reader->firstPage()) + " HTTP";
+        QTRY_VERIFY(pretend.heard.contains("GET /entries/e12/pages/"
+                                           + QByteArray::number(reader->firstPage()) + "?width="));
+        QVERIFY(!pretend.heard.contains(whole));
+
+        for (int step = 0; step < 4; ++step)
+            QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QTRY_COMPARE(zoomOf(view), 4.0);
+        QTRY_VERIFY2(pretend.heard.contains(whole), whole.constData());
+    }
+
+    /// The zoom stays out of a strip: Ctrl and the wheel scroll a webtoon as the wheel alone
+    /// does, and nothing is enlarged.
+    void ctrl_and_the_wheel_still_scroll_a_webtoon()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *strip = nullptr;
+        QTRY_VERIFY((strip = itemNamed(view, u"reader-strip"_s)) && strip->isVisible());
+        QTRY_COMPARE(stripPageAt(strip, strip->property("contentY").toReal() + 1), 46);
+        const qreal top = strip->property("contentY").toReal();
+
+        wheel(window, across(view, 0.5), QPoint(0, -120), QPoint(0, 0),
+                          Qt::ControlModifier);
+        QTRY_VERIFY(strip->property("contentY").toReal() > top);
+        QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QTest::keyClick(window, Qt::Key_I);
+        QTRY_VERIFY(view->property("volumeOpen").toBool());
+        QCOMPARE(zoomOf(view), 1.0);
+    }
+
+    /// A double click on a third of a whole page is two turns and no zoom, deliberately:
+    /// telling it from a click would hold back every turn by click for the double-click
+    /// interval. Only the middle zooms.
+    void a_double_click_on_a_third_turns_two_pages_and_zooms_nothing()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const int before = reader->display();
+
+        QTest::mouseDClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.10));
+        QTRY_COMPARE(reader->display(), before + 2);
+        QCOMPARE(zoomOf(view), 1.0);
+        QObject *later = view->findChild<QObject *>(u"reader-bars-later"_s);
+        QVERIFY(later);
+        QVERIFY(!later->property("running").toBool());
+    }
+
+    /// In a manga the page read next is on the left: ← moves a zoomed page towards its left
+    /// edge, and at that edge turns forward, as the left third does.
+    void in_a_manga_the_left_edge_of_a_zoomed_page_turns_it_forward()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *sheet = itemNamed(view, u"reader-sheet"_s);
+        QVERIFY(sheet);
+        const int before = reader->display();
+
+        for (int step = 0; step < 3; ++step)
+            QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QTRY_COMPARE(zoomOf(view), 3.0);
+        const qreal x = sheet->property("contentX").toReal();
+        QTest::keyClick(window, Qt::Key_Left);
+        QTRY_VERIFY(sheet->property("contentX").toReal() < x);
+        QCOMPARE(reader->display(), before);
+        QVERIFY(pressedToTheEdge(window, view, Qt::Key_Left, "atXBeginning"));
+        QCOMPARE(reader->display(), before);
+        QTest::keyClick(window, Qt::Key_Left);
+        QTRY_COMPARE(reader->display(), before + 1);
+
+        // And → towards the right edge, which turns back, as the right third does.
+        for (int step = 0; step < 3; ++step)
+            QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QTRY_COMPARE(zoomOf(view), 3.0);
+        QVERIFY(!sheet->property("atXEnd").toBool());
+        QVERIFY(pressedToTheEdge(window, view, Qt::Key_Right, "atXEnd"));
+        QCOMPARE(reader->display(), before + 1);
+        QTest::keyClick(window, Qt::Key_Right);
+        QTRY_COMPARE(reader->display(), before);
+    }
+
+    /// Ctrl = zooms as Ctrl + does — the + needs Shift on many keyboards — and on a French
+    /// one the key of 0 sends À: Ctrl À gives the whole page back as Ctrl 0 does.
+    void ctrl_equals_zooms_and_ctrl_a_grave_gives_the_whole_page_back()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+
+        QTest::keyClick(window, Qt::Key_Equal, Qt::ControlModifier);
+        QTRY_COMPARE(zoomOf(view), 1.5);
+        QTest::keyClick(window, Qt::Key_Agrave, Qt::ControlModifier);
+        QTRY_COMPARE(zoomOf(view), 1.0);
+    }
+
+    /// F11 is the full screen every other application on the desk answers to, and the test
+    /// of 22/10/2026 pressed it first: it does what `f` does, both ways.
+    void f11_toggles_the_full_screen_as_f_does()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+
+        QTest::keyClick(window, Qt::Key_F11);
+        QTRY_COMPARE(window->visibility(), QWindow::FullScreen);
+        QTest::keyClick(window, Qt::Key_F11);
+        QTRY_VERIFY(window->visibility() != QWindow::FullScreen);
+    }
+
+    /// Backspace goes back a page, as the back button of the dock does — and from the first
+    /// page to the end of the volume before, the way that button learned to.
+    void backspace_turns_back_and_from_the_first_page_opens_the_volume_before()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.preceded = true;
+        extras.unopened = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+
+        reader->goToPage(10);
+        const int there = reader->display();
+        QVERIFY(there > 0);
+        QTest::keyClick(window, Qt::Key_Backspace);
+        QTRY_COMPARE(reader->display(), there - 1);
+
+        reader->goToPage(0);
+        QTRY_COMPARE(reader->display(), 0);
+        QTest::keyClick(window, Qt::Key_Backspace);
+        QTRY_COMPARE(reader->entryId(), u"e11"_s);
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 30);
+        QCOMPARE(reader->firstPage(), 29);
+    }
+
+    /// Alt ← is the way back in every browser and file manager: it leaves the reader for the
+    /// series, as the bar's arrow does, without peeling a layer at a time as Escape does.
+    void alt_left_leaves_the_reader_for_the_series()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        const int before = reader->display();
+
+        QTest::keyClick(view->window(), Qt::Key_Left, Qt::AltModifier);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Series);
+        QCOMPARE(reader->display(), before);
+    }
+
+    /// Ctrl W closes what is open, here the book, even with the volume's panel up over it.
+    void ctrl_w_closes_the_reader_whatever_is_open_over_the_page()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QTest::keyClick(window, Qt::Key_I);
+        QTRY_VERIFY(view->property("volumeOpen").toBool());
+
+        QTest::keyClick(window, Qt::Key_W, Qt::ControlModifier);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Series);
+    }
+
+    /// + and − alone zoom as Ctrl + and Ctrl − do, from the row of figures and from the
+    /// keypad alike; the keypad's with Ctrl too.
+    void plus_and_minus_alone_and_on_the_keypad_zoom_as_ctrl_does()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const int before = reader->display();
+
+        QTest::keyClick(window, Qt::Key_Plus);
+        QTRY_COMPARE(zoomOf(view), 1.5);
+        QTest::keyClick(window, Qt::Key_Minus);
+        QTRY_COMPARE(zoomOf(view), 1.0);
+        QTest::keyClick(window, Qt::Key_Plus, Qt::KeypadModifier);
+        QTRY_COMPARE(zoomOf(view), 1.5);
+        QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier | Qt::KeypadModifier);
+        QTRY_COMPARE(zoomOf(view), 2.0);
+        QTest::keyClick(window, Qt::Key_Minus, Qt::ControlModifier | Qt::KeypadModifier);
+        QTRY_COMPARE(zoomOf(view), 1.5);
+        QTest::keyClick(window, Qt::Key_Minus, Qt::KeypadModifier);
+        QTRY_COMPARE(zoomOf(view), 1.0);
+        QCOMPARE(reader->display(), before);
+    }
+
+    /// Ctrl ← and Ctrl → go to the ends of the book the way it lies: in a manga the last page
+    /// is on the left, so Ctrl ← goes there, as ← goes on.
+    void ctrl_arrows_go_to_the_ends_of_the_book_the_way_it_reads()
+    {
+        for (const QString &direction : {u"RIGHT_TO_LEFT"_s, u"LEFT_TO_RIGHT"_s}) {
+            Pretend pretend;
+            QVERIFY(pretend.listen(QHostAddress::LocalHost));
+            pretend.answerFor = [direction](const QByteArray &request) {
+                return aBookAnswers(request, direction);
+            };
+            qputenv("LEAF_ADDRESS",
+                    u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+            QQmlApplicationEngine engine;
+            Boot::run(engine, *qGuiApp, nowhere());
+            Reader *reader = nullptr;
+            QQuickItem *view = aReaderAtHand(engine, reader);
+            QVERIFY(view);
+            auto *window = view->window();
+            const bool manga = direction == u"RIGHT_TO_LEFT"_s;
+
+            reader->goToPage(40);
+            QTRY_VERIFY(reader->display() > 0);
+            QTest::keyClick(window, manga ? Qt::Key_Left : Qt::Key_Right, Qt::ControlModifier);
+            QTRY_COMPARE(reader->display(), reader->displayCount() - 1);
+            QVERIFY(!reader->atTheEnd());
+            QTest::keyClick(window, manga ? Qt::Key_Right : Qt::Key_Left, Qt::ControlModifier);
+            QTRY_COMPARE(reader->display(), 0);
+        }
+    }
+
+    /// The keys that were there keep working beside the new ones: Page Down and Page Up turn,
+    /// whole pages, both ways.
+    void page_down_and_page_up_still_turn()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const int before = reader->display();
+
+        QTest::keyClick(window, Qt::Key_PageDown);
+        QTRY_COMPARE(reader->display(), before + 1);
+        QTest::keyClick(window, Qt::Key_PageUp);
+        QTRY_COMPARE(reader->display(), before);
+    }
+
+    /// The card of the reader's keys opens from its button in the bar — lit while it is up —
+    /// and from `?` and F1; each closes what it opened.
+    void the_keyboard_button_question_mark_and_f1_open_the_shortcuts_card()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *card = itemNamed(view, u"reader-shortcuts"_s);
+        QVERIFY(card);
+        QVERIFY(!card->isVisible());
+
+        QQuickItem *button = barsCalled(window, view, u"reader-shortcuts-button"_s);
+        QVERIFY(button);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(button));
+        QTRY_VERIFY(card->isVisible());
+        QTRY_COMPARE(card->opacity(), 1.0);
+        QVERIFY(button->property("held").toBool());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(button));
+        QTRY_VERIFY(!card->isVisible());
+        QVERIFY(!button->property("held").toBool());
+
+        QTest::keyClick(window, Qt::Key_Question, Qt::ShiftModifier);
+        QTRY_VERIFY(card->isVisible());
+        QTest::keyClick(window, Qt::Key_Question, Qt::ShiftModifier);
+        QTRY_VERIFY(!card->isVisible());
+        QTest::keyClick(window, Qt::Key_F1);
+        QTRY_VERIFY(card->isVisible());
+        QTest::keyClick(window, Qt::Key_F1);
+        QTRY_VERIFY(!card->isVisible());
+    }
+
+    /// Escape puts the card away and nothing else; the cross does the same; the reader
+    /// stays open on the same page, and the keys of the page wait while the card is up.
+    void escape_and_the_cross_put_the_shortcuts_card_away_and_nothing_else()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *card = itemNamed(view, u"reader-shortcuts"_s);
+        QVERIFY(card);
+        const int before = reader->display();
+
+        QTest::keyClick(window, Qt::Key_F1);
+        QTRY_VERIFY(card->isVisible());
+        QTest::keyClick(window, Qt::Key_Left);
+        QTest::keyClick(window, Qt::Key_Space);
+        QVERIFY(aFrameDrawn(window));
+        QCOMPARE(reader->display(), before);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!card->isVisible());
+        QCOMPARE(navigation->destination(), Navigation::Destination::Reader);
+
+        QTest::keyClick(window, Qt::Key_F1);
+        QTRY_COMPARE(card->opacity(), 1.0);
+        QQuickItem *cross = itemNamed(card, u"reader-shortcuts-close"_s);
+        QVERIFY(cross);
+        QVERIFY(aFrameDrawn(window));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(cross));
+        QTRY_VERIFY(!card->isVisible());
+        QCOMPARE(reader->display(), before);
+        QCOMPARE(navigation->destination(), Navigation::Destination::Reader);
+    }
+
+    /// A click beside the card puts it away and turns nothing, even on a third of the page.
+    void a_click_beside_the_shortcuts_card_puts_it_away_and_turns_nothing()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *card = itemNamed(view, u"reader-shortcuts"_s);
+        QQuickItem *face = itemNamed(view, u"reader-shortcuts-card"_s);
+        QVERIFY(card && face);
+        const int before = reader->display();
+
+        QTest::keyClick(window, Qt::Key_F1);
+        QTRY_COMPARE(card->opacity(), 1.0);
+        QVERIFY(aFrameDrawn(window));
+        // On the card: it stays.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          face->mapToScene(QPointF(face->width() / 2.0, face->height() - 12))
+                              .toPoint());
+        QVERIFY(aFrameDrawn(window));
+        QVERIFY(view->property("shortcutsOpen").toBool());
+        // Beside it, low on the left third: it goes, and the page stays.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          view->mapToScene(QPointF(8, view->height() - 8)).toPoint());
+        QTRY_VERIFY(!card->isVisible());
+        QCOMPARE(reader->display(), before);
+    }
+
+    /// One thing hung over the book at a time: the card shuts the volume's panel and the
+    /// settings card, and either of them shuts it. Nothing opens it over the end card.
+    void the_shortcuts_card_is_never_up_with_the_panel_the_settings_or_the_end_card()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.followed = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const auto open = [view](const char *what) { return view->property(what).toBool(); };
+        // The bars up first: a click in the middle under the card is a click on the card.
+        QQuickItem *tune = barsCalled(window, view, u"reader-settings-button"_s);
+        QVERIFY(tune);
+
+        QTest::keyClick(window, Qt::Key_I);
+        QTRY_VERIFY(open("volumeOpen"));
+        QTest::keyClick(window, Qt::Key_F1);
+        QTRY_VERIFY(open("shortcutsOpen"));
+        QVERIFY(!open("volumeOpen"));
+
+        // The bar's buttons answer through the veil.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(tune));
+        QTRY_VERIFY(open("settingsOpen"));
+        QVERIFY(!open("shortcutsOpen"));
+        QTest::keyClick(window, Qt::Key_F1);
+        QTRY_VERIFY(open("shortcutsOpen"));
+        QVERIFY(!open("settingsOpen"));
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!open("shortcutsOpen"));
+
+        QVERIFY(raiseTheEndCard(window, view, reader));
+        QTest::keyClick(window, Qt::Key_F1);
+        QTest::keyClick(window, Qt::Key_Question, Qt::ShiftModifier);
+        QVERIFY(aFrameDrawn(window));
+        QVERIFY(!open("shortcutsOpen"));
+        QVERIFY(reader->atTheEnd());
+    }
+
+    /// Every word on the card is `Words`': the title, the four groups in their order, each
+    /// line, the keys — and the card is two columns in a wide window, one in a narrow one.
+    void the_shortcuts_card_says_what_words_says_in_two_columns_or_one()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const auto putBack = qScopeGuard([&] { window->resize(1100, 760); });
+        QQuickItem *card = itemNamed(view, u"reader-shortcuts"_s);
+        QVERIFY(card);
+        QTest::keyClick(window, Qt::Key_F1);
+        QTRY_COMPARE(card->opacity(), 1.0);
+
+        QCOMPARE(textNamed(card, u"reader-shortcuts-title"_s), Words::readerShortcuts());
+        QStringList said;
+        for (QQuickItem *one : itemsNamed(card, u"reader-shortcut-does"_s))
+            said << one->property("text").toString();
+        using enum Words::ShortcutDoes;
+        // A manga: ← goes on, and the arrows' lines say so.
+        QCOMPARE(said, (QStringList{
+                           Words::shortcutDoes(TurnByArrowRightToLeft),
+                           Words::shortcutDoes(TurnBySpace),
+                           Words::shortcutDoes(ToTheEndsRightToLeft), Words::shortcutDoes(BackAPage),
+                           Words::shortcutDoes(FullScreen), Words::shortcutDoes(VolumeInfo),
+                           Words::shortcutDoes(TheseShortcuts), Words::shortcutDoes(ZoomByKey),
+                           Words::shortcutDoes(BackToWhole), Words::shortcutDoes(ZoomByWheel),
+                           Words::shortcutDoes(ZoomWhereAimed), Words::shortcutDoes(Pinch),
+                           Words::shortcutDoes(CloseWhatIsOpen),
+                           Words::shortcutDoes(BackToSeries), Words::shortcutDoes(CloseReader)}));
+        QStringList keys;
+        for (QQuickItem *one : itemsNamed(card, u"keycap-text"_s)) {
+            if (one->isVisible())
+                keys << one->property("text").toString();
+        }
+        QVERIFY2(keys.contains(Words::keyName(Words::KeyName::Escape)), qPrintable(keys.join(u' ')));
+        QVERIFY(keys.contains(Words::keyName(Words::KeyName::Shift)));
+        QCOMPARE(keys.count(Words::keyName(Words::KeyName::Ctrl)), 5);
+
+        // Navigate and Display on the left, Zoom and Leave on the right, side by side.
+        QQuickItem *navigate = itemNamed(card, u"reader-shortcuts-navigate"_s);
+        QQuickItem *display = itemNamed(card, u"reader-shortcuts-display"_s);
+        QQuickItem *zoom = itemNamed(card, u"reader-shortcuts-zoom"_s);
+        QVERIFY(navigate && display && zoom);
+        const auto at = [](QQuickItem *item) { return item->mapToScene(QPointF(0, 0)); };
+        QVERIFY(at(display).y() > at(navigate).y());
+        QVERIFY(at(zoom).x() > at(navigate).x() + 200);
+        QCOMPARE(at(zoom).y(), at(navigate).y());
+
+        window->resize(560, 760);
+        QTRY_COMPARE(view->width(), 560.0);
+        QTRY_COMPARE(at(zoom).x(), at(navigate).x());
+        QVERIFY(at(zoom).y() > at(display).y());
+    }
+
+    /// The shortcuts card follows the window as the dock does, its keys and its lines with
+    /// it; see `aCardThatDoesNotFollow`. Below the wide band it is still one column.
+    void the_shortcuts_card_follows_the_window_as_the_dock_does()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const auto putBack = qScopeGuard([&] { window->resize(1100, 760); });
+
+        struct Line {
+            QString name;
+            int size;
+            int (*role)(int, qreal);
+        };
+        for (const Line &words : {Line{u"reader-shortcuts-title"_s, 28, Scale::titleFor},
+                                  Line{u"reader-shortcut-does"_s, 15, Scale::bodyFor},
+                                  Line{u"keycap-text"_s, 13, Scale::captionFor}}) {
+            const QString wrong =
+                aCardThatDoesNotFollow(view, u"reader-shortcuts-card"_s, words.name, 1080,
+                                       words.size, words.role, 0.9, 32);
+            QVERIFY2(wrong.isEmpty(), qPrintable(wrong));
+        }
+
+        // Two columns in the wide band however large, one below it however small.
+        QQuickItem *grid = itemNamed(view, u"reader-shortcuts-grid"_s);
+        QVERIFY(grid);
+        window->resize(1920, 1200);
+        QTRY_COMPARE(grid->property("columns").toInt(), 2);
+        window->resize(1099, 700);
+        QTRY_COMPARE(grid->property("columns").toInt(), 1);
+        window->resize(560, 700);
+        QTRY_COMPARE(view->width(), 560.0);
+        QCOMPARE(grid->property("columns").toInt(), 1);
+    }
+
+    /// The reader in each of `theWindows`, as the owner asked on 22/10/2026 after trying it
+    /// on a window of 1920: no text under its floor, nothing outside the window, and each
+    /// layout switching where it should — the keys' card to one column, the volume's cover
+    /// above its facts, the dock's chapter steps and the bar's keyboard gone in the narrow
+    /// band, and a card taller than the window scrolling inside it.
+    void the_reader_lays_itself_out_for_each_window()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.chapters = QJsonArray{
+            QJsonObject{{u"id"_s, u"c98"_s}, {u"label"_s, u"Chap.098"_s}, {u"number"_s, 98},
+                        {u"title"_s, u"Le temps des examens"_s}, {u"kind"_s, u"CHAPTER"_s},
+                        {u"entryId"_s, u"e12"_s}, {u"startPage"_s, 0}},
+            QJsonObject{{u"id"_s, u"c99"_s}, {u"label"_s, u"Chap.099"_s}, {u"number"_s, 99},
+                        {u"title"_s, u"Coup de sifflet"_s}, {u"kind"_s, u"CHAPTER"_s},
+                        {u"entryId"_s, u"e12"_s}, {u"startPage"_s, 30}},
+        };
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const auto putBack = qScopeGuard([&] { window->resize(1100, 760); });
+        QTRY_VERIFY(reader->chapters().size() == 2);
+        // The bars up for good, so that what they show is shown: the ones a volume opens with
+        // would leave after three seconds.
+        view->findChild<QObject *>(u"reader-welcome"_s)->setProperty("running", false);
+        view->setProperty("barsShown", true);
+        QQuickItem *keys = itemNamed(view, u"reader-shortcuts-card"_s);
+        QQuickItem *grid = itemNamed(view, u"reader-shortcuts-grid"_s);
+        QQuickItem *sheet = itemNamed(view, u"reader-shortcuts-sheet"_s);
+        QQuickItem *panel = itemNamed(view, u"reader-volume"_s);
+        QQuickItem *cover = itemNamed(view, u"reader-volume-cover"_s);
+        QQuickItem *facts = itemNamed(view, u"reader-volume-facts"_s);
+        QQuickItem *settings = itemNamed(view, u"reader-settings"_s);
+        QQuickItem *end = itemNamed(view, u"reader-end-card"_s);
+        QQuickItem *dock = itemNamed(view, u"reader-dock"_s);
+        QQuickItem *bar = itemNamed(view, u"reader-bar"_s);
+        QQuickItem *chapter = itemNamed(view, u"reader-chapter-forward"_s);
+        QQuickItem *keyboard = itemNamed(view, u"reader-shortcuts-button"_s);
+        QVERIFY(keys && grid && sheet && panel && cover && facts && settings && end && dock
+                && bar && chapter && keyboard);
+        QList<QQuickItem *> texts;
+        textsUnder(view, texts);
+        QVERIFY(texts.size() > 40);
+        // What is read rather than glanced at, which stops at 13.
+        const QStringList read = {u"reader-shortcut-does"_s, u"reader-volume-summary"_s,
+                                  u"reader-desk-note"_s, u"reader-trouble"_s,
+                                  u"reader-end-done"_s, u"reader-volume-series"_s};
+
+        for (const AWindow &at : theWindows) {
+            QVERIFY(laidOutFor(view, at));
+            const QString where = u"%1 × %2"_s.arg(at.width).arg(at.height);
+            const QRectF whole(0, 0, at.width, at.height);
+            for (QQuickItem *text : std::as_const(texts))
+                QVERIFY2(lettersOf(text) >= Scale::CaptionFloor,
+                         qPrintable(where + u": "_s + text->objectName()));
+            for (const QString &name : read)
+                QVERIFY2(lettersOf(itemNamed(view, name)) >= Scale::BodyFloor,
+                         qPrintable(where + u": "_s + name));
+            for (QQuickItem *card : {keys, panel, settings, end, dock, bar})
+                QVERIFY2(whole.contains(placed(card)),
+                         qPrintable(where + u": "_s + card->objectName()));
+
+            const bool narrow = at.width < 600;
+            QCOMPARE(grid->property("columns").toInt(), at.width >= 1100 ? 2 : 1);
+            // A card taller than the window stops at it, and its lines scroll.
+            const bool overflows = sheet->property("contentHeight").toReal() > sheet->height();
+            QCOMPARE(sheet->property("interactive").toBool(), overflows);
+            QVERIFY2(keys->height() <= at.height - 32, qPrintable(where));
+            if (at.height <= 600)
+                QVERIFY2(overflows, qPrintable(where));
+            // The cover above the facts when the card is too narrow for both side by side.
+            const bool stacked = at.width <= 900;
+            // Placed by the grid at the next frame, not as the window changes.
+            QTRY_COMPARE(placed(facts).top() >= placed(cover).bottom(), stacked);
+            // Measured against the card as drawn, slide included: it is closed, so slid aside.
+            QVERIFY(placed(facts).right()
+                    <= panel->mapRectToScene(panel->boundingRect()).right() + 0.5);
+            QCOMPARE(chapter->isVisible(), !narrow);
+            QCOMPARE(keyboard->isVisible(), !narrow);
+        }
+    }
+
+    /// The arrows' lines follow the book open: in the test of 22/10/2026 the card said
+    /// « Page précédente, suivante » over ← → in a manga, where ← goes on. A book read left to
+    /// right keeps the words the mockup approved.
+    void the_shortcuts_card_words_the_arrows_the_way_the_book_reads()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"LEFT_TO_RIGHT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        QTRY_VERIFY(!view->property("rightToLeft").toBool());
+        auto *window = view->window();
+        QQuickItem *card = itemNamed(view, u"reader-shortcuts"_s);
+        QVERIFY(card);
+        QTest::keyClick(window, Qt::Key_F1);
+        QTRY_COMPARE(card->opacity(), 1.0);
+
+        QStringList said;
+        for (QQuickItem *one : itemsNamed(card, u"reader-shortcut-does"_s))
+            said << one->property("text").toString();
+        QVERIFY(said.size() > 2);
+        using enum Words::ShortcutDoes;
+        QCOMPARE(said.at(0), Words::shortcutDoes(TurnByArrow));
+        QCOMPARE(said.at(2), Words::shortcutDoes(ToTheEnds));
+        QVERIFY(!said.contains(Words::shortcutDoes(ToTheEndsRightToLeft)));
+    }
+
+    /// At the width fit a page taller than the window is read down before it is turned: the
+    /// space bar and ↓ go down it and turn at its foot, in a book read left to right.
+    void at_the_width_fit_the_keys_read_down_a_tall_page_and_turn_at_its_foot()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"LEFT_TO_RIGHT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        const auto putBack = qScopeGuard([&] {
+            preferences->chooseFit(Preferences::Fit::Height);
+        });
+        preferences->chooseFit(Preferences::Fit::Width);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *sheet = itemNamed(view, u"reader-sheet"_s);
+        QVERIFY(sheet);
+        QTRY_VERIFY(sheet->property("contentHeight").toReal() > sheet->height());
+        QCOMPARE(zoomOf(view), 1.0);
+        const int before = reader->display();
+
+        QVERIFY(pressedToTheEdge(window, view, Qt::Key_Space, "atYEnd"));
+        QCOMPARE(reader->display(), before);
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_COMPARE(reader->display(), before + 1);
+        // The page that comes starts at its top.
+        QTRY_COMPARE(sheet->property("contentY").toReal(), 0.0);
+
+        QVERIFY(pressedToTheEdge(window, view, Qt::Key_Down, "atYEnd"));
+        QCOMPARE(reader->display(), before + 1);
+        QTest::keyClick(window, Qt::Key_Down);
+        QTRY_COMPARE(reader->display(), before + 2);
+    }
+
+    /// Going back from the top of a tall page lands at the foot of the one before, as reading
+    /// back up does — not at its top, a screen away from the lines just left.
+    void at_the_width_fit_a_turn_back_lands_at_the_foot_of_the_page_before()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"LEFT_TO_RIGHT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        const auto single = onePageAtATime(engine);
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        const auto putBack = qScopeGuard([&] {
+            preferences->chooseFit(Preferences::Fit::Height);
+        });
+        preferences->chooseFit(Preferences::Fit::Width);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *sheet = itemNamed(view, u"reader-sheet"_s);
+        QVERIFY(sheet);
+        QTRY_VERIFY(sheet->property("contentHeight").toReal() > sheet->height());
+        QTRY_VERIFY(sheet->property("atYBeginning").toBool());
+        const int before = reader->display();
+
+        QTest::keyClick(window, Qt::Key_Space, Qt::ShiftModifier);
+        QTRY_COMPARE(reader->display(), before - 1);
+        QTRY_VERIFY(sheet->property("contentHeight").toReal() > sheet->height());
+        QTRY_VERIFY(sheet->property("atYEnd").toBool());
+        QVERIFY(sheet->property("contentY").toReal() > 0);
+
+        // A jump back from elsewhere — the progress bar — is not reading back up: the page
+        // starts at its top.
+        reader->goToPage(20);
+        QTRY_COMPARE(reader->firstPage(), 20);
+        QTRY_COMPARE(sheet->property("contentY").toReal(), 0.0);
+    }
+
+    /// The wheel scrolls a tall page at the width fit and turns it at the foot — with a notch
+    /// of its own, never with the run of notches that reached the foot.
+    void at_the_width_fit_the_wheel_turns_at_the_foot_but_not_with_the_scroll_that_reached_it()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"LEFT_TO_RIGHT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        const auto putBack = qScopeGuard([&] {
+            preferences->chooseFit(Preferences::Fit::Height);
+        });
+        preferences->chooseFit(Preferences::Fit::Width);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *sheet = itemNamed(view, u"reader-sheet"_s);
+        QVERIFY(sheet);
+        QObject *rest = view->findChild<QObject *>(u"reader-wheel-rest"_s);
+        QVERIFY(rest);
+        QTRY_VERIFY(sheet->property("contentHeight").toReal() > sheet->height());
+        const int before = reader->display();
+        // The rest held for as long as the test needs it, so that no notch below depends
+        // on arriving within 300 ms of the last scroll.
+        rest->setProperty("interval", 3600000);
+
+        // Down to the foot, a notch at a time; each is handled before `wheelEvent` returns.
+        for (int notch = 0; notch < 100 && !sheet->property("atYEnd").toBool(); ++notch)
+            wheel(window, across(view, 0.5), QPoint(0, -120));
+        QVERIFY(sheet->property("atYEnd").toBool());
+        QCOMPARE(reader->display(), before);
+        QVERIFY(rest->property("running").toBool());
+        // The run goes on past the foot, fresh from the scroll: no turn.
+        for (int notch = 0; notch < 3; ++notch)
+            wheel(window, across(view, 0.5), QPoint(0, -120));
+        QCOMPARE(reader->display(), before);
+        // Turned by a key while the rest still runs: the page that comes has no rest to
+        // swallow its first notch, which would otherwise wait an hour here.
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_COMPARE(reader->display(), before + 1);
+        QVERIFY(!rest->property("running").toBool());
+    }
+
+    /// What a touchpad sends once the fingers are lifted, named as momentum, never turns a
+    /// page at its foot, however long after the scroll it comes. Sent only once the rest is
+    /// over, so the phase alone is what holds the page.
+    void at_the_width_fit_the_momentum_of_a_touchpad_never_turns_the_page()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"LEFT_TO_RIGHT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        const auto putBack = qScopeGuard([&] {
+            preferences->chooseFit(Preferences::Fit::Height);
+        });
+        preferences->chooseFit(Preferences::Fit::Width);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *sheet = itemNamed(view, u"reader-sheet"_s);
+        QVERIFY(sheet);
+        QObject *rest = view->findChild<QObject *>(u"reader-wheel-rest"_s);
+        QVERIFY(rest);
+        QTRY_VERIFY(sheet->property("contentHeight").toReal() > sheet->height());
+        const int before = reader->display();
+        for (int notch = 0; notch < 100 && !sheet->property("atYEnd").toBool(); ++notch)
+            wheel(window, across(view, 0.5), QPoint(0, -120));
+        QVERIFY(sheet->property("atYEnd").toBool());
+        QTRY_VERIFY(!rest->property("running").toBool());
+        for (int sliver = 0; sliver < 3; ++sliver)
+            wheel(window, across(view, 0.5), QPoint(0, -120), QPoint(0, 0),
+                              Qt::NoModifier, Qt::ScrollMomentum);
+        QCOMPARE(reader->display(), before);
+        QVERIFY(!rest->property("running").toBool());
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_COMPARE(reader->display(), before + 1);
+    }
+
+    /// What the files say is text wherever the reader shows it: the bar at the top, the line
+    /// under the progress bar and the bubble over it. Left to Qt's guess, « <b>x</b> & y »
+    /// came out bold and without its tags in the bar, where the panel beside it already
+    /// showed it as written.
+    void a_chapter_title_with_markup_is_shown_as_written_in_the_bars()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.chapters = QJsonArray{
+            QJsonObject{{u"id"_s, u"c99"_s}, {u"label"_s, u"Chap.099"_s}, {u"number"_s, 99},
+                        {u"title"_s, u"<b>x</b> & y"_s}, {u"kind"_s, u"CHAPTER"_s},
+                        {u"entryId"_s, u"e12"_s}, {u"startPage"_s, 0}},
+            QJsonObject{{u"id"_s, u"c100"_s}, {u"label"_s, u"Chap.100"_s}, {u"number"_s, 100},
+                        {u"title"_s, u"Ridicule"_s}, {u"kind"_s, u"CHAPTER"_s},
+                        {u"entryId"_s, u"e12"_s}, {u"startPage"_s, 150}}};
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        const auto single = onePageAtATime(engine);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QCOMPARE(reader->firstPage(), 46);
+
+        for (const QString &name : {u"reader-title"_s, u"reader-where"_s, u"reader-trouble"_s}) {
+            QQuickItem *one = itemNamed(view, name);
+            QVERIFY2(one, qPrintable(name));
+            QVERIFY2(one->property("textFormat").toInt() == int(Qt::PlainText),
+                     qPrintable(name));
+        }
+        QVERIFY(textNamed(view, u"reader-where"_s).contains(u"<b>x</b> & y"_s));
+        QObject *tip = view->findChild<QObject *>(u"reader-scrub-tip"_s);
+        QVERIFY(tip);
+        QCOMPARE(tip->property("textFormat").toInt(), int(Qt::PlainText));
+    }
+
+    /// The line under the progress bar (spec §02): the chapter being read, and where the
+    /// volume ends — its last chapter, then « fin du tome » — both as the files spell them.
+    void the_line_under_the_progress_bar_names_the_chapter_and_the_end()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.chapters = QJsonArray{
+            QJsonObject{{u"id"_s, u"c99"_s}, {u"label"_s, u"Chap.099"_s}, {u"number"_s, 99},
+                        {u"title"_s, u"<b>x</b> & y"_s}, {u"kind"_s, u"CHAPTER"_s},
+                        {u"entryId"_s, u"e12"_s}, {u"startPage"_s, 0}},
+            QJsonObject{{u"id"_s, u"c100"_s}, {u"label"_s, u"Chap.100"_s}, {u"number"_s, 100},
+                        {u"title"_s, u"Ridicule"_s}, {u"kind"_s, u"CHAPTER"_s},
+                        {u"entryId"_s, u"e12"_s}, {u"startPage"_s, 150}},
+            // Titled by its label, as the files of the owner's test of 22/10/2026 were.
+            QJsonObject{{u"id"_s, u"c13"_s}, {u"label"_s, u"#13"_s}, {u"number"_s, 101},
+                        {u"title"_s, u"#13"_s}, {u"kind"_s, u"CHAPTER"_s},
+                        {u"entryId"_s, u"e12"_s}, {u"startPage"_s, 170}}};
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        const auto single = onePageAtATime(engine);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QCOMPARE(reader->firstPage(), 46);
+
+        for (const QString &name : {u"reader-scrub-chapter"_s, u"reader-scrub-title"_s,
+                                    u"reader-scrub-end"_s}) {
+            QQuickItem *one = itemNamed(view, name);
+            QVERIFY2(one, qPrintable(name));
+            QVERIFY2(one->property("textFormat").toInt() == int(Qt::PlainText),
+                     qPrintable(name));
+        }
+        const QChar n = Words::Nbsp;
+        QCOMPARE(textNamed(view, u"reader-scrub-chapter"_s), u"Chap.099"_s);
+        QCOMPARE(textNamed(view, u"reader-scrub-title"_s), n + u": <b>x</b> & y"_s);
+        QCOMPARE(textNamed(view, u"reader-scrub-end"_s), u"#13"_s + n + u"· fin du tome"_s);
+        reader->goToPage(160);
+        QTRY_COMPARE(textNamed(view, u"reader-scrub-chapter"_s), u"Chap.100"_s);
+        QCOMPARE(textNamed(view, u"reader-scrub-title"_s), n + u": Ridicule"_s);
+
+        // A title that only repeats its label is said once, on the line and in the bubble the
+        // hand raises over the bar: both read « #13 · #13 » in the owner's test of 22/10/2026.
+        reader->goToPage(175);
+        QTRY_COMPARE(textNamed(view, u"reader-scrub-chapter"_s), u"#13"_s);
+        QCOMPARE(textNamed(view, u"reader-scrub-title"_s), QString());
+        QObject *scrub = view->findChild<QObject *>(u"reader-scrub"_s);
+        QVERIFY(scrub);
+        QObject *tip = view->findChild<QObject *>(u"reader-scrub-tip"_s);
+        QVERIFY(tip);
+        scrub->setProperty("held", 179);
+        QCOMPARE(tip->property("text").toString(), u"#13"_s + n + u"· page 180"_s);
+        scrub->setProperty("held", 159);
+        QCOMPARE(tip->property("text").toString(),
+                 u"Chap.100"_s + n + u": Ridicule"_s + n + u"· page 160"_s);
+        scrub->setProperty("held", -1);
+    }
+
+    /// The panel opened over the pages changes nothing under it and asks for nothing: the
+    /// same image, the same file, never not there.
+    void opening_the_panel_keeps_the_page_on_screen_and_asks_for_nothing()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const int first = reader->firstPage();
+        QQuickItem *picture = nullptr;
+        QTRY_VERIFY((picture = itemNamed(view, u"reader-page-image-%1"_s.arg(first)))
+                    && picture->property("status").toInt() == 1);
+        const QUrl source = picture->property("source").toUrl();
+        const QByteArray asked = "GET /entries/e12/pages/" + QByteArray::number(first) + "?";
+        const qsizetype before = pretend.heard.count(asked);
+        QCOMPARE(before, 1);
+        QQuickItem *stage = itemNamed(view, u"reader-stage"_s);
+        const qreal whole = stage->width();
+
+        QQuickItem *panel = itemNamed(view, u"reader-volume"_s);
+        QTest::keyClick(window, Qt::Key_I);
+        QTRY_COMPARE(panel->opacity(), 1.0);
+        QVERIFY(aFrameDrawn(window));
+        QCOMPARE(stage->width(), whole);
+        // The same item, the same file, never not there.
+        QCOMPARE(itemNamed(view, u"reader-page-image-%1"_s.arg(first)), picture);
+        QCOMPARE(picture->property("source").toUrl(), source);
+        QCOMPARE(picture->property("status").toInt(), 1);
+        QTest::keyClick(window, Qt::Key_I);
+        QTRY_VERIFY(!panel->isVisible());
+        QVERIFY(aFrameDrawn(window));
+        QCOMPARE(stage->width(), whole);
+        QCOMPARE(picture->property("source").toUrl(), source);
+        QCOMPARE(picture->property("status").toInt(), 1);
+        QCOMPARE(pretend.heard.count(asked), before);
+    }
+
+    /// A window made wider than the step asked at does ask again — the copy would be blurred
+    /// otherwise — and the page drawn so far stays on screen until the new copy is there.
+    void a_page_asked_again_wider_stays_on_screen_until_the_new_copy_comes()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const auto putBack = qScopeGuard([&] { window->resize(1100, 760); });
+        const int first = reader->firstPage();
+        QQuickItem *picture = nullptr;
+        QTRY_VERIFY((picture = itemNamed(view, u"reader-page-image-%1"_s.arg(first)))
+                    && picture->property("status").toInt() == 1);
+        const int narrow = reader->askedWidth();
+
+        // The copy at the new width held back by the server, as a slow one would.
+        pretend.holdBack = [](const QByteArray &request) {
+            return request.startsWith("GET /entries/e12/pages/") && request.contains("?width=");
+        };
+        window->resize(1700, 760);
+        QTRY_VERIFY(reader->askedWidth() > narrow);
+        QQuickItem *kept = itemNamed(view, u"reader-page-before-%1"_s.arg(first));
+        QVERIFY(kept);
+        QTRY_COMPARE(picture->property("status").toInt(), 2);
+        QVERIFY(kept->isVisible());
+        QCOMPARE(kept->property("status").toInt(), 1);
+        QVERIFY(itemNamed(view, u"reader-page-%1"_s.arg(first))->height() > 0);
+
+        pretend.holdBack = nullptr;
+        pretend.release();
+        QTRY_COMPARE(picture->property("status").toInt(), 1);
+        QVERIFY(!kept->isVisible());
+    }
+
+    /// The notch that raised the end card is not also the one that opens what follows. One
+    /// notch raised it and the next, a hand still rolling, opened the next volume under a
+    /// reader who had not seen the card; a touchpad's momentum did it on its own. Swallowed
+    /// while the card is fresh (`wheelRest`, started when it rises) and whenever the platform
+    /// names it momentum; a deliberate notch after that opens it, as a turn does.
+    void the_wheel_that_raised_the_card_does_not_also_open_what_follows()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.followed = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QObject *rest = view->findChild<QObject *>(u"reader-wheel-rest"_s);
+        QVERIFY(rest);
+        reader->goToPage(189);
+        QTRY_VERIFY(!reader->next().isEmpty());
+        QTRY_VERIFY(!rest->property("running").toBool());
+
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QVERIFY(reader->atTheEnd());
+        QVERIFY(rest->property("running").toBool());
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        wheel(window, across(view, 0.5), QPoint(0, -240));
+        QCOMPARE(reader->entryId(), u"e12"_s);
+        QVERIFY(reader->atTheEnd());
+
+        QTRY_VERIFY(!rest->property("running").toBool());
+        for (int sliver = 0; sliver < 3; ++sliver)
+            wheel(window, across(view, 0.5), QPoint(0, -120), QPoint(0, 0),
+                              Qt::NoModifier, Qt::ScrollMomentum);
+        QCOMPARE(reader->entryId(), u"e12"_s);
+
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_COMPARE(reader->entryId(), u"e13"_s);
+    }
+
+    /// At the foot of a webtoon the wheel goes on as the space bar does: the card, then what
+    /// follows. Scrolling it did nothing, since there was no strip left to scroll, and the
+    /// card was out of reach of the wheel.
+    void at_the_foot_of_a_webtoon_the_wheel_raises_the_card_then_opens_what_follows()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.followed = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *strip = nullptr;
+        QTRY_VERIFY((strip = itemNamed(view, u"reader-strip"_s)) && strip->isVisible());
+        QObject *rest = view->findChild<QObject *>(u"reader-wheel-rest"_s);
+        QVERIFY(rest);
+
+        QTest::keyClick(window, Qt::Key_End);
+        QTRY_VERIFY(strip->property("atYEnd").toBool());
+        QTRY_COMPARE(reader->firstPage(), 189);
+        QTRY_VERIFY(!reader->next().isEmpty());
+        QTRY_VERIFY(!rest->property("running").toBool());
+
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QVERIFY(reader->atTheEnd());
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QCOMPARE(reader->entryId(), u"e12"_s);
+        QTRY_VERIFY(!rest->property("running").toBool());
+        wheel(window, across(view, 0.5), QPoint(0, -120), QPoint(0, 0),
+                          Qt::NoModifier, Qt::ScrollMomentum);
+        QCOMPARE(reader->entryId(), u"e12"_s);
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_COMPARE(reader->entryId(), u"e13"_s);
+    }
+
+    /// The bars a click in the middle was about to call stay away when a page is turned
+    /// before they came: the turn is what sends them away, and they came anyway a moment
+    /// later, over the page the reader had just turned to.
+    void a_turn_right_after_a_click_in_the_middle_keeps_the_bars_away()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QObject *later = view->findChild<QObject *>(u"reader-bars-later"_s);
+        QVERIFY(later);
+        const int before = reader->display();
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.5));
+        QVERIFY(later->property("running").toBool());
+        QTest::keyClick(window, Qt::Key_Space);
+        QCOMPARE(reader->display(), before + 1);
+        QTRY_VERIFY(!later->property("running").toBool());
+        QVERIFY(aFrameDrawn(window));
+        QVERIFY(!view->property("barsShown").toBool());
+    }
+
+    /// Nothing opens over the end card: the card is the one decision on the screen, and the
+    /// volume's panel or the settings put beside it are a second one it hides.
+    void nothing_opens_over_the_end_card()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *card = raiseTheEndCard(window, view, reader);
+        QVERIFY(card);
+        QQuickItem *panel = itemNamed(view, u"reader-volume"_s);
+        QQuickItem *settings = itemNamed(view, u"reader-settings"_s);
+        QVERIFY(panel && settings);
+
+        QTest::keyClick(window, Qt::Key_I);
+        QVERIFY(aFrameDrawn(window));
+        QVERIFY(!view->property("volumeOpen").toBool());
+
+        // The bars over the card, called by a click on the veil beside it.
+        view->setProperty("barsShown", true);
+        QQuickItem *book = itemNamed(view, u"reader-volume-button"_s);
+        QQuickItem *tune = itemNamed(view, u"reader-settings-button"_s);
+        QTRY_VERIFY(book->isVisible() && book->opacity() > 0.99);
+        QVERIFY(aFrameDrawn(window));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(book));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(tune));
+        QVERIFY(aFrameDrawn(window));
+        QVERIFY(!view->property("volumeOpen").toBool());
+        QVERIFY(!view->property("settingsOpen").toBool());
+        QVERIFY(!panel->isVisible());
+        QVERIFY(!settings->isVisible());
+        QVERIFY(reader->atTheEnd());
+    }
+
+    /// The wheel over the settings card or the volume's panel is theirs: the page behind was
+    /// turned by a hand that was only scrolling a list of chapters.
+    void the_wheel_over_the_settings_or_the_panel_turns_nothing_behind()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const int before = reader->display();
+
+        QQuickItem *settings = openTheSettings(window, view);
+        QVERIFY(settings);
+        QVERIFY(aFrameDrawn(window));
+        for (int notch = 0; notch < 3; ++notch)
+            wheel(window, centreOf(settings), QPoint(0, -120));
+        QVERIFY(aFrameDrawn(window));
+        QCOMPARE(reader->display(), before);
+        QVERIFY(settings->isVisible());
+
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!settings->isVisible());
+        QQuickItem *panel = openTheVolumePanel(window, view);
+        QVERIFY(panel);
+        QVERIFY(aFrameDrawn(window));
+        for (int notch = 0; notch < 3; ++notch)
+            wheel(window, centreOf(panel), QPoint(0, -120));
+        QVERIFY(aFrameDrawn(window));
+        QCOMPARE(reader->display(), before);
+        QVERIFY(panel->isVisible());
+    }
+
+    /// A window closed less than a second after a page was turned waits for that page to be
+    /// written. The write was left to the reader's destructor, which runs once the event loop
+    /// has stopped: the request was queued and never left, and the page was lost — the
+    /// abrupt exit spec §08 is written against.
+    void closing_the_window_right_after_a_turn_waits_for_the_page_to_be_written()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        bool writtenWhenHidden = false;
+        connect(window, &QWindow::visibleChanged, this, [&](bool visible) {
+            if (!visible)
+                writtenWhenHidden = pretend.heard.contains("PATCH /entries/e12/progress ");
+        });
+
+        QTest::keyClick(window, Qt::Key_Space);
+        QVERIFY(!pretend.heard.contains("PATCH "));
+        window->close();
+        // Still there: the close waits for the write it just sent.
+        QVERIFY(window->isVisible());
+        QTRY_VERIFY(!window->isVisible());
+        QVERIFY(writtenWhenHidden);
+    }
+
+    /// A server that does not answer does not hold the window open: the wait has a ceiling.
+    void a_close_waiting_for_a_write_gives_up_after_a_moment()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        pretend.holdBack = [](const QByteArray &request) { return request.startsWith("PATCH "); };
+
+        QTest::keyClick(window, Qt::Key_Space);
+        window->close();
+        QVERIFY(window->isVisible());
+        QTRY_VERIFY_WITH_TIMEOUT(pretend.heard.contains("PATCH "), 1000);
+        QTRY_VERIFY_WITH_TIMEOUT(!window->isVisible(), 3000);
+        pretend.holdBack = nullptr;
+        pretend.release();
+    }
+
+    /// The tile of a book that is a whole book on its own opens the reader on it — the third
+    /// way in that spec §01 names — and every other tile its series page. It opened the
+    /// series page for both, a page of one volume to click again.
+    void a_book_on_its_own_opens_the_reader_from_its_tile()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        QJsonObject alone = aSeries(u"lco"_s, u"Le Combat ordinaire"_s, 1, true);
+        alone[u"oneShotEntry"_s] = u"lco-1"_s;
+        const QJsonObject death = aSeries(u"dn"_s, u"Death Note"_s, 12, true);
+        pretend.answerFor = [=](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /series?"))
+                return aReply(200, QByteArrayLiteral("application/json"),
+                              aPage({alone, death}));
+            if (request.startsWith("GET /filters"))
+                return aReply(200, QByteArrayLiteral("application/json"), someFilters());
+            return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(grid);
+        QTRY_COMPARE(grid->property("count").toInt(), 2);
+        QQuickItem *tile = nullptr;
+        QTRY_VERIFY((tile = itemNamed(grid, u"tile-lco"_s)) && tile->width() > 0);
+        QVERIFY(aFrameDrawn(window));
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(tile, u"cover-frame-lco"_s)));
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Reader);
+        QCOMPARE(navigation->parameters().value(u"series"_s).toString(), u"lco"_s);
+        QCOMPARE(navigation->parameters().value(u"entry"_s).toString(), u"lco-1"_s);
+
+        navigation->back();
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Shelf);
+        QQuickItem *other = nullptr;
+        QTRY_VERIFY((other = itemNamed(grid, u"tile-dn"_s)) && other->isVisible());
+        QVERIFY(aFrameDrawn(window));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(other, u"cover-frame-dn"_s)));
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Series);
+        QCOMPARE(navigation->parameters().value(u"series"_s).toString(), u"dn"_s);
+    }
+
     void theme_resolves_and_follows_the_desktop_palette()
     {
         const RestoresThePalette restoreOnExit;
@@ -3618,5 +8587,68 @@ private slots:
     }
 };
 
-QTEST_MAIN(CrossesTheSeam)
+namespace {
+/// Puts this process on a display of its own before any Qt object exists, or refuses to run.
+///
+/// Twice on 22/10/2026 this test drew windows on the desktop of the person who ran it. First a
+/// bare `ctest` connected to the desktop's own X display and covered their work with empty
+/// blue « Leaf » windows; then, with registration fixed, a direct run of the binary did it
+/// again, and so did `xvfb-run -a build/crosses-the-seam` without `QT_QPA_PLATFORM=xcb`:
+/// `WAYLAND_DISPLAY` is set in a GNOME session, so Qt chose the Wayland platform and ignored
+/// Xvfb altogether. The test also moves the cursor and takes window activation, which are the
+/// display server's and not the test's. A registration in CMake protects `ctest` and nothing
+/// else, so the protection lives here, in the one place every way of starting the binary goes
+/// through.
+///
+/// Without the marker the binary re-executes itself under `xvfb-run -a` with the platform
+/// forced to xcb and the Wayland socket removed; with it, it is that re-executed process and
+/// runs the tests. A missing `xvfb-run` is a failure naming the package, never a fall-back to
+/// the real display. `execv` replaces the process, so the exit code is the test's own.
+constexpr const char *ownDisplay = "LEAF_SEAM_OWN_DISPLAY";
+
+void useXcbOnly()
+{
+    qputenv("QT_QPA_PLATFORM", "xcb");
+    qunsetenv("WAYLAND_DISPLAY");
+}
+
+/// Returns only when it could not re-execute; the caller then exits non-zero.
+int reexecuteOnItsOwnDisplay(int argc, char *argv[])
+{
+    const QString xvfb = QStandardPaths::findExecutable(u"xvfb-run"_s);
+    if (xvfb.isEmpty()) {
+        fprintf(stderr, "crosses-the-seam needs xvfb-run (package xvfb) to run on a display of "
+                        "its own, and will not use the real one\n");
+        return 1;
+    }
+    qputenv(ownDisplay, "1");
+    useXcbOnly();
+    const QByteArray tool = QFile::encodeName(xvfb);
+    std::vector<char *> args;
+    args.push_back(const_cast<char *>(tool.constData()));
+    args.push_back(const_cast<char *>("-a"));
+    for (int i = 0; i < argc; ++i)
+        args.push_back(argv[i]);
+    args.push_back(nullptr);
+    execv(tool.constData(), args.data());
+    fprintf(stderr, "crosses-the-seam could not start xvfb-run: %s\n", strerror(errno));
+    return 1;
+}
+} // namespace
+
+int main(int argc, char *argv[])
+{
+    if (!qEnvironmentVariableIsSet(ownDisplay))
+        return reexecuteOnItsOwnDisplay(argc, argv);
+    // Defensive: whoever sets the marker by hand still never reaches the real display.
+    useXcbOnly();
+
+    // What QTEST_MAIN expands to for a Gui-only target, written out so that nothing runs
+    // before the check above.
+    QGuiApplication app(argc, argv);
+    app.setAttribute(Qt::AA_Use96Dpi, true);
+    CrossesTheSeam tc;
+    QTest::setMainSourcePath(__FILE__);
+    return QTest::qExec(&tc, argc, argv);
+}
 #include "crosses_the_seam.moc"

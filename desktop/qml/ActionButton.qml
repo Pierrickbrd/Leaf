@@ -43,10 +43,20 @@ Rectangle {
     /// not a second component.
     property bool danger: false
 
+    /// Whether it follows the window (`Widths.scale`): only over the reader's pages yet, where
+    /// a pill of its drawn size under a title that had grown read as a button from another
+    /// card (owner's test of 22/10/2026).
+    property bool scaled: false
+
+    function sized(drawn: real): int {
+        return pill.scaled ? Widths.scale.size(drawn) : drawn
+    }
+
     readonly property bool hovered: pointer.hovered
 
-    height: 32
-    width: compact ? height : 14 + glyphs.width + 8 + word.implicitWidth + 14
+    height: pill.sized(32)
+    width: compact ? height
+                   : pill.sized(36) + glyphs.width + word.implicitWidth
     radius: height / 2
     color: !ready ? Theme.onPaper : (danger ? Theme.alert : Theme.emerald)
     opacity: ready ? 1.0 : 0.7
@@ -101,7 +111,7 @@ Rectangle {
         objectName: pill.objectName + "-glyph"
         width: childrenRect.width
         height: childrenRect.height
-        x: pill.compact ? Math.round((pill.width - width) / 2) : 14
+        x: pill.compact ? Math.round((pill.width - width) / 2) : pill.sized(14)
         anchors.verticalCenter: parent.verticalCenter
     }
 
@@ -110,14 +120,14 @@ Rectangle {
 
         objectName: pill.objectName + "-text"
         anchors.left: glyphs.right
-        anchors.leftMargin: 8
+        anchors.leftMargin: pill.sized(8)
         anchors.verticalCenter: parent.verticalCenter
         text: pill.label
         // The word of a button that cannot fire is faint, not the dark that sits on emerald:
         // on the sunk hollow of a disabled pill that dark was one shade off invisible.
         color: pill.ready ? Theme.onEmerald : Theme.inkFaint
         font.family: Theme.textFamily
-        font.pixelSize: 14
+        font.pixelSize: pill.scaled ? Widths.scale.body(14) : 14
         font.weight: Font.Medium
         visible: !pill.compact
     }

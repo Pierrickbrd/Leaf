@@ -44,7 +44,7 @@ private slots:
                   u"preferences"_s).clear();
         m_preferences = new Preferences;
         m_awake = false;
-        // Sixty milliseconds where the application leaves a success up for five seconds: the
+        // Sixty milliseconds where the application leaves a bubble up for ten seconds: the
         // lifetime is given rather than fixed, so this settles what it does and not how long
         // a test is willing to sit there.
         m_bubbles = new Toasts(m_preferences, [this] { return m_awake; }, 60);
@@ -77,19 +77,31 @@ private slots:
         QCOMPARE(at(0, "label"), u"Réessayer"_s);
     }
 
-    /// Five seconds for what succeeded, and until the click for what failed. A failure that
-    /// fades on its own is a failure nobody read.
-    void a_success_goes_by_itself_and_a_failure_waits_to_be_read()
+    /// Every bubble goes by itself, a failure as well as a success, and none goes while the
+    /// pointer is on it. A failure used to stay until it was clicked; tried by hand on
+    /// 22/10/2026, a refusal long out of date still covered the page being read.
+    void every_bubble_goes_by_itself_but_not_while_it_is_being_read()
     {
         m_bubbles->scanFinished(u"21 séries"_s);
         m_bubbles->scanFailed(u"le disque ne répond pas"_s);
         QCOMPARE(m_bubbles->count(), 2);
+        m_bubbles->hold(1, true);
 
         QTRY_COMPARE_WITH_TIMEOUT(m_bubbles->count(), 1, 3000);
-        // The one still there is the failure, and it stays there.
+        // The one still there is the one under the pointer, and it stays there.
         QCOMPARE(at(0, "headline"), Words::scanStopped());
         QTest::qWait(200);
         QCOMPARE(m_bubbles->count(), 1);
+
+        // The pointer gone, its time goes on, and so does it.
+        m_bubbles->hold(0, false);
+        QTRY_COMPARE_WITH_TIMEOUT(m_bubbles->count(), 0, 3000);
+    }
+
+    /// One duration, the same for both tones: ten seconds.
+    void a_bubble_is_left_up_ten_seconds()
+    {
+        QCOMPARE(Toasts::Lifetime, 10000);
     }
 
     /// Three at a time, and past that a count. Forty volumes that fail do not make forty
@@ -183,6 +195,41 @@ private slots:
 
         QCOMPARE(reached.size(), 0);
         QCOMPARE(m_bubbles->count(), 1);
+    }
+
+    /// The ISBN copied from the volume's panel answers the click that copied it, whatever the
+    /// families say, and never on the desktop: the click was made in this window.
+    void a_copied_isbn_is_said_in_the_window_and_only_there()
+    {
+        using enum Preferences::Warns;
+        for (const auto family : {Imports, Scans, Downloads, Failures}) {
+            m_preferences->showBubble(family, false);
+            m_preferences->reachTheDesktop(family, true);
+        }
+        QSignalSpy reached(m_bubbles, &Toasts::escalated);
+        m_bubbles->isbnCopied(u"9782505065333"_s);
+
+        QCOMPARE(m_bubbles->count(), 1);
+        QCOMPARE(at(0, "headline"), u"ISBN copié"_s);
+        QCOMPARE(at(0, "detail"), u"9782505065333"_s);
+        QVERIFY(at(0, "label").isEmpty());
+        QCOMPARE(reached.size(), 0);
+    }
+
+    /// Qt without its WebP plugin draws no cover and no page, each failing on its own
+    /// (22/10/2026). The startup names the package once — and says nothing when it is there.
+    void a_qt_that_cannot_read_webp_names_the_package_once()
+    {
+        m_bubbles->readsImages({"gif", "ico", "jpeg", "jpg", "png", "svg", "webp"});
+        QCOMPARE(m_bubbles->count(), 0);
+
+        m_bubbles->readsImages({"gif", "ico", "jpeg", "jpg", "png", "svg"});
+        m_bubbles->readsImages({"gif", "ico", "jpeg", "jpg", "png", "svg"});
+        QCOMPARE(m_bubbles->count(), 1);
+        QCOMPARE(at(0, "headline"), u"Il manque le module d’images WebP de Qt"_s);
+        QCOMPARE(at(0, "detail"),
+                 u"Installez qt6-image-formats-plugins pour voir les couvertures et les pages."_s);
+        QVERIFY(at(0, "label").isEmpty());
     }
 
     /// A refusal with nothing said about it is still a refusal: the headline carries the

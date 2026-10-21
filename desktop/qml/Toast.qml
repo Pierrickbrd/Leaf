@@ -6,8 +6,8 @@
 // distance a bubble is read from.
 //
 // The cross is not one more action. It is the way out, and the two are not counted together:
-// without it « click to close » would be an instruction nobody can see, and a failure stays
-// up until exactly that click.
+// without it « click to close » would be an instruction nobody can see. Every bubble goes by
+// itself after ten seconds, and its time stops while the pointer is on it (`Toasts.hold`).
 
 import QtQuick
 import Leaf
@@ -26,6 +26,8 @@ Rectangle {
 
     signal acted()
     signal dismissed()
+    /// The pointer came onto the bubble, or left it.
+    signal held(bool on)
 
     objectName: "toast-" + index
     width: 420
@@ -42,6 +44,11 @@ Rectangle {
     Accessible.description: bubble.detail
 
     CardLift { level: CardLift.Bubble }
+
+    // Being read is not being ignored: the ten seconds wait while the pointer is here.
+    HoverHandler {
+        onHoveredChanged: bubble.held(hovered)
+    }
 
     Glyph {
         id: mark

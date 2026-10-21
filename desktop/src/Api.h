@@ -289,6 +289,45 @@ struct Entry {
     QString file;
     qint64 size = 0;
     std::optional<double> sortKey;
+    /// What the side panel of a volume shows. Absent, never empty: most files carry none.
+    std::optional<QString> isbn;
+    /// The contract's date as it came (« 2011-03-04 »), left to the screen to word.
+    std::optional<QString> publishedOn;
+    std::optional<QString> summary;
+};
+
+/// One page of a book, as the reader needs to lay it out. Not `Page`, which is a page of the
+/// shelf; the contract calls both « Page » and only one of them can keep the word here.
+///
+/// Sizes are optional because an archive may not have been measured: a page of width 0 would
+/// be fitted to nothing, and unknown has to stay unknown.
+struct PageInfo {
+    int number = 0;
+    QString name;
+    QString mediaType;
+    std::optional<int> width;
+    std::optional<int> height;
+    std::optional<qint64> size;
+    /// Two pages side by side. Fitted to the screen's width each half would come out at half
+    /// the resolution of a single page, so the reader has to be told.
+    bool spread = false;
+};
+
+/// A marker inside a volume, or the chapter of a file that arrived alone.
+///
+/// `startPage` is absent for most of them (ComicInfo has no such field; 3 008 chapters of
+/// one library have none) and absent means « I do not know », never the first page.
+struct Chapter {
+    enum class Kind { Chapter, Bonus };
+
+    QString id;
+    /// What to show. The server settled the wording; the client does not rebuild it.
+    QString label;
+    std::optional<double> number;
+    std::optional<QString> title;
+    Kind kind = Kind::Chapter;
+    std::optional<int> startPage;
+    QString entryId;
 };
 
 /// A stretch of the story, and not a property of a volume.
@@ -355,10 +394,10 @@ struct Universe {
 /// A card of the resume band. `reason` separates "you are inside this one" from "you finished
 /// the last one and here is the next": the band words them differently.
 ///
-/// The band reads "Tome 12 · Page 47/190 · Chapitre 98", and every one of those three comes
-/// from a different place — the entry, the progress, and the chapter the page falls in. The
-/// chapter's wording is `label`, which the server has already settled: it knows the markers,
-/// and a client inventing "Chapitre" from a number would disagree with the reader screen.
+/// The band reads "Tome 12 · Page 47/190 · Chap. 98 : Titre", and every one of those three
+/// comes from a different place — the entry, the progress, and the chapter the page falls in.
+/// The chapter's wording is `label`, which the server has already settled: it knows the
+/// markers, and a client inventing "Chapitre" from a number would disagree with the reader.
 struct UpNext {
     enum class Reason { InProgress, NextUp };
     enum class Kind { Volume, Chapter };
@@ -374,6 +413,9 @@ struct UpNext {
     /// Absent when nothing is started — which is exactly `reason == NextUp`.
     std::optional<int> page;
     std::optional<QString> chapterLabel;
+    /// Beside the label, so the band names a chapter as the reader does: « Chap. 13 : Le
+    /// réveil », not the label alone.
+    std::optional<QString> chapterTitle;
 
     Reason reason = Reason::NextUp;
 };
@@ -722,6 +764,8 @@ Read<Health> health(const QJsonObject &from);
 Read<ScanStatus> scanStatus(const QJsonObject &from);
 Read<UpNext> upNext(const QJsonObject &from);
 Read<Entry> entry(const QJsonObject &from);
+Read<PageInfo> pageInfo(const QJsonObject &from);
+Read<Chapter> chapter(const QJsonObject &from);
 Read<Progress> progress(const QJsonObject &from);
 Read<Arc> arc(const QJsonObject &from);
 Read<ReadingStep> readingStep(const QJsonObject &from);
@@ -760,5 +804,7 @@ Hit::Kind hitKind(const QString &word);
 QString spell(Hit::Kind value);
 std::optional<ReadStatus> readStatus(const QString &word);
 QString spell(ReadStatus value);
+/// What the reader sends back when it chooses a direction for a series.
+QString spell(ReadingDirection value);
 
 } // namespace Api

@@ -34,12 +34,13 @@ private:
         return QFileInfo(Settings::configurationFile()).absolutePath();
     }
 
-    /// A configuration file, with the permissions asked for.
+    /// A configuration file, with the permissions asked for — where the installer writes it
+    /// unless another place is named.
     static void writeConfiguration(const QString &address, const QString &key,
-                                   QFileDevice::Permissions permissions)
+                                   QFileDevice::Permissions permissions,
+                                   const QString &path = Settings::configurationFile())
     {
-        QDir().mkpath(folder());
-        const QString path = Settings::configurationFile();
+        QDir().mkpath(QFileInfo(path).absolutePath());
         QFile::remove(path);
         {
             QSettings file(path, QSettings::IniFormat);
@@ -146,6 +147,7 @@ private slots:
     {
         QStandardPaths::setTestModeEnabled(true);
         QDir(folder()).removeRecursively();
+        QDir(QFileInfo(Settings::formerConfigurationFile()).absolutePath()).removeRecursively();
         qunsetenv("LEAF_ADDRESS");
         qunsetenv("LEAF_KEY");
 
@@ -464,6 +466,52 @@ private slots:
         QCOMPARE(settings.key(), QStringLiteral("8f3a92c1d4e5b6a7"));
         QCOMPARE(settings.storageLabel(), Words::keyStorage(Words::KeyFrom::ProtectedFile));
         QVERIFY(settings.configured());
+    }
+
+    /// A configuration left in the old place by a client that wrote there is still read,
+    /// rather than lost on the update.
+    void the_former_place_is_still_read_when_nothing_is_where_the_installer_writes()
+    {
+        QVERIFY(Settings::formerConfigurationFile() != Settings::configurationFile());
+        writeConfiguration(QStringLiteral("https://former:8081"), QStringLiteral("former-key"),
+                           QFileDevice::ReadOwner | QFileDevice::WriteOwner,
+                           Settings::formerConfigurationFile());
+        Settings settings;
+        waitFor(settings);
+
+        QCOMPARE(settings.address(), QStringLiteral("https://former:8081"));
+        QCOMPARE(settings.key(), QStringLiteral("former-key"));
+    }
+
+    void the_installers_file_wins_over_the_former_place()
+    {
+        writeConfiguration(QStringLiteral("https://former:8081"), QStringLiteral("former-key"),
+                           QFileDevice::ReadOwner | QFileDevice::WriteOwner,
+                           Settings::formerConfigurationFile());
+        writeConfiguration(QStringLiteral("https://installed:8081"),
+                           QStringLiteral("installed-key"),
+                           QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+        Settings settings;
+        waitFor(settings);
+
+        QCOMPARE(settings.address(), QStringLiteral("https://installed:8081"));
+        QCOMPARE(settings.key(), QStringLiteral("installed-key"));
+    }
+
+    /// The fallback is refused on the same terms: a key anybody can read has already left,
+    /// whichever folder it sits in.
+    void a_former_file_anybody_can_read_is_not_read_either()
+    {
+        writeConfiguration(QStringLiteral("https://former:8081"), QStringLiteral("former-key"),
+                           QFileDevice::ReadOwner | QFileDevice::WriteOwner
+                               | QFileDevice::ReadOther,
+                           Settings::formerConfigurationFile());
+        Settings settings;
+        QSignalSpy said(&settings, &Settings::trouble);
+        waitFor(settings);
+
+        QVERIFY(settings.key().isEmpty());
+        QCOMPARE(said.count(), 1);
     }
 
     void a_file_anybody_can_read_is_not_read_at_all()

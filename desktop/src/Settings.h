@@ -21,7 +21,8 @@
 //      which case it wins over the keyring, whose entry can only be older. Written
 //      readable by its owner alone, and **refused when anybody but its owner can read it**.
 //      The server refuses to start open on the network without a key; this is the same rule
-//      from the other end.
+//      from the other end. `~/.config/Leaf/Leaf/leaf.conf`, where the client used to look,
+//      is still read when nothing is where the installer writes.
 
 #include <QDateTime>
 #include <QObject>
@@ -109,8 +110,13 @@ public:
     /// and the date. Refused under the environment.
     void forget();
 
-    /// Where the configuration file lives.
+    /// Where the configuration file lives: `~/.config/Leaf/leaf.conf`, where `install.sh`
+    /// writes it.
     static QString configurationFile();
+
+    /// Where it used to be read: `~/.config/Leaf/Leaf/leaf.conf`, the application's own
+    /// folder under an organisation also called Leaf. Still read when the first is absent.
+    static QString formerConfigurationFile();
 
     /// Makes every keyring write fail, for the one test that has to see the fallback on a
     /// machine whose keyring accepts everything. Nothing else calls it, and it does nothing

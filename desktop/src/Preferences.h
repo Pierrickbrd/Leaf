@@ -12,10 +12,13 @@
 // written apart: `leaf.conf` is the deployment's file, refused when anybody but its owner
 // can read it, and a preference has no reason to sit in a file with that rule on it.
 
+#include "Spreads.h"
+
 #include <QHash>
 #include <QObject>
 #include <QQmlEngine>
 #include <QSettings>
+#include <QSizeF>
 #include <QUrl>
 #include <QString>
 #include <QVariantList>
@@ -69,6 +72,17 @@ class Preferences : public QObject
     Q_PROPERTY(QString cornerLabel READ cornerLabel NOTIFY changed)
     Q_PROPERTY(bool anythingBubbles READ anythingBubbles NOTIFY changed)
 
+    /// How the reader lays pages out and what it fits them to, kept per device like the rest:
+    /// a window and a screen are this machine's, not the library's.
+    Q_PROPERTY(PageLayout pageLayout READ pageLayout NOTIFY changed)
+    Q_PROPERTY(Fit fit READ fit NOTIFY changed)
+    /// What is behind the pages, and how a page that comes takes the place of the one that
+    /// goes. The owner's choice of 22/10/2026: a dark paper tires some eyes in a lit room, and
+    /// a slide on every page is too much for some readers, so both are a reader's to say, on
+    /// this desk like the layout.
+    Q_PROPERTY(Backdrop backdrop READ backdrop NOTIFY changed)
+    Q_PROPERTY(Motion motion READ motion NOTIFY changed)
+
 public:
     enum class Appearance { System, Light, Dark };
     Q_ENUM(Appearance)
@@ -86,6 +100,29 @@ public:
     enum class Corner { TopLeft, Top, TopRight, BottomLeft, Bottom, BottomRight };
     Q_ENUM(Corner)
 
+    /// `Auto` is two pages when the window is landscape and one otherwise. That is the plan
+    /// author's own choice: the specification does not define "Auto".
+    enum class PageLayout { Single, Double, Auto };
+    Q_ENUM(PageLayout)
+
+    enum class Fit { Height, Width, Original };
+    Q_ENUM(Fit)
+
+    /// `Theme.readerBlack`, `readerGrey` and `readerWhite`: colours for the pages, the same in
+    /// both themes, so « Noir » is black even when the application is light.
+    enum class Backdrop { Black, Grey, White };
+    Q_ENUM(Backdrop)
+
+    /// `Slide` is what there was: a turn slides, a jump fades. `Fade` fades both; `Instant`
+    /// moves nothing, and still waits for the images, so a page is never put on bare paper.
+    /// Not `None`, which X11's headers define as a macro.
+    ///
+    /// No default from the desktop's « reduce motion »: Qt 6.4 does not say it — no
+    /// `QStyleHints` for it, and GNOME's `enable-animations` is a GSettings key Qt does not
+    /// read — so `Slide`, and the reader who wants less says it here.
+    enum class Motion { Slide, Fade, Instant };
+    Q_ENUM(Motion)
+
     explicit Preferences(QObject *parent = nullptr);
 
     static Preferences *create(QQmlEngine *engine, QJSEngine *);
@@ -95,6 +132,17 @@ public:
     QVariantList appearances() const;
 
     Q_INVOKABLE void chooseAppearance(Appearance wanted);
+
+    PageLayout pageLayout() const { return m_pageLayout; }
+    Q_INVOKABLE void choosePageLayout(PageLayout wanted);
+    Fit fit() const { return m_fit; }
+    Q_INVOKABLE void chooseFit(Fit wanted);
+    Backdrop backdrop() const { return m_backdrop; }
+    Q_INVOKABLE void chooseBackdrop(Backdrop wanted);
+    Motion motion() const { return m_motion; }
+    Q_INVOKABLE void chooseMotion(Motion wanted);
+    /// What `Auto` resolves to for this window; a fixed choice ignores the window.
+    Spreads::Layout layoutFor(QSizeF window) const;
 
     bool volumesAsGrid() const { return m_volumesAsGrid; }
     void showVolumesAsGrid(bool asGrid);
@@ -135,6 +183,10 @@ private:
     Appearance m_appearance = Appearance::System;
     QUrl m_lastPlace;
     bool m_volumesAsGrid = false;
+    PageLayout m_pageLayout = PageLayout::Auto;
+    Fit m_fit = Fit::Height;
+    Backdrop m_backdrop = Backdrop::Black;
+    Motion m_motion = Motion::Slide;
     /// Everything on, except the desktop for a download: a copy saved in two seconds wakes
     /// nobody. It is being pestered that makes somebody open this screen, not silence.
     QHash<Warns, bool> m_bubbles;

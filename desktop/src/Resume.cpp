@@ -53,19 +53,35 @@ QString Resume::cover() const
     return m_server->address() + u"/entries/"_s + m_card->entryId + u"/cover"_s;
 }
 
+namespace {
+
+/// The page as a person counts it. The server records the index, from nought, and the reader
+/// shows it from one: closed on « 48 / 190 » in the test of 22/10/2026, the band said
+/// « Page 47/190 » of the same page.
+std::optional<int> shown(std::optional<int> recorded)
+{
+    return recorded ? std::optional<int>(*recorded + 1) : std::nullopt;
+}
+
+} // namespace
+
 QString Resume::where() const
 {
     if (!m_card)
         return {};
-    return Words::where(m_card->entryKind, m_card->entryNumber, m_card->page,
-                        m_card->pageCount, m_card->chapterLabel);
+    const std::optional<QString> chapter =
+        m_card->chapterLabel ? std::optional<QString>(Words::chapterName(
+                                   *m_card->chapterLabel, m_card->chapterTitle.value_or(QString())))
+                             : std::nullopt;
+    return Words::where(m_card->entryKind, m_card->entryNumber, shown(m_card->page),
+                        m_card->pageCount, chapter);
 }
 
 QString Resume::whereShort() const
 {
     if (!m_card)
         return {};
-    return Words::whereShort(m_card->entryKind, m_card->entryNumber, m_card->page,
+    return Words::whereShort(m_card->entryKind, m_card->entryNumber, shown(m_card->page),
                              m_card->pageCount);
 }
 

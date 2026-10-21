@@ -637,6 +637,103 @@ private slots:
         QCOMPARE(Api::progress(fresh).value->timesFinished, 0);
     }
 
+    /// The reader fits a spread to the screen's width and a single page to its height, and
+    /// it cannot tell them apart from a file name: only the server measured them.
+    void a_page_says_whether_it_is_a_spread()
+    {
+        const QJsonObject spread{{u"number"_s, 3},         {u"name"_s, u"003.jpg"_s},
+                                 {u"mediaType"_s, u"image/jpeg"_s}, {u"width"_s, 2800},
+                                 {u"height"_s, 1980},      {u"spread"_s, true}};
+        const Api::Read<Api::PageInfo> got = Api::pageInfo(spread);
+        QVERIFY(got.ok());
+        QVERIFY(got.value->spread);
+        QCOMPARE(got.value->width, std::optional<int>(2800));
+        QCOMPARE(got.value->height, std::optional<int>(1980));
+        QCOMPARE(got.value->number, 3);
+
+        // Unmeasured is not nought: a page of width 0 would be fitted to nothing.
+        const Api::Read<Api::PageInfo> bare = Api::pageInfo(
+            {{u"number"_s, 4}, {u"name"_s, u"004.jpg"_s}, {u"mediaType"_s, u"image/jpeg"_s}});
+        QVERIFY(bare.ok());
+        QVERIFY(!bare.value->spread);
+        QVERIFY(!bare.value->width);
+        QVERIFY(!bare.value->size);
+    }
+
+    void a_page_missing_its_name_is_refused_and_named()
+    {
+        const Api::Read<Api::PageInfo> got =
+            Api::pageInfo({{u"number"_s, 3}, {u"mediaType"_s, u"image/jpeg"_s}});
+        QVERIFY(!got.ok());
+        QVERIFY2(got.trouble.contains(u"name"_s), qPrintable(got.trouble));
+    }
+
+    void a_series_carries_the_direction_chosen_for_it()
+    {
+        QJsonObject chosen = aSeries();
+        chosen[u"readingDirectionChosen"_s] = u"VERTICAL"_s;
+        QCOMPARE(Api::series(chosen).value->readingDirectionChosen,
+                 std::optional<Api::ReadingDirection>(Api::ReadingDirection::Vertical));
+
+        // Null is « par défaut », and is not the direction the files say: the two are read
+        // side by side so that a screen can show which one is in force.
+        chosen[u"readingDirectionChosen"_s] = QJsonValue::Null;
+        QVERIFY(!Api::series(chosen).value->readingDirectionChosen);
+        chosen.remove(u"readingDirectionChosen"_s);
+        QVERIFY(!Api::series(chosen).value->readingDirectionChosen);
+    }
+
+    void a_chapter_with_no_start_page_does_not_start_at_nought()
+    {
+        const QJsonObject marker{{u"id"_s, u"c1"_s},       {u"raw"_s, u"ch1"_s},
+                                 {u"label"_s, u"Chapitre 1"_s}, {u"number"_s, 1.0},
+                                 {u"kind"_s, u"CHAPTER"_s}, {u"position"_s, 0},
+                                 {u"startPage"_s, QJsonValue::Null}, {u"entryId"_s, u"v1"_s}};
+        const Api::Read<Api::Chapter> got = Api::chapter(marker);
+        QVERIFY(got.ok());
+        QCOMPARE(got.value->label, u"Chapitre 1"_s);
+        QCOMPARE(got.value->kind, Api::Chapter::Kind::Chapter);
+        QVERIFY(!got.value->startPage);
+
+        QJsonObject placed = marker;
+        placed[u"startPage"_s] = 12;
+        placed[u"kind"_s] = u"BONUS"_s;
+        placed[u"number"_s] = QJsonValue::Null;
+        const Api::Read<Api::Chapter> bonus = Api::chapter(placed);
+        QCOMPARE(bonus.value->startPage, std::optional<int>(12));
+        QCOMPARE(bonus.value->kind, Api::Chapter::Kind::Bonus);
+        QVERIFY(!bonus.value->number);
+
+        // A kind the server learns first leaves the marker standing.
+        placed[u"kind"_s] = u"EXTRA"_s;
+        QVERIFY(Api::chapter(placed).ok());
+
+        QJsonObject nameless = marker;
+        nameless.remove(u"label"_s);
+        const Api::Read<Api::Chapter> refused = Api::chapter(nameless);
+        QVERIFY(!refused.ok());
+        QVERIFY2(refused.trouble.contains(u"label"_s), qPrintable(refused.trouble));
+    }
+
+    void an_entry_carries_the_isbn_date_and_summary_a_side_panel_shows()
+    {
+        QJsonObject file{{u"id"_s, u"v5"_s},      {u"type"_s, u"VOLUME"_s},
+                         {u"pageCount"_s, 54},    {u"chapterCount"_s, 0},
+                         {u"file"_s, u"Tome 5.cbz"_s}, {u"size"_s, 1}};
+        const Api::Read<Api::Entry> bare = Api::entry(file);
+        QVERIFY(!bare.value->isbn);
+        QVERIFY(!bare.value->publishedOn);
+        QVERIFY(!bare.value->summary);
+
+        file[u"isbn"_s] = u"9782723456789"_s;
+        file[u"publishedOn"_s] = u"2011-03-04"_s;
+        file[u"summary"_s] = u"Une dryade."_s;
+        const Api::Read<Api::Entry> full = Api::entry(file);
+        QCOMPARE(full.value->isbn, std::optional<QString>(u"9782723456789"_s));
+        QCOMPARE(full.value->publishedOn, std::optional<QString>(u"2011-03-04"_s));
+        QCOMPARE(full.value->summary, std::optional<QString>(u"Une dryade."_s));
+    }
+
     void a_whole_series_arrives_intact()
     {
         const Api::Read<Api::Series> got = Api::series(aSeries());
@@ -729,21 +826,6 @@ private slots:
         QCOMPARE(got.value->run, std::optional<Api::Run>());
         QCOMPARE(got.value->holding.readStatus, std::optional<Api::ReadStatus>());
         QCOMPARE(got.value->name, u"Assassination Classroom"_s);
-    }
-
-    void a_series_carries_the_direction_chosen_for_it()
-    {
-        QJsonObject chosen = aSeries();
-        chosen[u"readingDirectionChosen"_s] = u"VERTICAL"_s;
-        QCOMPARE(Api::series(chosen).value->readingDirectionChosen,
-                 std::optional<Api::ReadingDirection>(Api::ReadingDirection::Vertical));
-
-        // Null is « par défaut », and is not the direction the files say: the two are read
-        // side by side so that a screen can show which one is in force.
-        chosen[u"readingDirectionChosen"_s] = QJsonValue::Null;
-        QVERIFY(!Api::series(chosen).value->readingDirectionChosen);
-        chosen.remove(u"readingDirectionChosen"_s);
-        QVERIFY(!Api::series(chosen).value->readingDirectionChosen);
     }
 
     void a_page_says_where_the_broken_item_is()

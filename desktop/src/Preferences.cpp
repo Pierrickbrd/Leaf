@@ -1,5 +1,6 @@
 #include "Preferences.h"
 
+#include "Widths.h"
 #include "Words.h"
 
 #include <algorithm>
@@ -96,6 +97,105 @@ Preferences::Corner readCorner(const QString &word)
     return BottomRight;
 }
 
+/// Words and not numbers, for the same reason as the rest of the file. A word this version
+/// does not know falls back to the default instead of failing: the file may be hand-edited
+/// or written by a later version.
+QString spell(Preferences::PageLayout which)
+{
+    using enum Preferences::PageLayout;
+    switch (which) {
+    case Single:
+        return u"single"_s;
+    case Double:
+        return u"double"_s;
+    case Auto:
+        break;
+    }
+    return u"auto"_s;
+}
+
+Preferences::PageLayout readLayout(const QString &word)
+{
+    using enum Preferences::PageLayout;
+    for (const Preferences::PageLayout which : {Single, Double, Auto}) {
+        if (spell(which) == word)
+            return which;
+    }
+    return Auto;
+}
+
+QString spell(Preferences::Fit which)
+{
+    using enum Preferences::Fit;
+    switch (which) {
+    case Width:
+        return u"width"_s;
+    case Original:
+        return u"original"_s;
+    case Height:
+        break;
+    }
+    return u"height"_s;
+}
+
+Preferences::Fit readFit(const QString &word)
+{
+    using enum Preferences::Fit;
+    for (const Preferences::Fit which : {Height, Width, Original}) {
+        if (spell(which) == word)
+            return which;
+    }
+    return Height;
+}
+
+QString spell(Preferences::Backdrop which)
+{
+    using enum Preferences::Backdrop;
+    switch (which) {
+    case Grey:
+        return u"grey"_s;
+    case White:
+        return u"white"_s;
+    case Black:
+        break;
+    }
+    return u"black"_s;
+}
+
+Preferences::Backdrop readBackdrop(const QString &word)
+{
+    using enum Preferences::Backdrop;
+    for (const Preferences::Backdrop which : {Black, Grey, White}) {
+        if (spell(which) == word)
+            return which;
+    }
+    return Black;
+}
+
+QString spell(Preferences::Motion which)
+{
+    using enum Preferences::Motion;
+    switch (which) {
+    case Fade:
+        return u"fade"_s;
+    case Instant:
+        return u"instant"_s;
+    case Slide:
+        break;
+    }
+    return u"slide"_s;
+}
+
+Preferences::Motion readMotion(const QString &word)
+{
+    using enum Preferences::Motion;
+    for (const Preferences::Motion which : {Slide, Fade, Instant}) {
+        if (spell(which) == word)
+            return which;
+    }
+    return Slide;
+}
+
 } // namespace
 
 Preferences *Preferences::create(QQmlEngine *, QJSEngine *)
@@ -122,6 +222,10 @@ Preferences::Preferences(QObject *parent)
         m_desktop.insert(which, m_file.value(u"desktop/"_s + spell(which),
                                              which != Downloads).toBool());
     }
+    m_pageLayout = readLayout(m_file.value(u"reader/layout"_s).toString());
+    m_fit = readFit(m_file.value(u"reader/fit"_s).toString());
+    m_backdrop = readBackdrop(m_file.value(u"reader/backdrop"_s).toString());
+    m_motion = readMotion(m_file.value(u"reader/motion"_s).toString());
     m_corner = readCorner(m_file.value(u"corner"_s).toString());
 }
 
@@ -264,4 +368,64 @@ void Preferences::showVolumesAsGrid(bool asGrid)
     // Once. It was said before the write and again after it, which is two notifications for
     // one fact and one redraw of everything bound to this object for nothing.
     emit changed();
+}
+
+void Preferences::choosePageLayout(PageLayout wanted)
+{
+    if (wanted == m_pageLayout)
+        return;
+    m_pageLayout = wanted;
+    m_file.setValue(u"reader/layout"_s, spell(wanted));
+    m_file.sync();
+    emit changed();
+}
+
+void Preferences::chooseFit(Fit wanted)
+{
+    if (wanted == m_fit)
+        return;
+    m_fit = wanted;
+    m_file.setValue(u"reader/fit"_s, spell(wanted));
+    m_file.sync();
+    emit changed();
+}
+
+void Preferences::chooseBackdrop(Backdrop wanted)
+{
+    if (wanted == m_backdrop)
+        return;
+    m_backdrop = wanted;
+    m_file.setValue(u"reader/backdrop"_s, spell(wanted));
+    m_file.sync();
+    emit changed();
+}
+
+void Preferences::chooseMotion(Motion wanted)
+{
+    if (wanted == m_motion)
+        return;
+    m_motion = wanted;
+    m_file.setValue(u"reader/motion"_s, spell(wanted));
+    m_file.sync();
+    emit changed();
+}
+
+Spreads::Layout Preferences::layoutFor(QSizeF window) const
+{
+    switch (m_pageLayout) {
+    case PageLayout::Single:
+        return Spreads::Layout::Single;
+    case PageLayout::Double:
+        return Spreads::Layout::Double;
+    case PageLayout::Auto:
+        break;
+    }
+    // Two pages beyond 1100 px when the window is wider than tall (spec §03). The width is
+    // `Widths`' own break and not a second copy of it: below it each half of a pair is under
+    // four hundred pixels. Wider than tall alone sent a 1000 × 700 window to two pages of
+    // three hundred and fifty. Strictly wider: a square window has no room for a second page
+    // beside the first.
+    const bool wide = Widths::bandFor(int(window.width())) == Widths::Band::Wide;
+    return wide && window.width() > window.height() ? Spreads::Layout::Double
+                                                    : Spreads::Layout::Single;
 }

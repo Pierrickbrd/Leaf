@@ -117,13 +117,28 @@ private slots:
         QCOMPARE(m_resume->seriesId(), u"ac"_s);
         QCOMPARE(m_resume->seriesName(), u"Assassination Classroom"_s);
         QCOMPARE(m_resume->entryId(), u"volume-12"_s);
-        QCOMPARE(m_resume->where(), u"Tome 12 · Page 47/190 · Chapitre 98"_s);
+        QCOMPARE(m_resume->where(), u"Tome 12 · Page 48/190 · Chapitre 98"_s);
         QCOMPARE(m_resume->action(), u"Reprendre"_s);
         QVERIFY(m_resume->hasProgress());
         QVERIFY(qAbs(m_resume->progress() - (47.0 / 190.0)) < 0.0001);
         // The entry's cover, not the series' — a series' is its first volume's, and a
         // band offering tome 12 that showed tome 1 would be the one picture that lies.
         QVERIFY(m_resume->cover().endsWith(u"/entries/volume-12/cover"_s));
+    }
+
+    /// The server records the page by its index, from nought; the reader shows it from one.
+    /// The test of 22/10/2026 closed the reader on « 48 / 190 » and found « Page 47/190 » on
+    /// the band: one page, two numbers.
+    void the_band_counts_the_page_from_one_as_the_reader_does()
+    {
+        m_pretend->answers(200, offers({anOffer(u"IN_PROGRESS"_s,
+                                                QJsonObject{{u"page"_s, 0},
+                                                            {u"pageCount"_s, 190}})}));
+        m_resume->reload();
+        settle();
+
+        QCOMPARE(m_resume->where(), u"Tome 12 · Page 1/190"_s);
+        QCOMPARE(m_resume->whereShort(), u"T12 · Page 1/190"_s);
     }
 
     /// The same offer, for a band that has lost the width for the long line.
@@ -133,7 +148,7 @@ private slots:
         m_resume->reload();
         settle();
 
-        QCOMPARE(m_resume->whereShort(), u"T12 · Page 47/190"_s);
+        QCOMPARE(m_resume->whereShort(), u"T12 · Page 48/190"_s);
     }
 
     void the_next_unread_entry_has_no_made_up_progress()

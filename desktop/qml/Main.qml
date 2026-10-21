@@ -19,6 +19,45 @@ ApplicationWindow {
     /// fact about the library: it is a fact about what is drawn over it.
     property bool shelfIsStale: false
     property bool countsAreStale: false
+    /// The reader is on screen. Kept rather than read from `Navigation` because leaving it is
+    /// a change of its own — the book closed, what it recorded drawn — and by the time
+    /// `Navigation` says where it went it no longer says where it was.
+    property bool reading: false
+    /// A position was recorded while the reader was up, and the band and the volumes' states
+    /// behind it have not been asked for since: nobody is looking at them until it closes.
+    property bool readingMoved: false
+    /// The window was closed with a page still held by the reader's delay, and waits for the
+    /// write that close sent; see `onClosing`.
+    property bool closingAfterWrite: false
+
+    // Closed less than a second after a page was turned, the window waits for that page to
+    // be written (spec §08). The write was left to the reader's destructor, which runs once
+    // the event loop has stopped: the request was queued and never left. So the close is put
+    // off until the server answered — kept or refused — and `lastWrite` is a ceiling on a
+    // server that does not answer, not the way to know the write went.
+    onClosing: close => {
+        if (window.closingAfterWrite || !window.reading || !Reader.close())
+            return
+        close.accepted = false
+        window.closingAfterWrite = true
+        lastWrite.start()
+    }
+
+    Timer {
+        id: lastWrite
+
+        interval: 1500
+        onTriggered: window.close()
+    }
+
+    /// What a recorded position changes besides the series itself, which `Library` already
+    /// follows: where to resume, and the state of the volume on the series page. The same
+    /// two the menu's marks ask for, and only for the series that page holds.
+    function showWhatReadingMoved(seriesId) {
+        if (seriesId.length > 0 && seriesId === Series.identifier)
+            Entries.refreshProgress()
+        Resume.reload()
+    }
 
     /// **What an action changed is asked for, and nothing else.** A mark or a deletion names
     /// its series, and `Library` asks for that one series and hands it to every model drawing
@@ -137,6 +176,13 @@ ApplicationWindow {
         sequences: [StandardKey.Cancel]
         // qmllint enable unqualified
         onActivated: {
+            // The reader takes away one layer at a time — the full screen before the book —
+            // and is the one screen that knows which layers it has up.
+            const reader = screen.item as ReaderView
+            if (Navigation.destination === Navigation.Reader && reader) {
+                reader.peelOneLayer()
+                return
+            }
             // On the shelf Escape first clears the transient question. Only an already-empty
             // field means "leave this destination".
             if (Shelf.query.length > 0)
@@ -163,7 +209,9 @@ ApplicationWindow {
     // field, where Enter and Space are typing.
     Shortcut {
         objectName: "activation-returns-to-the-keyboard"
+        // Not in the reader, where Space turns the page and nothing is being navigated.
         enabled: appNavigationCursor.pointerTookOver
+                 && Navigation.destination !== Navigation.Reader
                  && !(window.activeFocusItem
                       && window.activeFocusItem.cursorPosition !== undefined)
         sequences: ["Return", "Enter", "Space"]
@@ -211,8 +259,9 @@ ApplicationWindow {
             if (!isArrow(event.key) && !isTab(event.key))
                 return
             // The linking screen is a plain form: Qt's own Tab order through its two fields
-            // and its button, and none of the shelf's order behind it.
-            if (linkScreen.active)
+            // and its button, and none of the shelf's order behind it. The reader's arrows
+            // turn pages; taken here first, they walked a bar that is not on screen.
+            if (linkScreen.active || Navigation.destination === Navigation.Reader)
                 return
 
             // Left and Right edit the field. They join global navigation everywhere else,
@@ -251,6 +300,8 @@ ApplicationWindow {
         AppBar {
             id: appBar
 
+            // The reader at rest is the page and nothing else; its own bar comes when called.
+            visible: Navigation.destination !== Navigation.Reader
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top
@@ -288,7 +339,8 @@ ApplicationWindow {
 
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.top: appBar.bottom
+            // The whole window for the reader: a hidden bar still has its height.
+            anchors.top: appBar.visible ? appBar.bottom : parent.top
             anchors.bottom: parent.bottom
             // Every destination that is not the shelf, drawn over it. It was pinned to the
             // shelf, which is why the settings button had to be left unwired: opening a
@@ -300,6 +352,8 @@ ApplicationWindow {
                     return settingsScreen
                 case Navigation.Series:
                     return seriesScreen
+                case Navigation.Reader:
+                    return readerScreen
                 default:
                     return null
                 }
@@ -471,6 +525,12 @@ ApplicationWindow {
     }
 
     Component {
+        id: readerScreen
+
+        ReaderView { }
+    }
+
+    Component {
         id: seriesScreen
 
         SeriesView {
@@ -491,6 +551,25 @@ ApplicationWindow {
         target: Navigation
 
         function onChanged() {
+            // Out of the reader: what the delay was holding is written now. If that sent a
+            // write, what reading moved is asked for when the server has kept it — see
+            // `onRecorded` below; asked now, the answer could still carry the page before.
+            // Otherwise what was recorded while reading is asked for now, once.
+            if (window.reading && Navigation.destination !== Navigation.Reader) {
+                window.reading = false
+                const sent = Reader.close()
+                if (!sent && window.readingMoved)
+                    window.showWhatReadingMoved(Reader.seriesId)
+                window.readingMoved = false
+            }
+            // Into it: the window first, because the pages are asked at one page's width, and
+            // the series page left as it was, so that coming back is not opening it again.
+            if (Navigation.destination === Navigation.Reader) {
+                window.reading = true
+                Reader.relayout(Qt.size(window.width, window.height))
+                Reader.open(Navigation.parameters.series ?? "", Navigation.parameters.entry ?? "")
+                return
+            }
             // Back on the wall, once, with whatever changed under it while it was hidden.
             if (Navigation.destination === Navigation.Shelf && window.shelfIsStale) {
                 Shelf.refresh()
@@ -548,6 +627,30 @@ ApplicationWindow {
             // The band is on this page as much as on the shelf, and marking a volume moves
             // where one resumes.
             Resume.reload()
+        }
+    }
+
+    // A position the server kept. Asked for now when nobody is reading, and on leaving
+    // otherwise: two answers per page turned, for screens hidden under the book, would be
+    // requests nobody looks at.
+    Connections {
+        target: Reader
+
+        function onRecorded(seriesId) {
+            if (window.closingAfterWrite) {
+                window.close()
+                return
+            }
+            if (window.reading)
+                window.readingMoved = true
+            else
+                window.showWhatReadingMoved(seriesId)
+        }
+
+        // Refused is answered too: the close waited for an answer, not for a success.
+        function onRefused() {
+            if (window.closingAfterWrite)
+                window.close()
         }
     }
 
