@@ -1,10 +1,22 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-LEAF_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# The sources sit beside the script only when the script is a file. Arriving as a string
+# (`bash -c "$(curl …)"`) or through a pipe (`bash <(curl …)`), it has no folder of its own,
+# and the current directory is not one to trust: this runs as root and builds what it finds.
+# LEAF_ROOT stays empty then, and the sources are downloaded.
+LEAF_ROOT=""
+if [[ -n ${BASH_SOURCE[0]:-} && -f ${BASH_SOURCE[0]} ]]; then
+    LEAF_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+fi
+
+is_checkout() {
+    local root=$1
+    [[ -n "$root" && -f "$root/VERSION" && -d "$root/server" && -d "$root/desktop" ]]
+}
 
 bootstrap_from_github() {
-    [[ -f "$LEAF_ROOT/VERSION" && -d "$LEAF_ROOT/server" && -d "$LEAF_ROOT/desktop" ]] && return 0
+    is_checkout "$LEAF_ROOT" && return 0
     command -v curl >/dev/null || { printf 'Leaf: curl est nécessaire pour télécharger les sources.\n' >&2; exit 1; }
     command -v tar >/dev/null || { printf 'Leaf: tar est nécessaire pour extraire les sources.\n' >&2; exit 1; }
 
@@ -26,17 +38,13 @@ bootstrap_from_github() {
     export LEAF_BOOTSTRAP_DIR=$bootstrap_tmp
     exec "$bootstrap_tmp/install.sh" "${args[@]}"
 }
-bootstrap_from_github "$@"
 
-LEAF_VERSION=$(tr -d '[:space:]' < "$LEAF_ROOT/VERSION")
-LEAF_TMP=$(mktemp -d /tmp/leaf-install.XXXXXX)
 cleanup() {
     rm -r -- "$LEAF_TMP"
     if [[ ${LEAF_BOOTSTRAP_DIR:-} == /tmp/leaf-bootstrap.* && -d ${LEAF_BOOTSTRAP_DIR:-} ]]; then
         rm -r -- "$LEAF_BOOTSTRAP_DIR"
     fi
 }
-trap cleanup EXIT
 
 component=""
 library=""
@@ -99,60 +107,50 @@ need_value() {
     [[ $# -ge 2 && -n "$2" ]] || fail "$1 attend une valeur."
 }
 
-if [[ ${1:-} == "update" ]]; then
-    updating=1
-    component=${2:-}
-    shift 2 || true
-elif [[ ${1:-} == "version" ]]; then
-    printf 'Leaf %s\n' "$LEAF_VERSION"
-    exit 0
-elif [[ ${1:-} == "server" || ${1:-} == "client" || ${1:-} == "all" ]]; then
-    component=$1
-    shift
-elif [[ ${1:-} == "--help" || ${1:-} == "-h" || -z ${1:-} ]]; then
-    usage
-    exit 0
-else
-    fail "commande inconnue '${1:-}'. Lancez ./install.sh --help."
-fi
+parse_arguments() {
+    if [[ ${1:-} == "update" ]]; then
+        updating=1
+        component=${2:-}
+        shift 2 || true
+    elif [[ ${1:-} == "version" ]]; then
+        printf 'Leaf %s\n' "$LEAF_VERSION"
+        exit 0
+    elif [[ ${1:-} == "server" || ${1:-} == "client" || ${1:-} == "all" ]]; then
+        component=$1
+        shift
+    elif [[ ${1:-} == "--help" || ${1:-} == "-h" || -z ${1:-} ]]; then
+        usage
+        exit 0
+    else
+        fail "commande inconnue '${1:-}'. Lancez ./install.sh --help."
+    fi
 
-[[ "$component" == "server" || "$component" == "client" || "$component" == "all" ]] \
-    || fail "update attend server, client ou all."
+    [[ "$component" == "server" || "$component" == "client" || "$component" == "all" ]] \
+        || fail "update attend server, client ou all."
 
-while (($#)); do
-    case "$1" in
-        --library)
-            need_value "$@"; library=$2; shift 2 ;;
-        --host)
-            need_value "$@"; host=$2; shift 2 ;;
-        --port)
-            need_value "$@"; port=$2; shift 2 ;;
-        --address)
-            need_value "$@"; address=$2; shift 2 ;;
-        --key-file)
-            need_value "$@"; key_file=$2; shift 2 ;;
-        --user)
-            need_value "$@"; install_user=$2; shift 2 ;;
-        --no-deps)
-            with_dependencies=0; shift ;;
-        --help|-h)
-            usage; exit 0 ;;
-        *)
-            fail "option inconnue '$1'. Lancez ./install.sh --help." ;;
-    esac
-done
-
-getent passwd "$install_user" >/dev/null || fail "l’utilisateur '$install_user' n’existe pas."
-install_group=$(id -gn "$install_user")
-install_home=$(getent passwd "$install_user" | cut -d: -f6)
-
-if (( updating )); then
-    command -v git >/dev/null || fail "git est nécessaire pour mettre à jour cette installation source."
-    [[ -z $(git -C "$LEAF_ROOT" status --porcelain) ]] \
-        || fail "le dépôt contient des modifications locales ; la mise à jour automatique est arrêtée."
-    git -C "$LEAF_ROOT" pull --ff-only
-    LEAF_VERSION=$(tr -d '[:space:]' < "$LEAF_ROOT/VERSION")
-fi
+    while (($#)); do
+        case "$1" in
+            --library)
+                need_value "$@"; library=$2; shift 2 ;;
+            --host)
+                need_value "$@"; host=$2; shift 2 ;;
+            --port)
+                need_value "$@"; port=$2; shift 2 ;;
+            --address)
+                need_value "$@"; address=$2; shift 2 ;;
+            --key-file)
+                need_value "$@"; key_file=$2; shift 2 ;;
+            --user)
+                need_value "$@"; install_user=$2; shift 2 ;;
+            --no-deps)
+                with_dependencies=0; shift ;;
+            --help|-h)
+                usage; exit 0 ;;
+            *)
+                fail "option inconnue '$1'. Lancez ./install.sh --help." ;;
+        esac
+    done
+}
 
 install_apt() {
     (( with_dependencies )) || return 0
@@ -372,24 +370,49 @@ install_client() {
         as_root gtk-update-icon-cache -q /usr/local/share/icons/hicolor || true
 }
 
-case "$component" in
-    server)
-        install_server ;;
-    client)
-        ask_client_configuration
-        install_client ;;
-    all)
-        host=${host:-127.0.0.1}
-        install_server
-        address=${address:-http://127.0.0.1:$port}
-        install_client ;;
-esac
+main() {
+    bootstrap_from_github "$@"
+    LEAF_VERSION=$(tr -d '[:space:]' < "$LEAF_ROOT/VERSION")
+    LEAF_TMP=$(mktemp -d /tmp/leaf-install.XXXXXX)
+    trap cleanup EXIT
 
-printf '\nLeaf %s installé : %s.\n' "$LEAF_VERSION" "$component"
-if [[ "$component" == "server" ]]; then
-    printf 'Adresse client : %s\n' "${address:-à renseigner selon votre proxy ou adresse réseau}"
-    printf 'Clé client     : %s\n' "$client_key"
-    printf 'Sur le PC client, lancez leaf-install client et saisissez ces deux valeurs.\n'
-elif [[ "$component" == "client" || "$component" == "all" ]]; then
-    printf 'Le client est configuré pour %s et apparaît dans le menu des applications.\n' "$address"
-fi
+    parse_arguments "$@"
+
+    getent passwd "$install_user" >/dev/null || fail "l’utilisateur '$install_user' n’existe pas."
+    install_group=$(id -gn "$install_user")
+    install_home=$(getent passwd "$install_user" | cut -d: -f6)
+
+    if (( updating )); then
+        command -v git >/dev/null || fail "git est nécessaire pour mettre à jour cette installation source."
+        [[ -z $(git -C "$LEAF_ROOT" status --porcelain) ]] \
+            || fail "le dépôt contient des modifications locales ; la mise à jour automatique est arrêtée."
+        git -C "$LEAF_ROOT" pull --ff-only
+        LEAF_VERSION=$(tr -d '[:space:]' < "$LEAF_ROOT/VERSION")
+    fi
+
+    case "$component" in
+        server)
+            install_server ;;
+        client)
+            ask_client_configuration
+            install_client ;;
+        all)
+            host=${host:-127.0.0.1}
+            install_server
+            address=${address:-http://127.0.0.1:$port}
+            install_client ;;
+    esac
+
+    printf '\nLeaf %s installé : %s.\n' "$LEAF_VERSION" "$component"
+    if [[ "$component" == "server" ]]; then
+        printf 'Adresse client : %s\n' "${address:-à renseigner selon votre proxy ou adresse réseau}"
+        printf 'Clé client     : %s\n' "$client_key"
+        printf 'Sur le PC client, lancez leaf-install client et saisissez ces deux valeurs.\n'
+    elif [[ "$component" == "client" || "$component" == "all" ]]; then
+        printf 'Le client est configuré pour %s et apparaît dans le menu des applications.\n' "$address"
+    fi
+}
+
+# Sourced by tools/test_install.py with LEAF_INSTALL_SOURCE_ONLY=1, so that each decision
+# can be called on its own and nothing is installed.
+[[ ${LEAF_INSTALL_SOURCE_ONLY:-} == 1 ]] || main "$@"
