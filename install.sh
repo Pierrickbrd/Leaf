@@ -46,6 +46,11 @@ cleanup() {
     fi
 }
 
+# /srv is where the filesystem standard puts the data a machine serves. Not /var/lib/leaf:
+# that is the unit's StateDirectory, which systemd takes over on every start, and the inbox
+# and drop folders created beside the library would mix with the index.
+LEAF_DEFAULT_LIBRARY=/srv/leaf/library
+
 component=""
 library=""
 host=""
@@ -53,7 +58,13 @@ port=""
 address=""
 client_key=""
 key_file=""
-install_user="${LEAF_INSTALL_USER:-${SUDO_USER:-$(id -un)}}"
+# The person installing: the client configuration goes to their home, and `all` shares the
+# library with them. Not the account the server runs as, which is service_user.
+human_user="${LEAF_INSTALL_USER:-${SUDO_USER:-$(id -un)}}"
+service_user=""
+share_with=""
+binary=""
+owned_library_dirs=()
 with_dependencies=1
 updating=0
 
@@ -73,12 +84,14 @@ Commands:
   update   download the current release, then reinstall the selected component
 
 Options:
-  --library PATH   library directory (default: /srv/leaf/library)
+  --library PATH   library directory (asked, default: /srv/leaf/library)
   --host ADDRESS   address the server binds (default: 127.0.0.1)
   --port PORT      server port (default: 8081)
   --address URL    URL written into the client configuration
   --key-file PATH  read the client key from this file
-  --user USER      account that runs the server and owns the client configuration
+  --user USER      account the server runs as (default: leaf, created if missing)
+  --share-with USER  give USER read and write access to the library files
+  --binary PATH    install this leaf-server instead of building one here
   --no-deps        do not install build dependencies with apt
 
 Examples:
@@ -141,7 +154,11 @@ parse_arguments() {
             --key-file)
                 need_value "$@"; key_file=$2; shift 2 ;;
             --user)
-                need_value "$@"; install_user=$2; shift 2 ;;
+                need_value "$@"; service_user=$2; shift 2 ;;
+            --share-with)
+                need_value "$@"; share_with=$2; shift 2 ;;
+            --binary)
+                need_value "$@"; binary=$2; shift 2 ;;
             --no-deps)
                 with_dependencies=0; shift ;;
             --help|-h)
@@ -150,6 +167,14 @@ parse_arguments() {
                 fail "option inconnue '$1'. Lancez ./install.sh --help." ;;
         esac
     done
+
+    if [[ "$component" == "all" ]]; then
+        share_with=${share_with:-$human_user}
+    fi
+    # Root's client configuration would land in /root, and sharing a library with root
+    # grants nothing root does not already have: this is a sudo run with no SUDO_USER.
+    [[ "$share_with" != "root" ]] \
+        || fail "partage avec root refusé : lancez avec sudo depuis votre compte, ou fixez LEAF_INSTALL_USER."
 }
 
 install_apt() {
@@ -217,85 +242,340 @@ client_url() {
     esac
 }
 
+check_library_path() {
+    local path=$1
+    [[ "$path" == /* ]] || fail "--library attend un chemin absolu."
+    [[ "$path" != *[[:space:]]* ]] || fail "le chemin de bibliothèque ne doit pas contenir d’espace."
+    # Resolved first, `..`, `//` and symbolic links included: the refusals below compare
+    # text, and /srv/../home is /home.
+    path=$(realpath -m -- "$path")
+    case "$path" in
+        /home|/home/*|/root|/root/*|/run/user|/run/user/*)
+            fail "$path est invisible au service (ProtectHome=yes) : choisissez un chemin hors de /home, /root et /run/user." ;;
+        /var/lib/leaf|/var/lib/leaf/*|/var/cache/leaf|/var/cache/leaf/*)
+            fail "$path est un dossier propre au service, que systemd reprend à chaque démarrage." ;;
+    esac
+    # The parent becomes ReadWritePaths and receives inbox and drop: at the root, the whole
+    # disk would be writable to the server.
+    [[ "$(dirname -- "$path")" != / ]] \
+        || fail "$path : le dossier parent de la bibliothèque ne peut pas être la racine (exemple : /srv/leaf/library)."
+    printf '%s\n' "$path"
+}
+
+# The option first, then what an earlier installation recorded, then the person at the
+# terminal, then the default — never a question when nobody is there to answer it.
+choose_library() {
+    local answer
+    library=${library:-$(existing_server_value LEAF_LIBRARY)}
+    if [[ -z "$library" && -t 0 ]]; then
+        read -r -p "Emplacement de la bibliothèque [$LEAF_DEFAULT_LIBRARY] : " answer
+        library=$answer
+    fi
+    library=${library:-$LEAF_DEFAULT_LIBRARY}
+}
+
+# An installation that already exists keeps the account it runs as: switching it to `leaf`
+# would leave it in front of a library it cannot write to. Only a new one gets `leaf`.
+resolve_service_user() {
+    local unit=$1 found=""
+    if [[ -n "$service_user" ]]; then
+        printf '%s\n' "$service_user"
+        return
+    fi
+    [[ -f "$unit" ]] && found=$(sed -n 's/^User=//p' "$unit" | tail -n1)
+    printf '%s\n' "${found:-leaf}"
+}
+
+ensure_service_account() {
+    local name=$1
+    getent passwd "$name" >/dev/null && return 0
+    [[ "$name" == "leaf" ]] || fail "l’utilisateur '$name' n’existe pas."
+    # No password, no shell, no home: an account a flaw in the server could act as, and
+    # nothing else.
+    as_root useradd --system --user-group --no-create-home --home-dir /nonexistent \
+        --shell /usr/sbin/nologin leaf
+}
+
+# Creates what is missing and lists in owned_library_dirs every folder the service owns,
+# so that sharing reaches one a stopped run created. Never re-owns what exists: a public
+# installer handed a path has no business running chown -R on it. For a folder that
+# belongs to someone else, it prints the commands instead.
+prepare_library_dirs() {
+    local user=$1 group=$2 library=$3 base=$4 dir owner
+    local -a foreign=()
+    owned_library_dirs=()
+    for dir in "$library" "$base/inbox" "$base/drop"; do
+        # A link the service account made would turn the setfacl run as root on its
+        # folders into one on whatever the link points at.
+        [[ ! -L "$dir" ]] || fail "$dir est un lien symbolique : remplacez-le par un vrai dossier."
+        if [[ ! -e "$dir" ]]; then
+            as_root install -d -m 2775 -o "$user" -g "$group" "$dir"
+            owned_library_dirs+=("$dir")
+        else
+            owner=$(stat -c %U -- "$dir")
+            if [[ "$owner" == "$user" ]]; then
+                owned_library_dirs+=("$dir")
+            else
+                foreign+=("$dir")
+            fi
+        fi
+    done
+    for dir in "${foreign[@]}"; do
+        printf 'Leaf: %s existe déjà et appartient à %s ; ses droits ne sont pas modifiés.\n' \
+            "$dir" "$(stat -c %U -- "$dir")" >&2
+        printf '      Pour le confier au service :\n' >&2
+        printf '        sudo chown -R %s:%s %s\n' "$user" "$group" "$dir" >&2
+        printf '        sudo setfacl -R -m g:%s:rwX %s\n' "$group" "$dir" >&2
+        printf '        sudo find %s -type d -exec setfacl -d -m g:%s:rwX {} +\n' "$dir" "$group" >&2
+    done
+}
+
+# Root creates the library folders inside the parent and puts ACLs on them. If the service
+# account could write in the parent, or in any folder above it, it could rename one away
+# and leave a symbolic link in its place, and root would chown or setfacl the target —
+# /etc as easily as anything. The kernel is asked as that account, so that its groups and
+# any ACL count. A folder anyone can write is refused whether the account exists or not:
+# any local account could put the link there.
+check_parent_out_of_reach() {
+    local user=$1 dir=$2 info owner mode account=0
+    if getent passwd "$user" >/dev/null; then
+        account=1
+        # A runuser that cannot run would read as "cannot write" and pass every folder.
+        as_root runuser -u "$user" -- true \
+            || fail "runuser ne peut pas agir sous le compte $user : impossible de vérifier les droits du dossier de la bibliothèque."
+    fi
+    while :; do
+        info=$(stat -c '%u %a' -- "$dir" 2>/dev/null || true)
+        if [[ -n "$info" ]]; then
+            owner=${info%% *}
+            mode=${info##* }
+            if (( ${mode: -1} & 2 )); then
+                fail "$dir est modifiable par tous : un autre compte pourrait y remplacer un dossier par un lien. Choisissez une bibliothèque ailleurs."
+            fi
+            # Not only the service: any account that can write here could swap a folder for
+            # a link while root creates, chowns or ACLs it — the person shared with, or
+            # whoever owns a mounted disk.
+            if (( owner != 0 )) || (( ${mode: -2:1} & 2 )); then
+                fail "$dir n’appartient pas à root seul : un autre compte pourrait y remplacer un dossier par un lien pendant que root le modifie. Rendez-le à root : sudo chown root:root $dir && sudo chmod go-w $dir"
+            fi
+            if command -v getfacl >/dev/null \
+                && getfacl -cp -- "$dir" 2>/dev/null | grep -Eq '^(user|group):[^:]+:.w'; then
+                fail "$dir donne par ACL le droit d’écrire à un autre compte : il pourrait y remplacer un dossier par un lien. Retirez-la : sudo setfacl -b $dir"
+            fi
+        fi
+        if (( account )) && as_root runuser -u "$user" -- test -w "$dir"; then
+            fail "$dir est modifiable par le compte $user : le service pourrait y remplacer un dossier par un lien. Rendez-le à root : sudo chown root:root $dir && sudo chmod 755 $dir && sudo setfacl -b $dir"
+        fi
+        [[ "$dir" == / ]] && break
+        dir=$(dirname -- "$dir")
+    done
+}
+
+# The group and an ACL on each folder, the default one included: setgid and the unit's
+# UMask cover what the server writes, but a file the person drops in over SSH follows
+# their own umask, usually 022, and would stay read-only to the server.
+share_library_with() {
+    local human=$1 group=$2 dir
+    shift 2
+    as_root usermod -aG "$group" "$human"
+    for dir in "$@"; do
+        as_root setfacl -m "g:$group:rwX,u:$human:rwX" "$dir"
+        as_root setfacl -d -m "g:$group:rwX,u:$human:rwX" "$dir"
+    done
+}
+
+# Sharing adds the person to the service account's group. For an installation that runs as
+# a person, that group is theirs, and with it their home.
+check_shareable_account() {
+    local name=$1 uid uid_min
+    getent passwd "$name" >/dev/null || return 0
+    uid=$(id -u "$name")
+    uid_min=$(awk '$1 == "UID_MIN" { print $2 }' /etc/login.defs 2>/dev/null || true)
+    (( uid < ${uid_min:-1000} )) \
+        || fail "--share-with demande que le serveur tourne sous un compte système, pas sous $name : réinstallez-le avec --user leaf."
+}
+
+need_command() {
+    local name=$1 package=$2
+    command -v "$name" >/dev/null && return 0
+    (( with_dependencies )) || fail "$name est nécessaire (paquet $package)."
+    install_apt "$package"
+}
+
+check_server_binary() {
+    local path=$1 name version
+    [[ -f "$path" && -x "$path" ]] || fail "$path n’est pas un fichier exécutable."
+    read -r name version < <("$path" --version 2>/dev/null || true)
+    [[ "$name" == "leaf-server" && -n "$version" ]] || fail "$path n’est pas un binaire leaf-server."
+    printf '%s\n' "$version"
+}
+
+# Sets server_binary: the one given with --binary, built elsewhere so that this machine
+# never receives a toolchain, or else the one built here from the sources. A variable, not
+# stdout: inside $(…), bash ignores set -e, and a failed build went on to install whatever
+# an earlier one had left in target/.
+obtain_server_binary() {
+    if [[ -n "$binary" ]]; then
+        server_binary=$binary
+        return
+    fi
+    ensure_rust
+    cargo build --locked --release --manifest-path "$LEAF_ROOT/server/Cargo.toml"
+    server_binary="$LEAF_ROOT/server/target/release/leaf-server"
+}
+
+render_server_env() {
+    local library=$1 base=$2 host=$3 port=$4 keys=$5
+    printf 'LEAF_LIBRARY=%s\n' "$(quote_environment_value "$library")"
+    printf 'LEAF_INBOX=%s\n' "$(quote_environment_value "$base/inbox")"
+    printf 'LEAF_DROP=%s\n' "$(quote_environment_value "$base/drop")"
+    printf 'LEAF_CACHE=/var/cache/leaf\n'
+    printf 'LEAF_DB=/var/lib/leaf/leaf.sqlite\n'
+    printf 'LEAF_KEYS=%s\n' "$(quote_environment_value "$keys")"
+    printf 'LEAF_HOST=%s\n' "$(quote_environment_value "$host")"
+    printf 'LEAF_PORT=%s\n' "$port"
+    printf 'LEAF_MAX_UPLOAD_MB=2048\n'
+    printf 'LEAF_TRUST_PROXY=\n'
+    printf 'LEAF_TLS_CERT=\n'
+    printf 'LEAF_TLS_KEY=\n'
+    printf 'LEAF_TLS_HOSTS=\n'
+}
+
+render_server_unit() {
+    local user=$1 group=$2 base=$3
+    cat <<EOF
+[Unit]
+Description=Leaf — serveur de bandes dessinées
+Documentation=https://github.com/Pierrickbrd/Leaf
+
+# The line not to remove. A mount point that is missing is not unreadable: it is an empty
+# folder, perfectly readable. Started with the disk absent, the server would scan an empty
+# library, and a scan that finds nothing prunes the index — reading progress included, the
+# one thing a new scan cannot rebuild.
+RequiresMountsFor=$base
+
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=$user
+Group=$group
+# What the server writes into the library stays writable by the group it shares the library
+# with, as what that group puts there does through the folder's default ACL.
+UMask=0002
+EnvironmentFile=/etc/leaf/server.env
+ExecStart=/usr/local/bin/leaf-server serve
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+
+# The index, the progress and the resized pages live on the system disk.
+StateDirectory=leaf
+CacheDirectory=leaf
+# UMask=0002 is for the library. Here every file would be group-writable, and writing an
+# existing file needs no right on its folder: the group shared with a person gets nothing.
+StateDirectoryMode=0700
+CacheDirectoryMode=0700
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# ProtectSystem=strict makes the rest of the disk read-only. The library, its inbox and its
+# drop folder are the only places the server writes outside its own directories.
+ReadWritePaths=$base
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
 install_server() {
-    local existing_keys base unit health_host env_file
+    local existing_keys base unit health_host env_file service_group server_binary server_version
+    # Everything is checked before anything is touched: a mistake found after the binary,
+    # the account and the folders exist would leave a half-made installation behind.
+    server_version=$LEAF_VERSION
+    if [[ -n "$binary" ]]; then
+        binary=$(realpath -- "$binary")
+        server_version=$(check_server_binary "$binary")
+    fi
     existing_keys=$(existing_server_value LEAF_KEYS)
 
-    library=${library:-$(existing_server_value LEAF_LIBRARY)}
+    choose_library
+    library=$(check_library_path "$library")
     host=${host:-$(existing_server_value LEAF_HOST)}
     port=${port:-$(existing_server_value LEAF_PORT)}
-    library=${library:-/srv/leaf/library}
     host=${host:-127.0.0.1}
     port=${port:-8081}
-    [[ "$library" != *[[:space:]]* ]] || fail "le chemin de bibliothèque ne doit pas contenir d’espace."
 
     [[ "$port" =~ ^[0-9]+$ ]] && (( port > 0 && port < 65536 )) \
         || fail "le port doit être compris entre 1 et 65535."
-    ensure_rust
-    [[ "$library" == /* ]] || fail "--library attend un chemin absolu."
     [[ "$library$host" != *$'\n'* ]] || fail "un chemin ou une adresse contient un retour à la ligne."
+
+    base=$(dirname -- "$library")
+    service_user=$(resolve_service_user /etc/systemd/system/leaf-server.service)
+    if [[ "$service_user" != "leaf" ]]; then
+        getent passwd "$service_user" >/dev/null || fail "l’utilisateur '$service_user' n’existe pas."
+    fi
+    check_parent_out_of_reach "$service_user" "$base"
+    if [[ -n "$share_with" ]]; then
+        getent passwd "$share_with" >/dev/null || fail "l’utilisateur '$share_with' n’existe pas."
+        check_shareable_account "$service_user"
+        need_command setfacl acl
+    fi
 
     if [[ -n "$existing_keys" ]]; then
         client_key=$(server_key_from "$existing_keys") \
             || fail "LEAF_KEYS existe mais son premier élément n’a pas la forme nom:secret:droits."
+    elif as_root test -f /etc/leaf/server.env; then
+        # An update never rewrites server.env, so a key made up here would be reported
+        # to the person and exist nowhere. An empty LEAF_KEYS is said as what it is.
+        client_key=""
     else
         client_key=$(openssl rand -hex 16)
         existing_keys="desktop:$client_key:read,import"
     fi
 
-    cargo build --locked --release --manifest-path "$LEAF_ROOT/server/Cargo.toml"
-    as_root install -m 0755 "$LEAF_ROOT/server/target/release/leaf-server" /usr/local/bin/leaf-server
+    obtain_server_binary
+    as_root install -m 0755 "$server_binary" /usr/local/bin/leaf-server
     as_root install -m 0755 "$LEAF_ROOT/install.sh" /usr/local/bin/leaf-install
     as_root install -d -m 0755 /usr/local/share/leaf
-    printf '%s\n' "$LEAF_VERSION" > "$LEAF_TMP/server.version"
+    printf '%s\n' "$server_version" > "$LEAF_TMP/server.version"
     as_root install -m 0644 "$LEAF_TMP/server.version" /usr/local/share/leaf/server.version
 
-    base=$(dirname -- "$library")
-    as_root install -d -m 0755 -o "$install_user" -g "$install_group" \
-        "$library" "$base/inbox" "$base/drop"
+    ensure_service_account "$service_user"
+    # Again, now that the kernel can be asked as the account: before useradd there was
+    # nobody to ask, and a leftover group of that name may hold an ACL on the parent.
+    check_parent_out_of_reach "$service_user" "$base"
+    service_group=$(id -gn "$service_user")
+    prepare_library_dirs "$service_user" "$service_group" "$library" "$base"
+    if [[ -n "$share_with" ]]; then
+        share_library_with "$share_with" "$service_group" "${owned_library_dirs[@]}"
+    fi
 
     if ! as_root test -f /etc/leaf/server.env; then
-    env_file="$LEAF_TMP/server.env"
-    {
-        printf 'LEAF_LIBRARY=%s\n' "$(quote_environment_value "$library")"
-        printf 'LEAF_INBOX=%s\n' "$(quote_environment_value "$base/inbox")"
-        printf 'LEAF_DROP=%s\n' "$(quote_environment_value "$base/drop")"
-        printf 'LEAF_CACHE=/var/cache/leaf\n'
-        printf 'LEAF_DB=/var/lib/leaf/leaf.sqlite\n'
-        printf 'LEAF_KEYS=%s\n' "$(quote_environment_value "$existing_keys")"
-        printf 'LEAF_HOST=%s\n' "$(quote_environment_value "$host")"
-        printf 'LEAF_PORT=%s\n' "$port"
-        printf 'LEAF_MAX_UPLOAD_MB=2048\n'
-        printf 'LEAF_TRUST_PROXY=\n'
-        printf 'LEAF_TLS_CERT=\n'
-        printf 'LEAF_TLS_KEY=\n'
-        printf 'LEAF_TLS_HOSTS=\n'
-    } > "$env_file"
-    as_root install -D -m 0600 -o root -g root "$env_file" /etc/leaf/server.env
+        env_file="$LEAF_TMP/server.env"
+        render_server_env "$library" "$base" "$host" "$port" "$existing_keys" > "$env_file"
+        as_root install -D -m 0600 -o root -g root "$env_file" /etc/leaf/server.env
     fi
 
     unit="$LEAF_TMP/leaf-server.service"
-    {
-        printf '%s\n' '[Unit]'
-        printf '%s\n' 'Description=Leaf — serveur de bandes dessinées'
-        printf 'RequiresMountsFor=%s\n' "$base"
-        printf '%s\n' 'After=network-online.target' 'Wants=network-online.target' ''
-        printf '%s\n' '[Service]' 'Type=exec'
-        printf 'User=%s\nGroup=%s\n' "$install_user" "$install_group"
-        printf '%s\n' 'EnvironmentFile=/etc/leaf/server.env'
-        printf '%s\n' 'ExecStart=/usr/local/bin/leaf-server serve'
-        printf '%s\n' 'Restart=on-failure' 'RestartSec=5s' 'TimeoutStopSec=20s'
-        printf '%s\n' 'StateDirectory=leaf' 'CacheDirectory=leaf'
-        printf '%s\n' 'NoNewPrivileges=yes' 'ProtectSystem=strict' 'ProtectHome=read-only'
-        printf '%s\n' 'PrivateTmp=yes' 'PrivateDevices=yes' 'ProtectKernelTunables=yes'
-        printf '%s\n' 'ProtectKernelModules=yes' 'ProtectControlGroups=yes'
-        printf '%s\n' 'RestrictSUIDSGID=yes' 'RestrictNamespaces=yes' 'RestrictRealtime=yes'
-        printf '%s\n' 'LockPersonality=yes' 'MemoryDenyWriteExecute=yes'
-        printf '%s\n' 'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX'
-        printf '%s\n' 'SystemCallFilter=@system-service' 'SystemCallErrorNumber=EPERM'
-        printf 'ReadWritePaths=%s\n\n' "$base"
-        printf '%s\n' '[Install]' 'WantedBy=multi-user.target'
-    } > "$unit"
+    render_server_unit "$service_user" "$service_group" "$base" > "$unit"
     as_root install -m 0644 "$unit" /etc/systemd/system/leaf-server.service
     as_root systemctl daemon-reload
     as_root systemctl enable --now leaf-server.service
@@ -316,7 +596,7 @@ install_server() {
 }
 
 read_client_configuration() {
-    local config="$install_home/.config/Leaf/leaf.conf"
+    local config="$human_home/.config/Leaf/leaf.conf"
     as_root test -f "$config" || return 0
     [[ -n "$address" ]] || address=$(as_root sed -n 's/^address=//p' "$config" | tail -n1)
     [[ -n "$client_key" ]] || client_key=$(as_root sed -n 's/^key=//p' "$config" | tail -n1)
@@ -356,13 +636,13 @@ install_client() {
     printf '%s\n' "$LEAF_VERSION" > "$LEAF_TMP/client.version"
     as_root install -m 0644 "$LEAF_TMP/client.version" /usr/local/share/leaf/client.version
 
-    as_root install -d -m 0700 -o "$install_user" -g "$install_group" "$install_home/.config/Leaf"
+    as_root install -d -m 0700 -o "$human_user" -g "$human_group" "$human_home/.config/Leaf"
     {
         printf 'address=%s\n' "$address"
         printf 'key=%s\n' "$client_key"
     } > "$LEAF_TMP/leaf.conf"
-    as_root install -m 0600 -o "$install_user" -g "$install_group" \
-        "$LEAF_TMP/leaf.conf" "$install_home/.config/Leaf/leaf.conf"
+    as_root install -m 0600 -o "$human_user" -g "$human_group" \
+        "$LEAF_TMP/leaf.conf" "$human_home/.config/Leaf/leaf.conf"
 
     command -v update-desktop-database >/dev/null && \
         as_root update-desktop-database /usr/local/share/applications >/dev/null || true
@@ -378,9 +658,9 @@ main() {
 
     parse_arguments "$@"
 
-    getent passwd "$install_user" >/dev/null || fail "l’utilisateur '$install_user' n’existe pas."
-    install_group=$(id -gn "$install_user")
-    install_home=$(getent passwd "$install_user" | cut -d: -f6)
+    getent passwd "$human_user" >/dev/null || fail "l’utilisateur '$human_user' n’existe pas."
+    human_group=$(id -gn "$human_user")
+    human_home=$(getent passwd "$human_user" | cut -d: -f6)
 
     if (( updating )); then
         command -v git >/dev/null || fail "git est nécessaire pour mettre à jour cette installation source."
@@ -403,8 +683,16 @@ main() {
             install_client ;;
     esac
 
+    report_installation
+}
+
+report_installation() {
     printf '\nLeaf %s installé : %s.\n' "$LEAF_VERSION" "$component"
-    if [[ "$component" == "server" ]]; then
+    if [[ "$component" == "server" && -z "$client_key" ]]; then
+        printf 'Aucune clé dans LEAF_KEYS (/etc/leaf/server.env) : la bibliothèque est ouverte,\n'
+        printf 'et seuls les programmes de cette machine peuvent la joindre.\n'
+        printf 'Pour y relier un autre appareil, ajoutez une clé nom:secret:droits à LEAF_KEYS.\n'
+    elif [[ "$component" == "server" ]]; then
         printf 'Adresse client : %s\n' "${address:-à renseigner selon votre proxy ou adresse réseau}"
         printf 'Clé client     : %s\n' "$client_key"
         printf 'Sur le PC client, lancez leaf-install client et saisissez ces deux valeurs.\n'
