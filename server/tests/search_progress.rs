@@ -568,8 +568,134 @@ fn what_to_open_next_does_not_ask_one_question_per_line() {
     assert_eq!(2, rows.len());
     // It used to build every line on its own — a series query, an entry query, a progress
     // query and a chapter query each. What it costs now is what the screen is made of, not
-    // how long it is.
-    assert!(cost < 15, "what to open next took {cost} queries");
+    // how long it is: two questions to choose the lines — what is open, and what follows
+    // the furthest finished entry of every series at once — and the rest to dress them.
+    assert_eq!(13, cost, "what to open next took {cost} queries");
+}
+
+/// Two more volumes in the first edition, so that « after the last one finished » and
+/// « the first one never opened » can be told apart.
+fn four_volumes(f: &Fixture) {
+    f.db.write(|cx| {
+        for (id, sort) in [("v3", 3.0), ("v4", 4.0)] {
+            cx.execute(
+                "INSERT INTO entry (id, edition_id, type, file, size, modified_at, added_at,
+                                    volume_number, sort_key, page_count)
+                 VALUES (?1, 'e', 'VOLUME', ?2, 1, 1, 1, ?3, ?3, 190)",
+                (id, format!("/{id}.cbz"), sort),
+            )?;
+        }
+        Ok(())
+    })
+    .expect("seeding");
+}
+
+/// What `up_next` offers for the first edition, as (entry, reason).
+fn offered_in_e(progress: &Progress) -> Vec<(String, String)> {
+    progress
+        .up_next(20)
+        .expect("up next")
+        .into_iter()
+        .filter(|n| n.series_id == "e")
+        .map(|n| (n.entry.id, n.reason))
+        .collect()
+}
+
+fn at_page(progress: &Progress, entry: &str, page: i64) {
+    progress
+        .record(
+            "default",
+            entry,
+            &ProgressPatch {
+                page: Some(page),
+                ..Default::default()
+            },
+            1,
+        )
+        .expect("recording")
+        .expect("the entry");
+}
+
+/// The test of 22/10/2026: volume three finished, volumes one and two never opened because
+/// they were read elsewhere, and « à suivre » offered volume one — the first entry carrying
+/// no progress, not the one that follows what was just read.
+#[test]
+fn what_follows_is_the_entry_after_the_last_one_finished_not_the_first_unread() {
+    let f = Fixture::new();
+    four_volumes(&f);
+    let progress = Progress::new(&f.db);
+
+    finish(&progress, "v3", 1_000);
+
+    assert_eq!(
+        vec![("v4".to_string(), "NEXT_UP".to_string())],
+        offered_in_e(&progress)
+    );
+}
+
+#[test]
+fn a_series_finished_to_its_last_entry_offers_nothing_more() {
+    let f = Fixture::new();
+    four_volumes(&f);
+    let progress = Progress::new(&f.db);
+
+    finish(&progress, "v4", 1_000);
+
+    assert!(
+        offered_in_e(&progress).is_empty(),
+        "nothing follows the last volume"
+    );
+}
+
+/// Finished volumes in a row are walked past: the offer is the first unfinished entry after
+/// the furthest one finished, however many finished ones lead up to it.
+#[test]
+fn finished_entries_in_a_row_are_walked_past_to_the_first_unfinished_one() {
+    let f = Fixture::new();
+    four_volumes(&f);
+    let progress = Progress::new(&f.db);
+
+    finish(&progress, "v1", 1_000);
+    finish(&progress, "v2", 1_100);
+    finish(&progress, "v3", 1_200);
+
+    assert_eq!(
+        vec![("v4".to_string(), "NEXT_UP".to_string())],
+        offered_in_e(&progress)
+    );
+}
+
+/// The entry that follows is already open: it is offered once, as what you are reading.
+#[test]
+fn what_follows_already_begun_is_offered_as_in_progress_and_only_so() {
+    let f = Fixture::new();
+    four_volumes(&f);
+    let progress = Progress::new(&f.db);
+
+    finish(&progress, "v1", 1_000);
+    at_page(&progress, "v2", 40);
+
+    assert_eq!(
+        vec![("v2".to_string(), "IN_PROGRESS".to_string())],
+        offered_in_e(&progress)
+    );
+}
+
+/// Opened at its first page and closed again, it is still what follows: a record at page
+/// nought is not a reason to skip it and offer the volume after.
+#[test]
+fn what_follows_opened_at_its_first_page_is_still_what_follows() {
+    let f = Fixture::new();
+    four_volumes(&f);
+    let progress = Progress::new(&f.db);
+
+    finish(&progress, "v1", 1_000);
+    at_page(&progress, "v2", 0);
+
+    assert_eq!(
+        vec![("v2".to_string(), "NEXT_UP".to_string())],
+        offered_in_e(&progress)
+    );
 }
 
 #[test]
@@ -712,6 +838,77 @@ fn finishing_counts_the_endings_and_a_rewind_counts_none() {
         2,
         progress.of("v1").unwrap().expect("a record").times_finished
     );
+}
+
+fn rewind_to(
+    progress: &Progress,
+    entry: &str,
+    page: i64,
+) -> leaf_server::api::progress::ProgressDto {
+    progress
+        .record(
+            "default",
+            entry,
+            &ProgressPatch {
+                page: Some(page),
+                rewind: true,
+                ..Default::default()
+            },
+            2_000,
+        )
+        .expect("recording")
+        .expect("the entry")
+}
+
+/// The contract says a rewind clears `finished`; the server kept it, so a volume re-opened
+/// at its first page in the test of 22/10/2026 stayed « lu » until the client said
+/// `finished: false` on its own.
+#[test]
+fn a_rewind_below_the_last_page_clears_finished_and_keeps_the_count() {
+    let f = Fixture::new();
+    let progress = Progress::new(&f.db);
+    finish(&progress, "v1", 1_000);
+
+    let rewound = rewind_to(&progress, "v1", 0);
+
+    assert!(!rewound.finished, "a rewind says where the reader is now");
+    assert_eq!(0, rewound.page);
+    assert_eq!(1, rewound.times_finished, "and keeps what happened");
+}
+
+/// Rewinding to the last page is still being at the end: there is nothing to clear.
+#[test]
+fn a_rewind_to_the_last_page_leaves_it_finished() {
+    let f = Fixture::new();
+    let progress = Progress::new(&f.db);
+    finish(&progress, "v1", 1_000);
+
+    assert!(rewind_to(&progress, "v1", 189).finished);
+}
+
+/// What the patch says outright wins over what the rewind implies.
+#[test]
+fn a_rewind_that_says_finished_is_taken_at_its_word() {
+    let f = Fixture::new();
+    let progress = Progress::new(&f.db);
+    finish(&progress, "v1", 1_000);
+
+    let said = progress
+        .record(
+            "default",
+            "v1",
+            &ProgressPatch {
+                page: Some(3),
+                finished: Some(true),
+                rewind: true,
+            },
+            2_000,
+        )
+        .expect("recording")
+        .expect("the entry");
+
+    assert!(said.finished);
+    assert_eq!(1, said.times_finished, "the same ending, not a second one");
 }
 
 /// The defect the counter exists for: a series you had finished left the READ filter the

@@ -965,8 +965,9 @@ paths:
       summary: What to open next.
       description: |
         Two different things, deliberately kept apart and labelled: what you are in the
-        middle of, most recent first, then the entry following the last one you finished in
-        each series.
+        middle of, most recent first, then the entry following the furthest one you finished
+        in each series, in the order the series is read. Volumes left unopened before it are
+        not offered, and a series finished to its last entry offers nothing more.
 
         A series you have never opened appears in neither. "Next" means next *for you*, not
         a catalogue.
@@ -2315,7 +2316,9 @@ components:
           default: false
           description: |
             Say so to move backwards. Without it a lower page is ignored, which is what
-            makes replaying an offline queue safe.
+            makes replaying an offline queue safe. A rewind below the last page clears
+            `finished`, unless the patch says `finished` itself; `timesFinished` keeps its
+            count.
 
     UpNext:
       type: object
