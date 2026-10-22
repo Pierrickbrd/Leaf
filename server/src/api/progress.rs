@@ -46,7 +46,8 @@ pub struct ProgressPatch {
     pub finished: Option<bool>,
     /// Progress never moves backwards on its own. That is the rule that makes the offline
     /// queue safe: a phone replaying yesterday's positions cannot undo today's reading. But
-    /// re-reading a volume is a normal thing to do, so it stays possible — explicitly.
+    /// re-reading a volume is a normal thing to do, so it stays possible — explicitly. Below
+    /// the last page it clears `finished`, unless the patch says `finished` itself.
     #[serde(default)]
     pub rewind: bool,
 }
@@ -209,7 +210,15 @@ impl<'a> Progress<'a> {
                             WHEN ?6 THEN COALESCE(?3, progress.page)
                             ELSE MAX(progress.page, COALESCE(?3, progress.page))
                           END,
-                   finished = COALESCE(?4, progress.finished),
+                   -- A rewind below the last page clears it, as the contract says: the
+                   -- server kept it, and a volume re-opened at its first page in the test
+                   -- of 22/10/2026 stayed « lu » unless the client cleared it itself. What
+                   -- the patch says outright still wins over what the rewind implies.
+                   finished = CASE
+                                WHEN ?4 IS NOT NULL THEN ?4
+                                WHEN ?6 AND COALESCE(?3, progress.page) < ?8 THEN 0
+                                ELSE progress.finished
+                              END,
                    -- Counted on the edge, and in this statement for the same reason the
                    -- page is: read-then-write would let two patches arriving together both
                    -- see an unfinished row and count the same ending twice.
@@ -226,6 +235,7 @@ impl<'a> Progress<'a> {
                     now,
                     i64::from(patch.rewind),
                     profile_id,
+                    (page_count - 1).max(0),
                 ],
             )?;
             Ok(true)
@@ -319,7 +329,8 @@ impl<'a> Progress<'a> {
     /// What to open next. Two very different things, deliberately kept apart:
     ///
     ///  - what you are in the middle of, most recent first;
-    ///  - the entry that follows the last one you finished, in each series.
+    ///  - the entry that follows the furthest one you finished, in each series — nothing
+    ///    when that was the last.
     ///
     /// A series you have never opened appears in neither: "next" means next for you, not a
     /// catalogue.
@@ -342,23 +353,29 @@ impl<'a> Progress<'a> {
         let busy: std::collections::HashSet<String> =
             in_progress.iter().map(|n| n.edition_id.clone()).collect();
 
-        // For each series with something finished and nothing in progress, the first entry
-        // that carries no progress at all. The entry is picked by the same query that finds
-        // the series, rather than by one more question per series.
+        // For each series, the entry right after the furthest one finished, in the order the
+        // series is read. It used to be the first entry carrying no progress at all, which
+        // the test of 22/10/2026 caught: volume three finished, one and two read elsewhere
+        // and never opened here, and « à suivre » offered volume one. The entry after the
+        // furthest finished is unfinished by construction, so a run of finished volumes is
+        // walked past without asking; a series finished to its last entry offers nothing.
+        // One query for every series, rather than one more question per series.
         let next_up = self.db.read(|cx| {
             cx.query(
-                "SELECT edition_id, id FROM (
-                   SELECT e.edition_id, e.id,
+                "WITH ranked AS (
+                   SELECT e.edition_id, e.id, COALESCE(p.finished, 0) AS finished,
                           ROW_NUMBER() OVER (
                             PARTITION BY e.edition_id ORDER BY e.sort_key IS NULL, e.sort_key, e.file
                           ) AS rank
                    FROM entry e
                    LEFT JOIN progress p ON p.entry_id = e.id
-                   WHERE p.entry_id IS NULL
-                     AND EXISTS (SELECT 1 FROM progress q
-                                 WHERE q.edition_id = e.edition_id AND q.finished = 1)
+                 ),
+                 furthest AS (
+                   SELECT edition_id, MAX(rank) AS rank FROM ranked
+                   WHERE finished = 1 GROUP BY edition_id
                  )
-                 WHERE rank = 1",
+                 SELECT r.edition_id, r.id FROM ranked r
+                 JOIN furthest f ON f.edition_id = r.edition_id AND r.rank = f.rank + 1",
                 [],
                 |r| {
                     Ok(Next {
