@@ -42,6 +42,27 @@ pub fn enforce(root: &Path, max_bytes: u64) {
     );
 }
 
+/// The smallest a file costs, whatever it holds: one block of the filesystem.
+pub const FLOOR: u64 = 4096;
+
+/// What a file in the cache really costs the disk — its allocated blocks, and never less
+/// than one block.
+///
+/// Counted by its length, a page not worth resizing weighed nothing: its marker is empty.
+/// Any key allowed to read could then ask every page at every width from 1 to 4096 and
+/// leave a file behind each time, millions of them, under a budget that never moved — and
+/// a marker is an inode and a block like any other file.
+pub fn on_disk(meta: &std::fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    let allocated = {
+        use std::os::unix::fs::MetadataExt;
+        meta.blocks().saturating_mul(512)
+    };
+    #[cfg(not(unix))]
+    let allocated = 0;
+    meta.len().max(allocated).max(FLOOR)
+}
+
 type Entry = (std::path::PathBuf, u64, std::time::SystemTime);
 
 /// Anything that cannot be read is skipped rather than fatal.
@@ -57,12 +78,9 @@ fn collect(dir: &Path, out: &mut Vec<Entry>, total: &mut u64) -> std::io::Result
         if meta.is_dir() {
             let _ = collect(&path, out, total);
         } else if meta.is_file() {
-            *total += meta.len();
-            out.push((
-                path,
-                meta.len(),
-                meta.modified().unwrap_or(std::time::UNIX_EPOCH),
-            ));
+            let cost = on_disk(&meta);
+            *total += cost;
+            out.push((path, cost, meta.modified().unwrap_or(std::time::UNIX_EPOCH)));
         }
     }
     Ok(())

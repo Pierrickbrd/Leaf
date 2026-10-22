@@ -315,7 +315,7 @@ in, so there is no runtime and no system library to install.
 | `LEAF_MAX_UPLOAD_MB` | `2048` | ceiling on a single file, both upload paths |
 | `LEAF_TRUST_PROXY` | off | read `X-Forwarded-For` — only behind **exactly one** proxy that sets it |
 | `LEAF_TLS_CERT` · `_KEY` · `_HOSTS` | `tls/leaf.crt` · `tls/leaf.key` beside `LEAF_DB`, off the loopback | the certificate Leaf serves with — two PEM files, generated if the certificate is not there |
-| `LEAF_JPEG_QUALITY` | `0.85` | |
+| `LEAF_IMAGE_QUALITY` | `0.75` | quality of resized pages, which are lossy WebP; `LEAF_JPEG_QUALITY` is ignored, and said so at startup |
 | `LEAF_MAX_CACHE_MB` | `4096` | ceiling on resized pages, oldest read go first |
 | `LEAF_NO_SCAN` | | skip the scan on start |
 
@@ -568,6 +568,9 @@ the library, or the rename becomes a copy and the point is lost.
 **`?width=` is the width you want per page.** A landscape image is a double-page spread and
 gets twice the requested width. Without the parameter the original bytes are served
 untouched, and nothing is ever upscaled or returned larger than its source.
+The width is rounded **up to a step of 200** first — 1001 and 1200 are one image under one
+ETag — because every distinct width is a decode and a cache entry, and any key that can read
+could otherwise ask a page at all 4096 of them.
 
 **`GET /entries/{id}/file` writes before it serves.** It stamps the archive with its own
 identity — work, edition, number — so the file can find its way home when it comes back. That
@@ -575,18 +578,20 @@ means a GET modifies something on disk, which no cache, proxy or client expects.
 and the stamp has to be in the copy that leaves rather than the one that stays; worth knowing
 before putting a caching proxy in front.
 
-**Resized pages are encoded at 4:4:4**, not the 4:2:0 that most encoders choose below quality
-90. Halving the colour resolution costs nothing measurable on line art and saves about 40 % of
-the bytes, but it is a change to the fidelity of every page the server sends and it has no
-business arriving as a side effect. On pure chroma noise — which no page contains — 4:4:4
-costs 1 217 KB against 747 KB for an average error of 6.62 against 13.43.
+**Resized pages are lossy WebP**, quality 0.75, method 4. Measured on 177 pages of a real
+library against the JPEG at 0.85 it replaced: the same PSNR to a tenth of a decibel and a
+higher SSIM, for 0.56 of the bytes in the median. A resize that came out larger than its
+WebP source — 32 % of them at 1000 wide, 54 % at 1200, as JPEG — now comes out larger for
+none. The price is the encode, about ten times the JPEG's (84 ms against 8 at 1000 wide),
+paid once per page and width and then served from the cache. A page too tall for a WebP at its width — a webtoon strip past 16 383 rows — is a JPEG instead, at the quality ten points up, which a WebP at 0.75 matches. Building the server needs a C
+compiler for libwebp, which is linked in: nothing to install beside the binary.
 
-**What a page that is not a JPEG becomes.** The resize path has one output format, so:
+**What a page becomes when a width is asked.** The resize path has one output format, so:
 
 | source | asked at a width |
 |---|---|
-| JPEG, PNG, BMP | decoded, shrunk, re-encoded as JPEG |
-| WebP, GIF | **may come back untouched** — re-encoding them can cost more bytes than it saves |
+| JPEG, lossy WebP | decoded, shrunk, re-encoded as WebP — or **untouched** when the width is within a fifth of its own, or the result would be larger |
+| PNG, BMP, GIF — and a lossless WebP cover file, whose bytes say so; inside an archive the index cannot tell it from a lossy one | **always** re-encoded as WebP, at its own width when the width asked is near or past it: a PNG scan is several megabytes where the WebP is a tenth — unless the result would be larger |
 | anything with transparency | flattened onto **white** before encoding |
 
 That last row was a defect once: dropping the alpha channel rather than compositing it left a

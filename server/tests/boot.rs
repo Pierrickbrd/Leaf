@@ -7,7 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use leaf_server::boot::{
-    cache_ceiling, jpeg_quality, split_volumes, tls_hosts, tls_paths, Device, Invocation, Outcome,
+    cache_ceiling, image_quality, retired_quality, split_volumes, tls_hosts, tls_paths, Device,
+    Invocation, Outcome,
 };
 use leaf_server::config::Config;
 
@@ -190,19 +191,30 @@ fn a_named_certificate_wins_over_the_default() {
 }
 
 #[test]
-fn the_jpeg_quality_is_a_dial_that_stops_at_its_ends() {
-    assert_eq!(jpeg_quality(None), 85);
-    assert_eq!(jpeg_quality(Some("0.85")), 85);
-    assert_eq!(jpeg_quality(Some("1.0")), 100);
+fn the_image_quality_is_a_dial_that_stops_at_its_ends() {
+    assert_eq!(image_quality(None), 75);
+    assert_eq!(image_quality(Some("0.75")), 75);
+    assert_eq!(image_quality(Some("1.0")), 100);
     // Past either end, it stops at the end rather than refusing.
-    assert_eq!(jpeg_quality(Some("0.1")), 40);
-    assert_eq!(jpeg_quality(Some("9")), 100);
+    assert_eq!(image_quality(Some("0.1")), 40);
+    assert_eq!(image_quality(Some("9")), 100);
 }
 
 #[test]
 fn a_quality_that_is_not_a_number_falls_back() {
-    assert_eq!(jpeg_quality(Some("haute")), 85);
-    assert_eq!(jpeg_quality(Some("")), 85);
+    assert_eq!(image_quality(Some("haute")), 75);
+    assert_eq!(image_quality(Some("")), 75);
+}
+
+/// A configuration file written for the JPEG still holds the old dial, and a dial that
+/// silently stops working is one nobody knows to turn again.
+#[test]
+fn the_jpeg_quality_left_in_a_configuration_is_said_to_be_ignored() {
+    assert_eq!(retired_quality(None), None);
+    let said = retired_quality(Some("0.85")).expect("a warning");
+    assert!(said.contains("LEAF_JPEG_QUALITY=0.85"), "{said}");
+    assert!(said.contains("ignored"), "{said}");
+    assert!(said.contains("LEAF_IMAGE_QUALITY"), "{said}");
 }
 
 #[test]

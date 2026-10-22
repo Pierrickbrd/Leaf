@@ -34,9 +34,15 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # SIMD resize. Measured on a real page: 1.9 ms against 31 ms for the scalar one in
 # `image` — sixteen times, on the one step of the path that was never the bottleneck.
 fast_image_resize = { version = "5", features = ["image"] }
-# Encoding, which is where a cold page actually spends its time — measured at 18.4 ms of the
-# 31 the whole path costs, against 7.9 for the decode. This one does it in 6.3, in Rust, with
-# SIMD: the same size out and the same fidelity, and no C to install beside the binary.
+# Lossy WebP for a resized page, at the fidelity of the JPEG it replaces for 0.56 of its
+# bytes — measured on 177 real pages, equal PSNR and a higher SSIM. And a resize that comes
+# out larger than its WebP source, which was 32 to 54 % of them as JPEG, is 0 %. `image`
+# only writes lossless WebP, so this is libwebp: compiled from source by `cc`, linked
+# statically, still nothing to install beside the binary — only a C compiler to build it.
+webp = { version = "0.3", default-features = false }
+# JPEG, only for a page too tall for a WebP — a webtoon strip past 16 383 rows at its
+# reading width. Measured on a 1936×1400 page: 6.3 ms to encode against 18.4 for the one in
+# `image`, in Rust with SIMD, for the same size and fidelity.
 jpeg-encoder = { version = "0.7", features = ["simd"] }
 
 # ComicInfo.xml. Not a courtesy: the real library is 100 %% ComicInfo and 0 %% entry.json,

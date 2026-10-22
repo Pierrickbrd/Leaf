@@ -1,6 +1,6 @@
 //! Serving a page, and the cache that means it is only ever resized once.
 //!
-//! Three decisions carry this file, and each of them was arrived at by measuring:
+//! Four decisions carry this file, and each of them was arrived at by measuring:
 //!
 //!  - **the cache is consulted before the archive is opened.** It used to be consulted
 //!    inside the resize, which meant a hit still paid for unzipping and reading a megabyte
@@ -12,6 +12,10 @@
 //!  - **a spread gets twice the width.** `?width` is the width you want *per page*; a page
 //!    wider than it is tall holds two, and each half would otherwise come back at half the
 //!    resolution of a single page.
+//!  - **the answer's tag is known before anything is read.** It is built from the key, the
+//!    file's modification time and the width, so a client revalidating what it holds gets
+//!    its 304 without the archive being opened — and a page whose resize turned out larger
+//!    than the source is remembered as such, rather than decoded again on every request.
 
 use std::collections::HashSet;
 use std::io::Cursor;
@@ -26,6 +30,7 @@ use fast_image_resize::images::Image as FirImage;
 use fast_image_resize::{PixelType, ResizeAlg, ResizeOptions, Resizer};
 use sha2::{Digest, Sha256};
 
+use super::flight::{Flights, Takeoff, PATIENCE};
 use crate::archive::cbz;
 use crate::store::Db;
 
@@ -33,7 +38,87 @@ use crate::store::Db;
 const MAX_WIDTH: u32 = 4096;
 
 /// What a cover is asked for at when nobody says. Small: it is a tile on a shelf.
-const COVER_WIDTH: u32 = 300;
+///
+/// A step of `WIDTH_STEP`, and said as one: it was 300, which is served at 400 since widths
+/// went by steps, and a constant that is never the width served misleads whoever reads it.
+const COVER_WIDTH: u32 = 400;
+
+/// What a resized page is encoded as.
+///
+/// WebP, unless the page is too tall for one: a WebP counts its rows in fourteen bits, and
+/// a stitched webtoon strip shrunk to a reading width is routinely past 16 383 of them.
+/// Sent as the original instead, a strip of 20 000 rows is exactly the waste the resize
+/// exists to remove — so it goes out as a JPEG, which counts them in sixteen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Encoding {
+    WebP,
+    Jpeg,
+}
+
+impl Encoding {
+    fn media_type(self) -> &'static str {
+        match self {
+            Encoding::WebP => "image/webp",
+            Encoding::Jpeg => "image/jpeg",
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            Encoding::WebP => "webp",
+            Encoding::Jpeg => "jpg",
+        }
+    }
+
+    /// The most rows or columns the format can hold.
+    fn max_side(self) -> u32 {
+        match self {
+            Encoding::WebP => 16383,
+            Encoding::Jpeg => u32::from(u16::MAX),
+        }
+    }
+
+    /// The format to shrink a page into, given the rows it comes out at: nothing when no
+    /// format can hold them, or there are none.
+    fn for_rows(rows: f64) -> Option<Encoding> {
+        if !(1.0..=f64::from(Encoding::Jpeg.max_side())).contains(&rows) {
+            None
+        } else if rows <= f64::from(Encoding::WebP.max_side()) {
+            Some(Encoding::WebP)
+        } else {
+            Some(Encoding::Jpeg)
+        }
+    }
+
+    /// The quality this format is asked for, from the one configured for WebP.
+    ///
+    /// The dial is calibrated on WebP: measured on the real library, WebP at 75 has the
+    /// fidelity of JPEG at 85. Ten points up is the same dial read for a JPEG.
+    fn quality(self, configured: u8) -> u8 {
+        match self {
+            Encoding::WebP => configured,
+            Encoding::Jpeg => configured.saturating_add(10).min(100),
+        }
+    }
+
+    /// What goes into the tag of a page encoded this way.
+    fn token(self, configured: u8) -> String {
+        match self {
+            Encoding::WebP => format!("webp-m4-q{}", self.quality(configured)),
+            Encoding::Jpeg => format!("jpeg-q{}", self.quality(configured)),
+        }
+    }
+}
+
+/// Widths are served by steps of this many pixels, rounded up.
+///
+/// Every width a client may ask for is a decode, an entry in the cache and, for a page not
+/// worth resizing, a marker — and any key that can read can ask for all 4096 of them on
+/// every page. Rounded up to a step, a page has at most 21 entries whatever it is asked, and
+/// two windows a few pixels apart share one. Up rather than to the nearest, so a client
+/// never gets fewer pixels than it asked for; the same steps the desktop client already
+/// asks by, so its requests land on a step rather than between two.
+const WIDTH_STEP: u32 = 200;
 
 /// How many pages are prepared ahead of the one being read.
 const AHEAD: i64 = 4;
@@ -50,6 +135,23 @@ pub struct ServedImage {
     pub bytes: Vec<u8>,
     pub media_type: String,
     pub tag: String,
+}
+
+/// What a request comes to once the tag the client already holds has been looked at.
+pub enum Served {
+    Image(ServedImage),
+    /// The client holds this tag already, and nothing was read to say so.
+    Unchanged(String),
+}
+
+impl Served {
+    /// The image, or nothing when the answer was that the client already has it.
+    pub fn into_image(self) -> Option<ServedImage> {
+        match self {
+            Served::Image(image) => Some(image),
+            Served::Unchanged(_) => None,
+        }
+    }
 }
 
 pub struct Pages {
@@ -80,6 +182,8 @@ pub struct Pages {
     /// On the instance and not in a `static`, unlike `cbz::OPENED`: tests in one binary share
     /// a process, and a global count is one a test can only print. Each `Pages` has its own.
     decoded: AtomicU64,
+    /// The resizes in progress, by tag, so the same one is never done twice at once.
+    flights: Flights,
 }
 
 impl Pages {
@@ -102,6 +206,7 @@ impl Pages {
             check_every,
             seen_widths: Mutex::new(Vec::new()),
             decoded: AtomicU64::new(0),
+            flights: Flights::default(),
         }
     }
 
@@ -123,6 +228,38 @@ impl Pages {
         number: i64,
         width: Option<u32>,
     ) -> Result<Option<ServedImage>> {
+        Ok(self
+            .page_or_unchanged(entry_id, number, width, None)?
+            .and_then(Served::into_image))
+    }
+
+    /// A page, or word that the client already holds it when `held` is its tag.
+    pub fn page_or_unchanged(
+        &self,
+        entry_id: &str,
+        number: i64,
+        width: Option<u32>,
+        held: Option<&str>,
+    ) -> Result<Option<Served>> {
+        self.page_for(entry_id, number, width, held, false)
+    }
+
+    /// A page for the warming, which skips one somebody is already making rather than
+    /// waiting for it: it has other pages to prepare.
+    fn warm_page(&self, entry_id: &str, number: i64, width: u32) -> Result<()> {
+        self.page_for(entry_id, number, Some(width), None, true)
+            .map(|_| ())
+    }
+
+    fn page_for(
+        &self,
+        entry_id: &str,
+        number: i64,
+        width: Option<u32>,
+        held: Option<&str>,
+        warming: bool,
+    ) -> Result<Option<Served>> {
+        let width = width.map(stepped);
         let row = self.db.read(|cx| {
             cx.query_one(
                 "SELECT e.file, e.modified_at, p.entry_name, p.media_type, p.width, p.height
@@ -142,12 +279,29 @@ impl Pages {
             )
         })?;
         let Some(source) = row else { return Ok(None) };
-        self.serve(&source, width, &format!("{entry_id}/{number}"))
+        self.serve(
+            &source,
+            width,
+            &format!("{entry_id}/{number}"),
+            held,
+            warming,
+        )
     }
 
     /// The cover of an entry. A thumbnail is a page asked for narrow; there is no separate
     /// thing.
     pub fn cover(&self, entry_id: &str, width: Option<u32>) -> Result<Option<ServedImage>> {
+        Ok(self
+            .cover_or_unchanged(entry_id, width, None)?
+            .and_then(Served::into_image))
+    }
+
+    pub fn cover_or_unchanged(
+        &self,
+        entry_id: &str,
+        width: Option<u32>,
+        held: Option<&str>,
+    ) -> Result<Option<Served>> {
         // A cover chosen on disk wins over page zero — that is what "cover.jpg beside the
         // volumes" is for.
         let chosen: Option<String> = self.db.read(|cx| {
@@ -160,10 +314,10 @@ impl Pages {
         })?;
         let requested = tile_width(width);
         if let Some(path) = chosen {
-            return self.serve_file(Path::new(&path), requested);
+            return self.serve_file(Path::new(&path), requested, held);
         }
         // Not a read: a cover is a tile on a shelf, and nobody has opened the volume.
-        self.page(entry_id, 0, Some(requested))
+        self.page_or_unchanged(entry_id, 0, Some(requested), held)
     }
 
     /// The tile of a grid: one request, not one to find the first entry and another for its
@@ -173,7 +327,18 @@ impl Pages {
         edition_id: &str,
         width: Option<u32>,
     ) -> Result<Option<ServedImage>> {
-        let requested = tile_width(width);
+        Ok(self
+            .series_cover_or_unchanged(edition_id, width, None)?
+            .and_then(Served::into_image))
+    }
+
+    pub fn series_cover_or_unchanged(
+        &self,
+        edition_id: &str,
+        width: Option<u32>,
+        held: Option<&str>,
+    ) -> Result<Option<Served>> {
+        let requested = stepped(tile_width(width));
         // Remembered at the width it is served at, never at the one that was typed. A `0`
         // remembered here is a width nothing is ever stored under: it pushed the two real
         // widths out of the list — `WIDTHS_REMEMBERED` is two — and the sweep after the next
@@ -192,7 +357,7 @@ impl Pages {
             .map(Option::flatten)
         })?;
         if let Some(path) = chosen {
-            return self.serve_file(Path::new(&path), requested);
+            return self.serve_file(Path::new(&path), requested, held);
         }
         let first: Option<String> = self.db.read(|cx| {
             cx.query_one(
@@ -202,7 +367,7 @@ impl Pages {
             )
         })?;
         match first {
-            Some(entry) => self.cover(&entry, Some(requested)),
+            Some(entry) => self.cover_or_unchanged(&entry, Some(requested), held),
             None => Ok(None),
         }
     }
@@ -211,78 +376,217 @@ impl Pages {
     ///
     /// Keyed on its own path: it belongs to no entry in particular — an edition cover is one
     /// file speaking for a whole series — and the path is what identifies it.
-    fn serve_file(&self, path: &Path, requested: u32) -> Result<Option<ServedImage>> {
-        if !path.is_file() {
-            return Ok(None);
-        }
-        let Ok(bytes) = std::fs::read(path) else {
+    ///
+    /// The index holds no dimensions for such a file, so whether it is worth resizing is only
+    /// known once it has been read — and is remembered from then on like a resize that came
+    /// out larger, so that the next request for it reads nothing it does not have to.
+    fn serve_file(
+        &self,
+        path: &Path,
+        requested: u32,
+        held: Option<&str>,
+    ) -> Result<Option<Served>> {
+        let requested = stepped(requested);
+        let Ok(meta) = std::fs::metadata(path) else {
             return Ok(None);
         };
+        if !meta.is_file() {
+            return Ok(None);
+        }
         let key = path.to_string_lossy().to_string();
-        let modified = std::fs::metadata(path)
-            .and_then(|m| m.modified())
+        let modified = meta
+            .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
+        let original = self.tag(&key, modified, None);
+        // WebP, decided before the file is read: its dimensions are not in the index, and the
+        // tag has to be known before anything is read. A cover too tall for a WebP at a tile's
+        // width is not a cover anyone has, so it is simply served as it is — see below.
+        let etag = self.tag(&key, modified, Some((requested, Encoding::WebP)));
+        let not_worth = self.known_not_worth(&etag);
+        if let Some(unchanged) = unchanged(held, if not_worth { &original } else { &etag }) {
+            return Ok(Some(unchanged));
+        }
+        if !not_worth {
+            if let Some(hit) = self.cached(&etag, Encoding::WebP) {
+                return Ok(Some(Served::Image(hit)));
+            }
+        }
+        // The shelf sweep and a reader looking at the shelf ask for the same tiles: one makes
+        // a tile, the other waits for it. See `serve`.
+        let flight = if not_worth {
+            None
+        } else {
+            match self.flights.take_off(&etag, Some(PATIENCE)) {
+                Takeoff::Mine(flight) => Some(flight),
+                Takeoff::Landed => {
+                    if let Some(hit) = self.cached(&etag, Encoding::WebP) {
+                        return Ok(Some(Served::Image(hit)));
+                    }
+                    if self.known_not_worth(&etag) {
+                        None
+                    } else {
+                        self.flights.try_take_off(&etag)
+                    }
+                }
+                Takeoff::TimedOut | Takeoff::Busy => None,
+            }
+        };
+        let not_worth = not_worth || (flight.is_none() && self.known_not_worth(&etag));
+
+        let Ok(bytes) = std::fs::read(path) else {
+            return Ok(None);
+        };
         let media_type = crate::archive::images::media_type(&bytes)
             .unwrap_or("application/octet-stream")
             .to_string();
-        let dimensions = crate::archive::images::dimension(&bytes);
-
-        Ok(Some(self.shrink(
+        let plain = |bytes: Vec<u8>| ServedImage {
+            tag: original.clone(),
             bytes,
-            &media_type,
+            media_type: media_type.clone(),
+        };
+        if not_worth {
+            return Ok(Some(Served::Image(plain(bytes))));
+        }
+        let dimensions = crate::archive::images::dimension(&bytes);
+        let plan = self.plan(
             dimensions.map(|(w, _)| w as i64),
             dimensions.map(|(_, h)| h as i64),
             requested,
-            &key,
-            modified,
-        )))
+            lossless(&media_type) || lossless_webp(&bytes),
+        );
+        if !plan.worth_resizing || plan.encoding != Encoding::WebP {
+            self.remember_not_worth(&etag);
+            if let Some(unchanged) = unchanged(held, &original) {
+                return Ok(Some(unchanged));
+            }
+            return Ok(Some(Served::Image(plain(bytes))));
+        }
+        let served = self.shrink(bytes, &plan, &etag, &key, plain);
+        Ok(Some(match unchanged(held, &served.tag) {
+            Some(unchanged) => unchanged,
+            None => Served::Image(served),
+        }))
     }
 
+    /// The tag is decided before anything is read, and compared with the one the client holds
+    /// before the archive is opened.
+    ///
+    /// Measured on a real library over a 4.5 ms network: a revalidation of a page whose
+    /// resize came out larger took 194 ms to say 304, because the tag was compared only once
+    /// the page had been extracted, decoded, resized and re-encoded — all of it to be thrown
+    /// away. The tag never needed any of that: it is the key, the file's modification time and
+    /// the width.
     fn serve(
         &self,
         source: &Source,
         requested: Option<u32>,
         key: &str,
-    ) -> Result<Option<ServedImage>> {
+        held: Option<&str>,
+        warming: bool,
+    ) -> Result<Option<Served>> {
+        let original = self.tag(key, source.modified_at, None);
         let Some(requested) = requested else {
-            let Some(bytes) = cbz::extract(Path::new(&source.file), &source.entry_name)? else {
-                return Ok(None);
-            };
-            return Ok(Some(ServedImage {
-                tag: self.tag(key, source.modified_at, None),
-                bytes,
-                media_type: source.media_type.clone(),
-            }));
+            return self.extracted(source, original, held);
         };
 
         // Consulted before the archive is opened. Everything the decision needs is in the
         // index already.
-        let plan = self.plan(source.width, source.height, requested);
-        if plan.worth_resizing {
-            if let Some(hit) = self.cached(&self.tag(key, source.modified_at, Some(requested))) {
-                return Ok(Some(hit));
-            }
+        let plan = self.plan(
+            source.width,
+            source.height,
+            requested,
+            lossless(&source.media_type),
+        );
+        if !plan.worth_resizing {
+            return self.extracted(source, original, held);
         }
+        let etag = self.tag(key, source.modified_at, Some((requested, plan.encoding)));
+        if self.known_not_worth(&etag) {
+            return self.extracted(source, original, held);
+        }
+        if let Some(unchanged) = unchanged(held, &etag) {
+            return Ok(Some(unchanged));
+        }
+        if let Some(hit) = self.cached(&etag, plan.encoding) {
+            return Ok(Some(Served::Image(hit)));
+        }
+
+        // Whoever is already making this page makes it for everyone: a reader asking for the
+        // page the warming is on waits for it and reads it from the cache, rather than
+        // decoding and encoding it a second time beside it.
+        let _flight = match self.flights.take_off(&etag, (!warming).then_some(PATIENCE)) {
+            Takeoff::Mine(flight) => Some(flight),
+            Takeoff::Busy => return Ok(None),
+            Takeoff::TimedOut => None,
+            Takeoff::Landed => {
+                if self.known_not_worth(&etag) {
+                    return self.extracted(source, original, held);
+                }
+                if let Some(hit) = self.cached(&etag, plan.encoding) {
+                    return Ok(Some(Served::Image(hit)));
+                }
+                // It landed with nothing to show — a panic, a cache that could not be
+                // written. The work is ours, then.
+                self.flights.try_take_off(&etag)
+            }
+        };
 
         let Some(bytes) = cbz::extract(Path::new(&source.file), &source.entry_name)? else {
             return Ok(None);
         };
-        Ok(Some(self.shrink(
+        let plain = |bytes: Vec<u8>| ServedImage {
+            tag: original.clone(),
             bytes,
-            &source.media_type,
-            source.width,
-            source.height,
-            requested,
-            key,
-            source.modified_at,
-        )))
+            media_type: source.media_type.clone(),
+        };
+        let served = self.shrink(bytes, &plan, &etag, key, plain);
+        // A revalidation of a tag the client could only have got from an earlier answer that
+        // was the original: the resize has just been found not worth it, and that is what it
+        // holds.
+        Ok(Some(match unchanged(held, &served.tag) {
+            Some(unchanged) => unchanged,
+            None => Served::Image(served),
+        }))
+    }
+
+    /// The member itself, unless the client already holds it under `tag`.
+    fn extracted(
+        &self,
+        source: &Source,
+        tag: String,
+        held: Option<&str>,
+    ) -> Result<Option<Served>> {
+        if let Some(unchanged) = unchanged(held, &tag) {
+            return Ok(Some(unchanged));
+        }
+        let Some(bytes) = cbz::extract(Path::new(&source.file), &source.entry_name)? else {
+            return Ok(None);
+        };
+        Ok(Some(Served::Image(ServedImage {
+            tag,
+            bytes,
+            media_type: source.media_type.clone(),
+        })))
     }
 
     /// What a request for a width actually means for this page, decided from the index alone.
-    fn plan(&self, source_width: Option<i64>, source_height: Option<i64>, requested: u32) -> Plan {
+    ///
+    /// `lossless` says the source is stored without loss, and then a width close to its own,
+    /// or past it, still goes through the encoder — at its own width rather than larger. A
+    /// PNG scan is 3 to 8 MB where a lossy WebP of it is a tenth of that: serving it as it is
+    /// because 1600 is close to 1920 sends the whole of it and has the client decode the
+    /// whole of it, to show the same page. A lossy source is a different case: shrinking it
+    /// by a fifth re-encodes losses already made, for bytes it mostly does not save.
+    fn plan(
+        &self,
+        source_width: Option<i64>,
+        source_height: Option<i64>,
+        requested: u32,
+        lossless: bool,
+    ) -> Plan {
         let spread = matches!((source_width, source_height), (Some(w), Some(h)) if w > h);
         let target = if spread {
             requested.saturating_mul(2)
@@ -290,8 +594,25 @@ impl Pages {
             requested
         }
         .clamp(1, MAX_WIDTH);
+        if lossless && requested > 0 {
+            if let Some(w) = source_width.and_then(|w| u32::try_from(w).ok()) {
+                let target = target.min(w);
+                let encoding = encoding_for(target, i64::from(w), source_height);
+                return Plan {
+                    target,
+                    worth_resizing: encoding.is_some(),
+                    at_own_width: true,
+                    encoding: encoding.unwrap_or(Encoding::WebP),
+                };
+            }
+        }
+        let encoding = source_width.map_or(Some(Encoding::WebP), |w| {
+            encoding_for(target, w, source_height)
+        });
         Plan {
             target,
+            at_own_width: lossless,
+            encoding: encoding.unwrap_or(Encoding::WebP),
             // A request for no columns at all is not a request for a width, and the clamp
             // above made it into one: `?width=0` came out as "shrink this page to a single
             // column", which on a spread is a JPEG one pixel wide. Being smaller than the
@@ -301,87 +622,107 @@ impl Pages {
             worth_resizing: requested > 0
                 && match source_width {
                     None => true,
-                    Some(w) => {
-                        f64::from(target) < w as f64 * WORTH_RESIZING
-                            && fits_a_jpeg(target, w, source_height)
-                    }
+                    Some(w) => f64::from(target) < w as f64 * WORTH_RESIZING && encoding.is_some(),
                 },
         }
     }
 
-    /// Decide the width, resize, and refuse to hand back something worse than the source.
-    #[allow(clippy::too_many_arguments)]
+    /// Resize, keep the result under `etag`, and refuse to hand back something worse than the
+    /// source — in which case `plain` makes the original into the answer.
+    ///
+    /// Keyed on what the caller asked for, not on the width we end up using: doubling a
+    /// spread is an internal decision, and the answer is deterministic either way.
     fn shrink(
         &self,
         source: Vec<u8>,
-        source_media_type: &str,
-        source_width: Option<i64>,
-        source_height: Option<i64>,
-        requested: u32,
+        plan: &Plan,
+        etag: &str,
         key: &str,
-        modified_at: i64,
+        plain: impl Fn(Vec<u8>) -> ServedImage,
     ) -> ServedImage {
-        let decided = self.plan(source_width, source_height, requested);
-        let plain = |bytes: Vec<u8>| ServedImage {
-            tag: self.tag(key, modified_at, None),
-            bytes,
-            media_type: source_media_type.to_string(),
-        };
-        if !decided.worth_resizing {
-            return plain(source);
-        }
-
-        // Keyed on what the caller asked for, not on the width we end up using: doubling a
-        // spread is an internal decision, and the answer is deterministic either way.
-        let etag = self.tag(key, modified_at, Some(requested));
-        if let Some(hit) = self.cached(&etag) {
-            return hit;
-        }
-
         // Counted here rather than inside `resize`, because this is the line that commits to
         // the decode: everything above decided whether to reach it.
         self.decoded.fetch_add(1, Ordering::Relaxed);
-        let resized = match resize(&source, decided.target, self.quality) {
+        let resized = match resize(
+            &source,
+            plan.target,
+            plan.encoding,
+            plan.encoding.quality(self.quality),
+            plan.at_own_width,
+        ) {
             Ok(bytes) => bytes,
             Err(e) => {
-                // A codec we cannot read is not a reason to fail: serve the original.
+                // A codec we cannot read is not a reason to fail: serve the original. And
+                // remember it: the same bytes will fail the same way next time.
                 tracing::warn!(key, error = %e, "could not resize");
+                self.remember_not_worth(etag);
                 return plain(source);
             }
         };
 
-        // A WebP source can re-encode to a *larger* JPEG. Serving that would be absurd, so
+        // A resize can come out larger than its source — a third to a half of the WebP pages
+        // of the real library did, when this encoded JPEG. Serving that would be absurd, so
         // the original goes back instead. The width still had a point: what matters on a
         // phone is the decoded bitmap — 1695×2101 costs 14 MB of memory, 1080 wide costs 6.
+        //
+        // **And the decision is kept.** It used to be thrown away with the image, so every
+        // later request for that page at that width decoded, resized and re-encoded it again:
+        // 130 to 230 ms on every request, against 10 to 15 for a page in the cache — measured
+        // on four of the first twelve pages of a volume of WebP. The marker sits in the cache
+        // under the same tag, so it survives a restart, is trimmed with the pages, and is
+        // orphaned by a new modification time like they are.
         if resized.len() >= source.len() {
+            self.remember_not_worth(etag);
             return plain(source);
         }
 
-        self.store(&etag, &resized);
+        self.store(etag, plan.encoding, &resized);
         ServedImage {
             bytes: resized,
-            media_type: "image/jpeg".to_string(),
-            tag: etag,
+            media_type: plan.encoding.media_type().to_string(),
+            tag: etag.to_string(),
         }
+    }
+
+    /// Whether a resize at this tag has already been found to give back nothing smaller.
+    ///
+    /// Touched like a page read from the cache, so the trim takes the markers nobody asks for
+    /// rather than the ones in use.
+    fn known_not_worth(&self, etag: &str) -> bool {
+        touch(&self.marker_path(etag)).is_ok()
+    }
+
+    fn remember_not_worth(&self, etag: &str) {
+        let path = self.marker_path(etag);
+        let written = path
+            .parent()
+            .map(std::fs::create_dir_all)
+            .transpose()
+            .and_then(|_| crate::store::files::write_whole(&path, &[]));
+        if let Err(e) = written {
+            tracing::warn!(cache = %path.display(), error = %e, "cache not written");
+            return;
+        }
+        self.wrote(0);
     }
 
     /// A resized page already on disk, or nothing.
     ///
     /// Reading touches the file, so what goes first when the cache is trimmed is what has
     /// not been opened for longest — not what happened to be written first.
-    fn cached(&self, etag: &str) -> Option<ServedImage> {
-        let path = self.cache_path(etag);
+    fn cached(&self, etag: &str, encoding: Encoding) -> Option<ServedImage> {
+        let path = self.cache_path(etag, encoding);
         let bytes = std::fs::read(&path).ok()?;
         let _ = touch(&path);
         Some(ServedImage {
             bytes,
-            media_type: "image/jpeg".to_string(),
+            media_type: encoding.media_type().to_string(),
             tag: etag.to_string(),
         })
     }
 
-    fn store(&self, etag: &str, bytes: &[u8]) {
-        let path = self.cache_path(etag);
+    fn store(&self, etag: &str, encoding: Encoding, bytes: &[u8]) {
+        let path = self.cache_path(etag, encoding);
         let written = path
             .parent()
             .map(std::fs::create_dir_all)
@@ -391,10 +732,17 @@ impl Pages {
             tracing::warn!(cache = %path.display(), error = %e, "cache not written");
             return;
         }
-        let so_far = self
-            .written_since_check
-            .fetch_add(bytes.len() as u64, Ordering::Relaxed)
-            + bytes.len() as u64;
+        self.wrote(bytes.len() as u64);
+    }
+
+    /// Counts what was just written against the budget, at its cost on the disk, and trims
+    /// the cache when enough has gone in since the last look.
+    ///
+    /// A marker goes through here like a page. Left out, it was the one write the budget
+    /// never saw.
+    fn wrote(&self, len: u64) {
+        let cost = len.max(super::cache_budget::FLOOR);
+        let so_far = self.written_since_check.fetch_add(cost, Ordering::Relaxed) + cost;
         if so_far > self.check_every {
             self.written_since_check.store(0, Ordering::Relaxed);
             super::cache_budget::enforce(&self.cache_root, self.max_cache_bytes);
@@ -403,17 +751,33 @@ impl Pages {
 
     /// The tag carries the file's modification time, so a retouched volume invalidates its
     /// cached pages on its own — no sweep to run, no stale image to explain.
-    fn tag(&self, key: &str, modified_at: i64, width: Option<u32>) -> String {
-        let width = width
-            .map(|w| w.to_string())
+    ///
+    /// A resized tag also names how it was encoded. The cache outlives a change of encoder:
+    /// without it, a JPEG kept from before would be served under a WebP's media type, and a
+    /// marker saying a page was not worth a JPEG would deny it a WebP that is half the size.
+    /// With it, the old entries are simply never asked for again and age out under the
+    /// budget. The quality is in it for the same reason: a page encoded at another one is
+    /// another image.
+    fn tag(&self, key: &str, modified_at: i64, resized: Option<(u32, Encoding)>) -> String {
+        let width = resized
+            .map(|(w, encoding)| format!("{w}/{}", encoding.token(self.quality)))
             .unwrap_or_else(|| "src".to_string());
         let digest = Sha256::digest(format!("{key}/{modified_at}/{width}").as_bytes());
         digest.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     /// Two levels of fan-out: a single folder of a hundred thousand files ages badly.
-    fn cache_path(&self, tag: &str) -> PathBuf {
-        self.cache_root.join(&tag[..2]).join(format!("{tag}.jpg"))
+    fn cache_path(&self, tag: &str, encoding: Encoding) -> PathBuf {
+        self.cache_root
+            .join(&tag[..2])
+            .join(format!("{tag}.{}", encoding.extension()))
+    }
+
+    /// Beside the page it stands for, empty: its existence is the whole of what it says.
+    fn marker_path(&self, tag: &str) -> PathBuf {
+        self.cache_root
+            .join(&tag[..2])
+            .join(format!("{tag}.original"))
     }
 
     // --------------------------------------------------------------- warming
@@ -449,7 +813,7 @@ impl Pages {
                     // page marked in flight for ever — so it was never prepared again, and
                     // the same page stuttered on every read.
                     let _claim = Claim(&pages, &task.key);
-                    if let Err(e) = pages.page(&task.id, task.number, Some(task.width)) {
+                    if let Err(e) = pages.warm_page(&task.id, task.number, task.width) {
                         tracing::debug!(key = %task.key, error = %e, "could not warm");
                     }
                 })
@@ -467,6 +831,11 @@ impl Pages {
     /// Only when a width was asked for, since serving the source costs nothing to begin
     /// with.
     pub fn warm_ahead(&self, entry_id: &str, number: i64, width: u32) {
+        self.warm_pages(entry_id, number + 1..=number + AHEAD, width);
+    }
+
+    /// Queues these pages of one entry for preparation at this width.
+    fn warm_pages(&self, entry_id: &str, numbers: std::ops::RangeInclusive<i64>, width: u32) {
         // And never at a width nothing is stored under. `?width=0` is served as the page
         // itself — `plan` refuses to shrink to no columns — so the four pages queued behind
         // it were four archives opened and four members read to store nothing at all, on
@@ -474,11 +843,13 @@ impl Pages {
         if width == 0 {
             return;
         }
+        // Claimed at the width it will be served at, so two windows a few pixels apart do
+        // not prepare the same page twice.
+        let width = stepped(width);
         let Some(sender) = self.warm.get() else {
             return;
         };
-        for step in 1..=AHEAD {
-            let next = number + step;
+        for next in numbers {
             let key = format!("{entry_id}/{next}@{width}");
             if !self.claim(&key) {
                 continue;
@@ -510,12 +881,40 @@ impl Pages {
     /// moment a reader is actually waiting. Listing the pages of a volume, with the width it
     /// will be read at, is the earliest unambiguous sign that it is about to be.
     ///
-    /// From the second page, not the first: the client asks for page 0 the instant it has
-    /// the list, so preparing it here only means doing it twice at once.
+    /// From the page the reader lands on, that page included, and the four after it. It
+    /// used to be pages 1 to 4 whatever the volume: never the page shown first, and on a
+    /// volume resumed at page 57 nothing it would show at all. Measured on the real server,
+    /// the list asked at 1200 and six seconds left to warm: page 0 still took 300 ms, pages 1
+    /// to 4 took 8 to 15, and page 5 took 770 — every opening waited on its first page.
     pub fn warm_opening(&self, entry_id: &str, width: Option<u32>) {
-        if let Some(width) = width {
-            self.warm_ahead(entry_id, 0, width);
+        let Some(width) = width else { return };
+        if width == 0 || self.warm.get().is_none() {
+            return;
         }
+        let landing = self.landing(entry_id);
+        self.warm_pages(entry_id, landing..=landing + AHEAD, width);
+    }
+
+    /// The page a reader opening this entry lands on: where its progress stands, or the
+    /// first page when it has none or was finished.
+    ///
+    /// Finished is the start, because that is what the client does with it: a finished volume
+    /// opened again is a volume read again, and it opens on the cover. Progress is the
+    /// library's, not a key's — keys are not people here — so the stored one is the only one
+    /// there is. One query, and none at all without a warming queue to feed.
+    fn landing(&self, entry_id: &str) -> i64 {
+        self.db
+            .read(|cx| {
+                cx.query_one(
+                    "SELECT page FROM progress WHERE entry_id = ?1 AND finished = 0",
+                    [entry_id],
+                    |r| r.get::<_, i64>(0),
+                )
+            })
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+            .max(0)
     }
 
     /// Prepares the shelf after a scan, at the widths a client has actually asked for.
@@ -640,7 +1039,44 @@ struct Source {
 
 struct Plan {
     target: u32,
+    /// What the page is shrunk into, decided from the rows it comes out at.
+    encoding: Encoding,
+    /// Whether to go through the encoder at all — resizing, or for a lossless source,
+    /// re-encoding at its own width.
     worth_resizing: bool,
+    /// Whether a target at or past the source's own width is encoded at that width rather
+    /// than refused: true for a lossless source only.
+    at_own_width: bool,
+}
+
+/// Whether a source of this media type is stored without loss, said by the index alone.
+///
+/// A WebP can be either, and the media type does not say which: `lossless_webp` reads it
+/// from the bytes where they are already in hand.
+fn lossless(media_type: &str) -> bool {
+    matches!(media_type, "image/png" | "image/bmp" | "image/gif")
+}
+
+/// A WebP whose first chunk is `VP8L`, its lossless form.
+fn lossless_webp(bytes: &[u8]) -> bool {
+    bytes.len() >= 16
+        && &bytes[..4] == b"RIFF"
+        && &bytes[8..12] == b"WEBP"
+        && &bytes[12..16] == b"VP8L"
+}
+
+/// The width a request is served at: up to the next step, never past the ceiling, and
+/// nought left as nought — it is not a width, and `plan` refuses it as such.
+fn stepped(width: u32) -> u32 {
+    width
+        .div_ceil(WIDTH_STEP)
+        .saturating_mul(WIDTH_STEP)
+        .min(MAX_WIDTH)
+}
+
+/// A 304 in waiting, when the client already holds this tag.
+fn unchanged(held: Option<&str>, tag: &str) -> Option<Served> {
+    (held == Some(tag)).then(|| Served::Unchanged(tag.to_string()))
 }
 
 /// What a cover is asked for at, given what the query said.
@@ -654,51 +1090,34 @@ fn tile_width(width: Option<u32>) -> u32 {
     width.filter(|w| *w > 0).unwrap_or(COVER_WIDTH)
 }
 
-/// Whether shrinking to this width can produce a JPEG at all, answered from the index.
+/// The format shrinking to this width can produce, answered from the index — or nothing,
+/// when no format can hold the rows it comes out at.
 ///
-/// `resize` refuses a page whose rows do not fit in sixteen bits, and refusing is right — but
-/// refusing *there* costs the decode first: the member's bytes are read into a full bitmap on
-/// the blocking pool, and only then is the answer no. The extraction would have happened
-/// anyway, since the original is what goes back; the decode is pure waste, and `shrink`
-/// stores nothing on that path, so the next reader pays it again. Ten readers on one webtoon
+/// `resize` refuses a page whose rows do not fit, and refusing is right — but refusing
+/// *there* costs the decode first: the member's bytes are read into a full bitmap on the
+/// blocking pool, and only then is the answer no. The extraction would have happened anyway,
+/// since the original is what goes back; the decode is pure waste. Ten readers on one webtoon
 /// strip is ten full decodes per page turn for a decision two columns of the index already
 /// hold.
 ///
-/// True when the index does not know, because then only `resize` can say.
-fn fits_a_jpeg(target: u32, source_width: i64, source_height: Option<i64>) -> bool {
+/// WebP when the index does not know, because then only `resize` can say.
+fn encoding_for(target: u32, source_width: i64, source_height: Option<i64>) -> Option<Encoding> {
     let Some(h) = source_height else {
-        return true;
+        return Some(Encoding::WebP);
     };
     if source_width <= 0 || h <= 0 {
-        return true;
+        return Some(Encoding::WebP);
     }
-    let rows = (h as f64 * (f64::from(target) / source_width as f64)).round();
-    (1.0..=f64::from(u16::MAX)).contains(&rows)
+    Encoding::for_rows((h as f64 * (f64::from(target) / source_width as f64)).round())
 }
 
-/// Resize on width, aspect ratio preserved, never upscaled. The output is JPEG: it is the
-/// only format every reader and every browser writes and reads without a plugin, and a
-/// downscaled page has already lost the detail a lossless format would protect.
-///
-/// The scaling itself is SIMD and fast — 1.9 ms on a real page, against 31 ms for the
-/// scalar implementation in `image`.
-///
-/// **And the whole path still costs 116 ms per page**, measured on a real archive. The
-/// reason is not the resize, it is the decode. libjpeg can be asked to decode at a
-/// *reduced* scale — the DCT can produce a half- or quarter-size image for a fraction of
-/// the work — so a decoder that exposes it never materialises the full bitmap it is about
-/// to shrink. Neither `image` nor `zune-jpeg` does, so this decodes 1936×1400 in full and
-/// then throws most of it away.
-///
-/// Recorded rather than papered over. It only bites on a cache miss, and the warm path is
-/// the one that runs: 9 ms against 12. Closing it would mean `mozjpeg` or `turbojpeg`,
-/// which is a C dependency, which is the property this build chose not to have.
 /// The pixels, with any transparency laid over white.
 ///
 /// `to_rgb8` **drops** the alpha channel rather than compositing it, and a PNG saved with a
 /// transparent background holds black under the clear part — so a page came back with ink
-/// where a reader expects paper. There is nowhere for transparency to go in a JPEG, and the
-/// question is only what it becomes: white, because these are pages.
+/// where a reader expects paper. A WebP could carry the transparency through, and still
+/// does not: these are pages, a reader draws them on paper, and a clear page shown over a
+/// dark theme is ink on black. White is what the clear part of a page means.
 fn flattened(decoded: image::DynamicImage) -> image::RgbImage {
     if !decoded.color().has_alpha() {
         return decoded.to_rgb8();
@@ -713,12 +1132,28 @@ fn flattened(decoded: image::DynamicImage) -> image::RgbImage {
     out
 }
 
-fn resize(source: &[u8], width: u32, quality: u8) -> Result<Vec<u8>> {
+/// Resize on width, aspect ratio preserved, never upscaled, and encode as `encoding`.
+///
+/// The scaling itself is SIMD and fast — 1.9 ms on a real page, against 31 ms for the
+/// scalar implementation in `image`.
+///
+/// The decode is not: `image` decodes the source in full before it is shrunk — 69 ms for a
+/// WebP page of the real library — where a decoder working at a reduced scale would not.
+/// Recorded rather than papered over: it only bites on a cache miss.
+fn resize(
+    source: &[u8],
+    width: u32,
+    encoding: Encoding,
+    quality: u8,
+    at_own_width: bool,
+) -> Result<Vec<u8>> {
     let decoded = image::ImageReader::new(Cursor::new(source))
         .with_guessed_format()?
         .decode()?;
     let (w0, h0) = (decoded.width(), decoded.height());
-    if width >= w0 {
+    // A lossless source is encoded at its own width rather than refused — see `plan`.
+    let width = if at_own_width { width.min(w0) } else { width };
+    if width > w0 || (width == w0 && !at_own_width) {
         // Never upscaled: asking for 4000 on a 1500-wide scan gets the original back rather
         // than a blurred enlargement. Before `flattened`, which walks every pixel of the
         // source to lay transparency over white — work that was being done and then dropped
@@ -727,28 +1162,28 @@ fn resize(source: &[u8], width: u32, quality: u8) -> Result<Vec<u8>> {
     }
     let height = ((h0 as f64) * (f64::from(width) / f64::from(w0))).round() as u32;
 
-    // A JPEG counts its rows and columns in sixteen bits, and the encoder is told them as
-    // `u16`. Cast rather than checked, a page 78 643 rows tall — a stitched webtoon strip is
-    // routinely past 65 535, and a PNG has no such ceiling — was handed the whole buffer and
-    // told it was 13 107 rows: a cache entry holding the top sixth of the page, served for a
-    // year behind `max-age=31536000`. Refusing here serves the original instead, which is
-    // what every other codec we cannot shrink already gets.
+    // A WebP counts its rows and columns in fourteen bits, a JPEG in sixteen. Unchecked, a stitched webtoon
+    // strip — routinely tens of thousands of rows, and a PNG has no such ceiling — is a
+    // failed encode at best; when this was a JPEG and the count was cast to sixteen bits, it
+    // was a cache entry holding the top sixth of the page, served for a year behind
+    // `max-age=31536000`. Refusing here serves the original instead, which is what every
+    // other codec we cannot shrink already gets.
     //
-    // **Nought is the same arithmetic from the other end**, and only the ceiling was checked.
-    // A page far wider than tall shrinks to no rows at all — 120 rows of a 4000-wide panorama
-    // asked for two columns round to none — and `u16::try_from(0)` is perfectly happy with
-    // that. It is the scaler that refuses further down, which is a right answer arrived at by
-    // accident: nothing here says an image of no pixels is not an image, so the day that
-    // library stops minding, a JPEG of nothing is smaller than the source and goes into the
-    // cache for a year like anything else.
+    // **Nought is the same arithmetic from the other end.** A page far wider than tall
+    // shrinks to no rows at all, and nothing here would otherwise say an image of no pixels
+    // is not an image — the day the scaler stops minding, an image of nothing is smaller
+    // than the source and goes into the cache for a year like anything else.
     //
-    // `plan` decides this from the index now, before the decode. This stays for the pages it
+    // `plan` decides this from the index, before the decode. This stays for the pages it
     // cannot decide for: an index that never recorded the dimensions.
-    let usable = |n: u32| u16::try_from(n).ok().filter(|n| *n > 0);
-    let (Some(width16), Some(height16)) = (usable(width), usable(height)) else {
-        anyhow::bail!("a JPEG cannot be {width}×{height}");
-    };
+    let usable = |n: u32| (1..=encoding.max_side()).contains(&n);
+    if !usable(width) || !usable(height) {
+        anyhow::bail!("{encoding:?} cannot be {width}×{height}");
+    }
     let decoded = flattened(decoded);
+    if width == w0 {
+        return encode(encoding, decoded.as_raw(), w0, h0, quality);
+    }
 
     let from = FirImage::from_vec_u8(w0, h0, decoded.into_raw(), PixelType::U8x3)?;
     let mut into = FirImage::new(width, height, PixelType::U8x3);
@@ -759,25 +1194,56 @@ fn resize(source: &[u8], width: u32, quality: u8) -> Result<Vec<u8>> {
             fast_image_resize::FilterType::Lanczos3,
         )),
     )?;
+    encode(encoding, into.buffer(), width, height, quality)
+}
 
-    // `jpeg-encoder` rather than the one in `image`, because encoding is where this path
-    // spends its time. Broken down on a 1936×1400 page: 0.1 ms to pull it out of the
-    // archive, 7.9 to decode it, 4.8 to shrink it, and **18.4 to encode it again** — nearly
-    // sixty per cent of the work, in the step nobody looks at.
-    //
-    // This one does it in 6.3, in Rust with SIMD, for 260 KB against 267 and an average
-    // error against the source pixels of 2.31 against 2.33. Faster, slightly smaller, no
-    // less faithful, and still nothing to install in the container.
+fn encode(encoding: Encoding, rgb: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>> {
+    match encoding {
+        Encoding::WebP => encode_webp(rgb, width, height, quality),
+        Encoding::Jpeg => encode_jpeg(rgb, width, height, quality),
+    }
+}
+
+/// A JPEG, for the pages too tall for a WebP.
+///
+/// `jpeg-encoder` rather than the encoder in `image`: on a 1936×1400 page it encodes in
+/// 6.3 ms against 18.4, in Rust with SIMD, for the same size and the same fidelity.
+fn encode_jpeg(rgb: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>> {
+    let side = |n: u32| u16::try_from(n).map_err(|_| anyhow::anyhow!("a JPEG cannot be {n} wide"));
     let mut out = Vec::new();
     jpeg_encoder::Encoder::new(&mut out, quality)
         .encode(
-            into.buffer(),
-            width16,
-            height16,
+            rgb,
+            side(width)?,
+            side(height)?,
             jpeg_encoder::ColorType::Rgb,
         )
         .map_err(|e| anyhow::anyhow!("encoding a page: {e}"))?;
     Ok(out)
+}
+
+/// Lossy WebP, at `quality` and method 4.
+///
+/// Measured on 177 pages of the real library, against the JPEG at 85 this replaced: at
+/// quality 75 the same PSNR to a tenth of a decibel and a higher SSIM, for **0.56 of the
+/// bytes** in the median (0.41 to 0.63 from p10 to p90). And the resize that came out larger
+/// than its WebP source — 32 % of the pages asked at 1000 wide, 54 % at 1200, every one of
+/// them decoded and thrown away — comes out larger for none of them.
+///
+/// It costs time, once: 84 ms to encode a page 1000 wide and 116 at 1200 on the machine it
+/// was measured on, against 8 and 12 for the JPEG, paid on the first request for a page at
+/// a width and never again, since the result is cached. Method 1 would divide that by two
+/// and a half for 15 % more bytes; method 4 is libwebp's own default.
+fn encode_webp(rgb: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>> {
+    let mut config =
+        webp::WebPConfig::new().map_err(|()| anyhow::anyhow!("no configuration for libwebp"))?;
+    config.lossless = 0;
+    config.quality = f32::from(quality);
+    config.method = 4;
+    webp::Encoder::from_rgb(rgb, width, height)
+        .encode_advanced(&config)
+        .map(|memory| memory.to_vec())
+        .map_err(|e| anyhow::anyhow!("encoding a page: {e:?}"))
 }
 
 /// Stamps a file as read, so the cache evicts what has not been opened for longest rather

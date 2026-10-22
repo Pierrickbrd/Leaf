@@ -102,17 +102,18 @@ fn every_format_the_scanner_reads_can_also_be_served_and_shrunk() {
             .expect("a page");
         assert_eq!(source, whole.bytes, "{name} must go back untouched");
 
-        // With one, it is decoded, shrunk, and re-encoded — as a JPEG, whatever it was.
+        // With one, it is decoded, shrunk, and re-encoded — as a WebP, whatever it was. At a
+        // step of 200, since that is what any width is served at.
         let small = one
             .pages
-            .page(&one.entry, 0, Some(300))
+            .page(&one.entry, 0, Some(400))
             .unwrap()
             .expect("a page");
         let back = image::load_from_memory(&small.bytes).unwrap();
         // Either it was shrunk, or the shrinking would have cost more bytes than it saved
         // and the original went back instead — which is a decision, and the only two
         // outcomes there are.
-        let shrunk = back.width() == 300;
+        let shrunk = back.width() == 400;
         assert!(
             shrunk || small.bytes == source,
             "{name}: neither shrunk nor left alone — {} wide, {} bytes",
@@ -139,7 +140,7 @@ fn every_format_the_scanner_reads_can_also_be_served_and_shrunk() {
     }
 }
 
-/// Transparency has nowhere to go in a JPEG, and dropping it is not the same as flattening it.
+/// Transparency is laid over white, and dropping it is not the same as flattening it.
 ///
 /// A PNG saved with a transparent background holds black under the clear part, so the page
 /// came back with ink where a reader expects paper.

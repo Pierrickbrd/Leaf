@@ -159,7 +159,7 @@ fn a_width_gives_back_something_smaller_and_keeps_it() {
     let resized = pages.page("v1", 0, Some(400)).unwrap().unwrap();
 
     assert!(resized.bytes.len() < source.bytes.len());
-    assert_eq!("image/jpeg", resized.media_type);
+    assert_eq!("image/webp", resized.media_type);
     assert_eq!(1, f.cache_files(), "the resize is kept");
 
     // And the second time it comes off the disk, tag and bytes unchanged.
@@ -277,20 +277,21 @@ fn walk(dir: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// A page taller than a JPEG can be.
+/// A page taller than the resized format can hold.
 ///
-/// 65 535 rows is the format's own ceiling and a PNG has no such thing, so a stitched
+/// Found when that format was JPEG: 65 535 rows was its ceiling (16 383 for the WebP it is
+/// now) and a PNG has no such thing, so a stitched
 /// webtoon strip goes past it as a matter of course. The encoder is told its dimensions as
 /// `u16`: cast rather than checked, it was handed the whole bitmap and told it was
 /// 13 107 rows tall, and what went into the cache — and out to the reader for a year behind
 /// `max-age=31536000` — was the top sixth of the page.
 #[test]
-fn a_page_too_tall_for_a_jpeg_comes_back_whole_rather_than_cut() {
+fn a_page_too_tall_to_encode_comes_back_whole_rather_than_cut() {
     let dir = tempfile::tempdir().expect("a directory");
     let cbz = dir.path().join("Tome 1.cbz");
 
-    // 20 × 131 072: shrunk to twelve wide it is 78 643 rows, which is past what a JPEG can
-    // say. Narrow on purpose — it is the height that has to be big, and this is 7.8 MB
+    // 20 × 131 072: shrunk to twelve wide it is 78 643 rows, which is past what either
+    // format can say. Narrow on purpose — it is the height that has to be big, and this is 7.8 MB
     // rather than the gigabyte a realistic width would cost.
     let mut strip = image::RgbImage::new(20, 131_072);
     for (x, y, pixel) in strip.enumerate_pixels_mut() {
@@ -341,7 +342,7 @@ fn a_page_too_tall_for_a_jpeg_comes_back_whole_rather_than_cut() {
         .expect("serving")
         .expect("a page");
 
-    // The original, whole, rather than a JPEG holding the top of it.
+    // The original, whole, rather than an image holding the top of it.
     assert_eq!("image/png", served.media_type);
     assert_eq!(png, served.bytes);
 
@@ -354,7 +355,7 @@ fn a_page_too_tall_for_a_jpeg_comes_back_whole_rather_than_cut() {
     assert_eq!(
         0,
         pages.decodes(),
-        "a strip no JPEG can hold is never decoded"
+        "a strip no resize can hold is never decoded"
     );
 }
 
@@ -487,13 +488,16 @@ fn no_pages_are_prepared_ahead_at_a_width_of_nothing() {
 /// pool, and `shrink` stores nothing on that path, so every reader paid the decode again on
 /// every request. Both numbers are in the index, and `plan` now answers from them.
 ///
+/// Four rows here rather than 120: a width is served by steps of 200, a spread at twice
+/// that, and four hundred columns of four rows is a request that still rounds to none.
+///
 /// Nothing observable moves between the two, which is what makes this the kind of defect
 /// that survives a suite. So the count is the assertion, the way `Cx` counts queries.
 #[test]
 fn a_width_that_leaves_no_rows_at_all_is_decided_before_the_decode() {
     let dir = tempfile::tempdir().expect("a directory");
     let cbz = dir.path().join("Tome 1.cbz");
-    archive(&cbz, &[("000.jpg", 4000, 120)]);
+    archive(&cbz, &[("000.jpg", 4000, 4)]);
 
     let db = Db::open(&dir.path().join("index.sqlite")).expect("opening");
     db.write(|cx| {
@@ -513,7 +517,7 @@ fn a_width_that_leaves_no_rows_at_all_is_decided_before_the_decode() {
         )?;
         cx.execute(
             "INSERT INTO page (entry_id, number, entry_name, media_type, width, height, size)
-             VALUES ('v1', 0, '000.jpg', 'image/jpeg', 4000, 120, 1000)",
+             VALUES ('v1', 0, '000.jpg', 'image/jpeg', 4000, 4, 1000)",
             [],
         )?;
         Ok(())
@@ -1054,4 +1058,616 @@ fn a_shelf_tile_that_cannot_be_made_is_said_and_the_sweep_carries_on() {
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+}
+
+// ------------------------------------------------- not worth it, and already held
+
+/// A volume of one page whose lossy re-encode is larger than the page itself.
+///
+/// A flat lossless WebP: a page of one colour is a few dozen bytes of it, and a lossy WebP of
+/// the same page still carries its headers and its partitions — the shape of the pages that
+/// came back larger on the real library.
+fn flat_volume(dir: &Path) -> Arc<Db> {
+    let mut webp = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(300, 450, image::Luma([236])))
+        .write_to(&mut webp, image::ImageFormat::WebP)
+        .expect("encoding");
+    let webp = webp.into_inner();
+    assert!(is_the_flat_original(&webp));
+    volume_of(dir, "000.webp", &webp, "image/webp", 300, 450)
+}
+
+/// Whether these are the bytes of `flat_volume`'s page, rather than a resize of it: the
+/// original is lossless (`VP8L`), what the server encodes is lossy (`VP8 `).
+fn is_the_flat_original(bytes: &[u8]) -> bool {
+    bytes.len() > 16 && &bytes[12..16] == b"VP8L"
+}
+
+/// A volume of one page, indexed with the dimensions given.
+fn volume_of(
+    dir: &Path,
+    name: &str,
+    bytes: &[u8],
+    media_type: &str,
+    width: u32,
+    height: u32,
+) -> Arc<Db> {
+    let cbz = dir.join("Tome 1.cbz");
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&cbz).expect("creating"));
+    // Stored, as most comic archives are: the pages are compressed already.
+    zip.start_file::<_, ()>(
+        name,
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+    )
+    .expect("an entry");
+    zip.write_all(bytes).expect("writing");
+    zip.finish().expect("closing");
+
+    let db = Db::open(&dir.join("index.sqlite")).expect("opening");
+    db.write(|cx| {
+        cx.execute(
+            "INSERT INTO work (id, name, path) VALUES ('w', 'Essai', '/w')",
+            [],
+        )?;
+        cx.execute(
+            "INSERT INTO edition (id, work_id, path, implicit) VALUES ('e', 'w', '/w/e', 1)",
+            [],
+        )?;
+        cx.execute(
+            "INSERT INTO entry (id, edition_id, type, file, size, modified_at, added_at,
+                                volume_number, sort_key, page_count)
+             VALUES ('v1', 'e', 'VOLUME', ?1, 1, 1700000000000, 1, 1.0, 1.0, 1)",
+            [cbz.to_string_lossy().to_string()],
+        )?;
+        cx.execute(
+            "INSERT INTO page (entry_id, number, entry_name, media_type, width, height, size)
+             VALUES ('v1', 0, ?1, ?2, ?3, ?4, 1000)",
+            (name, media_type, width, height),
+        )?;
+        Ok(())
+    })
+    .expect("seeding");
+    Arc::new(db)
+}
+
+fn pages_over(db: &Arc<Db>, dir: &Path) -> Pages {
+    let pages = Pages::new(Arc::clone(db), dir.join("cache"), 85, 64 * 1024 * 1024);
+    pages.prepare();
+    pages
+}
+
+/// Measured on a real library: four of the first twelve pages of a volume of WebP came back
+/// larger as JPEG, and each of them cost 130 to 230 ms on every request — the second and the
+/// third as much as the first — because the decision was thrown away with the JPEG.
+#[test]
+fn a_page_whose_resize_comes_out_larger_is_decoded_once_across_three_requests() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = flat_volume(dir.path());
+    let pages = pages_over(&db, dir.path());
+    let whole = pages.page("v1", 0, None).unwrap().unwrap();
+
+    for _ in 0..3 {
+        let served = pages.page("v1", 0, Some(100)).unwrap().unwrap();
+        assert_eq!(
+            whole.bytes, served.bytes,
+            "the original, not a larger resize"
+        );
+        assert!(is_the_flat_original(&served.bytes));
+        // The original's own tag: the same bytes are one thing to a client, whatever width
+        // it asked for them at.
+        assert_eq!(whole.tag, served.tag);
+    }
+    assert_eq!(1, pages.decodes());
+}
+
+#[test]
+fn a_page_not_worth_resizing_is_still_known_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = flat_volume(dir.path());
+    pages_over(&db, dir.path())
+        .page("v1", 0, Some(100))
+        .unwrap()
+        .unwrap();
+
+    let restarted = pages_over(&db, dir.path());
+    let served = restarted.page("v1", 0, Some(100)).unwrap().unwrap();
+    assert!(is_the_flat_original(&served.bytes));
+    assert_eq!(0, restarted.decodes());
+}
+
+#[test]
+fn a_retouched_page_is_reconsidered_rather_than_taken_on_its_old_verdict() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = flat_volume(dir.path());
+    let pages = pages_over(&db, dir.path());
+    pages.page("v1", 0, Some(100)).unwrap().unwrap();
+    db.write(|cx| {
+        cx.execute(
+            "UPDATE entry SET modified_at = 1800000000000 WHERE id = 'v1'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let served = pages.page("v1", 0, Some(100)).unwrap().unwrap();
+    assert!(is_the_flat_original(&served.bytes));
+    assert_eq!(2, pages.decodes(), "a new file is a new question");
+}
+
+/// A revalidation used to take 194 ms to say 304, measured on a real library: the tag was
+/// compared after the page had been extracted, decoded, resized and re-encoded. The archive
+/// is removed here, so anything that so much as opens it fails the test.
+#[test]
+fn a_client_holding_the_tag_is_answered_without_a_decode_or_the_archive() {
+    use leaf_server::api::pages::Served;
+
+    // A page that resizes.
+    let f = Fixture::new();
+    let pages = f.pages();
+    let resized = pages.page("v1", 0, Some(400)).unwrap().unwrap();
+    let original = pages.page("v1", 0, None).unwrap().unwrap();
+    let decodes = pages.decodes();
+    std::fs::remove_file(f.dir.path().join("Tome 1.cbz")).unwrap();
+    std::fs::remove_dir_all(f.dir.path().join("cache")).unwrap();
+    for (width, tag) in [(Some(400), &resized.tag), (None, &original.tag)] {
+        match pages
+            .page_or_unchanged("v1", 0, width, Some(tag))
+            .expect("no archive needed")
+        {
+            Some(Served::Unchanged(said)) => assert_eq!(*tag, said),
+            _ => panic!("{width:?}: not answered as unchanged"),
+        }
+    }
+    assert_eq!(decodes, pages.decodes());
+
+    // A page not worth resizing.
+    let dir = tempfile::tempdir().unwrap();
+    let db = flat_volume(dir.path());
+    let pages = pages_over(&db, dir.path());
+    let first = pages.page("v1", 0, Some(100)).unwrap().unwrap();
+    assert!(
+        is_the_flat_original(&first.bytes),
+        "the resize came out larger"
+    );
+    let held = first.tag;
+    std::fs::remove_file(dir.path().join("Tome 1.cbz")).unwrap();
+    match pages
+        .page_or_unchanged("v1", 0, Some(100), Some(&held))
+        .expect("no archive needed")
+    {
+        Some(Served::Unchanged(said)) => assert_eq!(held, said),
+        _ => panic!("not answered as unchanged"),
+    }
+    assert_eq!(1, pages.decodes(), "only the first request decoded");
+}
+
+/// Every new tag leaves a marker behind on a page not worth resizing — one per step of width,
+/// and one per modification of the file, without end. Each one is a file on the disk, so
+/// each one is counted, and the sweep that follows a page into the cache follows a marker
+/// too.
+#[test]
+fn markers_left_by_many_tags_are_trimmed_under_the_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = flat_volume(dir.path());
+    let budget = 64 * 1024;
+    let pages = Pages::new(Arc::clone(&db), dir.path().join("cache"), 85, budget);
+    pages.prepare();
+    for n in 0..150i64 {
+        db.write(|cx| {
+            cx.execute(
+                "UPDATE entry SET modified_at = ?1 WHERE id = 'v1'",
+                [1_700_000_000_000 + n],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let served = pages.page("v1", 0, Some(100)).unwrap().unwrap();
+        assert!(is_the_flat_original(&served.bytes), "at {n}");
+    }
+    assert_eq!(150, pages.decodes(), "every one of them a new question");
+
+    fn count(dir: &Path) -> u64 {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| {
+                        if e.path().is_dir() {
+                            count(&e.path())
+                        } else {
+                            1
+                        }
+                    })
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+    let files = count(&dir.path().join("cache"));
+    // The sweep runs once an eighth of the budget, floored at 64 KiB, has gone in since the
+    // last one: that much may stand above the ceiling between two sweeps, and no more.
+    assert!(
+        files * 4096 <= budget + 64 * 1024,
+        "{files} markers left under a budget of {budget} bytes"
+    );
+}
+
+// ------------------------------------------------------------------- steps of width
+
+/// A page wide enough for every step below 1600 to be worth resizing.
+fn a_wide_page(dir: &Path) -> Arc<Db> {
+    volume_of(dir, "000.jpg", &jpeg(2000, 2800), "image/jpeg", 2000, 2800)
+}
+
+/// Any key that can read could ask every width from 1 to 4096 of every page, and each one
+/// was a decode and an entry of its own. Served by steps of 200, rounded up.
+#[test]
+fn widths_in_one_step_share_one_entry_and_one_decode() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = a_wide_page(dir.path());
+    let pages = pages_over(&db, dir.path());
+    let a = pages.page("v1", 0, Some(1001)).unwrap().unwrap();
+    let b = pages.page("v1", 0, Some(1200)).unwrap().unwrap();
+    assert_eq!(a.tag, b.tag);
+    assert_eq!(a.bytes, b.bytes);
+    // Rounded up: never fewer pixels than were asked for.
+    assert_eq!(1200, image::load_from_memory(&b.bytes).unwrap().width());
+    assert_eq!(1, pages.decodes());
+}
+
+#[test]
+fn a_tag_got_at_one_width_revalidates_at_another_in_its_step() {
+    use leaf_server::api::pages::Served;
+    let dir = tempfile::tempdir().unwrap();
+    let db = a_wide_page(dir.path());
+    let pages = pages_over(&db, dir.path());
+    let held = pages.page("v1", 0, Some(1100)).unwrap().unwrap().tag;
+    match pages
+        .page_or_unchanged("v1", 0, Some(1200), Some(&held))
+        .unwrap()
+    {
+        Some(Served::Unchanged(said)) => assert_eq!(held, said),
+        _ => panic!("not answered as unchanged"),
+    }
+}
+
+#[test]
+fn one_page_asked_at_every_width_has_at_most_twenty_one_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    // Smaller than the others: most of the 4096 requests serve the page itself, and each
+    // of those is an extraction.
+    let db = volume_of(
+        dir.path(),
+        "000.jpg",
+        &jpeg(1000, 1400),
+        "image/jpeg",
+        1000,
+        1400,
+    );
+    let pages = pages_over(&db, dir.path());
+    let mut tags = std::collections::HashSet::new();
+    for width in 1..=4096 {
+        tags.insert(pages.page("v1", 0, Some(width)).unwrap().unwrap().tag);
+    }
+    assert!(tags.len() <= 21, "{} answers for one page", tags.len());
+    assert!(
+        pages.decodes() <= 21,
+        "{} decodes for one page",
+        pages.decodes()
+    );
+}
+
+// ----------------------------------------------------------------------- webp
+
+/// A page drawn like one: panel borders, strokes, a screen tone, mostly paper.
+///
+/// Noise would make any encoder look the same, and a flat page would make every one of them
+/// look free: what is compared has to have the structure a page has.
+fn drawn_page(width: u32, height: u32) -> Vec<u8> {
+    let mut buffer = image::RgbImage::new(width, height);
+    for (x, y, pixel) in buffer.enumerate_pixels_mut() {
+        let panel = x % 640 < 8 || y % 480 < 8;
+        let stroke = ((x as i32 - y as i32) % 97).abs() < 3 && (x / 40 + y / 60) % 3 == 0;
+        let tone = (x % 6 < 2 && y % 6 < 2) && (x / 300 + y / 400) % 2 == 0;
+        *pixel = if panel || stroke {
+            image::Rgb([20, 20, 20])
+        } else if tone {
+            image::Rgb([130, 130, 130])
+        } else {
+            image::Rgb([248, 248, 248])
+        };
+    }
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(buffer)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .unwrap();
+    out.into_inner()
+}
+
+/// Measured on 177 pages of the real library: at the fidelity of the JPEG at 85 it replaced,
+/// the WebP is 0.56 of its bytes in the median.
+#[test]
+fn a_resized_page_is_a_webp_at_its_step_and_smaller_than_the_jpeg_it_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = drawn_page(2000, 2800);
+    let db = volume_of(dir.path(), "000.png", &source, "image/png", 2000, 2800);
+    let pages = pages_over(&db, dir.path());
+
+    let served = pages.page("v1", 0, Some(1001)).unwrap().unwrap();
+    assert_eq!("image/webp", served.media_type);
+    let back = image::load_from_memory_with_format(&served.bytes, image::ImageFormat::WebP)
+        .expect("a WebP that decodes");
+    assert_eq!((1200, 1680), (back.width(), back.height()));
+
+    // The same page at the same width, as the JPEG at 85 this used to send.
+    let shrunk = image::load_from_memory(&source).unwrap().resize_exact(
+        1200,
+        1680,
+        image::imageops::FilterType::Lanczos3,
+    );
+    let mut jpeg = Vec::new();
+    jpeg_encoder::Encoder::new(&mut jpeg, 85)
+        .encode(
+            shrunk.to_rgb8().as_raw(),
+            1200,
+            1680,
+            jpeg_encoder::ColorType::Rgb,
+        )
+        .unwrap();
+    assert!(
+        served.bytes.len() < jpeg.len(),
+        "WebP {} bytes against JPEG {}",
+        served.bytes.len(),
+        jpeg.len()
+    );
+}
+
+#[test]
+fn a_cover_is_resized_to_webp_too() {
+    let f = Fixture::new();
+    let pages = f.pages();
+    assert_eq!(
+        "image/webp",
+        pages.cover("v1", None).unwrap().unwrap().media_type
+    );
+
+    let chosen = f.dir.path().join("cover.jpg");
+    std::fs::write(&chosen, jpeg(800, 1200)).unwrap();
+    f.db.write(|cx| {
+        cx.execute(
+            "UPDATE edition SET cover_file = ?1 WHERE id = 'e'",
+            [chosen.to_string_lossy().to_string()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let tile = pages.series_cover("e", Some(300)).unwrap().unwrap();
+    assert_eq!("image/webp", tile.media_type);
+    assert_eq!(400, image::load_from_memory(&tile.bytes).unwrap().width());
+}
+
+/// The cache outlives a change of encoder. A JPEG kept from before, under the tag it had
+/// then, must never come back as a WebP — and a marker that said a page was not worth a
+/// JPEG must not deny it a WebP, which is half the size.
+#[test]
+fn nothing_cached_when_pages_were_jpeg_is_served_or_believed_now() {
+    use sha2::{Digest, Sha256};
+    let f = Fixture::new();
+    let pages = f.pages();
+    // The tag as it was built when resized pages were JPEG: key, modification time, width.
+    let then: String = Sha256::digest(b"v1/0/1700000000000/400")
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let folder = f.dir.path().join("cache").join(&then[..2]);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join(format!("{then}.jpg")), jpeg(400, 567)).unwrap();
+    std::fs::write(folder.join(format!("{then}.original")), b"").unwrap();
+
+    let served = pages.page("v1", 0, Some(400)).unwrap().unwrap();
+    assert_ne!(then, served.tag, "a new encoding is a new tag");
+    assert_eq!("image/webp", served.media_type);
+    assert!(image::load_from_memory_with_format(&served.bytes, image::ImageFormat::WebP).is_ok());
+    assert_eq!(
+        1,
+        pages.decodes(),
+        "made afresh, not taken from either old entry"
+    );
+}
+
+/// A PNG scan is several megabytes where a lossy WebP of it is a tenth: served as it is
+/// because the width asked was close to its own, it sent all of them and had the client
+/// decode all of them, for the same page.
+#[test]
+fn a_png_asked_near_or_past_its_own_width_still_comes_back_as_a_smaller_webp() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = drawn_page(1000, 1400);
+    let db = volume_of(dir.path(), "000.png", &source, "image/png", 1000, 1400);
+    let pages = pages_over(&db, dir.path());
+
+    for (asked, expected) in [(1000, 1000), (1600, 1000)] {
+        let served = pages.page("v1", 0, Some(asked)).unwrap().unwrap();
+        assert_eq!("image/webp", served.media_type, "at {asked}");
+        assert!(served.bytes.len() < source.len(), "at {asked}");
+        let back = image::load_from_memory(&served.bytes).unwrap();
+        // At its own width, never larger.
+        assert_eq!(expected, back.width(), "at {asked}");
+    }
+
+    // Without a width, the original bytes, as the contract says.
+    let whole = pages.page("v1", 0, None).unwrap().unwrap();
+    assert_eq!("image/png", whole.media_type);
+    assert_eq!(source, whole.bytes);
+}
+
+/// A webtoon strip shrunk to a reading width is routinely past the 16 383 rows a WebP can
+/// hold. Sent as the original instead, it is the waste a resize exists to remove: it goes
+/// out as a JPEG, which holds 65 535.
+#[test]
+fn a_strip_too_tall_for_a_webp_is_resized_to_a_jpeg_instead() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = jpeg(400, 40_000);
+    let db = volume_of(dir.path(), "000.jpg", &source, "image/jpeg", 400, 40_000);
+    let pages = pages_over(&db, dir.path());
+
+    let served = pages.page("v1", 0, Some(200)).unwrap().unwrap();
+    assert_eq!("image/jpeg", served.media_type);
+    assert!(served.bytes.len() < source.len());
+    let back = image::load_from_memory_with_format(&served.bytes, image::ImageFormat::Jpeg)
+        .expect("a JPEG that decodes");
+    assert_eq!((200, 20_000), (back.width(), back.height()));
+
+    let again = pages.page("v1", 0, Some(200)).unwrap().unwrap();
+    assert_eq!(served.tag, again.tag);
+    assert_eq!(served.bytes, again.bytes);
+    assert_eq!(
+        1,
+        pages.decodes(),
+        "kept, and served from the cache the second time"
+    );
+}
+
+// ------------------------------------------------------------------ the opening
+
+/// Seventy pages, each wide enough to be resized at 200, and the progress given.
+fn a_volume_of_seventy(dir: &Path, progress: Option<(i64, bool)>) -> Arc<Db> {
+    let cbz = dir.join("Tome 1.cbz");
+    let page = jpeg(300, 400);
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&cbz).unwrap());
+    for n in 0..70 {
+        zip.start_file::<_, ()>(
+            format!("{n:03}.jpg"),
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+        zip.write_all(&page).unwrap();
+    }
+    zip.finish().unwrap();
+
+    let db = Db::open(&dir.join("index.sqlite")).unwrap();
+    db.write(|cx| {
+        cx.execute(
+            "INSERT INTO work (id, name, path) VALUES ('w', 'Essai', '/w')",
+            [],
+        )?;
+        cx.execute(
+            "INSERT INTO edition (id, work_id, path, implicit) VALUES ('e', 'w', '/w/e', 1)",
+            [],
+        )?;
+        cx.execute(
+            "INSERT INTO entry (id, edition_id, type, file, size, modified_at, added_at,
+                                volume_number, sort_key, page_count)
+             VALUES ('v1', 'e', 'VOLUME', ?1, 1, 1700000000000, 1, 1.0, 1.0, 70)",
+            [cbz.to_string_lossy().to_string()],
+        )?;
+        for n in 0..70i64 {
+            cx.execute(
+                "INSERT INTO page (entry_id, number, entry_name, media_type, width, height, size)
+                 VALUES ('v1', ?1, ?2, 'image/jpeg', 300, 400, 1000)",
+                (n, format!("{n:03}.jpg")),
+            )?;
+        }
+        if let Some((page, finished)) = progress {
+            cx.execute(
+                "INSERT INTO progress (entry_id, edition_id, page, finished, updated_at)
+                 VALUES ('v1', 'e', ?1, ?2, 1)",
+                (page, finished),
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    Arc::new(db)
+}
+
+/// Which pages opening the volume at this width prepared: the ones that then come out of
+/// the cache without a decode.
+fn prepared_by_opening(progress: Option<(i64, bool)>, width: Option<u32>) -> Vec<i64> {
+    let dir = tempfile::tempdir().unwrap();
+    let db = a_volume_of_seventy(dir.path(), progress);
+    let pages = Arc::new(pages_over(&db, dir.path()));
+    pages.start_warming(2, 16);
+    pages.warm_opening("v1", width);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while pages.pending() > 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let mut prepared = Vec::new();
+    for n in 0..70 {
+        let before = pages.decodes();
+        pages.page("v1", n, Some(200)).unwrap().unwrap();
+        if pages.decodes() == before {
+            prepared.push(n);
+        }
+    }
+    prepared
+}
+
+/// Measured on the real server: the list asked at 1200, six seconds left to warm, and page
+/// 0 still took 300 ms — opening prepared pages 1 to 4, never the one shown first.
+#[test]
+fn opening_an_unread_volume_prepares_its_first_page_and_the_four_after() {
+    assert_eq!(vec![0, 1, 2, 3, 4], prepared_by_opening(None, Some(200)));
+}
+
+/// And a volume resumed at page 57 had pages 1 to 4 prepared, none of which it shows.
+#[test]
+fn opening_a_volume_read_to_page_57_prepares_from_page_57() {
+    assert_eq!(
+        vec![57, 58, 59, 60, 61],
+        prepared_by_opening(Some((57, false)), Some(200))
+    );
+}
+
+/// A finished volume opened again is a volume read again: the client opens it on the cover.
+#[test]
+fn opening_a_finished_volume_prepares_from_the_start_as_the_client_opens_it() {
+    assert_eq!(
+        vec![0, 1, 2, 3, 4],
+        prepared_by_opening(Some((69, true)), Some(200))
+    );
+}
+
+#[test]
+fn opening_without_a_width_prepares_nothing() {
+    assert!(prepared_by_opening(Some((57, false)), None).is_empty());
+}
+
+/// The reader asks for the next screens at the moment the server warms the next pages, so the
+/// same page was decoded and encoded twice at once — the second copy is what the reader
+/// waited behind. Whichever comes first makes it; the other waits and reads it, or, for the
+/// warming, skips it.
+#[test]
+fn a_page_asked_for_while_it_is_being_warmed_is_made_once() {
+    let dir = tempfile::tempdir().unwrap();
+    // Small enough that the work lands well inside the five seconds a reader waits for it,
+    // even in a debug build beside the rest of the suite: past them, it would do the work
+    // itself, which is right, and this would count two.
+    let db = volume_of(
+        dir.path(),
+        "000.jpg",
+        &jpeg(1000, 1400),
+        "image/jpeg",
+        1000,
+        1400,
+    );
+    let pages = Arc::new(pages_over(&db, dir.path()));
+    pages.start_warming(1, 4);
+    pages.warm_ahead("v1", -1, 600);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let asked = pages.page("v1", 0, Some(600)).unwrap().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while pages.pending() > 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let kept = pages.page("v1", 0, Some(600)).unwrap().unwrap();
+    assert_eq!(asked.bytes, kept.bytes);
+    assert_eq!("image/webp", asked.media_type);
+    assert_eq!(
+        1,
+        pages.decodes(),
+        "made once, by whichever got there first"
+    );
 }

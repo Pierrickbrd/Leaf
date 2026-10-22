@@ -277,15 +277,31 @@ pub fn tls_paths(config: &Config) -> Option<(PathBuf, PathBuf)> {
     Some((folder.join("leaf.crt"), folder.join("leaf.key")))
 }
 
-/// The JPEG quality for resized pages, as the encoder counts it.
+/// The quality resized pages are encoded at, as the encoder counts it: `LEAF_IMAGE_QUALITY`.
 ///
 /// Clamped rather than refused: the setting is a dial, and a dial turned past its end should
 /// stop at the end. Below 0.4 the artefacts are visible on line art; above 1.0 there is
-/// nothing left to ask for.
-pub fn jpeg_quality(set: Option<&str>) -> u8 {
+/// nothing left to ask for. 0.75 by default, which for a WebP is the fidelity the JPEG at
+/// 0.85 it replaced had, measured on the real library.
+pub fn image_quality(set: Option<&str>) -> u8 {
     set.and_then(|v| v.parse::<f32>().ok())
         .map(|q| (q.clamp(0.4, 1.0) * 100.0) as u8)
-        .unwrap_or(85)
+        .unwrap_or(75)
+}
+
+/// What to say when `LEAF_JPEG_QUALITY` is still set, or nothing when it is not.
+///
+/// Said rather than honoured: the number meant something for a JPEG, and the same number
+/// asks a WebP for something else — 0.85 as a WebP is half again the bytes of the JPEG it
+/// named. A configuration file written before the change still holds it, and a dial that
+/// silently stops working is one nobody knows to turn again.
+pub fn retired_quality(set: Option<&str>) -> Option<String> {
+    set.map(|v| {
+        format!(
+            "LEAF_JPEG_QUALITY={v} is ignored: resized pages are WebP now. \
+             Set LEAF_IMAGE_QUALITY instead (0.75 by default)."
+        )
+    })
 }
 
 /// The ceiling on the page cache, in bytes.
