@@ -494,6 +494,97 @@ fn a_cache_that_cannot_be_read_is_said_and_left() {
     writable(&cache);
 }
 
+/// An empty file weighed nothing, so a cache of markers was a cache with no ceiling.
+#[test]
+fn an_empty_file_in_the_cache_costs_at_least_a_block() {
+    use leaf_server::api::cache_budget::on_disk;
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("marker.original");
+    std::fs::write(&marker, b"").unwrap();
+    assert!(on_disk(&std::fs::metadata(&marker).unwrap()) >= 4096);
+}
+
+#[test]
+fn a_cache_of_empty_markers_is_trimmed_to_its_budget_like_any_other() {
+    use leaf_server::api::cache_budget::enforce;
+    let dir = tempfile::tempdir().unwrap();
+    for n in 0..100 {
+        std::fs::write(dir.path().join(format!("{n}.original")), b"").unwrap();
+    }
+    enforce(dir.path(), 40 * 4096);
+    let left = std::fs::read_dir(dir.path()).unwrap().count();
+    assert!(left <= 40, "{left} markers under a budget of forty blocks");
+    assert!(left > 0, "trimmed to the budget, not emptied");
+}
+
+// ------------------------------------------------------------ one at a time
+
+/// A warmer that panics mid-page drops its flight on the way out, and whoever was waiting
+/// on it is woken at once to do the work itself — not left for the whole of its patience,
+/// and never for ever.
+#[test]
+fn a_flight_that_ends_in_a_panic_wakes_who_waits_on_it() {
+    use leaf_server::api::flight::{Flights, Takeoff};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let flights = Arc::new(Flights::default());
+    let (airborne, took_off) = std::sync::mpsc::channel();
+    let crashing = {
+        let flights = Arc::clone(&flights);
+        std::thread::spawn(move || {
+            let _flight = flights.take_off("v1/0@1200", None);
+            airborne.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            panic!("a decoder that gave up");
+        })
+    };
+    took_off.recv().unwrap();
+
+    let started = Instant::now();
+    assert!(matches!(
+        flights.take_off("v1/0@1200", Some(Duration::from_secs(5))),
+        Takeoff::Landed
+    ));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(crashing.join().is_err());
+    assert!(
+        flights.try_take_off("v1/0@1200").is_some(),
+        "the work is free to do"
+    );
+}
+
+#[test]
+fn different_widths_of_one_page_do_not_wait_on_each_other() {
+    use leaf_server::api::flight::{Flights, Takeoff};
+    let flights = Flights::default();
+    let _first = flights.take_off("v1/0@1200", None);
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        flights.take_off("v1/0@1000", Some(std::time::Duration::from_secs(5))),
+        Takeoff::Mine(_)
+    ));
+    assert!(started.elapsed() < std::time::Duration::from_millis(500));
+}
+
+/// Bounded: a reader is better served by a second copy of the work than by a wait with no
+/// end. And the warming does not wait at all — it has other pages to prepare.
+#[test]
+fn a_wait_for_someone_elses_work_runs_out_and_the_warming_does_not_wait() {
+    use leaf_server::api::flight::{Flights, Takeoff};
+    let flights = Flights::default();
+    let _first = flights.take_off("k", None);
+    assert!(matches!(
+        flights.take_off("k", Some(std::time::Duration::from_millis(50))),
+        Takeoff::TimedOut
+    ));
+    assert!(matches!(flights.take_off("k", None), Takeoff::Busy));
+}
+
 // ------------------------------------------------------------ which chapter
 
 #[test]

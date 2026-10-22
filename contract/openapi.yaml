@@ -838,8 +838,13 @@ paths:
         back downscaled — **never upscaled**: asking for 4000 on a 1500-wide scan returns
         the original rather than a blurred enlargement.
 
-        Cached on disk under an ETag built from the file's modification time, so a client
-        may keep it for as long as it likes.
+        A page sent at a width is a lossy WebP (`image/webp`) — resized, or for a lossless
+        source such as a PNG re-encoded at its own width — or a JPEG (`image/jpeg`) when it is
+        too tall for a WebP, past 16 383 rows. Unless that would come out larger than the
+        source, in which case the original goes back in its own media type.
+
+        Cached on disk under an ETag built from the file's modification time, the width and
+        the encoding, so a client may keep it for as long as it likes.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
@@ -1638,7 +1643,11 @@ components:
     Width:
       name: width
       in: query
-      description: The width the image is wanted at. Never upscales beyond the original.
+      description: >-
+        The width the image is wanted at. Never upscales beyond the original. Rounded up to
+        a step of 200 pixels before anything is decided, so a page has a bounded number of
+        sizes to make, cache and tag whatever widths are asked; two widths in one step share
+        one image and one ETag.
       schema: { type: integer, minimum: 1 }
     FilterRead:
       name: read

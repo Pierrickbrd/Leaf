@@ -769,6 +769,52 @@ async fn a_cover_already_held_comes_back_as_not_modified() {
     assert_eq!(status, StatusCode::NOT_MODIFIED);
 }
 
+/// A revalidation is answered from the index, before the archive is opened.
+///
+/// It used to be compared after the page had been extracted, decoded, resized and
+/// re-encoded — 194 ms to say 304, measured on a real library. The volume is taken off the
+/// disk here, so a 304 that so much as opened it would come back as something else.
+#[tokio::test]
+async fn a_page_already_held_is_not_modified_without_the_archive_being_read() {
+    let (server, _, entry) = a_library().await;
+    let mut tags = Vec::new();
+    for uri in [
+        format!("/entries/{entry}/pages/0?width=300"),
+        format!("/entries/{entry}/pages/0"),
+        format!("/entries/{entry}/cover"),
+    ] {
+        let tag = server.tagged(&uri).await.expect("an ETag");
+        tags.push((uri, tag));
+    }
+    fn volumes(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            if e.path().is_dir() {
+                volumes(&e.path(), out);
+            } else if e.path().extension().is_some_and(|x| x == "cbz") {
+                out.push(e.path());
+            }
+        }
+    }
+    let mut found = Vec::new();
+    volumes(&server.library(), &mut found);
+    assert!(!found.is_empty(), "a volume to take away");
+    for path in found {
+        std::fs::remove_file(path).unwrap();
+    }
+
+    for (uri, tag) in tags {
+        let (status, _) = server
+            .send(
+                request("GET", &uri, READ_ONLY)
+                    .header("If-None-Match", format!("\"{tag}\""))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_MODIFIED, "{uri}");
+    }
+}
+
 // --------------------------------------------------------------- what is refused
 
 #[tokio::test]

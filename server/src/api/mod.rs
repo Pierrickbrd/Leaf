@@ -4,6 +4,7 @@ pub mod bulk_import;
 pub mod cache_budget;
 pub mod dto;
 pub mod erase;
+pub mod flight;
 pub mod format;
 pub mod intake;
 pub mod keys;

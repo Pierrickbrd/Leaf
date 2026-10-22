@@ -15,7 +15,8 @@ use leaf_server::api::keys::Keys;
 use leaf_server::api::pages::Pages;
 use leaf_server::api::routes::{router, AppState};
 use leaf_server::boot::{
-    cache_ceiling, jpeg_quality, split_volumes, tls_hosts, tls_paths, Invocation, Outcome,
+    cache_ceiling, image_quality, retired_quality, split_volumes, tls_hosts, tls_paths, Invocation,
+    Outcome,
 };
 use leaf_server::config::Config;
 use leaf_server::net::link::Reach;
@@ -126,10 +127,13 @@ async fn serve(asked: Invocation) -> Result<()> {
 
     // The connect info is what the throttle counts against: without it every caller looks
     // like the same one, and one misconfigured device would lock out the household.
+    if let Some(said) = retired_quality(std::env::var("LEAF_JPEG_QUALITY").ok().as_deref()) {
+        tracing::warn!("{said}");
+    }
     let pages = Pages::new(
         Arc::clone(&db),
         config.cache.clone(),
-        jpeg_quality(std::env::var("LEAF_JPEG_QUALITY").ok().as_deref()),
+        image_quality(std::env::var("LEAF_IMAGE_QUALITY").ok().as_deref()),
         cache_ceiling(std::env::var("LEAF_MAX_CACHE_MB").ok().as_deref()),
     );
 

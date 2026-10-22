@@ -38,7 +38,7 @@ use super::intake::{Collision, FileRequest, Intake, Proposal};
 use super::keys::{Key, Keys, Permission, HEADER};
 use super::linking;
 use super::local_drop::{DropListing, DropRequest, LocalDrop};
-use super::pages::{Pages, ServedImage};
+use super::pages::{Pages, Served};
 use super::progress::{Progress, ProgressDto, ProgressPatch, SeriesProgressPatch, UpNextDto};
 use super::records::{EntryPatch, Records, SeriesPatch};
 use super::relocate::{MoveRequest, Relocate};
@@ -825,8 +825,11 @@ async fn get_page(
             .into_response());
     };
     let width = query.width;
+    let held = held_tag(&headers);
     let served = blocking(move || {
-        let served = state.pages.page(&id, number, width);
+        let served = state
+            .pages
+            .page_or_unchanged(&id, number, width, held.as_deref());
         // Only when a width was asked for: serving the source costs nothing to begin with.
         // And never from a cover or from the warming itself — without that distinction the
         // preparation fed itself, and fetching a grid of covers quietly resized the opening
@@ -837,7 +840,7 @@ async fn get_page(
         served
     })
     .await?;
-    Ok(image_response(served, &headers))
+    Ok(image_response(served))
 }
 
 /// The cover, small by default. A thumbnail is a page asked for narrow.
@@ -849,8 +852,10 @@ async fn entry_cover(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, Failure> {
     let width = query.width;
-    let served = blocking(move || state.pages.cover(&id, width)).await?;
-    Ok(image_response(served, &headers))
+    let held = held_tag(&headers);
+    let served =
+        blocking(move || state.pages.cover_or_unchanged(&id, width, held.as_deref())).await?;
+    Ok(image_response(served))
 }
 
 /// The tile of a grid: one request, not one to find the first entry and another for its
@@ -863,8 +868,14 @@ async fn series_cover(
     headers: axum::http::HeaderMap,
 ) -> Result<Response, Failure> {
     let width = query.width;
-    let served = blocking(move || state.pages.series_cover(&id, width)).await?;
-    Ok(image_response(served, &headers))
+    let held = held_tag(&headers);
+    let served = blocking(move || {
+        state
+            .pages
+            .series_cover_or_unchanged(&id, width, held.as_deref())
+    })
+    .await?;
+    Ok(image_response(served))
 }
 
 /// The original file: this is how a volume comes back down to be retouched.
@@ -987,43 +998,43 @@ fn attachment(name: &str) -> String {
     format!("attachment; filename=\"{plain}\"; filename*=UTF-8''{encoded}")
 }
 
-/// The tag carries the file's modification time, so a cached page can be trusted for as
-/// long as the client cares to keep it.
-fn image_response(served: Option<ServedImage>, headers: &axum::http::HeaderMap) -> Response {
-    let Some(image) = served else {
-        return (StatusCode::NOT_FOUND, Json(ErrorDto::new("unknown page"))).into_response();
-    };
-    let offered = headers
+/// The tag the client says it already holds, without its quotes.
+///
+/// Read before the work rather than after it: the tag of an answer is known from the index
+/// alone, so a client that already holds it is told so before the archive is opened.
+fn held_tag(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
         .get(axum::http::header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.trim_matches('"'));
-    if offered == Some(image.tag.as_str()) {
+        .map(|v| v.trim_matches('"').to_string())
+}
+
+/// The tag carries the file's modification time, so a cached page can be trusted for as
+/// long as the client cares to keep it.
+fn image_response(served: Option<Served>) -> Response {
+    let cache_control = (
+        axum::http::header::CACHE_CONTROL.as_str(),
+        "private, max-age=31536000".to_string(),
+    );
+    match served {
+        None => (StatusCode::NOT_FOUND, Json(ErrorDto::new("unknown page"))).into_response(),
         // The freshness headers go on the 304 too: a client that revalidates and gets a
         // bare 304 has learnt nothing about how long it may now keep what it has.
-        return (
+        Some(Served::Unchanged(tag)) => (
             StatusCode::NOT_MODIFIED,
+            [(axum::http::header::ETAG.as_str(), tag), cache_control],
+        )
+            .into_response(),
+        Some(Served::Image(image)) => (
             [
                 (axum::http::header::ETAG.as_str(), image.tag),
-                (
-                    axum::http::header::CACHE_CONTROL.as_str(),
-                    "private, max-age=31536000".to_string(),
-                ),
+                cache_control,
+                (axum::http::header::CONTENT_TYPE.as_str(), image.media_type),
             ],
+            image.bytes,
         )
-            .into_response();
+            .into_response(),
     }
-    (
-        [
-            (axum::http::header::ETAG.as_str(), image.tag),
-            (
-                axum::http::header::CACHE_CONTROL.as_str(),
-                "private, max-age=31536000".to_string(),
-            ),
-            (axum::http::header::CONTENT_TYPE.as_str(), image.media_type),
-        ],
-        image.bytes,
-    )
-        .into_response()
 }
 
 // ------------------------------------------------------------------- search
