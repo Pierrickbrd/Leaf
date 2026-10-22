@@ -184,6 +184,44 @@ installer. The client command asks for those two values without echoing the key.
 resulting `~/.config/Leaf/leaf.conf` is mode `0600`; the server copy lives in
 `/etc/leaf/server.env`, also mode `0600`.
 
+**Where the library goes.** `--library` chooses it. Without the option the server command
+asks at a terminal and otherwise takes `/srv/leaf/library`; an update keeps the one already
+installed. Its inbox and drop folders are created beside it, in the same parent. Paths under
+`/home`, `/root` and `/run/user` are refused: the service cannot see them, and a library it
+cannot see is an empty one, whose scan would prune the reading progress. Every folder above
+the library must belong to root alone, with no group write and no ACL granting write:
+root creates and shares folders there, and any other account able to write in it could
+swap one for a link first. On a disk mounted as a person's, `sudo chown root:root` the
+mount point, or put the library elsewhere.
+
+**Which account runs it.** A new installation runs the server as `leaf`, a system account
+created on the spot with no password, no shell and no home, so that a flaw in the server
+reaches the library and nothing else the machine holds. `--user` names another account. An
+update keeps the account the installed service already runs as.
+
+**Sharing the files with a person.** `--share-with alice` adds `alice` to the `leaf` group
+and gives the folders the installer creates an ACL, the default one included, so that what
+she copies in and what the server writes stay writable by both. It covers the library
+files, not the index nor the keys. `all` shares with the person running it. The installer
+never changes the permissions of a library that already exists: it prints the `chown` and
+`setfacl` commands to run instead.
+
+```bash
+sudo ./install.sh server --library /data/comics/library --share-with alice
+```
+
+**Building on one machine, installing on another.** The server command builds from the
+sources, which installs Rust and `build-essential` on the machine. To keep a server free of
+both, build where the toolchain already is and hand the binary over:
+
+```bash
+cd server && cargo build --release
+scp target/release/leaf-server server.example:/tmp/
+sudo ./install.sh server --binary /tmp/leaf-server
+```
+
+The installer checks that the file is a `leaf-server` and records the version it reports.
+
 The safe default listens only on `127.0.0.1`. For a remote server, bind Leaf to a private
 network address reachable from the client:
 
