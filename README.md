@@ -178,11 +178,20 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Pierrickbrd/Leaf/main/instal
 ```
 
 The command downloads the Leaf sources into a temporary directory, builds the selected
-component and removes those sources afterwards. The server command creates a 32-character
-client key, starts the service and prints the address and key needed by the client
-installer. The client command asks for those two values without echoing the key. The
-resulting `~/.config/Leaf/leaf.conf` is mode `0600`; the server copy lives in
-`/etc/leaf/server.env`, also mode `0600`.
+component and removes those sources afterwards. The server command asks for the public
+address of the server, the one devices type to reach it (through a proxy or a tunnel as
+much as directly; leave it empty if you do not know it yet), writes it as `LEAF_PUBLIC_URL`
+in `/etc/leaf/server.env` (mode `0600`), starts the service and ends with a first
+`leaf://` link and its QR code, made by `leaf-server device add`: open it on the device to
+link, or type its code there. It is valid ten minutes, once; run
+`sudo leaf-server device add` again for the next device. On `127.0.0.1` without a public
+address there is no link to give, and the command says so. No key is written into
+`LEAF_KEYS` any more; the keys already there keep working.
+
+The client command asks for nothing: the client opens on its own screen, from which it is
+linked to a library, and opens `leaf://` links. `--address` and `--key-file` still write
+`~/.config/Leaf/leaf.conf` (mode `0600`) for the scripts that pass them. `all` links the
+client of the same machine by itself, and keeps its key in that file.
 
 **Where the library goes.** `--library` chooses it. Without the option the server command
 asks at a terminal and otherwise takes `/srv/leaf/library`; an update keeps the one already
@@ -223,15 +232,17 @@ sudo ./install.sh server --binary /tmp/leaf-server
 The installer checks that the file is a `leaf-server` and records the version it reports.
 
 The safe default listens only on `127.0.0.1`. For a remote server, bind Leaf to a private
-network address reachable from the client:
+network address reachable from the client; anywhere but the loopback Leaf speaks only
+https, with a certificate whose fingerprint the link carries:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Pierrickbrd/Leaf/main/install.sh) server --host 100.64.0.10
 ```
 
-For a public hostname, keep Leaf behind a TLS reverse proxy and pass the public URL with
-`--address https://leaf.example.net`. The plain HTTP port should remain private because the
-client key is sent on every request.
+For a public hostname, put Leaf behind a TLS reverse proxy and give the public URL at the
+question, or with `--address https://leaf.example.net`. An update adds `LEAF_PUBLIC_URL` to
+an existing `server.env` only when the line is missing and there is a terminal to ask, or
+the option gives it; it never rewrites the rest.
 
 Leaf currently has one product version for the two independently installable components.
 The server and client record their installed versions separately and both expose them:
@@ -286,13 +297,14 @@ in, so there is no runtime and no system library to install.
 | `LEAF_LIBRARY` | the first root | read and written |
 | `LEAF_INBOX` | `../inbox` | transfers in flight — **same filesystem as the library** |
 | `LEAF_CACHE` | `../cache` | resized pages, disposable |
-| `LEAF_DB` | `data/leaf.sqlite` | the index, rebuildable |
-| `LEAF_KEYS` | none | `desktop:secret:read,import  phone:secret:read` — 16 characters minimum, and required to bind anywhere but the loopback |
-| `LEAF_HOST` · `LEAF_PORT` | `127.0.0.1` · `8081` | |
+| `LEAF_DB` | `data/leaf.sqlite` | the index **and** the devices and reading progress — back it up |
+| `LEAF_KEYS` | none | `desktop:secret:read,import  phone:secret:read` — 16 characters minimum; optional now that devices link themselves, and the keys already there keep working |
+| `LEAF_HOST` · `LEAF_PORT` | `127.0.0.1` · `8081` | anywhere but the loopback, Leaf speaks https |
+| `LEAF_PUBLIC_URL` | none | the address devices type to reach Leaf, behind a proxy or a tunnel as much as directly — what `device add` puts in its link |
 | `LEAF_DROP` | none | a folder shared with an application on the same machine |
 | `LEAF_MAX_UPLOAD_MB` | `2048` | ceiling on a single file, both upload paths |
 | `LEAF_TRUST_PROXY` | off | read `X-Forwarded-For` — only behind **exactly one** proxy that sets it |
-| `LEAF_TLS_CERT` · `_KEY` · `_HOSTS` | none | serve HTTPS directly — two PEM files, generated if the certificate is not there |
+| `LEAF_TLS_CERT` · `_KEY` · `_HOSTS` | `tls/leaf.crt` · `tls/leaf.key` beside `LEAF_DB`, off the loopback | the certificate Leaf serves with — two PEM files, generated if the certificate is not there |
 | `LEAF_JPEG_QUALITY` | `0.85` | |
 | `LEAF_MAX_CACHE_MB` | `4096` | ceiling on resized pages, oldest read go first |
 | `LEAF_NO_SCAN` | | skip the scan on start |
@@ -301,29 +313,126 @@ The inbox must sit on the same filesystem as the library: committing an import i
 instant and atomic. On another volume it becomes a multi-gigabyte copy, and the server warns
 at startup when it detects that.
 
+**The database is no longer only an index.** It used to be rebuildable from the files and
+nothing else; it now also holds the reading progress and the linked devices, which a rescan
+cannot give back. Back up `LEAF_DB` (the folder that holds it, `tls/` included) the way you
+back up the library.
+
 ## Security
 
-**A secret string per device**, compared in constant time against the configuration. No
-accounts, no passwords, no sign-in screen. Keys carry different rights: a desktop imports, a
-phone only reads — so a lost phone gives access to comics, not to writing on the disk. Keys
-belong in the applications' settings, never compiled into them.
+**A key per device, made by linking.** No accounts, no passwords, no sign-in screen: a
+device is linked once, receives a random key of its own, and the server keeps only a digest
+of it, compared in constant time. The key belongs in the application's keychain, never
+compiled into it and never printed. Every linked device has every right — rights chosen
+device by device are not offered yet. The keys of `LEAF_KEYS` keep working, with the rights
+they were given.
 
 **Wrong keys are throttled.** Ten failures from one address and it is refused for fifteen
 minutes, with `Retry-After` saying how long. Failures age out, so a device that gets it wrong
 once a week never accumulates its way into a lockout. A key that works clears the slate.
 
-**It binds the loopback by default,** and refuses to start bound wider with no key
-configured — a port open with no key is not a risky setting, it is an open library.
+**The library is closed as soon as a device is linked, and stays closed.** Until then, on
+the loopback, it answers without a key, so a machine that serves only itself needs no setup.
+Revoking the last device does not open it again, and a key it does not know is refused even
+while it is open. Off the loopback
+it is never open: with no key and no device it answers only `/health` and the exchange of a
+code, so that a first device can still be linked.
 
-**TLS, if nothing else provides it.** A reverse proxy is the better answer: it holds a
-certificate browsers already trust. But a port opened without one would send the key in clear
-on every request, so the server can do it itself: set `LEAF_TLS_CERT` and it generates a
-self-signed certificate on first start and prints its fingerprint. Pin that in the
-applications rather than trusting an authority — it names exactly one server. Two PEM files
-and no keystore: the key sits beside the certificate unless `LEAF_TLS_KEY` names it
-elsewhere, and it is guarded by its mode — checked on every start, and closed to everybody
-but its owner when it is not — rather than by a password to configure, lose, or leave in an
-environment variable.
+### Linking a device
+
+On the machine that runs the server:
+
+```bash
+sudo leaf-server device add
+```
+
+It makes a code of eight characters, valid **ten minutes** and good **once**, and prints a
+link for each address the server listens on, with the QR code of the first (`--qr LABEL`
+draws another one):
+
+```
+leaf://192.0.2.10:8081/lier/ABCD-EFGH?empreinte=<64 hexadecimal characters>
+```
+
+Open the link on the device to link — click it, since the client registers `leaf://`, or
+paste it into the client's own linking screen — or scan the QR code. The client takes the
+whole link, never the code alone: the link also carries the address and the fingerprint. The device sends the code, gets its key
+in return, and keeps it in the keychain; the code is spent. `--address URL` links to another
+address this once, and `LEAF_PUBLIC_URL` (in `/etc/leaf/server.env`) is the one `device add`
+uses when Leaf sits behind a proxy or a tunnel, where its own addresses are not the ones
+devices type. For a server on the loopback, `leaf://` to a loopback address means plain http,
+which is how a tunnel is linked.
+
+Once linked, a device can link another: **Bond**, then « Relier un autre appareil », draws a
+code and its QR code. The same tab renames the device, moves it to another server, or
+unlinks it.
+
+```bash
+sudo leaf-server device list              # devices, keys of LEAF_KEYS, waiting codes
+sudo leaf-server device revoke "Laptop"   # a device by its name, or a waiting code
+sudo leaf-server device enroll "Desktop" > key   # for the installer: the key on stdout
+```
+
+`revoke` takes effect on the device's next request: it comes back to the linking screen with
+its sentence. `enroll` links a device at once and writes its key to its output, which must
+not be a terminal — a key is never shown on a screen. These commands read
+`/etc/leaf/server.env`, so they are run with `sudo`, and they open the index as the account
+that owns its folder.
+
+### https on the network
+
+Anywhere but `127.0.0.1`, `localhost` and `::1`, Leaf speaks https and nothing else, with no
+setting to turn it off: the key travels on every request, and on a home network it is
+anyone's who listens. The first start there makes a self-signed certificate under `tls/`
+beside `LEAF_DB` (`leaf.crt` and `leaf.key`, the key closed to everybody but its owner), and
+`device add` writes its **fingerprint** — the SHA-256 of the certificate, 64 lowercase
+hexadecimal characters — into every link.
+
+The client pins that fingerprint when it links and compares it on every connection. There
+is no « continue anyway » button on purpose: a certificate that changed is either a renewal
+the device was not told about or someone standing in between, and the screen cannot tell
+which, so it stops and says so. Link the device again from a fresh code to accept the new
+certificate. Copying `tls/` to another machine keeps the fingerprint, and so keeps the links.
+
+`LEAF_TLS_CERT` and `LEAF_TLS_KEY` name a certificate of your own instead.
+
+### A proxy on another machine
+
+A proxy on the same machine talks to Leaf over the loopback, in plain http, and needs nothing.
+A proxy on **another** machine reaches Leaf off the loopback, so it speaks https to it and
+must trust Leaf's certificate, which no public authority signed — and, since it checks the
+name, a certificate that carries the address it dials. The generated certificate carries
+`LEAF_HOST` (`0.0.0.0` is no address anyone dials), so set `LEAF_TLS_HOSTS` to the address or
+name of the proxy's upstream **before the first start**; the certificate is made once, and
+changing it later means removing `tls/` and linking the devices again. With Traefik, name
+`leaf.crt` as a root of the transport the router uses:
+
+```yaml
+http:
+  serversTransports:
+    leaf:
+      rootCAs:
+        - /etc/traefik/leaf.crt        # a copy of tls/leaf.crt
+      serverName: 192.0.2.10           # a name or address the certificate carries (LEAF_TLS_HOSTS)
+  services:
+    leaf:
+      loadBalancer:
+        serversTransport: leaf
+        servers:
+          - url: https://192.0.2.10:8081
+```
+
+Then set `LEAF_PUBLIC_URL` to the proxy's public address, so that the links carry it. When
+that address answers with a certificate publicly signed, the link carries no fingerprint and
+the client trusts the authorities it already knows; when it does not, `device add` shows the
+fingerprint it found and asks you to check it is your proxy's.
+
+**TLS, if nothing else provides it.** A reverse proxy with a certificate browsers already
+trust is the better answer for a public hostname. Leaf's own certificate is for the
+addresses of a private network, where the clients are yours and pin exactly one server. Two
+PEM files and no keystore: the key is guarded by its mode — checked on every start, and
+closed to everybody but its owner when it is not — rather than by a password to configure,
+lose, or leave in an environment variable.
 
 **Uploads have a ceiling**, malformed input answers `400` rather than `500`, and an
 unforeseen failure answers `internal error` with the detail logged server-side — an exception
@@ -336,6 +445,9 @@ shape, and what each one means. The summary below is the shape of it.
 
 ```
 GET    /health                        answers without a key, and says what it is
+POST   /link                          answers without a key: a code becomes a device's key
+POST   /link/codes  ·  GET/DELETE /link/codes/{id}   make, follow or withdraw a code
+PATCH  /device  ·  DELETE /device     the calling device renames itself, or leaves
 GET    /series                        a "series" is an edition
 GET    /series?author=&genre=&medium=&status=&universe=&language=&publisher=&read=
                                       repeat a parameter to widen, add another to narrow
@@ -367,10 +479,12 @@ POST   /works/{id}/move               a series into a universe, or back out to t
 POST   /cleanup  ·  /scan
 ```
 
-`/health` answers without a key and says what it is:
+`/health` answers without a key — and so does `POST /link`, which is where a device without
+one gets its own — and says what it is. `linked` is whether the library is closed to anyone
+without a key:
 
 ```json
-{ "status": "ok", "api": 1, "format": 1, "library": 12 }
+{ "status": "ok", "api": 1, "format": 1, "library": 12, "linked": true }
 ```
 
 `api` is what a client checks on connecting, so a client carrying last month's build says
