@@ -75,6 +75,11 @@ getrandom = "0.3"
 # safe in a header, a keychain entry and a JSON string alike.
 base64 = "0.22"
 
+# The household's code, kept as a slow digest. It is four characters at the shortest, so a
+# bare SHA-256 would be guessed in an instant by anyone holding a copy of the index — the
+# brake on wrong tries protects the route, not the file. Default parameters, random salt.
+argon2 = "0.5"
+
 thiserror = "2"
 anyhow = "1"
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
@@ -112,6 +117,10 @@ tower = { version = "0.5", features = ["util"] }
 # that — it is the largest thing on this disk by an order of magnitude.
 [profile.dev]
 debug = "line-tables-only"
+
+# Argon2 is slow on purpose, and unoptimised it is slower than a test run should be.
+[profile.dev.package.argon2]
+opt-level = 3
 
 [profile.release]
 opt-level = 3

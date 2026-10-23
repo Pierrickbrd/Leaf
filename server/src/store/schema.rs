@@ -196,11 +196,27 @@ pub const SCHEMA: &[&str] = &[
       restricted  INTEGER NOT NULL DEFAULT 0,
       max_age     INTEGER,
       code_digest BLOB,
-      created_at  INTEGER NOT NULL
+      created_at  INTEGER NOT NULL,
+      color       TEXT NOT NULL DEFAULT 'emeraude',
+      can_import  INTEGER NOT NULL DEFAULT 0,
+      can_edit    INTEGER NOT NULL DEFAULT 0,
+      can_delete  INTEGER NOT NULL DEFAULT 0,
+      reading     TEXT NOT NULL DEFAULT '{}'
     )
     "#,
     "INSERT OR IGNORE INTO profile (id, name, name_key, restricted, max_age, code_digest, created_at)
-     VALUES ('default', 'Par défaut', 'par défaut', 0, NULL, NULL, CAST(strftime('%s', 'now') AS INTEGER) * 1000)",
+     VALUES ('default', 'Principal', 'principal', 0, NULL, NULL, CAST(strftime('%s', 'now') AS INTEGER) * 1000)",
+    // The one code of the household, kept as an argon2 PHC string. One row at most, like
+    // `closed`, and the principal is the row of `profile` whose id is DEFAULT_PROFILE:
+    // nothing here says who it is, so nothing here can disagree with it.
+    r#"
+    CREATE TABLE IF NOT EXISTS household (
+      id         INTEGER PRIMARY KEY CHECK (id = 1),
+      code_phc   TEXT,
+      code_scope TEXT CHECK (code_scope IN ('restricted', 'everything'))
+    )
+    "#,
+    "INSERT OR IGNORE INTO household (id) VALUES (1)",
     // A linked device. Only the SHA-256 of its key is kept, so a copy of the index cannot
     // be used to read the library.
     r#"
@@ -212,7 +228,10 @@ pub const SCHEMA: &[&str] = &[
       linked_at  INTEGER NOT NULL,
       linked_by  TEXT NOT NULL,
       seen_at    INTEGER,
-      profile_id TEXT NOT NULL DEFAULT 'default' REFERENCES profile(id)
+      profile_id TEXT NOT NULL DEFAULT 'default' REFERENCES profile(id),
+      kept       INTEGER NOT NULL DEFAULT 0,
+      choosing   INTEGER NOT NULL DEFAULT 0,
+      held       INTEGER NOT NULL DEFAULT 0
     )
     "#,
     "CREATE INDEX IF NOT EXISTS ix_device_profile ON device(profile_id)",
@@ -656,6 +675,31 @@ pub const MIGRATIONS: &[&[&str]] = &[
         INSERT OR IGNORE INTO closed (id, closed_at)
          SELECT 1, MIN(linked_at) FROM device HAVING COUNT(*) > 0
         "#,
+    ],
+    // 30 — profiles that can be made. The principal is the first profile, renamed unless its
+    // owner already named it; every other profile has a colour of its own and three rights to
+    // the library, none by default. `progress` already cascades from `profile`, so deleting a
+    // profile needs no step of its own for it. The `device` columns are for what
+    // a device keeps, whether it must choose again, whether it is held under restriction.
+    &[
+        "ALTER TABLE profile ADD COLUMN color TEXT NOT NULL DEFAULT 'emeraude'",
+        "ALTER TABLE profile ADD COLUMN can_import INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE profile ADD COLUMN can_edit INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE profile ADD COLUMN can_delete INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE profile ADD COLUMN reading TEXT NOT NULL DEFAULT '{}'",
+        "UPDATE profile SET name = 'Principal', name_key = 'principal'
+          WHERE id = 'default' AND name = 'Par défaut'",
+        r#"
+        CREATE TABLE IF NOT EXISTS household (
+          id         INTEGER PRIMARY KEY CHECK (id = 1),
+          code_phc   TEXT,
+          code_scope TEXT CHECK (code_scope IN ('restricted', 'everything'))
+        )
+        "#,
+        "INSERT OR IGNORE INTO household (id) VALUES (1)",
+        "ALTER TABLE device ADD COLUMN kept INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE device ADD COLUMN choosing INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE device ADD COLUMN held INTEGER NOT NULL DEFAULT 0",
     ],
 ];
 
