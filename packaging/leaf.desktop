@@ -2,9 +2,10 @@
 Type=Application
 Name=Leaf
 Comment=Lire une bibliothèque de bandes dessinées
-Exec=leaf-desktop
+Exec=leaf-desktop %u
 Icon=leaf
 Terminal=false
 Categories=Graphics;Viewer;
 StartupNotify=true
 StartupWMClass=Leaf
+MimeType=x-scheme-handler/leaf;

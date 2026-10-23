@@ -40,6 +40,16 @@ bootstrap_from_github() {
 }
 
 cleanup() {
+    local status=$?
+    # A device `all` enrolled whose client was never installed: its key was only ever in this
+    # process, so the device would stay on the list with nobody holding the key, and the
+    # next run would stop on « nom déjà pris ». Found when the client build failed on a
+    # missing zlib after the enrolment.
+    if (( status != 0 )) && [[ -n $enrolled_name ]]; then
+        as_root /usr/local/bin/leaf-server device revoke "$enrolled_name" \
+            || printf 'Leaf: l’appareil « %s » reste relié ; retirez-le avec sudo leaf-server device revoke.\n' \
+                "$enrolled_name" >&2
+    fi
     rm -r -- "$LEAF_TMP"
     if [[ ${LEAF_BOOTSTRAP_DIR:-} == /tmp/leaf-bootstrap.* && -d ${LEAF_BOOTSTRAP_DIR:-} ]]; then
         rm -r -- "$LEAF_BOOTSTRAP_DIR"
@@ -51,11 +61,13 @@ cleanup() {
 # and drop folders created beside the library would mix with the index.
 LEAF_DEFAULT_LIBRARY=/srv/leaf/library
 
+enrolled_name=""
 component=""
 library=""
 host=""
 port=""
 address=""
+public_url=""
 client_key=""
 key_file=""
 # The person installing: the client configuration goes to their home, and `all` shares the
@@ -87,7 +99,8 @@ Options:
   --library PATH   library directory (asked, default: /srv/leaf/library)
   --host ADDRESS   address the server binds (default: 127.0.0.1)
   --port PORT      server port (default: 8081)
-  --address URL    URL written into the client configuration
+  --address URL    server: its public address, as devices type it (asked otherwise)
+                   client: the server to use, with --key-file (both optional)
   --key-file PATH  read the client key from this file
   --user USER      account the server runs as (default: leaf, created if missing)
   --share-with USER  give USER read and write access to the library files
@@ -114,6 +127,11 @@ as_root() {
     else
         sudo "$@"
     fi
+}
+
+# A function, so that the tests can play the person at the terminal.
+at_a_terminal() {
+    [[ -t 0 ]]
 }
 
 need_value() {
@@ -168,8 +186,13 @@ parse_arguments() {
         esac
     done
 
+    if [[ "$component" == "server" ]]; then
+        public_url=$address
+        address=""
+    fi
     if [[ "$component" == "all" ]]; then
         share_with=${share_with:-$human_user}
+        [[ -z "$host" ]] || all_on_the_loopback "$host"
     fi
     # Root's client configuration would land in /root, and sharing a library with root
     # grants nothing root does not already have: this is a sudo run with no SUDO_USER.
@@ -224,22 +247,15 @@ quote_environment_value() {
     printf '"%s"' "$value"
 }
 
-server_key_from() {
-    local keys=$1 first rest
-    first=${keys%% *}
-    rest=${first#*:}
-    [[ "$rest" != "$first" ]] || return 1
-    printf '%s' "${rest%%:*}"
+is_loopback() {
+    [[ "$1" == 127.0.0.1 || "$1" == localhost || "$1" == ::1 ]]
 }
 
-client_url() {
-    local bind=$1 number=$2
-    case "$bind" in
-        0.0.0.0|::)
-            return 1 ;;
-        *)
-            printf 'http://%s:%s' "$bind" "$number" ;;
-    esac
+# `all` is a client and its server on one machine, the server on the loopback. Anywhere
+# else the server speaks only https, or does not listen on the loopback at all, and the
+# local client would get a key for an address that never answers it.
+all_on_the_loopback() {
+    is_loopback "$1" || fail "install.sh all installe le client et le serveur sur cette machine, le serveur sur 127.0.0.1. Pour un serveur joignable du réseau, lancez install.sh server, puis reliez le client avec le lien qu’il affiche."
 }
 
 check_library_path() {
@@ -267,11 +283,26 @@ check_library_path() {
 choose_library() {
     local answer
     library=${library:-$(existing_server_value LEAF_LIBRARY)}
-    if [[ -z "$library" && -t 0 ]]; then
+    if [[ -z "$library" ]] && at_a_terminal; then
         read -r -p "Emplacement de la bibliothèque [$LEAF_DEFAULT_LIBRARY] : " answer
         library=$answer
     fi
     library=${library:-$LEAF_DEFAULT_LIBRARY}
+}
+
+# The address devices type to reach Leaf, through a proxy or a tunnel as much as directly:
+# Leaf cannot guess it, and the links of `device add` are made from it. The option first,
+# then the person at the terminal; empty is an answer, the line is there to fill later.
+choose_public_url() {
+    local answer
+    if [[ -z "$public_url" ]] && at_a_terminal; then
+        read -r -p "Adresse publique de Leaf, telle que les appareils la taperont (ex. https://leaf.example.net ; laisser vide si vous ne savez pas encore) : " answer
+        public_url=$answer
+    fi
+    # Off the loopback the clients speak only https: an http address would make links
+    # that no device accepts.
+    [[ -z "$public_url" || "$public_url" == https://* ]] \
+        || fail "l’adresse publique doit commencer par https://."
 }
 
 # An installation that already exists keeps the account it runs as: switching it to `leaf`
@@ -424,16 +455,19 @@ obtain_server_binary() {
     server_binary="$LEAF_ROOT/server/target/release/leaf-server"
 }
 
+# No key in LEAF_KEYS: each device now gets its own, against a one-time code, and the
+# server keeps only its digest. A key made up here would sit in clear in this file.
 render_server_env() {
-    local library=$1 base=$2 host=$3 port=$4 keys=$5
+    local library=$1 base=$2 host=$3 port=$4 public_url=$5
     printf 'LEAF_LIBRARY=%s\n' "$(quote_environment_value "$library")"
     printf 'LEAF_INBOX=%s\n' "$(quote_environment_value "$base/inbox")"
     printf 'LEAF_DROP=%s\n' "$(quote_environment_value "$base/drop")"
     printf 'LEAF_CACHE=/var/cache/leaf\n'
     printf 'LEAF_DB=/var/lib/leaf/leaf.sqlite\n'
-    printf 'LEAF_KEYS=%s\n' "$(quote_environment_value "$keys")"
+    printf 'LEAF_KEYS=\n'
     printf 'LEAF_HOST=%s\n' "$(quote_environment_value "$host")"
     printf 'LEAF_PORT=%s\n' "$port"
+    printf 'LEAF_PUBLIC_URL=%s\n' "$(quote_environment_value "$public_url")"
     printf 'LEAF_MAX_UPLOAD_MB=2048\n'
     printf 'LEAF_TRUST_PROXY=\n'
     printf 'LEAF_TLS_CERT=\n'
@@ -505,8 +539,33 @@ WantedBy=multi-user.target
 EOF
 }
 
+# Off the loopback the server speaks only https, with a certificate it made itself that
+# curl has nothing to check against. --insecure is acceptable only because this asks the
+# very machine it runs on; the fingerprint a device must trust travels in its link.
+check_health() {
+    local bind=$1 number=$2 asked=$1 url
+    local -a options=(-fsS)
+    case "$asked" in
+        0.0.0.0) asked=127.0.0.1 ;;
+        ::) asked=::1 ;;
+    esac
+    [[ "$asked" != *:* ]] || asked="[$asked]"
+    if is_loopback "$bind"; then
+        url="http://$asked:$number/health"
+    else
+        options+=(--insecure)
+        url="https://$asked:$number/health"
+    fi
+    for _ in $(seq 1 40); do
+        curl "${options[@]}" "$url" >/dev/null && return 0
+        sleep 0.25
+    done
+    curl "${options[@]}" "$url" >/dev/null \
+        || fail "le service est installé mais /health ne répond pas ; consultez journalctl -u leaf-server."
+}
+
 install_server() {
-    local existing_keys base unit health_host env_file service_group server_binary server_version
+    local base unit env_file service_group server_binary server_version add_public_url=0
     # Everything is checked before anything is touched: a mistake found after the binary,
     # the account and the folders exist would leave a half-made installation behind.
     server_version=$LEAF_VERSION
@@ -514,7 +573,6 @@ install_server() {
         binary=$(realpath -- "$binary")
         server_version=$(check_server_binary "$binary")
     fi
-    existing_keys=$(existing_server_value LEAF_KEYS)
 
     choose_library
     library=$(check_library_path "$library")
@@ -525,7 +583,17 @@ install_server() {
 
     [[ "$port" =~ ^[0-9]+$ ]] && (( port > 0 && port < 65536 )) \
         || fail "le port doit être compris entre 1 et 65535."
-    [[ "$library$host" != *$'\n'* ]] || fail "un chemin ou une adresse contient un retour à la ligne."
+    # An update never rewrites server.env; it only adds the public address when the line
+    # is missing and there is someone to ask, or the option gives it.
+    if ! as_root test -f /etc/leaf/server.env; then
+        choose_public_url
+    elif [[ -n "$public_url" ]] || at_a_terminal; then
+        if ! as_root grep -q '^LEAF_PUBLIC_URL=' /etc/leaf/server.env; then
+            choose_public_url
+            add_public_url=1
+        fi
+    fi
+    [[ "$library$host$public_url" != *$'\n'* ]] || fail "un chemin ou une adresse contient un retour à la ligne."
 
     base=$(dirname -- "$library")
     service_user=$(resolve_service_user /etc/systemd/system/leaf-server.service)
@@ -537,18 +605,6 @@ install_server() {
         getent passwd "$share_with" >/dev/null || fail "l’utilisateur '$share_with' n’existe pas."
         check_shareable_account "$service_user"
         need_command setfacl acl
-    fi
-
-    if [[ -n "$existing_keys" ]]; then
-        client_key=$(server_key_from "$existing_keys") \
-            || fail "LEAF_KEYS existe mais son premier élément n’a pas la forme nom:secret:droits."
-    elif as_root test -f /etc/leaf/server.env; then
-        # An update never rewrites server.env, so a key made up here would be reported
-        # to the person and exist nowhere. An empty LEAF_KEYS is said as what it is.
-        client_key=""
-    else
-        client_key=$(openssl rand -hex 16)
-        existing_keys="desktop:$client_key:read,import"
     fi
 
     obtain_server_binary
@@ -568,10 +624,15 @@ install_server() {
         share_library_with "$share_with" "$service_group" "${owned_library_dirs[@]}"
     fi
 
+    env_file="$LEAF_TMP/server.env"
     if ! as_root test -f /etc/leaf/server.env; then
-        env_file="$LEAF_TMP/server.env"
-        render_server_env "$library" "$base" "$host" "$port" "$existing_keys" > "$env_file"
+        render_server_env "$library" "$base" "$host" "$port" "$public_url" > "$env_file"
         as_root install -D -m 0600 -o root -g root "$env_file" /etc/leaf/server.env
+    elif (( add_public_url )); then
+        as_root cat /etc/leaf/server.env > "$env_file"
+        [[ -z $(tail -c1 "$env_file") ]] || printf '\n' >> "$env_file"
+        printf 'LEAF_PUBLIC_URL=%s\n' "$(quote_environment_value "$public_url")" >> "$env_file"
+        as_root install -m 0600 -o root -g root "$env_file" /etc/leaf/server.env
     fi
 
     unit="$LEAF_TMP/leaf-server.service"
@@ -581,18 +642,7 @@ install_server() {
     as_root systemctl enable --now leaf-server.service
     as_root systemctl restart leaf-server.service
 
-    health_host=$host
-    [[ "$health_host" == "0.0.0.0" ]] && health_host=127.0.0.1
-    for _ in $(seq 1 40); do
-        curl -fsS "http://$health_host:$port/health" >/dev/null && break
-        sleep 0.25
-    done
-    curl -fsS "http://$health_host:$port/health" >/dev/null \
-        || fail "le service est installé mais /health ne répond pas ; consultez journalctl -u leaf-server."
-
-    if [[ -z "$address" ]]; then
-        address=$(client_url "$host" "$port" || true)
-    fi
+    check_health "$host" "$port"
 }
 
 read_client_configuration() {
@@ -602,26 +652,55 @@ read_client_configuration() {
     [[ -n "$client_key" ]] || client_key=$(as_root sed -n 's/^key=//p' "$config" | tail -n1)
 }
 
-ask_client_configuration() {
-    read_client_configuration
+# Nothing to ask: a client with no library opens on the screen that links it, by a
+# leaf:// link. --address and --key-file still write leaf.conf, for the scripts
+# that pass them; an existing leaf.conf is left as it is.
+choose_client_configuration() {
     if [[ -n "$key_file" ]]; then
         client_key=$(tr -d '\r\n' < "$key_file")
     fi
-    if [[ -z "$address" && -t 0 ]]; then
-        read -r -p 'Adresse du serveur Leaf (ex. https://leaf.example.net) : ' address
-    fi
-    if [[ -z "$client_key" && -t 0 ]]; then
-        read -r -s -p 'Clé du client : ' client_key
-        printf '\n'
-    fi
+    [[ -n "$address$client_key" ]] || return 0
+    read_client_configuration
     [[ -n "$address" && -n "$client_key" ]] \
-        || fail "configuration manquante : relancez avec un terminal, --address et --key-file."
+        || fail "--address et --key-file vont ensemble ; sans eux, le client se relie depuis son propre écran."
     [[ "$address" == http://* || "$address" == https://* ]] \
         || fail "l’adresse doit commencer par http:// ou https://."
 }
 
+# `all` links the client of this machine itself. After install_server: before the first
+# start /var/lib/leaf does not exist, and device enroll refuses. The key goes from its
+# stdout into leaf.conf and nowhere else — never to the screen; and under sudo the
+# keyring of the person's session is out of reach. A client that already holds a key keeps
+# it: a second device of the same name would be refused.
+#
+# So does a client whose leaf.conf names an address and no key: it linked itself from its
+# own screen — unlinked and linked again, say — and its key is in the keychain, where this
+# script cannot see it. Enrolling again would stop on « nom déjà pris » after the server was
+# already updated, or make a second device whose key overwrites the file.
+link_local_client() {
+    local name reach=${host:-127.0.0.1} config="$human_home/.config/Leaf/leaf.conf" linked
+    if as_root test -f "$config" \
+        && [[ -z $(as_root sed -n 's/^key=//p' "$config") ]]; then
+        linked=$(as_root sed -n 's/^address=//p' "$config" | tail -n1)
+        if [[ -n "$linked" ]]; then
+            address=$linked
+            return 0
+        fi
+    fi
+    [[ "$reach" != ::1 ]] || reach="[::1]"
+    address=${address:-http://$reach:$port}
+    read_client_configuration
+    [[ -z "$client_key" ]] || return 0
+    name=$(uname -n)
+    name=${name:0:40}
+    client_key=$(as_root /usr/local/bin/leaf-server device enroll "$name") \
+        || fail "leaf-server device enroll n’a pas relié ce client ; voyez sudo leaf-server device list."
+    [[ -n "$client_key" ]] || fail "leaf-server device enroll n’a rendu aucune clé."
+    enrolled_name=$name
+}
+
 install_client() {
-    install_apt build-essential cmake ninja-build qt6-base-dev qt6-declarative-dev \
+    install_apt build-essential cmake ninja-build zlib1g-dev qt6-base-dev qt6-declarative-dev \
         libqt6svg6-dev qml6-module-qtquick qml6-module-qtquick-controls \
         qml6-module-qtquick-layouts qml6-module-qtquick-templates qml6-module-qtqml \
         qml6-module-qtqml-workerscript qml6-module-qt5compat-graphicaleffects \
@@ -636,16 +715,26 @@ install_client() {
     printf '%s\n' "$LEAF_VERSION" > "$LEAF_TMP/client.version"
     as_root install -m 0644 "$LEAF_TMP/client.version" /usr/local/share/leaf/client.version
 
-    as_root install -d -m 0700 -o "$human_user" -g "$human_group" "$human_home/.config/Leaf"
-    {
-        printf 'address=%s\n' "$address"
-        printf 'key=%s\n' "$client_key"
-    } > "$LEAF_TMP/leaf.conf"
-    as_root install -m 0600 -o "$human_user" -g "$human_group" \
-        "$LEAF_TMP/leaf.conf" "$human_home/.config/Leaf/leaf.conf"
+    if [[ -n "$address" && -n "$client_key" ]]; then
+        as_root install -d -m 0700 -o "$human_user" -g "$human_group" "$human_home/.config/Leaf"
+        {
+            printf 'address=%s\n' "$address"
+            printf 'key=%s\n' "$client_key"
+        } > "$LEAF_TMP/leaf.conf"
+        as_root install -m 0600 -o "$human_user" -g "$human_group" \
+            "$LEAF_TMP/leaf.conf" "$human_home/.config/Leaf/leaf.conf"
+        # The key is held by the client from here: a failure after this point must not
+        # revoke the device (`cleanup`).
+        enrolled_name=""
+    fi
 
     command -v update-desktop-database >/dev/null && \
         as_root update-desktop-database /usr/local/share/applications >/dev/null || true
+    # The handler of leaf:// links is the person's choice, in their ~/.config/mimeapps.list:
+    # run as root, xdg-mime would set root's. HOME too, since sudo hands on root's.
+    command -v xdg-mime >/dev/null && \
+        as_root runuser -u "$human_user" -- env HOME="$human_home" \
+            xdg-mime default leaf.desktop x-scheme-handler/leaf || true
     command -v gtk-update-icon-cache >/dev/null && \
         as_root gtk-update-icon-cache -q /usr/local/share/icons/hicolor || true
 }
@@ -674,31 +763,51 @@ main() {
         server)
             install_server ;;
         client)
-            ask_client_configuration
+            choose_client_configuration
             install_client ;;
         all)
+            # An update keeps the host server.env names, and it must be the loopback too.
+            host=${host:-$(existing_server_value LEAF_HOST)}
             host=${host:-127.0.0.1}
+            all_on_the_loopback "$host"
             install_server
-            address=${address:-http://127.0.0.1:$port}
+            link_local_client
             install_client ;;
     esac
 
     report_installation
 }
 
+# A first link to open on a device, or its QR code to scan, made by device add after the
+# server answered /health. Never a key: a key on the screen is a key in a scrollback.
+report_server_link() {
+    local status=0
+    printf '\n'
+    as_root /usr/local/bin/leaf-server device add || status=$?
+    # 2 is device add's own answer on the loopback without LEAF_PUBLIC_URL: no code made,
+    # and the explanation already printed. The installation itself succeeded.
+    if (( status != 0 && status != 2 )); then
+        printf 'Leaf: aucun lien n’a pu être créé ; relancez sudo leaf-server device add.\n' >&2
+    fi
+}
+
 report_installation() {
     printf '\nLeaf %s installé : %s.\n' "$LEAF_VERSION" "$component"
-    if [[ "$component" == "server" && -z "$client_key" ]]; then
-        printf 'Aucune clé dans LEAF_KEYS (/etc/leaf/server.env) : la bibliothèque est ouverte,\n'
-        printf 'et seuls les programmes de cette machine peuvent la joindre.\n'
-        printf 'Pour y relier un autre appareil, ajoutez une clé nom:secret:droits à LEAF_KEYS.\n'
-    elif [[ "$component" == "server" ]]; then
-        printf 'Adresse client : %s\n' "${address:-à renseigner selon votre proxy ou adresse réseau}"
-        printf 'Clé client     : %s\n' "$client_key"
-        printf 'Sur le PC client, lancez leaf-install client et saisissez ces deux valeurs.\n'
-    elif [[ "$component" == "client" || "$component" == "all" ]]; then
-        printf 'Le client est configuré pour %s et apparaît dans le menu des applications.\n' "$address"
-    fi
+    case "$component" in
+        server)
+            report_server_link ;;
+        all)
+            printf 'Le client de cette machine est relié au serveur (%s) et apparaît dans le menu des applications.\n' "$address"
+            printf 'Pour relier un autre appareil : sudo leaf-server device add\n' ;;
+        client)
+            if [[ -n "$address" ]]; then
+                printf 'Le client est configuré pour %s et apparaît dans le menu des applications.\n' "$address"
+            else
+                printf 'Le client apparaît dans le menu des applications. Pour le relier, ouvrez sur ce PC\n'
+                printf 'le lien leaf:// que donne sudo leaf-server device add sur le serveur : cliquez-le, ou collez-le\n'
+                printf 'dans l’écran de liaison du client.\n'
+            fi ;;
+    esac
 }
 
 # Sourced by tools/test_install.py with LEAF_INSTALL_SOURCE_ONLY=1, so that each decision
