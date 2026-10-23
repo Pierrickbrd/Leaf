@@ -803,9 +803,9 @@ fn an_unretained_principal_seat_is_not_a_way_round_the_code() {
     );
     assert_eq!(
         fx.profiles
-            .switch("d", "default", Some("2468"), false)
+            .switch_checked("d", "default", Some("2468"), false)
             .unwrap(),
-        Ok(seat("default", false))
+        Ok((seat("default", false), true))
     );
 }
 
@@ -985,5 +985,110 @@ fn a_device_that_must_choose_is_not_the_principal_when_the_code_guards_it() {
             .switch("d", "default", Some("2468"), false)
             .unwrap(),
         Ok(seat("default", false))
+    );
+}
+
+#[test]
+fn a_switch_says_whether_it_checked_the_code() {
+    let fx = Fixture::new();
+    fx.with_code(CodeScope::Everything);
+    let ines = fx.reader("Inès", "bleu").unwrap();
+    let anna = fx.reader("Anna", "rose").unwrap();
+    fx.device_on("d", &ines.id);
+    // Free, with text in the field anyway: nothing was checked, and the route must not take
+    // the success for a right code.
+    let (_, checked) = fx
+        .profiles
+        .switch_checked("d", &anna.id, Some("faux"), false)
+        .unwrap()
+        .unwrap();
+    assert!(!checked);
+    let (seat, checked) = fx
+        .profiles
+        .switch_checked("d", "default", Some("2468"), false)
+        .unwrap()
+        .unwrap();
+    assert!(checked);
+    assert_eq!(seat.profile_id, "default");
+}
+
+#[test]
+fn placing_a_device_that_is_not_there_is_a_refusal() {
+    let fx = Fixture::new();
+    assert_eq!(
+        fx.profiles.place("gone", "default", false).unwrap(),
+        Err(SwitchRefusal::NoSuchDevice)
+    );
+}
+
+fn restricted_one(name: &str, color: &str) -> NewProfile {
+    NewProfile {
+        name: name.into(),
+        color: color.into(),
+        restricted: true,
+        max_age: Some(10),
+        rights: Rights::default(),
+    }
+}
+
+#[test]
+fn the_first_restricted_profile_and_its_code_are_made_together_or_not_at_all() {
+    let fx = Fixture::new();
+    fx.reader("Inès", "bleu").unwrap();
+    assert_eq!(
+        fx.profiles
+            .create_with_code(restricted_one("inès", "rose"), Some("2468"), NOW)
+            .unwrap(),
+        Err(ProfileRefusal::NameTaken)
+    );
+    assert_eq!(None, fx.profiles.code().unwrap(), "no code left behind");
+    assert_eq!(
+        fx.profiles
+            .create_with_code(restricted_one("Léo", "rose"), Some("24"), NOW)
+            .unwrap(),
+        Err(ProfileRefusal::BadCode)
+    );
+    let leo = fx
+        .profiles
+        .create_with_code(restricted_one("Léo", "rose"), Some("2468"), NOW)
+        .unwrap()
+        .unwrap();
+    assert_eq!(leo.kind, Kind::Restricted);
+    assert_eq!(Some(CodeScope::Restricted), fx.profiles.code().unwrap());
+    assert!(fx.profiles.check_code("2468").unwrap());
+}
+
+#[test]
+fn a_code_already_there_wins_over_the_one_given_with_a_profile() {
+    let fx = Fixture::new();
+    fx.with_code(CodeScope::Everything);
+    fx.profiles
+        .create_with_code(restricted_one("Léo", "rose"), Some("1357"), NOW)
+        .unwrap()
+        .unwrap();
+    assert!(fx.profiles.check_code("2468").unwrap());
+    assert_eq!(Some(CodeScope::Everything), fx.profiles.code().unwrap());
+}
+
+#[test]
+fn creating_a_restricted_profile_with_its_code_costs_six_statements() {
+    let fx = Fixture::new();
+    // The household's code, name, colour, the code written, the insert, the read back.
+    assert_eq!(
+        cost(&fx, |p| p.create_with_code(
+            restricted_one("Léo", "rose"),
+            Some("2468"),
+            NOW
+        )),
+        6
+    );
+    // With the code already there, it is not written again.
+    assert_eq!(
+        cost(&fx, |p| p.create_with_code(
+            restricted_one("Mia", "bleu"),
+            Some("2468"),
+            NOW
+        )),
+        5
     );
 }

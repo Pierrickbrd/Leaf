@@ -27,7 +27,7 @@ use axum::extract::{ConnectInfo, FromRequestParts, Path, State};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use http_body_util::BodyExt;
 
@@ -43,6 +43,7 @@ use super::keys::{Key, Keys, Permission, HEADER};
 use super::linking;
 use super::local_drop::{DropListing, DropRequest, LocalDrop};
 use super::pages::{Pages, ServedImage};
+use super::profiles;
 use super::progress::{Progress, ProgressDto, ProgressPatch, SeriesProgressPatch, UpNextDto};
 use super::records::{EntryPatch, Records, SeriesPatch};
 use super::relocate::{MoveRequest, Relocate};
@@ -82,6 +83,10 @@ pub struct AppState {
     /// Wrong codes on `/link`, counted apart: a recognised key wipes `throttle`, and a
     /// caller holding any key could otherwise guess a code, wipe, and guess again for ever.
     pub link_throttle: Arc<Throttle>,
+    /// Wrong codes of the household, counted per device and apart from both: a device whose
+    /// key is good clears `throttle` with every request, and would otherwise guess the code
+    /// that keeps a child in its profile ten at a time, for ever.
+    pub code_throttle: Arc<Throttle>,
     pub pages: Arc<Pages>,
     pub scanner: Arc<Scanner>,
     pub runner: Arc<ScanRunner>,
@@ -152,7 +157,8 @@ impl AppState {
             db,
             keys: Arc::new(keys),
             throttle: Arc::new(Throttle::default()),
-            link_throttle: Arc::new(Throttle::default()),
+            link_throttle: Arc::new(Throttle::default().counting("wrong link codes")),
+            code_throttle: Arc::new(Throttle::default().counting("wrong codes")),
             pages,
         }
     }
@@ -216,6 +222,30 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/device",
             delete(linking::unlink_device).patch(linking::rename_device),
+        )
+        // The two routes of « Qui lit ? » come first: a device that must choose reaches these
+        // and nothing else.
+        .route(
+            "/profiles",
+            get(profiles::list_profiles).post(profiles::create_profile),
+        )
+        .route("/profiles/active", put(profiles::switch_profile))
+        .route(
+            "/profiles/code",
+            put(profiles::set_code).delete(profiles::clear_code),
+        )
+        .route(
+            "/profiles/{id}",
+            patch(profiles::patch_profile).delete(profiles::delete_profile),
+        )
+        .route(
+            "/profile/reading",
+            get(profiles::get_reading).put(profiles::put_reading),
+        )
+        .route("/devices", get(profiles::list_devices))
+        .route(
+            "/devices/{id}",
+            patch(profiles::place_device).delete(profiles::remove_device),
         )
         .route("/series", get(list_series))
         .route("/filters", get(get_filters))
@@ -494,6 +524,13 @@ fn grant(who: &Who, need: Need) -> Result<(), Refused> {
             }
         }
     }
+}
+
+/// Whether a caller is the principal, by the same rule [`Principal`] applies: the routes that
+/// split a row of the table between the principal and the others ask this rather than
+/// restate it, so the two cannot come apart.
+pub(super) fn is_principal(who: &Who) -> bool {
+    grant(who, Need::Principal).is_ok()
 }
 
 fn lacking(right: &str) -> String {

@@ -74,7 +74,7 @@ impl IntoResponse for Answer {
     }
 }
 
-fn say(status: StatusCode, message: &str) -> Answer {
+pub(super) fn say(status: StatusCode, message: &str) -> Answer {
     Answer::Said(Box::new(
         (status, Json(ErrorDto::new(message))).into_response(),
     ))

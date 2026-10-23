@@ -55,11 +55,17 @@ tags:
     description: Getting files in, one at a time or a folder at once.
   - name: maintenance
     description: Scanning, and knowing whether one is running.
+  - name: profiles
+    description: |
+      Who reads. Each device sits on a profile the server keeps: the principal, a reader, or
+      a restricted one, which sees series up to an age and leaves only with the code. The
+      profile decides the rights of every other route, and these are the routes that manage
+      profiles, the code, each profile's reading preferences, and the devices.
   - name: linking
     description: |
-      Getting a key of one's own. A code, made on a device that is already linked (or in the
-      server's terminal), is typed on the new one and exchanged once for a key; the device
-      may then rename itself or leave.
+      Getting a key of one's own. A code, made on a device that sits on the principal profile
+      (or in the server's terminal), is typed on the new one and exchanged once for a key; a
+      device on the principal may then rename itself or leave.
 
 paths:
   /health:
@@ -140,10 +146,11 @@ paths:
       tags: [linking]
       summary: Make a code for another device to link with.
       description: |
-        Needs a linked device, or a key from `LEAF_KEYS` that carries read, import and delete
-        — which is how a client linked that way links its first device. A device carries
-        every right, so a key with fewer may not make one: it would mint itself more. A library still open to everyone issues none: its first
-        device is linked from the server's terminal.
+        Needs the principal profile: a device sitting on it, or a key from `LEAF_KEYS` that
+        carries read, import and delete — which is how a client linked that way links its
+        first device. A new device sits on the principal, so a key with fewer rights may not
+        make one: it would mint itself more. A library still open to everyone issues none:
+        its first device is linked from the server's terminal.
 
         The answer carries the whole link, built by the server the way `leaf-server device
         add` builds it: `LEAF_PUBLIC_URL` first, else one of its own network addresses, with
@@ -162,7 +169,8 @@ paths:
           description: |
             No other device can reach this server: it listens only on the loopback and
             `LEAF_PUBLIC_URL` is not set. `error` is `unreachable`, and no code is made —
-            `relay` in `/health` already said so, and a client does not ask.
+            `relay` in `/health` already said so, and a client does not ask. Or
+            the device must choose a profile first (`error` is `choose a profile`).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -195,7 +203,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "409":
-          description: The key comes from `LEAF_KEYS`, which has no device to follow a code.
+          description: |
+            The key comes from `LEAF_KEYS`, which has no device to follow a code; or
+            the device must choose a profile first (`error` is `choose a profile`).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -214,7 +224,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "409":
-          description: The key comes from `LEAF_KEYS`, which has no device to own a code.
+          description: |
+            The key comes from `LEAF_KEYS`, which has no device to own a code; or
+            the device must choose a profile first (`error` is `choose a profile`).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -226,9 +238,9 @@ paths:
       tags: [linking]
       summary: Give the calling device another name.
       description: |
-        The same rules as the name it linked with: one to forty characters once trimmed, no
-        control character, and not another device's, compared without regard to case or
-        repeated spaces.
+        The principal profile only. The same rules as the name it linked with: one to forty
+        characters once trimmed, no control character, and not another device's, compared
+        without regard to case or repeated spaces.
       requestBody:
         required: true
         content:
@@ -250,8 +262,9 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "409":
           description: |
-            Another device carries that name (`error` is `name`, and `name` spells it), or
-            the key comes from `LEAF_KEYS` and is renamed in `server.env`.
+            Another device carries that name (`error` is `name`, and `name` spells it), the
+            key comes from `LEAF_KEYS` and is renamed in `server.env`, or
+            the device must choose a profile first (`error` is `choose a profile`).
           content:
             application/json:
               schema:
@@ -264,17 +277,374 @@ paths:
       tags: [linking]
       summary: Unlink the calling device.
       description: |
-        Its key stops working with this answer. The server forgets the device and the code it
-        linked with; the devices it linked keep their own keys.
+        The principal profile only. Its key stops working with this answer. The server
+        forgets the device and the code it linked with; the devices it linked keep their own
+        keys.
       responses:
         "204":
           description: Unlinked.
         "403": { $ref: "#/components/responses/Forbidden" }
         "409":
-          description: "The key comes from `LEAF_KEYS`: remove it in `server.env`."
+          description: |
+            The key comes from `LEAF_KEYS`: remove it in `server.env`. Or
+            the device must choose a profile first (`error` is `choose a profile`).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  # ------------------------------------------------------------------ profiles
+
+  /profiles:
+    get:
+      operationId: listProfiles
+      tags: [profiles]
+      summary: Who reads — every profile, and where the calling device sits.
+      description: |
+        « Qui lit ? ». Answers any recognised caller, a device that must choose a profile
+        included: this and `PUT /profiles/active` are the two routes such a device reaches,
+        every other one answers it `409`.
+
+        A key from `LEAF_KEYS` and a library still open have no device: they are the
+        principal, `active` is `default`, `kept` is true, and nothing asks them to choose.
+      responses:
+        "200":
+          description: The principal first, then in the order the profiles were made.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Profiles" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+    post:
+      operationId: createProfile
+      tags: [profiles]
+      summary: Add a profile.
+      description: |
+        The principal adds a reader with any rights, or a restricted profile. A reader adds a
+        reader and nothing else: `rights` is ignored and the new reader has none, and when the
+        code guards everything (`code` is `everything` in `GET /profiles`) `principalCode`
+        must be the code. A restricted profile adds nobody. Adding does not switch: the
+        caller stays on its own profile.
+
+        A restricted profile needs the code. When there is none yet, `code` and `codeAgain`
+        make it in the same request (for restricted profiles only): the code and the profile
+        are written together or not at all. With a code already there, they are ignored.
+
+        A wrong `principalCode` counts against a brake of its own, per device, apart from
+        the one on keys: ten in five minutes and the routes that take the code answer `429`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NewProfile" }
+      responses:
+        "201":
+          description: Added.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Profile" }
+        "400":
+          description: |
+            An unknown colour, an age that is not a whole number from 3 to 17 (for a
+            restricted profile; any `maxAge` sent must be one), an empty name, a `kind` other
+            than `reader` or `restricted`, or — when there is no code yet — a code outside 4
+            to 8 characters, or `code` and `codeAgain` that differ or come one without the
+            other. With a code already there, `code` and `codeAgain` are ignored.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: |
+            `error` is `code` when `principalCode` is missing or wrong. Otherwise the caller
+            may not add this profile — a restricted profile adds none, a reader no restricted
+            one — or the key is not recognised.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: |
+            `name taken` (names are compared without case or accents), `colour taken`, or
+            `code required`: a restricted profile and no code, given or stored. Or the device
+            must choose a profile first (`error` is `choose a profile`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/TooManyCodes" }
+
+  /profiles/active:
+    put:
+      operationId: switchProfile
+      tags: [profiles]
+      summary: Read as another profile on this device.
+      description: |
+        Free between the principal and readers, and to a restricted profile. The code is
+        asked to leave a restricted profile — or a seat the device is held on, its restricted
+        profile having been deleted — and to reach the principal when the code guards
+        everything. A device that keeps the principal opens on it without the code; that is
+        the principal's choice. One merely left on the principal, not kept, is asked the
+        code to stay there like any other device.
+
+        `keep` makes the device open on this profile next time; a restricted profile is
+        never kept from here (the principal does it in `PATCH /devices/{id}`). Omitted, it
+        is false.
+
+        Answers a device that must choose a profile: this is how it chooses. A wrong code
+        counts against the brake of codes, and while that brake holds the route answers
+        `429` whatever it is asked.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Seat" }
+      responses:
+        "200":
+          description: Seated. Who reads, as `GET /profiles` answers it now.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Profiles" }
+        "403":
+          description: |
+            `error` is `code` when the code is missing or wrong; otherwise `keep` asked for a
+            restricted profile, or the key is not recognised.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: No such profile.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: |
+            `no device`: the key comes from `LEAF_KEYS`, or the library is open, and there is
+            no device to seat.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/TooManyCodes" }
+
+  /profiles/code:
+    put:
+      operationId: setCode
+      tags: [profiles]
+      summary: Make the code, or change it, and say what it is for.
+      description: |
+        The principal only. One code for the whole library, typed twice, 4 to 8 characters
+        of any kind. `restricted`: to leave a restricted profile. `everything`: also to
+        reach the principal, and for a reader to add a profile. Kept as a slow digest.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CodeChange" }
+      responses:
+        "204":
+          description: Set.
+        "400":
+          description: |
+            The two codes differ, the code is outside 4 to 8 characters, or `scope` is
+            neither `restricted` nor `everything`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+    delete:
+      operationId: clearCode
+      tags: [profiles]
+      summary: Remove the code.
+      description: The principal only, and not while a profile is restricted.
+      responses:
+        "204":
+          description: There is no code any more.
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: |
+            `a profile is restricted`: nobody could be let out of it. Or the device must
+            choose a profile first (`error` is `choose a profile`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /profiles/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    patch:
+      operationId: updateProfile
+      tags: [profiles]
+      summary: Change a profile.
+      description: |
+        The principal changes anything of any profile — name, colour, kind, age, rights —
+        except making the principal anything but the principal. A reader changes its own
+        `name` and `color` and nothing else; a restricted profile changes nothing, the
+        principal does it for it.
+
+        Restricting a reader clears its rights, and so does releasing a restricted profile:
+        it comes back a reader with none until they are ticked. The devices that kept it
+        keep it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProfilePatch" }
+      responses:
+        "200":
+          description: The profile as it is now.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Profile" }
+        "400":
+          description: |
+            An unknown colour, an age that is not a whole number from 3 to 17, an empty name
+            or an unknown kind.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No such profile.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: |
+            `name taken`, `colour taken`, `code required` (restricting a reader while there is
+            no code: make it first with `PUT /profiles/code`), the
+            principal asked to be restricted, or the device must choose a profile first
+            (`error` is `choose a profile`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+    delete:
+      operationId: deleteProfile
+      tags: [profiles]
+      summary: Delete a profile, its progress and its reading preferences.
+      description: |
+        The principal only; the principal profile itself cannot go. The volumes stay. A
+        device that sat on it must choose again at its next request, and one whose
+        restricted profile it was stays held: leaving that seat asks the code.
+      responses:
+        "204":
+          description: Deleted.
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No such profile.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: |
+            The principal profile cannot be deleted; or the device must choose a profile
+            first (`error` is `choose a profile`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /profile/reading:
+    get:
+      operationId: getReadingPreferences
+      tags: [profiles]
+      summary: The reading preferences of the calling device's profile.
+      description: |
+        An object the server keeps for the client and never reads: `{}` until something was
+        written. Each profile has its own; a key from `LEAF_KEYS` reads the principal's.
+      responses:
+        "200":
+          description: The object as it was last written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReadingPreferences" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+    put:
+      operationId: putReadingPreferences
+      tags: [profiles]
+      summary: Replace the reading preferences of the calling device's profile.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReadingPreferences" }
+      responses:
+        "204":
+          description: Kept.
+        "400":
+          description: Not an object.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /devices:
+    get:
+      operationId: listDevices
+      tags: [profiles]
+      summary: Every linked device, and the profile each one sits on.
+      description: |
+        The principal only — the Devices tab nobody else is shown. A key from `LEAF_KEYS`
+        counts as the principal when it carries the import right.
+      responses:
+        "200":
+          description: Oldest first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Devices" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /devices/{id}:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    patch:
+      operationId: placeDevice
+      tags: [profiles]
+      summary: Seat a device on a profile, and say whether it keeps it.
+      description: |
+        The principal only, and no code: a restricted profile may be kept here, which is how
+        a child's tablet opens on the child's profile. It also ends a choice or a hold the
+        device was waiting on.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Placement" }
+      responses:
+        "200":
+          description: The device as it sits now.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceEntry" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No such device, or no such profile.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+    delete:
+      operationId: removeDevice
+      tags: [profiles]
+      summary: Remove a device.
+      description: |
+        The principal only. Its key stops working with this answer — its next request is
+        an unknown key. The calling device may remove itself this way too.
+      responses:
+        "204":
+          description: Removed.
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No such device.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
 
   # ------------------------------------------------------------------ reading
@@ -355,6 +725,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SeriesPage" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /universes:
@@ -375,6 +746,7 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/Universe" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
 
   /universes/{id}/orders:
     get:
@@ -403,6 +775,7 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/ReadingOrder" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /filters:
@@ -442,6 +815,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Facets" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
 
   /format:
     get:
@@ -460,6 +834,7 @@ paths:
         from the constants the walk itself uses.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: The format, as data.
@@ -475,6 +850,7 @@ paths:
       summary: One series.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: The series.
@@ -515,6 +891,7 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "404": { $ref: "#/components/responses/NotFound" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
       x-leaf-permission: import
 
     delete:
@@ -540,6 +917,7 @@ paths:
         carries `read,import` and cannot do this.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "404": { $ref: "#/components/responses/NotFound" }
         "200":
@@ -556,6 +934,7 @@ paths:
       summary: Volumes and standalone chapters, mixed, in reading order.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: The entries.
@@ -576,6 +955,7 @@ paths:
         the unit of numbering.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: The chapters.
@@ -592,6 +972,7 @@ paths:
       summary: The story arcs, as ranges.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: The arcs.
@@ -610,6 +991,7 @@ paths:
             schema: { type: array, items: { $ref: "#/components/schemas/ArcInput" } }
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: The arcs as they now stand.
@@ -638,6 +1020,7 @@ paths:
       description: One request, not one to find the first entry and another for its cover.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200": { $ref: "#/components/responses/Image" }
         "304": { $ref: "#/components/responses/NotModified" }
@@ -651,6 +1034,7 @@ paths:
       summary: Where the reader stands in every entry of a series.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: One record per entry that has been opened.
@@ -681,6 +1065,7 @@ paths:
             schema: { $ref: "#/components/schemas/SeriesProgressPatch" }
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "404": { $ref: "#/components/responses/NotFound" }
         "200":
@@ -694,6 +1079,7 @@ paths:
       summary: Forget every position in a series.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "204": { description: "Forgotten, whether or not there was anything to forget." }
 
@@ -705,6 +1091,7 @@ paths:
       summary: One entry.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: The entry.
@@ -723,6 +1110,7 @@ paths:
             schema: { $ref: "#/components/schemas/EntryPatch" }
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: The entry as it now stands.
@@ -748,6 +1136,7 @@ paths:
         Needs a key carrying `delete`.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "404": { $ref: "#/components/responses/NotFound" }
         "200":
@@ -765,6 +1154,7 @@ paths:
       description: What no other tool can read today — 2 677 chapters had nowhere to live.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: The markers, in reading order.
@@ -787,6 +1177,7 @@ paths:
         prepared: a guessed width is work thrown away.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: The pages, in order.
@@ -816,6 +1207,7 @@ paths:
         may keep it for as long as it likes.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200": { $ref: "#/components/responses/Image" }
         "304": { $ref: "#/components/responses/NotModified" }
@@ -837,6 +1229,7 @@ paths:
       description: A thumbnail is a page asked for narrow. There is no separate thing.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200": { $ref: "#/components/responses/Image" }
         "304": { $ref: "#/components/responses/NotModified" }
@@ -858,6 +1251,7 @@ paths:
         not in the one that stays.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: The archive.
@@ -889,6 +1283,7 @@ paths:
       summary: Where the reader stands in one entry.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: The record.
@@ -917,6 +1312,7 @@ paths:
             schema: { $ref: "#/components/schemas/ProgressPatch" }
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: The record as it now stands.
@@ -930,6 +1326,7 @@ paths:
       summary: Forget a position.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "204": { description: "Forgotten, whether or not there was anything to forget." }
 
@@ -951,6 +1348,7 @@ paths:
           schema: { type: integer, minimum: 1, default: 20 }
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: What to open, in order.
@@ -1038,6 +1436,7 @@ paths:
         - { $ref: "#/components/parameters/FilterPublisher" }
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: |
@@ -1065,6 +1464,7 @@ paths:
         of bytes already on the disk — and the disk is the scarce thing.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: The listing, and whether the short path exists at all.
@@ -1087,6 +1487,7 @@ paths:
             schema: { $ref: "#/components/schemas/DropRequest" }
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: |
@@ -1126,6 +1527,7 @@ paths:
             schema: { type: string, format: binary }
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: A proposal.
@@ -1165,6 +1567,7 @@ paths:
             schema: { $ref: "#/components/schemas/PreflightRequest" }
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: Where it would go, and where to send it.
@@ -1182,6 +1585,7 @@ paths:
       description: Enough for a broken transfer to know where to pick up.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: What is held, and what was announced.
@@ -1196,6 +1600,7 @@ paths:
       summary: Abandon a file that was offered.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "204": { description: Dropped. }
       x-leaf-permission: import
@@ -1235,9 +1640,13 @@ paths:
           description: |
             The offset is past what the server holds. The body carries what it *does* hold,
             so the client knows exactly where to resume rather than starting over.
+            Or the device must choose a profile first (`error` is `choose a profile`).
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/BadOffset" }
+              schema:
+                anyOf:
+                  - { $ref: "#/components/schemas/BadOffset" }
+                  - { $ref: "#/components/schemas/Error" }
         "404": { $ref: "#/components/responses/NotFound" }
       x-leaf-permission: import
     post:
@@ -1265,10 +1674,14 @@ paths:
         "409":
           description: |
             A file of that name is already in the series and `onCollision` did not say
-            which one wins. Send the request again with REPLACE or RENAME.
+            which one wins. Send the request again with REPLACE or RENAME. Or
+            the device must choose a profile first (`error` is `choose a profile`).
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Collision" }
+              schema:
+                anyOf:
+                  - { $ref: "#/components/schemas/Collision" }
+                  - { $ref: "#/components/schemas/Error" }
         "404": { $ref: "#/components/responses/NotFound" }
       x-leaf-permission: import
 
@@ -1285,6 +1698,7 @@ paths:
         desktop that crashed took the only copy of it with it.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: What is waiting, longest first.
@@ -1307,6 +1721,7 @@ paths:
         a file nobody named.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: What is open, longest first.
@@ -1334,6 +1749,7 @@ paths:
             schema: { $ref: "#/components/schemas/ImportRequest" }
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: What to send, and what is already there.
@@ -1365,6 +1781,7 @@ paths:
       description: Enough for a broken transfer to know where to pick up.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: The state of the transfer.
@@ -1379,6 +1796,7 @@ paths:
       summary: Abandon an import.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "204": { description: "Dropped, inbox cleaned." }
       x-leaf-permission: import
@@ -1419,9 +1837,13 @@ paths:
           description: |
             The offset is past what the server holds. The body carries what it *does*
             hold, so the client knows exactly where to resume rather than starting over.
+            Or the device must choose a profile first (`error` is `choose a profile`).
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/BadOffset" }
+              schema:
+                anyOf:
+                  - { $ref: "#/components/schemas/BadOffset" }
+                  - { $ref: "#/components/schemas/Error" }
         "404": { $ref: "#/components/responses/NotFound" }
       x-leaf-permission: import
 
@@ -1451,6 +1873,7 @@ paths:
             schema: { $ref: "#/components/schemas/CommitRequest" }
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: |
@@ -1478,6 +1901,7 @@ paths:
             schema: { $ref: "#/components/schemas/CleanupRequest" }
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: What was actually removed.
@@ -1516,6 +1940,7 @@ paths:
             schema: { $ref: "#/components/schemas/MoveRequest" }
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: Where the work is now.
@@ -1546,6 +1971,7 @@ paths:
       summary: Where the scan is, and what the last one found.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: The state.
@@ -1568,10 +1994,14 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ScanStatus" }
         "409":
-          description: One is already running.
+          description: |
+            One is already running; or the device must choose a profile first (`error` is `choose a profile`).
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/ScanStatus" }
+              schema:
+                anyOf:
+                  - { $ref: "#/components/schemas/ScanStatus" }
+                  - { $ref: "#/components/schemas/Error" }
       x-leaf-permission: import
 
 components:
@@ -1594,8 +2024,9 @@ components:
         Recording progress deliberately needs only the read right: otherwise the phone
         could not remember where you stopped.
 
-        **Two kinds of key.** A linked device's own key, made by `POST /link`, carries every
-        right and is removed by name. A key from the configuration carries the rights
+        **Two kinds of key.** A linked device's own key, made by `POST /link`, carries the
+        rights of the profile it sits on (`GET /profiles`) and is removed by name, or by the
+        principal in `DELETE /devices/{id}`. A key from the configuration carries the rights
         written beside it, and cannot be renamed or unlinked over the wire.
 
         With no key configured and no device ever linked, the server answers everyone on
@@ -1735,6 +2166,31 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
 
+    ChooseAProfile:
+      description: |
+        The profile this device sat on was deleted: it must say who reads first, with
+        `PUT /profiles/active`. `error` is `choose a profile`. Every route answers this to
+        such a device but `/health`, `GET /profiles` and `PUT /profiles/active` — read as the
+        principal in the meantime, a child's tablet would open the whole library.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyCodes:
+      description: |
+        Too many wrong codes from this device: ten in five minutes, and the routes that take
+        the code wait fifteen. A brake of its own, apart from the one on keys — a device
+        whose key is good would otherwise clear it with every request and guess the code
+        for ever. Guesses still being checked count as if they had failed, so codes sent
+        together are held to ten as well. The right code clears the count but never a
+        block; a change of profile that asked no code clears nothing.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+          description: Seconds.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
   schemas:
 
     Health:
@@ -1840,6 +2296,134 @@ components:
         error: { type: string, enum: [name] }
         name: { type: string, description: The name as the device that holds it spells it. }
       required: [error, name]
+
+    ProfileRights:
+      type: object
+      description: |
+        Always all three. All true for the principal and all false for a restricted profile,
+        whatever was asked: the table of rights is the reference.
+      properties:
+        import: { type: boolean }
+        edit: { type: boolean }
+        delete: { type: boolean }
+      required: [import, edit, delete]
+
+    Profile:
+      type: object
+      properties:
+        id: { type: string, description: "`default` for the principal." }
+        name: { type: string }
+        color:
+          type: string
+          enum: [emeraude, sapin, sauge, olive, ocre, ambre, corail, framboise, rose, prune,
+                 violet, indigo, bleu, azur, ardoise, terre]
+          description: One of the palette's sixteen, owned by one profile.
+        kind: { type: string, enum: [principal, reader, restricted] }
+        maxAge:
+          type: integer
+          minimum: 3
+          maximum: 17
+          description: Only for a restricted profile. A series rated above it, or not rated, is hidden.
+        rights: { $ref: "#/components/schemas/ProfileRights" }
+      required: [id, name, color, kind, rights]
+
+    Profiles:
+      type: object
+      properties:
+        profiles:
+          type: array
+          items: { $ref: "#/components/schemas/Profile" }
+        active: { type: string, description: The id of the profile the calling device sits on. }
+        kept: { type: boolean, description: The device opens on `active` without asking who reads. }
+        choosing:
+          type: boolean
+          description: |
+            The profile it sat on was deleted: it must choose before anything else, and every
+            route but this one and `PUT /profiles/active` answers it `409`.
+        held:
+          type: boolean
+          description: That profile was restricted, so choosing asks the code.
+        code:
+          type: string
+          enum: [none, restricted, everything]
+          description: What the code is for, never the code.
+      required: [profiles, active, kept, choosing, held, code]
+
+    NewProfile:
+      type: object
+      properties:
+        name: { type: string }
+        color: { type: string }
+        kind: { type: string, enum: [reader, restricted] }
+        maxAge: { type: integer, description: Required for a restricted profile, 3 to 17. }
+        rights:
+          $ref: "#/components/schemas/ProfileRights"
+          description: The principal's to give. Ignored from a reader.
+        code: { type: string, description: The code to make with the first restricted profile. }
+        codeAgain: { type: string, description: The same, a second time. }
+        principalCode:
+          type: string
+          description: From a reader, when the code guards everything.
+      required: [name, color, kind]
+
+    ProfilePatch:
+      type: object
+      description: Only what changes. A reader sends `name` and `color` of its own profile only.
+      properties:
+        name: { type: string }
+        color: { type: string }
+        kind: { type: string, enum: [reader, restricted] }
+        maxAge: { type: integer }
+        rights: { $ref: "#/components/schemas/ProfileRights" }
+
+    Seat:
+      type: object
+      properties:
+        id: { type: string, description: The profile to read as. }
+        code: { type: string, description: When the change asks for it. }
+        keep: { type: boolean, default: false }
+      required: [id]
+
+    CodeChange:
+      type: object
+      properties:
+        code: { type: string, description: 4 to 8 characters, any. }
+        codeAgain: { type: string }
+        scope: { type: string, enum: [restricted, everything] }
+      required: [code, codeAgain, scope]
+
+    ReadingPreferences:
+      type: object
+      description: The client's own, kept as they were sent.
+      additionalProperties: true
+
+    DeviceEntry:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        seenAt:
+          type: integer
+          description: Milliseconds since the epoch, to the minute. Absent until its first request.
+        profile: { type: string, description: The id of the profile it sits on. }
+        kept: { type: boolean }
+        here: { type: boolean, description: This is the device asking. }
+      required: [id, name, profile, kept, here]
+
+    Devices:
+      type: object
+      properties:
+        devices:
+          type: array
+          items: { $ref: "#/components/schemas/DeviceEntry" }
+      required: [devices]
+
+    Placement:
+      type: object
+      properties:
+        profile: { type: string }
+        kept: { type: boolean }
+      required: [profile, kept]
 
     Series:
       type: object

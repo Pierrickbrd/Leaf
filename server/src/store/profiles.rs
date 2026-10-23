@@ -144,6 +144,8 @@ pub enum SwitchRefusal {
     WrongCode,
     /// A restricted profile cannot be kept on a device by whoever reads there.
     NotYours,
+    /// Only from [`Profiles::place`], which is handed a device by id from over the wire.
+    NoSuchDevice,
 }
 
 const COLUMNS: &str = "id, name, color, restricted, max_age, can_import, can_edit, can_delete";
@@ -267,8 +269,31 @@ impl Profiles {
     }
 
     pub fn create(&self, new: NewProfile, now: i64) -> Result<Result<Profile, ProfileRefusal>> {
+        self.create_with_code(new, None, now)
+    }
+
+    /// [`Profiles::create`], making the code in the same write when there is none yet — « Le
+    /// code, à créer », the window that adds the first restricted profile. One write, so a
+    /// profile refused (a name taken, a colour) leaves no code behind that nobody asked for,
+    /// and a code is never stored for a profile that does not exist.
+    ///
+    /// The code is hashed before the write, never inside it, like [`Profiles::set_code`]. A
+    /// code that is already there wins: the one given is ignored.
+    pub fn create_with_code(
+        &self,
+        new: NewProfile,
+        code: Option<&str>,
+        now: i64,
+    ) -> Result<Result<Profile, ProfileRefusal>> {
         let Some(name) = clean_name(&new.name) else {
             return Ok(Err(ProfileRefusal::BadName));
+        };
+        let phc = match code {
+            Some(code) => match digest_of(code)? {
+                Some(phc) => Some(phc),
+                None => return Ok(Err(ProfileRefusal::BadCode)),
+            },
+            None => None,
         };
         let id = new_id()?;
         self.db.write(|cx| {
@@ -283,14 +308,26 @@ impl Profiles {
                 }
                 (false, _) => None,
             };
-            if new.restricted && !has_code(cx)? {
-                return Ok(Err(ProfileRefusal::CodeRequired));
-            }
+            let code_to_make = match (new.restricted, &phc) {
+                (true, phc) if !has_code(cx)? => match phc {
+                    Some(phc) => Some(phc),
+                    None => return Ok(Err(ProfileRefusal::CodeRequired)),
+                },
+                _ => None,
+            };
             if name_is_taken(cx, &name, None)? {
                 return Ok(Err(ProfileRefusal::NameTaken));
             }
             if color_is_taken(cx, &new.color, None)? {
                 return Ok(Err(ProfileRefusal::ColorTaken));
+            }
+            // Last, once nothing can refuse: the transaction rolls back on an error, but a
+            // refusal is an `Ok`, and a code written before one would stay.
+            if let Some(phc) = code_to_make {
+                cx.execute(
+                    "UPDATE household SET code_phc = ?1, code_scope = 'restricted' WHERE id = 1",
+                    [phc.as_str()],
+                )?;
             }
             // A restricted profile is given no rights whatever was asked: the form may have
             // ticked boxes before the switch was thrown.
@@ -435,17 +472,9 @@ impl Profiles {
     }
 
     pub fn set_code(&self, code: &str, scope: CodeScope) -> Result<Result<(), ProfileRefusal>> {
-        if !CODE_LENGTH.contains(&code.chars().count()) {
+        let Some(phc) = digest_of(code)? else {
             return Ok(Err(ProfileRefusal::BadCode));
-        }
-        let mut salt = [0u8; 16];
-        getrandom::fill(&mut salt)
-            .map_err(|e| anyhow!("drawing from the system's randomness: {e}"))?;
-        let salt = SaltString::encode_b64(&salt).map_err(|e| anyhow!("encoding a salt: {e}"))?;
-        let phc = Argon2::default()
-            .hash_password(code.as_bytes(), &salt)
-            .map_err(|e| anyhow!("hashing the code: {e}"))?
-            .to_string();
+        };
         let scope = match scope {
             CodeScope::Restricted => "restricted",
             CodeScope::Everything => "everything",
@@ -518,6 +547,22 @@ impl Profiles {
         code: Option<&str>,
         keep: bool,
     ) -> Result<Result<Seat, SwitchRefusal>> {
+        Ok(self
+            .switch_checked(device_id, to, code, keep)?
+            .map(|(seat, _)| seat))
+    }
+
+    /// [`Profiles::switch`], saying also whether the code was checked and found right. The
+    /// route clears the brake on wrong codes only then: a switch that needed no code, with
+    /// some text in the field, would otherwise wipe nine wrong guesses at the principal and
+    /// let a reader's tablet guess for ever, ten at a time.
+    pub fn switch_checked(
+        &self,
+        device_id: &str,
+        to: &str,
+        code: Option<&str>,
+        keep: bool,
+    ) -> Result<Result<(Seat, bool), SwitchRefusal>> {
         let facts = self.db.read(|cx| facts_of(cx, device_id, to))?;
         let Some(facts) = facts else {
             return Ok(Err(SwitchRefusal::NoSuchProfile));
@@ -547,7 +592,9 @@ impl Profiles {
             if facts.code_needed() && !verified {
                 return Ok(Err(SwitchRefusal::CodeNeeded));
             }
-            Ok(Ok(sit(cx, device_id, to, keep)?))
+            let seat = sit(cx, device_id, to, keep)?
+                .ok_or_else(|| anyhow!("there is no device {device_id}"))?;
+            Ok(Ok((seat, verified)))
         })
     }
 
@@ -563,7 +610,9 @@ impl Profiles {
             if find(cx, to)?.is_none() {
                 return Ok(Err(SwitchRefusal::NoSuchProfile));
             }
-            Ok(Ok(sit(cx, device_id, to, kept)?))
+            // Told apart from a failure: the id came from a request, and a device removed a
+            // moment earlier from another window is the caller's stale list, not a fault.
+            Ok(sit(cx, device_id, to, kept)?.ok_or(SwitchRefusal::NoSuchDevice))
         })
     }
 
@@ -604,6 +653,24 @@ impl Profiles {
             Ok(())
         })
     }
+}
+
+/// The code as it is kept: an Argon2 PHC string, default parameters, a random salt. `None`
+/// for a code outside four to eight characters. Slow on purpose: never call it under the
+/// writer.
+fn digest_of(code: &str) -> Result<Option<String>> {
+    if !CODE_LENGTH.contains(&code.chars().count()) {
+        return Ok(None);
+    }
+    let mut salt = [0u8; 16];
+    getrandom::fill(&mut salt).map_err(|e| anyhow!("drawing from the system's randomness: {e}"))?;
+    let salt = SaltString::encode_b64(&salt).map_err(|e| anyhow!("encoding a salt: {e}"))?;
+    Ok(Some(
+        Argon2::default()
+            .hash_password(code.as_bytes(), &salt)
+            .map_err(|e| anyhow!("hashing the code: {e}"))?
+            .to_string(),
+    ))
 }
 
 fn seat_of(cx: &Cx<'_>, device_id: &str) -> Result<Seat> {
@@ -686,21 +753,21 @@ fn facts_of(cx: &Cx<'_>, device_id: &str, to: &str) -> Result<Option<Facts>> {
 }
 
 /// The one statement that moves a device: profile and flags together, and the end of any
-/// choice or hold, since a seat taken is a seat chosen.
-fn sit(cx: &Cx<'_>, device_id: &str, to: &str, kept: bool) -> Result<Seat> {
+/// choice or hold, since a seat taken is a seat chosen. `None` when there is no such device.
+fn sit(cx: &Cx<'_>, device_id: &str, to: &str, kept: bool) -> Result<Option<Seat>> {
     let touched = cx.execute(
         "UPDATE device SET profile_id = ?2, kept = ?3, choosing = 0, held = 0 WHERE id = ?1",
         rusqlite::params![device_id, to, kept],
     )?;
     if touched == 0 {
-        return Err(anyhow!("there is no device {device_id}"));
+        return Ok(None);
     }
-    Ok(Seat {
+    Ok(Some(Seat {
         profile_id: to.to_string(),
         kept,
         choosing: false,
         held: false,
-    })
+    }))
 }
 
 fn name_is_taken(cx: &Cx<'_>, name: &str, except: Option<&str>) -> Result<bool> {

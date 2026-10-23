@@ -105,6 +105,117 @@ pub struct NameTakenDto {
     pub name: String,
 }
 
+// ------------------------------------------------------------------ profiles
+
+/// The three rights a reader may be given. Always all three on the wire, `false` included:
+/// a box left unticked is a fact the settings screen draws, not a default to leave out.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RightsDto {
+    pub import: bool,
+    pub edit: bool,
+    pub delete: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileDto {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    /// `principal`, `reader` or `restricted`.
+    pub kind: &'static str,
+    /// Only for a restricted profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<u8>,
+    pub rights: RightsDto,
+}
+
+/// « Qui lit ? »: every profile, and where the calling device sits. The three flags are
+/// always sent: `choosing: false` is what lets a client open on the profile rather than on
+/// the screen that asks.
+#[derive(Debug, Serialize)]
+pub struct ProfilesDto {
+    pub profiles: Vec<ProfileDto>,
+    pub active: String,
+    pub kept: bool,
+    pub choosing: bool,
+    pub held: bool,
+    /// `none`, `restricted` or `everything`: what the code is for, never the code.
+    pub code: &'static str,
+}
+
+/// A new profile. No `Debug`: it may carry the code, and the principal's.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewProfileDto {
+    pub name: String,
+    pub color: String,
+    /// Read as text and judged by the route, so that `principal` is a 400 with a sentence
+    /// rather than the 422 a failed enum gives.
+    pub kind: String,
+    /// Any number, judged by the route: see `profiles::age_from`.
+    pub max_age: Option<serde_json::Number>,
+    pub rights: Option<RightsDto>,
+    pub code: Option<String>,
+    pub code_again: Option<String>,
+    pub principal_code: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfilePatchDto {
+    pub name: Option<String>,
+    pub color: Option<String>,
+    pub kind: Option<String>,
+    /// Any number, judged by the route: see `profiles::age_from`.
+    pub max_age: Option<serde_json::Number>,
+    pub rights: Option<RightsDto>,
+}
+
+/// A change of profile. No `Debug`: it carries the code.
+#[derive(Deserialize)]
+pub struct SeatDto {
+    pub id: String,
+    pub code: Option<String>,
+    #[serde(default)]
+    pub keep: bool,
+}
+
+/// No `Debug`: the code, twice.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeDto {
+    pub code: String,
+    pub code_again: String,
+    pub scope: String,
+}
+
+/// A linked device as the principal sees it in the Devices tab.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceEntryDto {
+    pub id: String,
+    pub name: String,
+    /// Absent for a device that has not made a request since it was linked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seen_at: Option<i64>,
+    pub profile: String,
+    pub kept: bool,
+    /// The device asking: the one row a client must not offer to remove without saying so.
+    pub here: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DevicesDto {
+    pub devices: Vec<DeviceEntryDto>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PlacementDto {
+    pub profile: String,
+    pub kept: bool,
+}
+
 /// A series is an **edition**: the level that carries entries, chapters and progress.
 /// `work_id` is what ties it to its siblings — the other editions of the same story.
 #[derive(Debug, Clone, Serialize)]

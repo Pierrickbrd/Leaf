@@ -10,6 +10,7 @@ pub mod keys;
 pub mod linking;
 pub mod local_drop;
 pub mod pages;
+pub mod profiles;
 pub mod progress;
 pub mod records;
 pub mod relocate;

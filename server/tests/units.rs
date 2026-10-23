@@ -899,3 +899,79 @@ fn a_database_path_that_is_a_directory_is_reported() {
     let error = Db::open(dir.path()).err().expect("not a database file");
     assert!(error.to_string().contains("opening"), "{error:#}");
 }
+
+// ------------------------------------------------------------------ attempts
+
+fn a_brake_of_three() -> std::sync::Arc<leaf_server::api::throttle::Throttle> {
+    use std::time::Duration;
+    std::sync::Arc::new(
+        leaf_server::api::throttle::Throttle::new(
+            3,
+            Duration::from_secs(300),
+            Duration::from_secs(900),
+        )
+        .counting("wrong codes"),
+    )
+}
+
+#[test]
+fn guesses_in_flight_count_before_they_are_judged() {
+    let brake = a_brake_of_three();
+    let held: Vec<_> = (0..3).map(|_| brake.attempt("d").expect("room")).collect();
+    // The fourth is refused while three are still being hashed, before any has failed.
+    assert!(brake.attempt("d").is_err());
+    assert!(brake.attempt("other").is_ok(), "only that caller");
+    for attempt in held {
+        attempt.failed();
+    }
+    assert!(brake.blocked_for("d").is_some());
+}
+
+#[test]
+fn a_right_guess_does_not_lift_a_block_its_neighbours_earned() {
+    let brake = a_brake_of_three();
+    let right = brake.attempt("d").unwrap();
+    let wrong: Vec<_> = (0..2).map(|_| brake.attempt("d").unwrap()).collect();
+    brake.record_failure("d");
+    for attempt in wrong {
+        attempt.failed();
+    }
+    assert!(brake.blocked_for("d").is_some());
+    right.succeeded();
+    assert!(brake.blocked_for("d").is_some(), "still blocked");
+}
+
+#[test]
+fn a_right_guess_clears_the_count_when_nothing_is_blocked() {
+    let brake = a_brake_of_three();
+    brake.attempt("d").unwrap().failed();
+    brake.attempt("d").unwrap().failed();
+    brake.attempt("d").unwrap().succeeded();
+    brake.attempt("d").unwrap().failed();
+    brake.attempt("d").unwrap().failed();
+    assert!(brake.blocked_for("d").is_none());
+}
+
+#[test]
+fn an_abandoned_guess_counts_and_gives_its_slot_back() {
+    let brake = a_brake_of_three();
+    // A request dropped mid-hash: neither kept for ever nor let off.
+    drop(brake.attempt("d").unwrap());
+    drop(brake.attempt("d").unwrap());
+    assert!(brake.blocked_for("d").is_none());
+    drop(brake.attempt("d").unwrap());
+    assert!(
+        brake.blocked_for("d").is_some(),
+        "three dropped are three failed"
+    );
+}
+
+#[test]
+fn a_guess_that_judged_nothing_gives_its_slot_back_uncounted() {
+    let brake = a_brake_of_three();
+    for _ in 0..10 {
+        brake.attempt("d").unwrap().void();
+    }
+    assert!(brake.blocked_for("d").is_none());
+    assert!(brake.attempt("d").is_ok());
+}
