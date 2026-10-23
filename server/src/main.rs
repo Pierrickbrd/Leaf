@@ -59,6 +59,16 @@ fn main() -> Result<ExitCode> {
         return leaf_server::cli::device::run(device, &mut console);
     }
 
+    if asked.profile.is_some() {
+        let (mut out, mut err) = (std::io::stdout().lock(), std::io::stderr().lock());
+        let mut console = leaf_server::cli::device::Console {
+            out: &mut out,
+            err: &mut err,
+            terminal: false,
+        };
+        return leaf_server::cli::profile::run(&mut console);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_env("LEAF_LOG").unwrap_or_else(|_| EnvFilter::new("info")),

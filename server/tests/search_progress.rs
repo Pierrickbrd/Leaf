@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use leaf_server::api::dto::{SeriesFilter, SeriesSort};
 use leaf_server::api::progress::{Progress, ProgressPatch};
+use leaf_server::store::repository::Ceiling;
 use leaf_server::store::text::search_key;
 use leaf_server::store::{Db, Repository};
 
@@ -119,7 +120,7 @@ impl Fixture {
         filter: &SeriesFilter,
     ) -> Vec<leaf_server::api::dto::SearchHitDto> {
         Repository::new(&self.db)
-            .search(query, 40, kinds, filter)
+            .search(query, 40, kinds, filter, "default", &Ceiling::NONE)
             .expect("searching")
     }
 }
@@ -187,10 +188,10 @@ fn a_paged_search_counts_the_whole_answer_and_describes_its_files() {
     let filter = SeriesFilter::default();
 
     let first = repository
-        .search_page("titans", 1, 0, &[], &filter)
+        .search_page("titans", 1, 0, &[], &filter, "default", &Ceiling::NONE)
         .expect("the first search page");
     let second = repository
-        .search_page("titans", 1, 1, &[], &filter)
+        .search_page("titans", 1, 1, &[], &filter, "default", &Ceiling::NONE)
         .expect("the second search page");
 
     assert_eq!(3, first.total, "one series, one volume and one chapter");
@@ -202,7 +203,7 @@ fn a_paged_search_counts_the_whole_answer_and_describes_its_files() {
     assert_ne!(first.items[0].id, second.items[0].id);
 
     let all = repository
-        .search_page("titans", 40, 0, &[], &filter)
+        .search_page("titans", 40, 0, &[], &filter, "default", &Ceiling::NONE)
         .expect("all the context");
     let volume = all
         .items
@@ -315,7 +316,7 @@ fn progress_never_moves_backwards_on_its_own() {
     let at = |p: &leaf_server::api::progress::ProgressDto| p.page;
     let set = |patch: ProgressPatch| {
         progress
-            .record("default", "v1", &patch, 1_000)
+            .record("default", "v1", &patch, 1_000, &Ceiling::NONE)
             .expect("recording")
             .expect("the entry")
     };
@@ -363,7 +364,9 @@ fn two_profiles_keep_two_places_in_the_same_volume() {
             page: Some(page),
             ..Default::default()
         };
-        progress.record(profile, "v1", &patch, 1_000).unwrap();
+        progress
+            .record(profile, "v1", &patch, 1_000, &Ceiling::NONE)
+            .unwrap();
     }
     let pages: Vec<(String, i64)> =
         f.db.read(|cx| {
@@ -392,6 +395,7 @@ fn a_position_that_does_not_exist_is_clamped_to_one_that_does() {
                 ..Default::default()
             },
             1,
+            &Ceiling::NONE,
         )
         .expect("recording")
         .expect("the entry");
@@ -414,6 +418,7 @@ fn the_chapter_is_derived_from_the_markers_not_stored() {
                 ..Default::default()
             },
             1,
+            &Ceiling::NONE,
         )
         .unwrap()
         .unwrap();
@@ -431,6 +436,7 @@ fn the_chapter_is_derived_from_the_markers_not_stored() {
                 ..Default::default()
             },
             2,
+            &Ceiling::NONE,
         )
         .unwrap()
         .unwrap();
@@ -464,6 +470,7 @@ fn a_volume_with_no_start_pages_answers_that_it_does_not_know() {
                 ..Default::default()
             },
             1,
+            &Ceiling::NONE,
         )
         .unwrap()
         .unwrap();
@@ -485,6 +492,7 @@ fn an_unknown_entry_records_nothing() {
                 ..Default::default()
             },
             1,
+            &Ceiling::NONE,
         )
         .expect("recording");
     assert!(recorded.is_none());
@@ -497,7 +505,10 @@ fn what_to_open_next_is_next_for_you_and_not_a_catalogue() {
 
     // Nothing opened: nothing to offer. A series you have never touched appears in neither
     // list.
-    assert!(progress.up_next(20).expect("up next").is_empty());
+    assert!(progress
+        .up_next(20, "default", &Ceiling::NONE)
+        .expect("up next")
+        .is_empty());
 
     progress
         .record(
@@ -508,9 +519,12 @@ fn what_to_open_next_is_next_for_you_and_not_a_catalogue() {
                 ..Default::default()
             },
             1,
+            &Ceiling::NONE,
         )
         .unwrap();
-    let started = progress.up_next(20).expect("up next");
+    let started = progress
+        .up_next(20, "default", &Ceiling::NONE)
+        .expect("up next");
     assert_eq!(1, started.len());
     assert_eq!("IN_PROGRESS", started[0].reason);
     assert_eq!("v1", started[0].entry.id);
@@ -525,9 +539,12 @@ fn what_to_open_next_is_next_for_you_and_not_a_catalogue() {
                 ..Default::default()
             },
             2,
+            &Ceiling::NONE,
         )
         .unwrap();
-    let following = progress.up_next(20).expect("up next");
+    let following = progress
+        .up_next(20, "default", &Ceiling::NONE)
+        .expect("up next");
     assert_eq!(1, following.len());
     assert_eq!("NEXT_UP", following[0].reason);
     assert_eq!("v2", following[0].entry.id);
@@ -550,6 +567,7 @@ fn what_to_open_next_does_not_ask_one_question_per_line() {
                 ..Default::default()
             },
             1,
+            &Ceiling::NONE,
         )
         .unwrap();
     progress
@@ -561,11 +579,14 @@ fn what_to_open_next_does_not_ask_one_question_per_line() {
                 ..Default::default()
             },
             1,
+            &Ceiling::NONE,
         )
         .unwrap();
 
     let before = f.db.statements();
-    let rows = progress.up_next(20).expect("up next");
+    let rows = progress
+        .up_next(20, "default", &Ceiling::NONE)
+        .expect("up next");
     let cost = f.db.statements() - before;
 
     assert_eq!(2, rows.len());
@@ -596,7 +617,7 @@ fn four_volumes(f: &Fixture) {
 /// What `up_next` offers for the first edition, as (entry, reason).
 fn offered_in_e(progress: &Progress) -> Vec<(String, String)> {
     progress
-        .up_next(20)
+        .up_next(20, "default", &Ceiling::NONE)
         .expect("up next")
         .into_iter()
         .filter(|n| n.series_id == "e")
@@ -614,6 +635,7 @@ fn at_page(progress: &Progress, entry: &str, page: i64) {
                 ..Default::default()
             },
             1,
+            &Ceiling::NONE,
         )
         .expect("recording")
         .expect("the entry");
@@ -715,12 +737,16 @@ fn the_progress_of_a_series_is_read_once_not_once_per_volume() {
                     ..Default::default()
                 },
                 1,
+                &Ceiling::NONE,
             )
             .unwrap();
     }
 
     let before = f.db.statements();
-    let all = progress.of_series("e").expect("of series");
+    let all = progress
+        .of_series("e", "default", &Ceiling::NONE)
+        .expect("of series")
+        .expect("the series");
     let cost = f.db.statements() - before;
 
     assert_eq!(2, all.len());
@@ -740,17 +766,36 @@ fn progress_belongs_to_the_edition() {
                 ..Default::default()
             },
             1,
+            &Ceiling::NONE,
         )
         .unwrap();
 
     // Reading in one edition says nothing about another, which is why there is no shared
     // numbering: they do not even hold the same bonus chapters.
-    assert_eq!(1, progress.of_series("e").unwrap().len());
-    assert!(progress.of_series("e2").unwrap().is_empty());
+    assert_eq!(
+        1,
+        progress
+            .of_series("e", "default", &Ceiling::NONE)
+            .unwrap()
+            .expect("the series")
+            .len()
+    );
+    assert!(progress
+        .of_series("e2", "default", &Ceiling::NONE)
+        .unwrap()
+        .expect("the series")
+        .is_empty());
 
     // And the shelf sees it: one series in progress, one still unread.
     let shelf = Repository::new(&f.db)
-        .series(&SeriesFilter::default(), SeriesSort::Name, 0, 0)
+        .series(
+            &SeriesFilter::default(),
+            SeriesSort::Name,
+            0,
+            0,
+            "default",
+            &Ceiling::NONE,
+        )
         .expect("listing");
     let statuses: Vec<(&str, &str)> = shelf
         .iter()
@@ -763,7 +808,14 @@ fn progress_belongs_to_the_edition() {
 /// The status of one edition as the shelf computes it.
 fn read_status(f: &Fixture, edition: &str) -> String {
     Repository::new(&f.db)
-        .series(&SeriesFilter::default(), SeriesSort::Name, 0, 0)
+        .series(
+            &SeriesFilter::default(),
+            SeriesSort::Name,
+            0,
+            0,
+            "default",
+            &Ceiling::NONE,
+        )
         .expect("listing")
         .into_iter()
         .find(|s| s.id == edition)
@@ -782,6 +834,7 @@ fn finish(progress: &Progress, entry: &str, at: i64) {
                 ..Default::default()
             },
             at,
+            &Ceiling::NONE,
         )
         .expect("recording")
         .expect("the entry");
@@ -798,6 +851,7 @@ fn start_over(progress: &Progress, entry: &str, at: i64) {
                 rewind: true,
             },
             at,
+            &Ceiling::NONE,
         )
         .expect("recording")
         .expect("the entry");
@@ -814,7 +868,11 @@ fn finishing_counts_the_endings_and_a_rewind_counts_none() {
     finish(&progress, "v1", 1_000);
     assert_eq!(
         1,
-        progress.of("v1").unwrap().expect("a record").times_finished
+        progress
+            .of("v1", "default", &Ceiling::NONE)
+            .unwrap()
+            .expect("a record")
+            .times_finished
     );
 
     // Saying it a second time is the same ending: a client re-sending the last page of a
@@ -822,12 +880,19 @@ fn finishing_counts_the_endings_and_a_rewind_counts_none() {
     finish(&progress, "v1", 1_100);
     assert_eq!(
         1,
-        progress.of("v1").unwrap().expect("a record").times_finished
+        progress
+            .of("v1", "default", &Ceiling::NONE)
+            .unwrap()
+            .expect("a record")
+            .times_finished
     );
 
     let rewound = {
         start_over(&progress, "v1", 1_200);
-        progress.of("v1").unwrap().expect("a record")
+        progress
+            .of("v1", "default", &Ceiling::NONE)
+            .unwrap()
+            .expect("a record")
     };
     assert_eq!(
         1, rewound.times_finished,
@@ -839,7 +904,11 @@ fn finishing_counts_the_endings_and_a_rewind_counts_none() {
     finish(&progress, "v1", 1_300);
     assert_eq!(
         2,
-        progress.of("v1").unwrap().expect("a record").times_finished
+        progress
+            .of("v1", "default", &Ceiling::NONE)
+            .unwrap()
+            .expect("a record")
+            .times_finished
     );
 }
 
@@ -858,6 +927,7 @@ fn rewind_to(
                 ..Default::default()
             },
             2_000,
+            &Ceiling::NONE,
         )
         .expect("recording")
         .expect("the entry")
@@ -906,6 +976,7 @@ fn a_rewind_that_says_finished_is_taken_at_its_word() {
                 rewind: true,
             },
             2_000,
+            &Ceiling::NONE,
         )
         .expect("recording")
         .expect("the entry");
@@ -933,7 +1004,13 @@ fn a_series_being_reread_is_still_read() {
         "having finished it is something that happened, and re-reading does not un-happen it"
     );
     // And the volume itself answers the other question, which is why both are kept.
-    assert!(!progress.of("v1").unwrap().expect("a record").finished);
+    assert!(
+        !progress
+            .of("v1", "default", &Ceiling::NONE)
+            .unwrap()
+            .expect("a record")
+            .finished
+    );
 }
 
 /// And not too loose in the other direction: the rule is every entry finished, not any.
@@ -967,7 +1044,7 @@ fn marking_a_whole_series_read_fills_in_the_page_it_was_finished_at() {
     let progress = Progress::new(&f.db);
 
     let records = progress
-        .record_series("default", "e", true, 5_000)
+        .record_series("default", "e", true, 5_000, &Ceiling::NONE)
         .expect("recording")
         .expect("the series");
 
@@ -992,7 +1069,7 @@ fn marking_a_whole_series_read_costs_the_same_whatever_it_holds() {
 
     let before = f.db.statements();
     progress
-        .record_series("default", "e", true, 5_000)
+        .record_series("default", "e", true, 5_000, &Ceiling::NONE)
         .expect("recording");
     let two_volumes = f.db.statements() - before;
 
@@ -1011,7 +1088,7 @@ fn marking_a_whole_series_read_costs_the_same_whatever_it_holds() {
 
     let before = f.db.statements();
     progress
-        .record_series("default", "e", true, 6_000)
+        .record_series("default", "e", true, 6_000, &Ceiling::NONE)
         .expect("recording");
     let thirty_two_volumes = f.db.statements() - before;
 
@@ -1030,7 +1107,7 @@ fn marking_a_whole_series_unread_records_nothing_about_what_was_never_opened() {
     let progress = Progress::new(&f.db);
 
     let records = progress
-        .record_series("default", "e", false, 5_000)
+        .record_series("default", "e", false, 5_000, &Ceiling::NONE)
         .expect("recording")
         .expect("the series");
 
@@ -1046,10 +1123,10 @@ fn marking_a_read_series_unread_keeps_the_page_and_forgetting_it_does_not() {
     let progress = Progress::new(&f.db);
 
     progress
-        .record_series("default", "e", true, 5_000)
+        .record_series("default", "e", true, 5_000, &Ceiling::NONE)
         .expect("recording");
     let cleared = progress
-        .record_series("default", "e", false, 6_000)
+        .record_series("default", "e", false, 6_000, &Ceiling::NONE)
         .expect("recording")
         .expect("the series");
     assert_eq!(2, cleared.len());
@@ -1059,7 +1136,11 @@ fn marking_a_read_series_unread_keeps_the_page_and_forgetting_it_does_not() {
     assert!(cleared.iter().all(|p| p.times_finished == 1));
 
     progress.forget_series("default", "e").expect("forgetting");
-    assert!(progress.of_series("e").unwrap().is_empty());
+    assert!(progress
+        .of_series("e", "default", &Ceiling::NONE)
+        .unwrap()
+        .expect("the series")
+        .is_empty());
     assert_eq!("UNREAD", read_status(&f, "e"));
 }
 
@@ -1079,7 +1160,7 @@ fn forgetting_a_series_that_holds_nothing_is_not_a_failure() {
 fn marking_a_series_that_is_not_there_records_nothing() {
     let f = Fixture::new();
     assert!(Progress::new(&f.db)
-        .record_series("default", "nowhere", true, 5_000)
+        .record_series("default", "nowhere", true, 5_000, &Ceiling::NONE)
         .expect("recording")
         .is_none());
 }
@@ -1091,10 +1172,14 @@ fn marking_a_series_read_leaves_the_other_editions_alone() {
     let progress = Progress::new(&f.db);
 
     progress
-        .record_series("default", "e", true, 5_000)
+        .record_series("default", "e", true, 5_000, &Ceiling::NONE)
         .expect("recording");
 
-    assert!(progress.of_series("e2").unwrap().is_empty());
+    assert!(progress
+        .of_series("e2", "default", &Ceiling::NONE)
+        .unwrap()
+        .expect("the series")
+        .is_empty());
     assert_eq!("UNREAD", read_status(&f, "e2"));
 }
 
@@ -1127,6 +1212,7 @@ fn two_positions_arriving_together_cannot_lose_the_further_one() {
                         ..Default::default()
                     },
                     100,
+                    &Ceiling::NONE,
                 )
                 .unwrap()
         });
@@ -1140,13 +1226,17 @@ fn two_positions_arriving_together_cannot_lose_the_further_one() {
                         ..Default::default()
                     },
                     101,
+                    &Ceiling::NONE,
                 )
                 .unwrap()
         });
         far.join().unwrap();
         near.join().unwrap();
 
-        let landed = Progress::new(&db).of(&entry).unwrap().expect("a position");
+        let landed = Progress::new(&db)
+            .of(&entry, "default", &Ceiling::NONE)
+            .unwrap()
+            .expect("a position");
         assert_eq!(
             9, landed.page,
             "round {round}: page 9 and page 2 arrived together and the far one was lost"
@@ -1188,7 +1278,14 @@ fn the_shelf_says_how_many_volumes_of_a_series_are_finished() {
 
     let shelf = || {
         Repository::new(&f.db)
-            .series(&SeriesFilter::default(), SeriesSort::Name, 0, 0)
+            .series(
+                &SeriesFilter::default(),
+                SeriesSort::Name,
+                0,
+                0,
+                "default",
+                &Ceiling::NONE,
+            )
             .expect("listing")
     };
     let far = |rows: &[leaf_server::api::dto::SeriesDto], id: &str| {
@@ -1210,6 +1307,7 @@ fn the_shelf_says_how_many_volumes_of_a_series_are_finished() {
                 ..Default::default()
             },
             1,
+            &Ceiling::NONE,
         )
         .unwrap();
     assert_eq!(0, far(&shelf(), "e"), "opened is not finished");
@@ -1235,6 +1333,7 @@ fn the_shelf_says_how_many_volumes_of_a_series_are_finished() {
                 ..Default::default()
             },
             1,
+            &Ceiling::NONE,
         )
         .unwrap();
     assert_eq!(1, far(&shelf(), "e"));
@@ -1265,12 +1364,16 @@ fn forgetting_a_series_leaves_another_profiles_progress() {
     })
     .unwrap();
     let progress = Progress::new(&f.db);
-    progress.record_series("default", "e", true, 5_000).unwrap();
-    progress.record_series("kid", "e", true, 5_000).unwrap();
+    progress
+        .record_series("default", "e", true, 5_000, &Ceiling::NONE)
+        .unwrap();
+    progress
+        .record_series("kid", "e", true, 5_000, &Ceiling::NONE)
+        .unwrap();
 
     // Marking unread, forgetting one volume, forgetting the series: each under `default`.
     progress
-        .record_series("default", "e", false, 6_000)
+        .record_series("default", "e", false, 6_000, &Ceiling::NONE)
         .unwrap();
     progress.forget("default", "v1").unwrap();
     progress.forget_series("default", "e").unwrap();
@@ -1392,7 +1495,11 @@ async fn choosing_nothing_goes_back_to_what_the_series_declares() {
     assert_eq!(serde_json::json!("RIGHT_TO_LEFT"), got["readingDirection"]);
     let rows: i64 = server
         .db
-        .read(|cx| cx.query_one("SELECT COUNT(*) FROM reading_choice", [], |r| r.get(0)))
+        .read(|cx| {
+            cx.query_one("SELECT COUNT(*) FROM profile_reading_choice", [], |r| {
+                r.get(0)
+            })
+        })
         .unwrap()
         .unwrap();
     assert_eq!(0, rows, "absence is what says \"by default\"");
@@ -1481,7 +1588,11 @@ async fn a_choice_goes_with_the_edition_it_was_made_for() {
     let rows = |server: &Server| -> i64 {
         server
             .db
-            .read(|cx| cx.query_one("SELECT COUNT(*) FROM reading_choice", [], |r| r.get(0)))
+            .read(|cx| {
+                cx.query_one("SELECT COUNT(*) FROM profile_reading_choice", [], |r| {
+                    r.get(0)
+                })
+            })
             .unwrap()
             .unwrap()
     };
@@ -1522,7 +1633,14 @@ fn the_shelf_still_costs_what_it_cost() {
     let list = |f: &Fixture| {
         let before = f.db.statements();
         Repository::new(&f.db)
-            .series(&SeriesFilter::default(), SeriesSort::Name, 0, 0)
+            .series(
+                &SeriesFilter::default(),
+                SeriesSort::Name,
+                0,
+                0,
+                "default",
+                &Ceiling::NONE,
+            )
             .unwrap();
         f.db.statements() - before
     };
@@ -1539,7 +1657,8 @@ fn the_shelf_still_costs_what_it_cost() {
                 (format!("ce{i}"), format!("cw{i}"), format!("/cw{i}/e")),
             )?;
             cx.execute(
-                "INSERT INTO reading_choice (edition_id, reading_direction) VALUES (?1, 'VERTICAL')",
+                "INSERT INTO profile_reading_choice (profile_id, edition_id, reading_direction)
+                 VALUES ('default', ?1, 'VERTICAL')",
                 [format!("ce{i}")],
             )?;
         }
@@ -1553,11 +1672,11 @@ fn the_shelf_still_costs_what_it_cost() {
         "a choice must not add a query per series"
     );
     assert!(Repository::new(&f.db)
-        .choose_reading_direction("e", Some("VERTICAL"))
+        .choose_reading_direction("default", "e", Some("VERTICAL"))
         .unwrap());
     assert_eq!(without, list(&f));
     assert!(!Repository::new(&f.db)
-        .choose_reading_direction("nope", Some("VERTICAL"))
+        .choose_reading_direction("default", "nope", Some("VERTICAL"))
         .unwrap());
 }
 
@@ -1570,7 +1689,7 @@ fn choosing_a_direction_costs_two_statements_and_an_unknown_edition_costs_one() 
     let cost = |edition: &str, chosen: Option<&str>| {
         let before = f.db.statements();
         Repository::new(&f.db)
-            .choose_reading_direction(edition, chosen)
+            .choose_reading_direction("default", edition, chosen)
             .unwrap();
         f.db.statements() - before
     };

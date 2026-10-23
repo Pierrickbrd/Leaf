@@ -32,7 +32,8 @@ pub const SCHEMA: &[&str] = &[
       status            TEXT,
       reading_direction TEXT,
       summary           TEXT,
-      age_rating        TEXT
+      age_rating        TEXT,
+      age               INTEGER
     )
     "#,
     // One row per genre, and the only record of one. A comma-joined column beside this
@@ -196,11 +197,28 @@ pub const SCHEMA: &[&str] = &[
       restricted  INTEGER NOT NULL DEFAULT 0,
       max_age     INTEGER,
       code_digest BLOB,
-      created_at  INTEGER NOT NULL
+      created_at  INTEGER NOT NULL,
+      color       TEXT NOT NULL DEFAULT 'emeraude',
+      can_import  INTEGER NOT NULL DEFAULT 0,
+      can_edit    INTEGER NOT NULL DEFAULT 0,
+      can_delete  INTEGER NOT NULL DEFAULT 0,
+      reading     TEXT NOT NULL DEFAULT '{}'
     )
     "#,
     "INSERT OR IGNORE INTO profile (id, name, name_key, restricted, max_age, code_digest, created_at)
-     VALUES ('default', 'Par défaut', 'par défaut', 0, NULL, NULL, CAST(strftime('%s', 'now') AS INTEGER) * 1000)",
+     VALUES ('default', 'Principal', 'principal', 0, NULL, NULL, CAST(strftime('%s', 'now') AS INTEGER) * 1000)",
+    // The one code of the household, kept as an argon2 PHC string. One row at most, like
+    // `closed`, and the principal is the row of `profile` whose id is DEFAULT_PROFILE:
+    // nothing here says who it is, so nothing here can disagree with it.
+    r#"
+    CREATE TABLE IF NOT EXISTS household (
+      id         INTEGER PRIMARY KEY CHECK (id = 1),
+      code_phc   TEXT,
+      code_scope TEXT CHECK (code_scope IN ('restricted', 'everything')),
+      recovery_phc TEXT
+    )
+    "#,
+    "INSERT OR IGNORE INTO household (id) VALUES (1)",
     // A linked device. Only the SHA-256 of its key is kept, so a copy of the index cannot
     // be used to read the library.
     r#"
@@ -212,7 +230,10 @@ pub const SCHEMA: &[&str] = &[
       linked_at  INTEGER NOT NULL,
       linked_by  TEXT NOT NULL,
       seen_at    INTEGER,
-      profile_id TEXT NOT NULL DEFAULT 'default' REFERENCES profile(id)
+      profile_id TEXT NOT NULL DEFAULT 'default' REFERENCES profile(id),
+      kept       INTEGER NOT NULL DEFAULT 0,
+      choosing   INTEGER NOT NULL DEFAULT 0,
+      held       INTEGER NOT NULL DEFAULT 0
     )
     "#,
     "CREATE INDEX IF NOT EXISTS ix_device_profile ON device(profile_id)",
@@ -257,11 +278,14 @@ pub const SCHEMA: &[&str] = &[
     // Keyed by entry, but read by edition: the read status of a shelf asks "what has this
     // edition got" twice for every tile.
     "CREATE INDEX IF NOT EXISTS ix_progress_edition ON progress(edition_id, finished)",
-    // The reader's own choice of direction, apart from the files. See migration 30.
+    // What a profile chose for the direction of a series, apart from the files and from what
+    // anyone else chose. See migration 33.
     r#"
-    CREATE TABLE IF NOT EXISTS reading_choice (
-      edition_id        TEXT PRIMARY KEY REFERENCES edition(id) ON DELETE CASCADE,
-      reading_direction TEXT NOT NULL
+    CREATE TABLE IF NOT EXISTS profile_reading_choice (
+      profile_id        TEXT NOT NULL REFERENCES profile(id) ON DELETE CASCADE,
+      edition_id        TEXT NOT NULL REFERENCES edition(id) ON DELETE CASCADE,
+      reading_direction TEXT NOT NULL,
+      PRIMARY KEY (profile_id, edition_id)
     )
     "#,
     r#"
@@ -680,7 +704,92 @@ pub const MIGRATIONS: &[&[&str]] = &[
         )
         "#,
     ],
+    // 31 — profiles that can be made. The principal is the first profile, renamed unless its
+    // owner already named it; every other profile has a colour of its own and three rights to
+    // the library, none by default. `progress` already cascades from `profile`, so deleting a
+    // profile needs no step of its own for it. The `device` columns are for what
+    // a device keeps, whether it must choose again, whether it is held under restriction.
+    &[
+        "ALTER TABLE profile ADD COLUMN color TEXT NOT NULL DEFAULT 'emeraude'",
+        "ALTER TABLE profile ADD COLUMN can_import INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE profile ADD COLUMN can_edit INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE profile ADD COLUMN can_delete INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE profile ADD COLUMN reading TEXT NOT NULL DEFAULT '{}'",
+        "UPDATE profile SET name = 'Principal', name_key = 'principal'
+          WHERE id = 'default' AND name = 'Par défaut'",
+        r#"
+        CREATE TABLE IF NOT EXISTS household (
+          id         INTEGER PRIMARY KEY CHECK (id = 1),
+          code_phc   TEXT,
+          code_scope TEXT CHECK (code_scope IN ('restricted', 'everything'))
+        )
+        "#,
+        "INSERT OR IGNORE INTO household (id) VALUES (1)",
+        "ALTER TABLE device ADD COLUMN kept INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE device ADD COLUMN choosing INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE device ADD COLUMN held INTEGER NOT NULL DEFAULT 0",
+    ],
+    // 32 — the age a rating stands for, beside the rating. « 16+ » and « Mature 17+ » are
+    // what a person wrote; a restricted profile compares a number, and parsing the string in
+    // every `WHERE` of every list would put the rule in SQL, where it cannot be tested on
+    // its own. Filled for the rows already there by `age_of` itself, in Rust, after this
+    // statement: see `ADD_WORK_AGE` and `db::after`.
+    &[ADD_WORK_AGE],
+    // 33 — the direction a series is read in is a choice of whoever reads it, and the library
+    // has several readers now: one table row per profile and series, so a child turning a
+    // book the other way no longer turns it for everyone. What migration 30 stored, with no
+    // one to belong to, goes to the principal — the only reader there was when it was made.
+    // `reading_choice` is created again first, as migration 30 made it, so a database that
+    // never ran 30 (the profiles were numbered before it on their own branch) meets this
+    // with the table to copy from and drop.
+    &[
+        r#"
+        CREATE TABLE IF NOT EXISTS profile_reading_choice (
+          profile_id        TEXT NOT NULL REFERENCES profile(id) ON DELETE CASCADE,
+          edition_id        TEXT NOT NULL REFERENCES edition(id) ON DELETE CASCADE,
+          reading_direction TEXT NOT NULL,
+          PRIMARY KEY (profile_id, edition_id)
+        )
+        "#,
+        r#"
+        CREATE TABLE IF NOT EXISTS reading_choice (
+          edition_id        TEXT PRIMARY KEY REFERENCES edition(id) ON DELETE CASCADE,
+          reading_direction TEXT NOT NULL
+        )
+        "#,
+        r#"
+        INSERT OR IGNORE INTO profile_reading_choice (profile_id, edition_id, reading_direction)
+         SELECT 'default', edition_id, reading_direction FROM reading_choice
+        "#,
+        "DROP TABLE reading_choice",
+    ],
+    // 34 — a way back from a forgotten code that needs no terminal. The household's code was
+    // recoverable only by whoever could type on the machine running the server, which is no
+    // way at all on a host nobody sits at. The recovery code is a second secret, drawn by the
+    // server, shown once and kept only as a digest, like the code it stands in for.
+    &["ALTER TABLE household ADD COLUMN recovery_phc TEXT"],
 ];
+
+/// The statement that adds `work.age`. `db::after` follows the migration holding it with the
+/// backfill only Rust can write — the rule is `metadata::age::age_of`, and a second copy of
+/// it in SQL would be the one that drifts.
+pub const ADD_WORK_AGE: &str = "ALTER TABLE work ADD COLUMN age INTEGER";
+
+/// Where that migration sits today. **Not what `db::after` keys off**: another branch holds
+/// a migration 30 of its own, and the numbers shift when the two meet. Keyed off the number,
+/// the backfill would then run after whatever landed at 31, before the column exists, and
+/// leave every age empty — every rated series hidden from every child, in silence. It keys
+/// off [`adds_work_age`] instead; this constant is for the test that holds the two together.
+pub const WORK_AGE: i32 = 32;
+
+/// Whether migration `number` is the one that adds `work.age`, read from its statements.
+pub fn adds_work_age(number: i32) -> bool {
+    usize::try_from(number)
+        .ok()
+        .and_then(|n| n.checked_sub(1))
+        .and_then(|i| MIGRATIONS.get(i))
+        .is_some_and(|statements| statements.contains(&ADD_WORK_AGE))
+}
 
 /// What a fresh database is stamped with, and the number of the last migration. Deriving it
 /// from the list is what makes adding a migration a one-line change that cannot be got

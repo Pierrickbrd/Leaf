@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::{a_volume, json_body, request, Server, READ_ONLY};
+use common::{a_volume, json_body, request, Server, IMPORTER, READ_ONLY};
 use leaf_server::api::keys::Keys;
 use leaf_server::api::routes::AppState;
 use leaf_server::net::link::Reach;
@@ -634,6 +634,9 @@ async fn unlinking_makes_the_key_useless_at_once() {
     assert_eq!(StatusCode::FORBIDDEN, status);
 }
 
+/// An old key is the principal for these routes when it may import — the keys that could
+/// already scan — and is then told where it can be renamed. One that may only read is refused
+/// at the door, like any other caller that is not the principal.
 #[tokio::test]
 async fn an_old_key_asked_to_rename_itself_is_sent_to_server_env() {
     let server = Server::new();
@@ -646,7 +649,7 @@ async fn an_old_key_asked_to_rename_itself_is_sent_to_server_env() {
             with_body(
                 "PATCH",
                 "/device",
-                READ_ONLY,
+                IMPORTER,
                 serde_json::json!({ "name": "x" }),
             ),
         )
@@ -660,10 +663,19 @@ async fn an_old_key_asked_to_rename_itself_is_sent_to_server_env() {
         ("DELETE", "/link/codes/anything"),
     ] {
         let (status, body) = server
-            .send_to(state.clone(), empty(method, uri, READ_ONLY))
+            .send_to(state.clone(), empty(method, uri, IMPORTER))
             .await;
         assert_eq!(StatusCode::CONFLICT, status, "{method} {uri}");
         assert_eq!(sentence, body["error"]);
+
+        let (status, body) = server
+            .send_to(state.clone(), empty(method, uri, READ_ONLY))
+            .await;
+        assert_eq!(StatusCode::FORBIDDEN, status, "{method} {uri}");
+        assert_eq!(
+            "this key does not carry the \"import\" right",
+            body["error"]
+        );
     }
 }
 

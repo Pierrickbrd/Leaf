@@ -21,6 +21,7 @@ use crate::config::Config;
 /// leaf-server scan  [roots…] [--no-dimensions]   analyse and exit, with a report
 /// leaf-server serve [roots…] [--no-dimensions]   scan, then listen
 /// leaf-server device add|list|revoke|enroll …    the linked devices, see [`Device`]
+/// leaf-server profile reset-code                 replace a forgotten code
 /// ```
 ///
 /// `serve` is the default, because a server started with no argument should serve.
@@ -42,6 +43,15 @@ pub struct Invocation {
     pub all_dimensions: bool,
     /// What to do to the linked devices, for `device` and for no other command.
     pub device: Option<Device>,
+    /// What to do to the profiles, for `profile` and for no other command.
+    pub profile: Option<ProfileCommand>,
+}
+
+/// The words after `profile`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProfileCommand {
+    /// A new code, typed twice at the terminal, for a household that forgot it.
+    ResetCode,
 }
 
 /// The words after `device`, read as strictly as the rest of the line: an option one
@@ -76,7 +86,7 @@ pub enum Outcome {
 
 /// The commands `Invocation::of` understands. Named once so the refusal that lists them and
 /// the check that accepts them cannot drift apart.
-const COMMANDS: [&str; 3] = ["scan", "serve", "device"];
+const COMMANDS: [&str; 4] = ["scan", "serve", "device", "profile"];
 
 /// Printed for `--help`, and nowhere else — so the options this claims to accept and the
 /// ones `Invocation::of` actually parses cannot quietly disagree.
@@ -86,6 +96,7 @@ Usage: leaf-server [scan|serve] [roots...] [--no-dimensions]
        leaf-server device list
        leaf-server device revoke NAME|CODE
        leaf-server device enroll NAME
+       leaf-server profile reset-code
 
   scan             analyse the roots and exit, with a report
   serve            scan, then listen (the default when no command is given)
@@ -102,8 +113,12 @@ Usage: leaf-server [scan|serve] [roots...] [--no-dimensions]
   device enroll    link a device now and print its key on stdout, which must not be
                    a terminal (for the installer)
 
-  The device commands read /etc/leaf/server.env (or $LEAF_ENV_FILE) and, run as root,
-  open the index as the account that owns its folder.
+  profile reset-code
+                   replace a forgotten code: asks twice, shows nothing, keeps what the
+                   old code was for (everything, or only leaving a restricted profile)
+
+  The device and profile commands read /etc/leaf/server.env (or $LEAF_ENV_FILE)
+  and, run as root, open the index as the account that owns its folder.
 
   --help           print this message and exit";
 
@@ -144,6 +159,16 @@ impl Invocation {
                 requested: Vec::new(),
                 all_dimensions: true,
                 device: Some(Device::of(&args[1..])?),
+                profile: None,
+            }));
+        }
+        if command == "profile" {
+            return Ok(Outcome::Run(Invocation {
+                command,
+                requested: Vec::new(),
+                all_dimensions: true,
+                device: None,
+                profile: Some(ProfileCommand::of(&args[1..])?),
             }));
         }
 
@@ -167,6 +192,7 @@ impl Invocation {
             requested,
             all_dimensions,
             device: None,
+            profile: None,
         }))
     }
 
@@ -180,6 +206,22 @@ impl Invocation {
             vec![library.to_path_buf()]
         } else {
             self.requested.clone()
+        }
+    }
+}
+
+impl ProfileCommand {
+    /// The words after `profile`.
+    fn of(words: &[String]) -> Result<ProfileCommand> {
+        match words {
+            [] => anyhow::bail!("'profile' needs a subcommand: reset-code."),
+            [what] if what == "reset-code" => Ok(ProfileCommand::ResetCode),
+            [what, ..] if what == "reset-code" => {
+                anyhow::bail!("'profile reset-code' takes no '{}'.", words[1])
+            }
+            [other, ..] => {
+                anyhow::bail!("'{other}' is not something 'profile' does; it does reset-code.")
+            }
         }
     }
 }

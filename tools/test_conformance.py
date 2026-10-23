@@ -159,7 +159,8 @@ class RunsEveryCheck(unittest.TestCase):
             code, said = quietly(base)
         self.assertEqual(code, 0, said)
         self.assertIn("the server answers what the contract promises", said)
-        for stage in ("— reading —", "— progress —", "— records —", "— import —"):
+        for stage in ("— reading —", "— progress —", "— records —", "— profiles —",
+                      "— import —"):
             self.assertIn(stage, said)
         self.assertNotIn("✗", said)
 
@@ -168,14 +169,14 @@ class RunsEveryCheck(unittest.TestCase):
             _, said = quietly(base)
         # One line per check, and the count is the thing: a stage that stopped early would
         # leave the rest silently unrun.
-        self.assertEqual(said.count("✓") + said.count("·"), 47)
+        self.assertEqual(said.count("✓") + said.count("·"), 58)
 
     def test_a_key_brings_the_guard_out(self):
         with a_server(CONTRACT) as base:
             code, said = quietly(base, "a-key")
         self.assertEqual(code, 0, said)
         self.assertIn("— the guard —", said)
-        self.assertEqual(said.count("✓") + said.count("·"), 48)
+        self.assertEqual(said.count("✓") + said.count("·"), 59)
 
     def test_an_answer_that_diverges_is_named_and_fails_the_run(self):
         def drop_the_name(template, value):

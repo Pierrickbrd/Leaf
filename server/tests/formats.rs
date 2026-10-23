@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use leaf_server::api::pages::Pages;
 use leaf_server::scan::scanner::Scanner;
+use leaf_server::store::repository::Ceiling;
 use leaf_server::store::Db;
 
 /// The bar pattern, plus a vertical rule every 300 pixels.
@@ -97,7 +98,7 @@ fn every_format_the_scanner_reads_can_also_be_served_and_shrunk() {
         // Without a width the bytes go back exactly as they are, in their own format.
         let whole = one
             .pages
-            .page(&one.entry, 0, None)
+            .page(&one.entry, 0, None, &Ceiling::NONE)
             .unwrap()
             .expect("a page");
         assert_eq!(source, whole.bytes, "{name} must go back untouched");
@@ -106,7 +107,7 @@ fn every_format_the_scanner_reads_can_also_be_served_and_shrunk() {
         // step of 200, since that is what any width is served at.
         let small = one
             .pages
-            .page(&one.entry, 0, Some(400))
+            .page(&one.entry, 0, Some(400), &Ceiling::NONE)
             .unwrap()
             .expect("a page");
         let back = image::load_from_memory(&small.bytes).unwrap();
@@ -151,7 +152,7 @@ fn a_transparent_page_does_not_come_back_with_black_where_it_was_clear() {
 
     let small = one
         .pages
-        .page(&one.entry, 0, Some(300))
+        .page(&one.entry, 0, Some(300), &Ceiling::NONE)
         .unwrap()
         .expect("a page");
     let back = image::load_from_memory(&small.bytes).unwrap().into_rgb8();

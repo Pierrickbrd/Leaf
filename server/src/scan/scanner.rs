@@ -20,6 +20,7 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 use crate::archive::cbz;
+use crate::metadata::age::age_of;
 use crate::metadata::label;
 use crate::metadata::legacy_comic_info::{self as comic_info, LegacyRead};
 use crate::metadata::sidecars::{
@@ -668,8 +669,8 @@ impl Scanner {
 
         cx.execute(
             "INSERT INTO work (id, universe_id, name, path, title, medium, status,
-                               reading_direction, summary, age_rating)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                               reading_direction, summary, age_rating, age)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
              ON CONFLICT(id) DO UPDATE SET
                -- The place follows the identity. It did not have to before: a folder
                -- that moved got a new identity, so it got a new row, and this one was
@@ -680,7 +681,7 @@ impl Scanner {
                universe_id=excluded.universe_id, name=excluded.name, title=excluded.title,
                medium=excluded.medium, status=excluded.status,
                reading_direction=excluded.reading_direction, summary=excluded.summary,
-               age_rating=excluded.age_rating",
+               age_rating=excluded.age_rating, age=excluded.age",
             rusqlite::params![
                 id,
                 universe_id,
@@ -692,6 +693,11 @@ impl Scanner {
                 meta.as_ref().and_then(|m| m.reading_direction.clone()),
                 meta.as_ref().and_then(|m| m.summary.clone()),
                 meta.as_ref().and_then(|m| m.age_rating.clone()),
+                // Beside the rating, from it, in the same statement: a work whose rating
+                // changed and whose age did not would be shown to a child on the old one.
+                meta.as_ref()
+                    .and_then(|m| m.age_rating.as_deref())
+                    .and_then(age_of),
             ],
         )?;
         report.works += 1;
@@ -1172,13 +1178,13 @@ impl Scanner {
         let stale_work = self.make_way(cx, "work", &work_id, &absolute(&file))?;
         cx.execute(
             "INSERT INTO work (id, universe_id, name, path, title, medium, status,
-                               reading_direction, summary, age_rating)
-             VALUES (?1,?2,?3,?4,?5,?6,'completed',?7,?8,?9)
+                               reading_direction, summary, age_rating, age)
+             VALUES (?1,?2,?3,?4,?5,?6,'completed',?7,?8,?9,?10)
              ON CONFLICT(id) DO UPDATE SET
                path=excluded.path, universe_id=excluded.universe_id, name=excluded.name,
                title=excluded.title, medium=excluded.medium, status=excluded.status,
                reading_direction=excluded.reading_direction, summary=excluded.summary,
-               age_rating=excluded.age_rating",
+               age_rating=excluded.age_rating, age=excluded.age",
             rusqlite::params![
                 work_id,
                 universe_id,
@@ -1189,6 +1195,7 @@ impl Scanner {
                 meta.reading_direction.clone(),
                 meta.summary.clone(),
                 meta.age_rating.clone(),
+                meta.age_rating.as_deref().and_then(age_of),
             ],
         )?;
         report.works += 1;

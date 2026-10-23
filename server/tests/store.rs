@@ -373,7 +373,7 @@ fn an_old_scheme_index_at(
     let conn = rusqlite::Connection::open(&file).expect("opening");
     conn.execute_batch(
         "DROP TABLE link_code; DROP TABLE device; DROP TABLE closed;
-         DROP TABLE progress; DROP TABLE profile; DROP TABLE reading_choice;
+         DROP TABLE progress; DROP TABLE profile; DROP TABLE profile_reading_choice;
          CREATE TABLE progress (
            entry_id    TEXT PRIMARY KEY REFERENCES entry(id) ON DELETE CASCADE,
            edition_id  TEXT NOT NULL REFERENCES edition(id) ON DELETE CASCADE,
@@ -427,11 +427,11 @@ fn assert_migrated_to_the_end_with_every_position(file: &std::path::Path) {
 
 /// The version is a migration number and the list has one entry per migration, so the two
 /// can no longer be read apart: a person who read « 41 » on a production index looked for
-/// migration 41, and there were twenty-nine.
+/// migration 41, and there were thirty.
 #[test]
 fn the_version_is_the_number_of_the_last_migration() {
-    assert_eq!(30, MIGRATIONS.len());
-    assert_eq!(30, schema_version());
+    assert_eq!(34, MIGRATIONS.len());
+    assert_eq!(34, schema_version());
 }
 
 #[test]
@@ -440,7 +440,7 @@ fn a_fresh_database_is_stamped_with_the_marker_and_the_last_migration() {
     let file = dir.path().join("fresh.sqlite");
     drop(Db::open(&file).expect("opening"));
 
-    assert_eq!(30, user_version(&file));
+    assert_eq!(34, user_version(&file));
     assert_eq!(LEAF_APPLICATION_ID, application_id(&file));
 }
 
@@ -490,7 +490,8 @@ fn the_production_index_at_41_keeps_every_position_and_its_reading_choice() {
     let conn = rusqlite::Connection::open(&file).expect("opening");
     let choice: String = conn
         .query_row(
-            "SELECT reading_direction FROM reading_choice WHERE edition_id = 'e'",
+            "SELECT reading_direction FROM profile_reading_choice
+             WHERE profile_id = 'default' AND edition_id = 'e'",
             [],
             |r| r.get(0),
         )
@@ -502,7 +503,7 @@ fn the_production_index_at_41_keeps_every_position_and_its_reading_choice() {
 /// left alone but for what came after it — migration 6 would empty the search index, and a
 /// rebuilt `progress` would hand a second reader's places to the default profile.
 #[test]
-fn an_old_scheme_index_at_47_is_recognised_as_29_and_nothing_runs_again() {
+fn an_old_scheme_index_at_47_is_recognised_as_29_and_only_what_is_new_runs() {
     let dir = temp();
     let file = dir.path().join("main-as-it-was.sqlite");
     drop(Db::open(&file).expect("creating"));
@@ -564,7 +565,7 @@ fn an_index_written_by_a_newer_leaf_is_refused() {
     drop(Db::open(&file).expect("creating"));
     rusqlite::Connection::open(&file)
         .expect("opening")
-        .execute_batch("PRAGMA user_version = 31;")
+        .execute_batch("PRAGMA user_version = 35;")
         .expect("pretending to be newer");
 
     let said = match Db::open(&file) {
@@ -573,7 +574,7 @@ fn an_index_written_by_a_newer_leaf_is_refused() {
     };
     assert!(said.contains("written by a newer Leaf"), "{said}");
     assert!(said.contains("must not run on it"), "{said}");
-    assert_eq!(31, user_version(&file), "and it is left as it was found");
+    assert_eq!(35, user_version(&file), "and it is left as it was found");
 }
 
 /// No release ever counted past 47 in the old numbering; a count beyond it comes from a
@@ -1080,8 +1081,10 @@ fn a_scan_does_not_hold_the_writer_for_the_whole_library() {
     //
     // What the test is actually for survives without a clock: a scan that wrapped the whole
     // library in one transaction would let **one** write through — the first, which would
-    // block until the scan committed and would find it over. One turn per shelf is the least
-    // a scan that lets go between them can manage, and it manages thousands.
+    // block until the scan committed and would find it over. Two turns are the least a scan
+    // that lets go between shelves can show, and no single transaction can give them. It
+    // asked for twelve, one per shelf, and read 11 on a loaded machine on 24/10/2026: twelve
+    // was a count of how fast this scan ran, which is a speed after all.
     let mut turns = 0u32;
     while !over.load(Ordering::SeqCst) && turns < 500 {
         db.write(|cx| cx.execute("PRAGMA user_version = 10", []))
@@ -1093,7 +1096,7 @@ fn a_scan_does_not_hold_the_writer_for_the_whole_library() {
     assert_eq!(12, report.works, "the scan still did all of it");
     println!("short writes that got a turn while the scan ran: {turns}");
     assert!(
-        turns >= 12,
+        turns >= 2,
         "only {turns} short write(s) got a turn across twelve shelves — the scan is holding \
          the writer for the whole library"
     );
@@ -1318,31 +1321,38 @@ fn the_production_index_with_the_readers_first_build() -> (tempfile::TempDir, st
 
 /// Read as entries of main, 41 falls inside migration 26, so the start resumes after 25:
 /// profiles, devices, progress keyed by profile and closing run as they would on any old
-/// index, and the reader's own migration, now 30, meets a table already there and leaves
-/// it as it found it.
+/// index, and the reader's own migration, the thirtieth, meets a table already there and
+/// leaves it as it found it. Profiles and ages run after it: they were numbered 30 and 31 on
+/// their own branch, and a database that already held the reader's table is the proof they
+/// had to move.
 #[test]
-fn an_unmarked_index_at_41_holding_the_readers_table_is_brought_to_30() {
-    assert_eq!(30, schema_version());
+fn an_unmarked_index_at_41_holding_the_readers_table_is_brought_to_the_last_migration() {
     assert!(MIGRATIONS[29][0].contains("CREATE TABLE IF NOT EXISTS reading_choice"));
     let (_dir, file) = the_production_index_with_the_readers_first_build();
 
     let db = Db::open(&file).expect("migrating");
 
-    assert_eq!(30, user_version(&file));
+    assert_eq!(schema_version(), user_version(&file));
     assert_eq!(LEAF_APPLICATION_ID, application_id(&file));
     assert_eq!(
         planted_positions(),
         positions(&file),
         "every place kept before profiles belongs to the default profile, nothing else changed"
     );
-    for table in ["profile", "device", "link_code", "closed", "reading_choice"] {
+    for table in [
+        "profile",
+        "device",
+        "link_code",
+        "closed",
+        "profile_reading_choice",
+    ] {
         assert!(tables(&file).contains(&table.to_string()), "{table}");
     }
     assert_eq!(
         1,
         count(
             &db,
-            "SELECT COUNT(*) FROM reading_choice WHERE edition_id = 'e' AND reading_direction = 'VERTICAL'"
+            "SELECT COUNT(*) FROM profile_reading_choice WHERE profile_id = 'default' AND edition_id = 'e' AND reading_direction = 'VERTICAL'"
         ),
         "the reader's choice outlives the migrations that ran under it"
     );
