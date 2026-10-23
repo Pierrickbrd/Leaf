@@ -24,6 +24,12 @@ current version may continue to receive compatible fixes.
   complete it. The library closes as soon as a device is linked.
 - The client's Bond tab renames the device, moves it to another server or unlinks it, and
   « Relier un autre appareil » makes a code and its QR code for the next one.
+- The link « Relier un autre appareil » shows is built by the server, from `LEAF_PUBLIC_URL`
+  or else one of its network addresses, never from the address the client uses. A library
+  nobody else can reach offers neither relaying nor unlinking, and says so in one sentence.
+  Every sentence about linking is written for anyone: the commands moved to the README.
+- A client and a server installed on one machine link themselves in whichever order they
+  arrive, not only with `all`.
 - The database now also holds the reading progress and the linked devices: back it up with
   the library, a rescan cannot rebuild them.
 - Document linking, https off the loopback, and the Traefik transport a proxy on another

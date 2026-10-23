@@ -190,8 +190,18 @@ address there is no link to give, and the command says so. No key is written int
 
 The client command asks for nothing: the client opens on its own screen, from which it is
 linked to a library, and opens `leaf://` links. `--address` and `--key-file` still write
-`~/.config/Leaf/leaf.conf` (mode `0600`) for the scripts that pass them. `all` links the
-client of the same machine by itself, and keeps its key in that file.
+`~/.config/Leaf/leaf.conf` (mode `0600`) for the scripts that pass them.
+
+**A client and a server on one machine link themselves**, with no code, in whichever order
+they are installed: `all`, `client` where the server already is, or `server` (and `update
+server`) where the client already is. The installer knows what it installed by what it
+wrote — `/usr/local/bin/leaf-server` and its unit for the server,
+`/usr/local/share/leaf/client.version` for the client — and enrolls the client of the person
+running it, its key in `~/.config/Leaf/leaf.conf`. Only for a server on the loopback, which
+that client reaches at `http://127.0.0.1` with no certificate to pin; a server on the
+network is linked from the link `device add` prints. A client that already holds a key keeps
+it, one that linked itself from its own screen is left alone, and a run that fails after
+enrolling takes the device back.
 
 **Where the library goes.** `--library` chooses it. Without the option the server command
 asks at a terminal and otherwise takes `/srv/leaf/library`; an update keeps the one already
@@ -364,8 +374,36 @@ devices type. For a server on the loopback, `leaf://` to a loopback address mean
 which is how a tunnel is linked.
 
 Once linked, a device can link another: **Bond**, then « Relier un autre appareil », draws a
-code and its QR code. The same tab renames the device, moves it to another server, or
+link and its QR code. The same tab renames the device, moves it to another server, or
 unlinks it.
+
+**The link a device relays is the server's.** `POST /link/codes` answers it whole, built the
+way `device add` builds it, from the one address the server knows another device can reach:
+
+1. `LEAF_PUBLIC_URL`, whatever path the asking device takes to the server — a tunnel
+   included. The server asks that address once, at start, which certificate it presents,
+   and logs the answer: a public authority's pins nothing, Leaf's own is pinned, and
+   anything else — or no answer — pins nothing either, so that the device trusts only what
+   a public authority signed. A certificate of your own behind a proxy is pinned with
+   `device add`, which shows it to you first;
+2. otherwise one of the addresses it listens on past the loopback, the home network first
+   and never a container's or a virtual machine's bridge, and the panel says the link works
+   on the same network as the library;
+3. otherwise none. A server on `127.0.0.1` with no public address is reached only from its
+   own machine: the tab offers neither « Relier un autre appareil » nor « Délier cet
+   appareil » — unlinking there would strand the client with no device able to link it
+   back — and says « Cette bibliothèque n'est accessible que depuis cet ordinateur. »
+
+The address the asking device uses is never the one in the link: on the server's own
+machine it is the loopback, and through an SSH tunnel it is the tunnel's end, which no other
+device can follow. A developer reaching a server through a tunnel, who wants to link a
+second device through it, sets `LEAF_PUBLIC_URL` on the server to the address that device
+types — `http://127.0.0.1:9099` for a tunnel on each machine — and restarts it, or makes
+that one link from the server's terminal:
+
+```bash
+sudo leaf-server device add --address http://127.0.0.1:9099
+```
 
 ```bash
 sudo leaf-server device list              # devices, keys of LEAF_KEYS, waiting codes
@@ -378,6 +416,11 @@ its sentence. `enroll` links a device at once and writes its key to its output, 
 not be a terminal — a key is never shown on a screen. These commands read
 `/etc/leaf/server.env`, so they are run with `sudo`, and they open the index as the account
 that owns its folder.
+
+The client's sentences name no command: when a device forgot a library the server did not
+hear about, or came in with a key from `LEAF_KEYS`, it asks the reader to see whoever
+installed the library — and that person runs `device revoke` above, or removes the key from
+`/etc/leaf/server.env` and restarts the service.
 
 ### https on the network
 
@@ -486,6 +529,10 @@ without a key:
 ```json
 { "status": "ok", "api": 1, "format": 1, "library": 12, "linked": true }
 ```
+
+To a key it recognises, and to nobody else, it adds `"relay": true | false`: whether another
+device can reach the server, which decides what the client's **Bond** tab offers. A key
+tried there is counted against the throttle like anywhere else.
 
 `api` is what a client checks on connecting, so a client carrying last month's build says
 "update the application" instead of failing obscurely three screens later. There is no `/v1`
