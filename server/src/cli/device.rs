@@ -16,8 +16,8 @@ use anyhow::{bail, Context, Result};
 use crate::api::keys::Keys;
 use crate::boot::{is_loopback, tls_hosts, tls_paths, Device};
 use crate::config::Config;
-use crate::net::link::{listening_addresses, Address, Link};
-use crate::net::tls::{observe, own_fingerprint, Presented};
+use crate::net::link::{targets, Link, Note, Target, Targets};
+use crate::net::tls::own_fingerprint;
 use crate::store::devices::{Creator, Devices, Refusal, CODE_LIFETIME};
 use crate::store::Db;
 
@@ -109,15 +109,6 @@ fn devices(config: &Config) -> Result<Devices> {
     Ok(Devices::new(Arc::new(db)))
 }
 
-/// Where one link points, and what to say about it.
-struct Target {
-    /// `None` for the one address given or configured: there is nothing to tell it from.
-    label: Option<String>,
-    address: Address,
-    fingerprint: Option<String>,
-    notes: Vec<String>,
-}
-
 fn add(
     config: &Config,
     settings: &Settings,
@@ -127,57 +118,27 @@ fn add(
 ) -> Result<ExitCode> {
     // Every target, and its fingerprint, before the code: a code made for a link that then
     // cannot be printed is a code nobody can use, waiting ten minutes in `device list`.
-    let targets = match address.map(str::to_string).or(config.public_url.clone()) {
-        Some(typed) => {
-            let address = Address::parse(&typed)?;
-            let (fingerprint, notes) = if address.https {
-                decide(&address, || leafs_fingerprint(config))?
-            } else {
-                (None, Vec::new())
-            };
-            vec![Target {
-                label: None,
-                address,
-                fingerprint,
-                notes,
-            }]
-        }
-        None if is_loopback(&config.host) => {
-            writeln!(
-                console.out,
-                "Leaf n'écoute que sur cette machine ({}) : aucun autre appareil ne peut le \
-                 joindre par cette adresse. Indiquez l'adresse publique dans LEAF_PUBLIC_URL \
-                 (/etc/leaf/server.env), ou passez --address URL pour cette fois.",
-                config.host
-            )?;
-            return Ok(ExitCode::from(2));
-        }
-        None => {
-            // Leaf's own addresses: the certificate there is Leaf's, nothing to ask them.
-            let fingerprint = leafs_fingerprint(config)?;
-            let found = listening_addresses(&config.host);
-            if found.is_empty() {
-                bail!(
-                    "aucune adresse de cette machine ne répond à LEAF_HOST={} : indiquez \
-                     l'adresse publique dans LEAF_PUBLIC_URL, ou passez --address URL.",
+    let configured = address.map(str::to_string).or(config.public_url.clone());
+    let own = || leafs_fingerprint(config);
+    let targets: Vec<Target> =
+        match targets(configured.as_deref(), &config.host, config.port, &own)? {
+            Targets::Found(found) => found,
+            Targets::OnlyHere => {
+                writeln!(
+                    console.out,
+                    "Leaf n'écoute que sur cette machine ({}) : aucun autre appareil ne peut le \
+                     joindre par cette adresse. Indiquez l'adresse publique dans LEAF_PUBLIC_URL \
+                     (/etc/leaf/server.env), ou passez --address URL pour cette fois.",
                     config.host
-                );
+                )?;
+                return Ok(ExitCode::from(2));
             }
-            found
-                .into_iter()
-                .map(|(label, ip)| Target {
-                    label: Some(label),
-                    address: Address {
-                        https: true,
-                        host: ip.to_string(),
-                        port: config.port,
-                    },
-                    fingerprint: fingerprint.clone(),
-                    notes: Vec::new(),
-                })
-                .collect()
-        }
-    };
+            Targets::NoneListening => bail!(
+                "aucune adresse de cette machine ne répond à LEAF_HOST={} : indiquez \
+                 l'adresse publique dans LEAF_PUBLIC_URL, ou passez --address URL.",
+                config.host
+            ),
+        };
 
     let drawn = match qr {
         None => 0,
@@ -207,16 +168,7 @@ fn add(
         && !devices.closed()?;
     let issued = devices.issue(Creator::Terminal, now())?;
 
-    let links: Vec<Link> = targets
-        .iter()
-        .map(|t| Link {
-            https: t.address.https,
-            host: t.address.host.clone(),
-            port: t.address.port,
-            code: issued.code.clone(),
-            fingerprint: t.fingerprint.clone(),
-        })
-        .collect();
+    let links: Vec<Link> = targets.iter().map(|t| t.link(&issued.code)).collect();
     for (target, link) in targets.iter().zip(&links) {
         match &target.label {
             Some(label) => writeln!(console.out, "Lien ({}) : {link}", printable(label))?,
@@ -225,7 +177,16 @@ fn add(
     }
     for target in &targets {
         for note in &target.notes {
-            writeln!(console.out, "{note}")?;
+            match note {
+                Note::Unreachable => writeln!(console.out, "{UNREACHABLE}")?,
+                Note::UnreachableNoCertificate => {
+                    writeln!(console.out, "{UNREACHABLE_NO_CERTIFICATE}")?
+                }
+                Note::NotLeafs(fingerprint) => {
+                    writeln!(console.out, "{}", not_leafs(fingerprint))?;
+                    writeln!(console.out, "{PRIVATE_AUTHORITY}")?;
+                }
+            }
         }
     }
     writeln!(console.out)?;
@@ -255,31 +216,6 @@ fn leafs_fingerprint(config: &Config) -> Result<Option<String>> {
             )
         })
         .transpose()
-}
-
-/// The fingerprint a link to an https address carries, by asking the address what it
-/// presents. Leaf's own is asked for only when it is needed, since asking may make it.
-fn decide(
-    address: &Address,
-    own: impl FnOnce() -> Result<Option<String>>,
-) -> Result<(Option<String>, Vec<String>)> {
-    Ok(match observe(&address.host, address.port) {
-        Presented::PublicAuthority => (None, Vec::new()),
-        Presented::Pinned(fingerprint) => {
-            // Leaf's own certificate does not expire for twenty years; anything else pinned
-            // here — a proxy's, from a private authority — will, and the link with it.
-            let notes = if own()?.as_ref() == Some(&fingerprint) {
-                Vec::new()
-            } else {
-                vec![not_leafs(&fingerprint), PRIVATE_AUTHORITY.into()]
-            };
-            (Some(fingerprint), notes)
-        }
-        Presented::Unreachable(_) => match own()? {
-            Some(fingerprint) => (Some(fingerprint), vec![UNREACHABLE.into()]),
-            None => (None, vec![UNREACHABLE_NO_CERTIFICATE.into()]),
-        },
-    })
 }
 
 /// The link as a QR code in text, two modules to a character cell, with the two-module

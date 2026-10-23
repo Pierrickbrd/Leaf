@@ -37,6 +37,11 @@ pub struct HealthDto {
     /// Whether the library is closed to anyone without a key. Always sent, `false`
     /// included: a client that gets no field cannot tell "open" from "an older server".
     pub linked: bool,
+    /// Only to a recognised key: whether another device can reach this server, so whether
+    /// one linked here may link another. Absent rather than `false` for everyone else, who
+    /// is told nothing about where the server is reached.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay: Option<bool>,
 }
 
 // ------------------------------------------------------------------ linking
@@ -72,6 +77,12 @@ pub struct IssuedCodeDto {
     pub id: String,
     pub code: String,
     pub expires_at: i64,
+    /// The whole `leaf://` link, built by the server from an address another device can
+    /// reach — never from the one the asking device happens to use.
+    pub link: String,
+    /// The link names one of the server's own network addresses, there being no public one:
+    /// it works from the same network and nowhere else.
+    pub local_network: bool,
 }
 
 /// What became of a code this device made.

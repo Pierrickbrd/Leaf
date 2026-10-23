@@ -5,7 +5,9 @@ use std::path::Path;
 
 use leaf_server::cli::env_file::read_env_file;
 use leaf_server::cli::{account_for, printable, Account};
-use leaf_server::net::link::{listening_addresses, Address, Link};
+use leaf_server::net::link::{
+    listening_addresses, listening_among, relay_choice, Address, Interface, Link,
+};
 
 #[test]
 fn an_env_file_written_by_the_installer_reads_back_unquoted() {
@@ -82,6 +84,32 @@ fn on_every_interface_each_address_gets_a_label() {
     assert_eq!(one.len(), 1, "{one:?}");
     assert_eq!(one[0].0, "réseau local");
     assert_eq!(listening_addresses("100.101.102.103")[0].0, "Tailscale");
+}
+
+#[test]
+fn a_relay_never_points_at_a_container_or_virtual_machine_bridge() {
+    // On 0.0.0.0 with Docker, docker0 is a private address like the home network's, came
+    // first among them, and was the address a phone was handed.
+    let one = |name: &str, ip: &str| Interface {
+        name: name.into(),
+        ip: ip.parse().unwrap(),
+    };
+    let interfaces = [
+        one("lo", "127.0.0.1"),
+        one("docker0", "172.17.0.1"),
+        one("br-4f2a9c", "172.18.0.1"),
+        one("virbr0", "192.168.122.1"),
+        one("veth1234", "10.0.3.1"),
+        one("enp3s0", "192.168.1.20"),
+    ];
+    let found = listening_among("0.0.0.0", &interfaces);
+    // `device add` still lists them all, each under a name that tells them apart.
+    assert_eq!(5, found.len(), "{found:?}");
+    let chosen = relay_choice(&found).expect("an address");
+    assert_eq!("192.168.1.20", chosen.ip.to_string());
+
+    let only_bridges = listening_among("0.0.0.0", &interfaces[..3]);
+    assert!(relay_choice(&only_bridges).is_none(), "{only_bridges:?}");
 }
 
 #[test]
