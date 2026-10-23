@@ -20,6 +20,7 @@ use super::dto::{
 };
 use super::keys::{Key, Permission};
 use super::routes::{blocking, caller, now_in_millis, AppState, Caller, Failure, Refused, Who};
+use crate::net::link::Relay;
 use crate::store::devices::{Creator, Device, Refusal};
 
 /// What the old-key callers are told when a route is about a device and they are not one.
@@ -159,45 +160,80 @@ pub async fn link(
 }
 
 /// A new code, made by a device that is linked (or by an old key, which is how a client
-/// linked through `LEAF_KEYS` links its first device).
+/// linked through `LEAF_KEYS` links its first device), and the link that carries it.
+///
+/// The link is the server's to build. The client used to build it from its own address, and
+/// on the machine that runs the server that address is the loopback: a person there opened
+/// « Relier un autre appareil » and got a link no other device could follow, explained by a
+/// sentence about 127.0.0.1, tunnels and sudo. Through an SSH tunnel it named the tunnel.
 pub async fn issue_code(
     Caller(who): Caller,
     State(state): State<AppState>,
 ) -> Result<(StatusCode, Json<IssuedCodeDto>), Answer> {
-    let devices = Arc::clone(&state.devices);
-    let now = now_in_millis();
-    let issued =
-        match who {
-            // Nobody to say who made it, and nobody to hold it against: the first device of an
-            // open library is linked from the server's terminal.
-            Who::Open => return Err(say(
+    let maker = match who {
+        // Nobody to say who made it, and nobody to hold it against: the first device of an
+        // open library is linked from the server's terminal.
+        Who::Open => {
+            return Err(say(
                 StatusCode::FORBIDDEN,
                 "an open library issues no codes: link the first device from the server's terminal",
-            )),
-            Who::Device(device) => {
-                blocking(move || devices.issue(Creator::Device(&device.id), now)).await?
-            }
-            // A linked device carries every right, so a key may only make one if it holds
-            // them all: a read-only key from LEAF_KEYS could otherwise mint itself a device
-            // that imports and deletes.
-            Who::OldKey(key) if !carries_every_right(&key) => {
-                return Err(say(
-                    StatusCode::FORBIDDEN,
-                    "this key does not carry every right a linked device gets: only a key with read, import and delete may link a device",
-                ))
-            }
-            Who::OldKey(key) => {
-                blocking(move || devices.issue(Creator::OldKey(&key.name), now)).await?
-            }
+            ))
+        }
+        Who::Device(device) => Maker::Device(device.id),
+        // A linked device carries every right, so a key may only make one if it holds them
+        // all: a read-only key from LEAF_KEYS could otherwise mint itself a device that
+        // imports and deletes.
+        Who::OldKey(key) if !carries_every_right(&key) => {
+            return Err(say(
+                StatusCode::FORBIDDEN,
+                "this key does not carry every right a linked device gets: only a key with read, import and delete may link a device",
+            ))
+        }
+        Who::OldKey(key) => Maker::OldKey(key.name),
+    };
+
+    // The address before the code, as `device add` does it: a code made for a link that
+    // cannot be built is a code nobody can use, waiting ten minutes in `device list`.
+    let Relay::To {
+        target,
+        local_network,
+    } = &*state.relay
+    else {
+        // Refused rather than answered without a link: the client never asks here — `/health`
+        // told it `relay: false` — and a code alone is what the client stopped building
+        // links from.
+        return Err(say(StatusCode::CONFLICT, "unreachable"));
+    };
+    let (target, local_network) = (target.clone(), *local_network);
+
+    let devices = Arc::clone(&state.devices);
+    let now = now_in_millis();
+    let issued = blocking(move || {
+        let creator = match &maker {
+            Maker::Device(id) => Creator::Device(id),
+            Maker::OldKey(name) => Creator::OldKey(name),
         };
+        devices.issue(creator, now)
+    })
+    .await?;
+    let link = target.link(&issued.code).to_string();
     Ok((
         StatusCode::CREATED,
         Json(IssuedCodeDto {
             id: issued.id,
             code: issued.code,
             expires_at: issued.expires_at,
+            link,
+            local_network,
         }),
     ))
+}
+
+/// Who a code is made by, owned: it waits for the address to be decided, then crosses to
+/// the thread the index is asked on, where `Creator` borrows from it.
+enum Maker {
+    Device(String),
+    OldKey(String),
 }
 
 /// Whether a code this device made has been used.

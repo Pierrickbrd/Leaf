@@ -11,12 +11,31 @@ use axum::http::{Request, StatusCode};
 use common::{a_volume, json_body, request, Server, READ_ONLY};
 use leaf_server::api::keys::Keys;
 use leaf_server::api::routes::AppState;
+use leaf_server::net::link::Reach;
+use leaf_server::net::tls::Tls;
 use leaf_server::store::devices::{Creator, Devices, CODE_LIFETIME};
 use leaf_server::store::Db;
 
 /// A state with no `LEAF_KEYS` at all, the way a fresh installation starts.
 fn keyless(server: &Server) -> AppState {
     AppState::new(Arc::clone(&server.db), Keys::default())
+}
+
+/// Reached by other devices through a tunnel's address, declared as `LEAF_PUBLIC_URL`: plain
+/// http on the loopback, so nothing is asked of the network to make a link to it.
+fn through_a_tunnel(state: AppState) -> AppState {
+    settled(
+        state,
+        Reach {
+            public_url: Some("http://127.0.0.1:9099".into()),
+            ..Reach::listening_on("127.0.0.1", 8081, None)
+        },
+    )
+}
+
+/// What `main` does once at start: the reach settled into the one relay the routes keep.
+fn settled(state: AppState, reach: Reach) -> AppState {
+    state.relaying(reach.settle())
 }
 
 fn anonymous(uri: &str) -> Request<Body> {
@@ -476,7 +495,7 @@ async fn an_open_library_cannot_issue_codes() {
 async fn a_device_follows_the_code_it_issued_until_it_is_served() {
     let server = Server::new();
     let key = server.linked_device("PC du salon");
-    let state = server.state();
+    let state = through_a_tunnel(server.state());
 
     let (status, issued) = server
         .send_to(state.clone(), empty("POST", "/link/codes", &key))
@@ -511,7 +530,7 @@ async fn a_device_follows_the_code_it_issued_until_it_is_served() {
 async fn a_device_cancels_the_code_it_issued() {
     let server = Server::new();
     let key = server.linked_device("PC du salon");
-    let state = server.state();
+    let state = through_a_tunnel(server.state());
     let (_, issued) = server
         .send_to(state.clone(), empty("POST", "/link/codes", &key))
         .await;
@@ -536,7 +555,7 @@ async fn a_device_cannot_see_or_cancel_a_code_another_device_issued() {
     let server = Server::new();
     let first = server.linked_device("PC du salon");
     let second = server.linked_device("Liseuse");
-    let state = server.state();
+    let state = through_a_tunnel(server.state());
     let (_, issued) = server
         .send_to(state.clone(), empty("POST", "/link/codes", &first))
         .await;
@@ -652,7 +671,7 @@ async fn an_old_key_asked_to_rename_itself_is_sent_to_server_env() {
 async fn an_old_key_with_every_right_may_issue_a_code() {
     let server = Server::new();
     let keys = Keys::parse(Some("admin:0123456789abcdef:read,import,delete")).unwrap();
-    let state = AppState::new(Arc::clone(&server.db), keys);
+    let state = through_a_tunnel(AppState::new(Arc::clone(&server.db), keys));
     let (status, body) = server
         .send_to(state, empty("POST", "/link/codes", "0123456789abcdef"))
         .await;
@@ -692,4 +711,277 @@ async fn health_says_whether_the_library_is_linked() {
     let other = Server::new();
     let (_, body) = other.send_to(other.state(), anonymous("/health")).await;
     assert_eq!(serde_json::json!(true), body["linked"]);
+}
+
+// ------------------------------------------------------------- relaying
+
+// A person on the machine that runs the server opened « Relier un autre appareil » and got
+// a window explaining 127.0.0.1, tunnels and sudo: the client built the link from its own
+// address, which is the loopback there — and through an SSH tunnel too, where it named the
+// tunnel. The server is the one that knows which addresses another device can reach, so it
+// builds the link, and says when there is none.
+
+/// Leaf's own certificate, as a link carries its fingerprint.
+const OWN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// A TLS server on 127.0.0.2 — https, since only 127.0.0.1, localhost and ::1 are the
+/// loopback a link speaks http to — presenting a certificate generated in `dir`. Its
+/// fingerprint, its port, and the handle that stops it.
+async fn presenting(
+    dir: &std::path::Path,
+) -> (String, u16, axum_server::Handle<std::net::SocketAddr>) {
+    let tls = Tls::of(
+        &dir.join("leaf.crt"),
+        &dir.join("leaf.key"),
+        &["127.0.0.2".to_string()],
+    )
+    .await
+    .expect("generating");
+    let listener = std::net::TcpListener::bind("127.0.0.2:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    listener.set_nonblocking(true).unwrap();
+    let handle = axum_server::Handle::new();
+    let server = axum_server::from_tcp_rustls(listener, tls.config.clone())
+        .unwrap()
+        .handle(handle.clone())
+        .serve(axum::Router::new().into_make_service());
+    tokio::spawn(server);
+    (tls.fingerprint_hex, port, handle)
+}
+
+async fn settled_off_the_runtime(state: AppState, reach: Reach) -> AppState {
+    // `settle` asks the address, which here is served by this same runtime.
+    let relay = tokio::task::spawn_blocking(move || reach.settle())
+        .await
+        .unwrap();
+    state.relaying(relay)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_public_address_is_probed_once_at_start_and_its_answer_kept() {
+    let server = Server::new();
+    let key = server.linked_device("PC du salon");
+    let dir = tempfile::tempdir().unwrap();
+    let (own, port, handle) = presenting(dir.path()).await;
+    let state = settled_off_the_runtime(
+        server.state(),
+        Reach {
+            public_url: Some(format!("https://127.0.0.2:{port}")),
+            ..Reach::listening_on("0.0.0.0", 8081, Some(own.clone()))
+        },
+    )
+    .await;
+    // Gone after the start: asked again, it would be unreachable and pin nothing.
+    handle.shutdown();
+
+    for _ in 0..2 {
+        let (status, issued) = server
+            .send_to(state.clone(), empty("POST", "/link/codes", &key))
+            .await;
+        assert_eq!(StatusCode::CREATED, status, "{issued}");
+        let code = issued["code"].as_str().unwrap().replace('-', "");
+        assert_eq!(
+            format!("leaf://127.0.0.2:{port}/lier/{code}?empreinte={own}"),
+            issued["link"]
+        );
+        assert_eq!(serde_json::json!(false), issued["localNetwork"]);
+    }
+}
+
+#[tokio::test]
+async fn a_public_address_the_server_cannot_verify_gets_a_link_that_pins_nothing() {
+    // Leaf on the network, a proxy elsewhere holding a public certificate for the public
+    // name, and no way from the server back to that name: pinning Leaf's own certificate
+    // there gave every phone a certificate alarm for a certificate it never sees. With no
+    // fingerprint the client trusts only what a public authority signed — safe whatever
+    // answers there.
+    let server = Server::new();
+    let key = server.linked_device("PC du salon");
+    // `.invalid` never resolves.
+    let state = settled(
+        server.state(),
+        Reach {
+            public_url: Some("https://leaf.invalid".into()),
+            ..Reach::listening_on("127.0.0.1", 8081, Some(OWN.into()))
+        },
+    );
+
+    let (status, issued) = server
+        .send_to(state, empty("POST", "/link/codes", &key))
+        .await;
+    assert_eq!(StatusCode::CREATED, status, "{issued}");
+    let code = issued["code"].as_str().unwrap().replace('-', "");
+    assert_eq!(format!("leaf://leaf.invalid/lier/{code}"), issued["link"]);
+    assert_eq!(serde_json::json!(false), issued["localNetwork"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_public_address_presenting_a_certificate_not_leafs_gets_a_link_that_pins_nothing() {
+    // Reached from inside, the public address may land on the router's own page: its
+    // certificate is no proxy's, and a link must not pin it.
+    let server = Server::new();
+    let key = server.linked_device("PC du salon");
+    let dir = tempfile::tempdir().unwrap();
+    let (theirs, port, _handle) = presenting(dir.path()).await;
+    assert_ne!(theirs, OWN);
+    let state = settled_off_the_runtime(
+        server.state(),
+        Reach {
+            public_url: Some(format!("https://127.0.0.2:{port}")),
+            ..Reach::listening_on("0.0.0.0", 8081, Some(OWN.into()))
+        },
+    )
+    .await;
+
+    let (status, issued) = server
+        .send_to(state, empty("POST", "/link/codes", &key))
+        .await;
+    assert_eq!(StatusCode::CREATED, status, "{issued}");
+    let link = issued["link"].as_str().unwrap();
+    assert!(!link.contains("empreinte"), "{link}");
+}
+
+#[tokio::test]
+async fn a_tunnel_declared_as_the_public_address_is_the_address_in_the_link() {
+    let server = Server::new();
+    let key = server.linked_device("PC du salon");
+    let (status, issued) = server
+        .send_to(
+            through_a_tunnel(server.state()),
+            empty("POST", "/link/codes", &key),
+        )
+        .await;
+    assert_eq!(StatusCode::CREATED, status, "{issued}");
+    let code = issued["code"].as_str().unwrap().replace('-', "");
+    assert_eq!(format!("leaf://127.0.0.1:9099/lier/{code}"), issued["link"]);
+    assert_eq!(serde_json::json!(false), issued["localNetwork"]);
+}
+
+#[tokio::test]
+async fn without_a_public_address_the_link_names_a_network_address_and_says_so() {
+    let server = Server::new();
+    let key = server.linked_device("PC du salon");
+    let state = settled(
+        server.state().bound_to("192.168.1.20"),
+        Reach::listening_on("192.168.1.20", 8081, Some(OWN.into())),
+    );
+
+    let (status, issued) = server
+        .send_to(state, empty("POST", "/link/codes", &key))
+        .await;
+    assert_eq!(StatusCode::CREATED, status, "{issued}");
+    let code = issued["code"].as_str().unwrap().replace('-', "");
+    assert_eq!(
+        format!("leaf://192.168.1.20:8081/lier/{code}?empreinte={OWN}"),
+        issued["link"]
+    );
+    assert_eq!(serde_json::json!(true), issued["localNetwork"]);
+}
+
+#[tokio::test]
+async fn a_server_bound_to_a_public_address_does_not_call_it_a_local_network() {
+    // The bound address is its own label then, and a label said « local network » for it.
+    let server = Server::new();
+    let key = server.linked_device("PC du salon");
+    let state = settled(
+        server.state().bound_to("203.0.113.7"),
+        Reach::listening_on("203.0.113.7", 8081, Some(OWN.into())),
+    );
+    let (status, issued) = server
+        .send_to(state, empty("POST", "/link/codes", &key))
+        .await;
+    assert_eq!(StatusCode::CREATED, status, "{issued}");
+    assert_eq!(serde_json::json!(false), issued["localNetwork"]);
+}
+
+#[tokio::test]
+async fn a_server_only_its_own_machine_reaches_makes_no_code_for_another_device() {
+    let server = Server::new();
+    let key = server.linked_device("PC du salon");
+    let state = settled(server.state(), Reach::listening_on("127.0.0.1", 8081, None));
+
+    let (status, body) = server
+        .send_to(state, empty("POST", "/link/codes", &key))
+        .await;
+    assert_eq!(StatusCode::CONFLICT, status, "{body}");
+    assert_eq!("unreachable", body["error"]);
+    let rows = server
+        .db
+        .read(|cx| cx.query_one("SELECT COUNT(*) FROM link_code", [], |r| r.get::<_, i64>(0)))
+        .unwrap();
+    assert_eq!(
+        Some(0),
+        rows,
+        "no code was made for a link nobody could follow"
+    );
+}
+
+#[tokio::test]
+async fn health_tells_a_linked_device_whether_another_one_can_be_linked() {
+    let server = Server::new();
+    let key = server.linked_device("PC du salon");
+    let keyed = |key: &str| request("GET", "/health", key).body(Body::empty()).unwrap();
+
+    let only_here = settled(server.state(), Reach::listening_on("127.0.0.1", 8081, None));
+    let (_, body) = server.send_to(only_here, keyed(&key)).await;
+    assert_eq!(serde_json::json!(false), body["relay"], "{body}");
+
+    let (_, body) = server
+        .send_to(through_a_tunnel(server.state()), keyed(&key))
+        .await;
+    assert_eq!(serde_json::json!(true), body["relay"], "{body}");
+
+    let network = settled(
+        server.state().bound_to("192.168.1.20"),
+        Reach::listening_on("192.168.1.20", 8081, Some(OWN.into())),
+    );
+    let (_, body) = server.send_to(network, keyed(&key)).await;
+    assert_eq!(serde_json::json!(true), body["relay"], "{body}");
+}
+
+#[tokio::test]
+async fn health_without_a_key_says_no_more_than_it_did() {
+    let server = Server::new();
+    server.linked_device("PC du salon");
+    let (status, body) = server
+        .send_to(through_a_tunnel(server.state()), anonymous("/health"))
+        .await;
+    assert_eq!(StatusCode::OK, status);
+    let mut fields: Vec<&str> = body
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    assert_eq!(vec!["api", "format", "library", "linked", "status"], fields);
+}
+
+#[tokio::test]
+async fn a_wrong_key_on_health_hears_nothing_more_and_counts_against_the_throttle() {
+    let server = Server::new();
+    server.linked_device("Liseuse");
+    let state = through_a_tunnel(server.state());
+    let wrong = "A".repeat(43);
+    for _ in 0..10 {
+        let (status, body) = server
+            .send_to(
+                state.clone(),
+                request("GET", "/health", &wrong)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(StatusCode::OK, status, "health still answers");
+        assert!(body.get("relay").is_none(), "{body}");
+    }
+    let (status, _) = server
+        .send_to(
+            state,
+            request("GET", "/series", &wrong)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::TOO_MANY_REQUESTS, status);
 }

@@ -18,6 +18,7 @@ use leaf_server::boot::{
     cache_ceiling, jpeg_quality, split_volumes, tls_hosts, tls_paths, Invocation, Outcome,
 };
 use leaf_server::config::Config;
+use leaf_server::net::link::Reach;
 use leaf_server::net::tls::Tls;
 use leaf_server::scan::scanner::Scanner;
 use leaf_server::store::Db;
@@ -132,7 +133,36 @@ async fn serve(asked: Invocation) -> Result<()> {
         cache_ceiling(std::env::var("LEAF_MAX_CACHE_MB").ok().as_deref()),
     );
 
+    // Loaded before the state rather than where it is bound: the certificate's fingerprint is
+    // what a device's relay pins in the link it hands another.
+    let tls = match tls_paths(&config) {
+        Some((certificate, key)) => Some(
+            Tls::of(
+                &certificate,
+                &key,
+                &tls_hosts(&config.tls_hosts, &config.host),
+            )
+            .await?,
+        ),
+        None => None,
+    };
+    let reach = Reach {
+        public_url: config.public_url.clone(),
+        ..Reach::listening_on(
+            &config.host,
+            config.port,
+            tls.as_ref().map(|t| t.fingerprint_hex.clone()),
+        )
+    };
+
+    // Once, here, and off the async threads: it asks LEAF_PUBLIC_URL which certificate it
+    // presents, and the routes keep the answer.
+    let relay = tokio::task::spawn_blocking(move || reach.settle())
+        .await
+        .context("settling where relayed links point")?;
+
     let state = AppState::with_pages(Arc::clone(&db), keys, pages)
+        .relaying(relay)
         .with_library(roots.clone(), asked.all_dimensions)
         .trusting_proxy(config.trust_proxy)
         .bound_to(&config.host)
@@ -162,14 +192,8 @@ async fn serve(asked: Invocation) -> Result<()> {
     let address: std::net::SocketAddr = address
         .parse()
         .with_context(|| format!("{address} is not an address to bind"))?;
-    match tls_paths(&config) {
-        Some((certificate, key)) => {
-            let tls = Tls::of(
-                &certificate,
-                &key,
-                &tls_hosts(&config.tls_hosts, &config.host),
-            )
-            .await?;
+    match tls {
+        Some(tls) => {
             tracing::info!("Listening on https://{address}");
             // The same graceful stop the plain path has. Without it, stopping the unit cut
             // the process off mid-write while HTTP shut down politely — one behaviour for

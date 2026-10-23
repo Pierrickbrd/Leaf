@@ -44,6 +44,7 @@ use super::records::{EntryPatch, Records, SeriesPatch};
 use super::relocate::{MoveRequest, Relocate};
 use super::throttle::Throttle;
 use crate::metadata::sidecars::ArcJson;
+use crate::net::link::Relay;
 use crate::scan::layout;
 use crate::scan::runner::{ScanRunner, ScanStatus};
 use crate::scan::scanner::Scanner;
@@ -65,6 +66,9 @@ pub struct AppState {
     /// Whether the server listens only on this machine. Only there may a library with no
     /// key and no device be open; see [`AppState::bound_to`].
     pub loopback: bool,
+    /// Where a device's relay points, settled once at start (`Reach::settle`): the server
+    /// knows its own addresses, and a client only the one it happens to use.
+    pub relay: Arc<Relay>,
     pub throttle: Arc<Throttle>,
     /// Wrong codes on `/link`, counted apart: a recognised key wipes `throttle`, and a
     /// caller holding any key could otherwise guess a code, wipe, and guess again for ever.
@@ -132,6 +136,9 @@ impl AppState {
             // The safe guess would be `false`, but every state built without saying where it
             // listens is a test's, and the binary always says: `main.rs` calls `bound_to`.
             loopback: true,
+            // Nowhere another device can reach, for the same reason: the binary says where
+            // it is reached (`reached_at`), and a test that relays says so too.
+            relay: Arc::new(Relay::Nowhere),
             db,
             keys: Arc::new(keys),
             throttle: Arc::new(Throttle::default()),
@@ -160,6 +167,12 @@ impl AppState {
     /// is open (the loopback) or closed (anywhere else, where only `/health` answers).
     pub fn bound_to(mut self, host: &str) -> Self {
         self.loopback = crate::boot::is_loopback(host);
+        self
+    }
+
+    /// Where a device's relay points, as `Reach::settle` decided it.
+    pub fn relaying(mut self, relay: Relay) -> Self {
+        self.relay = Arc::new(relay);
         self
     }
 
@@ -293,6 +306,30 @@ impl FromRequestParts<AppState> for Caller {
     type Rejection = Refused;
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Refused> {
         allowed(parts, state, Permission::Read).await.map(Caller)
+    }
+}
+
+/// Whether a request offered a key the door recognises — for `/health`, which answers
+/// everyone and says a little more to a caller it knows. Never a refusal: a key that is
+/// wrong, or an address the throttle holds back, is simply not recognised. Offering no key
+/// asks nothing, so an open library is not recognising anybody.
+pub struct Recognised(pub bool);
+
+impl FromRequestParts<AppState> for Recognised {
+    type Rejection = Failure;
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Failure> {
+        let offered = parts
+            .headers
+            .get(HEADER)
+            .is_some_and(|v| !v.as_bytes().trim_ascii().is_empty());
+        if !offered {
+            return Ok(Recognised(false));
+        }
+        match allowed(parts, state, Permission::Read).await {
+            Ok(_) => Ok(Recognised(true)),
+            Err(Refused::Failed(failure)) => Err(failure),
+            Err(Refused::Forbidden(_) | Refused::TooMany(_)) => Ok(Recognised(false)),
+        }
     }
 }
 
@@ -473,7 +510,18 @@ impl IntoResponse for Refused {
 // -------------------------------------------------------------------- routes
 
 /// What the server is, and whether it is up. With `POST /link`, the only route that answers without a key.
-async fn health(State(state): State<AppState>) -> Result<Json<HealthDto>, Failure> {
+///
+/// To a key it recognises, and only then, it also says `relay`: whether another device can
+/// reach this server, which is the settings screen's one question before it offers to link
+/// another device or to unlink this one. Behind the key because it is a fact about the
+/// deployment, which a stranger at the door has no business learning, and judged by the same
+/// door as every other route — a key tried here is counted, or `/health` would be the one
+/// place to guess keys without the throttle noticing.
+async fn health(
+    State(state): State<AppState>,
+    Recognised(recognised): Recognised,
+) -> Result<Json<HealthDto>, Failure> {
+    let relay = recognised.then(|| state.relay.possible());
     let local_drop = state.drop.enabled();
     let could_be_open = state.loopback && state.keys.open();
     let (library, closed) = blocking(move || {
@@ -500,6 +548,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<HealthDto>, Failur
         library,
         local_drop,
         linked: !could_be_open || closed,
+        relay,
     }))
 }
 
