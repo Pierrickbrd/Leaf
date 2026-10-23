@@ -126,6 +126,26 @@ pub enum ProfileRefusal {
     BadName,
 }
 
+/// Where a device sits: the profile it reads as, and the three flags that say how it got
+/// there and what leaving it costs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seat {
+    pub profile_id: String,
+    pub kept: bool,
+    pub choosing: bool,
+    pub held: bool,
+}
+
+/// The answers to a change of profile that are the caller's to fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchRefusal {
+    NoSuchProfile,
+    CodeNeeded,
+    WrongCode,
+    /// A restricted profile cannot be kept on a device by whoever reads there.
+    NotYours,
+}
+
 const COLUMNS: &str = "id, name, color, restricted, max_age, can_import, can_edit, can_delete";
 
 fn profile_of(r: &Row<'_>) -> rusqlite::Result<Profile> {
@@ -373,7 +393,7 @@ impl Profiles {
             // served as the principal, which is the tablet of a child opening its parent's
             // library. A restricted profile's device is also held, so the choice asks the code.
             cx.execute(
-                "UPDATE device SET profile_id = ?1, choosing = 1, held = held OR ?3
+                "UPDATE device SET profile_id = ?1, kept = 0, choosing = 1, held = held OR ?3
                  WHERE profile_id = ?2",
                 rusqlite::params![DEFAULT_PROFILE, id, gone.kind == Kind::Restricted],
             )?;
@@ -465,6 +485,77 @@ impl Profiles {
             .is_ok())
     }
 
+    /// Where a device sits. An error for a device that does not exist: the caller was
+    /// recognised by its key a moment ago, so its absence is a revocation in between.
+    pub fn seat(&self, device_id: &str) -> Result<Seat> {
+        self.db.read(|cx| seat_of(cx, device_id))
+    }
+
+    /// The device changes the profile it reads as, by the table of the design: leaving a
+    /// restricted profile (or a seat it is held on) takes the code whatever the target;
+    /// reaching the principal takes it when the code guards everything; the rest is free.
+    ///
+    /// The code is hashed **before** the write, never inside it: Argon2 is slow on purpose and
+    /// the writer is one for the whole library. So what was true when it was checked may not
+    /// be true when the write runs — a profile made restricted, a scope tightened — and the
+    /// write asks again with what it finds, refusing with `CodeNeeded` if the code it was
+    /// given no longer covers it. The refusal is the safe side of the race.
+    pub fn switch(
+        &self,
+        device_id: &str,
+        to: &str,
+        code: Option<&str>,
+        keep: bool,
+    ) -> Result<Result<Seat, SwitchRefusal>> {
+        let facts = self.db.read(|cx| facts_of(cx, device_id, to))?;
+        let Some(facts) = facts else {
+            return Ok(Err(SwitchRefusal::NoSuchProfile));
+        };
+        if keep && facts.target_restricted {
+            return Ok(Err(SwitchRefusal::NotYours));
+        }
+        let mut verified = false;
+        if facts.code_needed() {
+            let Some(code) = code else {
+                return Ok(Err(SwitchRefusal::CodeNeeded));
+            };
+            if !self.check_code(code)? {
+                return Ok(Err(SwitchRefusal::WrongCode));
+            }
+            verified = true;
+        }
+        self.db.write(|cx| {
+            // One transaction from here: two switches at once are two writes in turn, and the
+            // seat is whichever came last, never a profile of one and the flags of the other.
+            let Some(facts) = facts_of(cx, device_id, to)? else {
+                return Ok(Err(SwitchRefusal::NoSuchProfile));
+            };
+            if keep && facts.target_restricted {
+                return Ok(Err(SwitchRefusal::NotYours));
+            }
+            if facts.code_needed() && !verified {
+                return Ok(Err(SwitchRefusal::CodeNeeded));
+            }
+            Ok(Ok(sit(cx, device_id, to, keep)?))
+        })
+    }
+
+    /// The principal seats another device, or this one: their decision, so no code and a
+    /// restricted profile may be kept. It also ends a choice the device was waiting on.
+    pub fn place(
+        &self,
+        device_id: &str,
+        to: &str,
+        kept: bool,
+    ) -> Result<Result<Seat, SwitchRefusal>> {
+        self.db.write(|cx| {
+            if find(cx, to)?.is_none() {
+                return Ok(Err(SwitchRefusal::NoSuchProfile));
+            }
+            Ok(Ok(sit(cx, device_id, to, kept)?))
+        })
+    }
+
     /// The profile's reading preferences, an opaque object; `{}` for a profile that has none
     /// or does not exist.
     pub fn reading(&self, profile_id: &str) -> Result<serde_json::Value> {
@@ -502,6 +593,103 @@ impl Profiles {
             Ok(())
         })
     }
+}
+
+fn seat_of(cx: &Cx<'_>, device_id: &str) -> Result<Seat> {
+    cx.query_one(
+        "SELECT profile_id, kept, choosing, held FROM device WHERE id = ?1",
+        [device_id],
+        |r| {
+            Ok(Seat {
+                profile_id: r.get(0)?,
+                kept: r.get(1)?,
+                choosing: r.get(2)?,
+                held: r.get(3)?,
+            })
+        },
+    )?
+    .ok_or_else(|| anyhow!("there is no device {device_id}"))
+}
+
+/// What the table of the design looks at, read together so the decision is made on one
+/// moment's state.
+struct Facts {
+    /// The device sits on a restricted profile, or is held as if it did.
+    leaving_restricted: bool,
+    on_principal: bool,
+    target_principal: bool,
+    target_restricted: bool,
+    code: Option<CodeScope>,
+}
+
+impl Facts {
+    fn code_needed(&self) -> bool {
+        // No code at all, nothing to ask: a device held after its restricted profile was
+        // deleted must not be stuck for ever if the code was cleared since, which
+        // `clear_code` allows once no profile is restricted.
+        let Some(scope) = self.code else {
+            return false;
+        };
+        self.leaving_restricted
+            || (self.target_principal && scope == CodeScope::Everything && !self.on_principal)
+    }
+}
+
+/// `None` when the target profile does not exist.
+fn facts_of(cx: &Cx<'_>, device_id: &str, to: &str) -> Result<Option<Facts>> {
+    let seat = seat_of(cx, device_id)?;
+    let Some(target) = find(cx, to)? else {
+        return Ok(None);
+    };
+    let here = find(cx, &seat.profile_id)?;
+    let code = cx
+        .query_one(
+            "SELECT CASE WHEN code_phc IS NULL THEN NULL ELSE code_scope END
+             FROM household WHERE id = 1",
+            [],
+            |r| r.get::<_, Option<String>>(0),
+        )?
+        .flatten();
+    Ok(Some(Facts {
+        leaving_restricted: seat.held || here.is_some_and(|p| p.kind == Kind::Restricted),
+        // A device that must choose or is held only sits on `default` to hold its key: it is
+        // not the principal's, and reaching the principal from there asks what it asks of
+        // anyone else. Counting it as the principal let a deleted reader's device walk to the
+        // principal without the code when the code guards everything. Nor is a seat on the
+        // principal without « Retenir »: a device left there reopened on it for anyone, and the
+        // code window accepted any code, because the server did not check one.
+        on_principal: seat.profile_id == DEFAULT_PROFILE
+            && seat.kept
+            && !seat.choosing
+            && !seat.held,
+        target_principal: target.kind == Kind::Principal,
+        target_restricted: target.kind == Kind::Restricted,
+        code: code.map(|s| {
+            if s == "everything" {
+                CodeScope::Everything
+            } else {
+                CodeScope::Restricted
+            }
+        }),
+    }))
+}
+
+/// The one statement that moves a device: profile and flags together, and the end of any
+/// choice or hold, since a seat taken is a seat chosen.
+fn sit(cx: &Cx<'_>, device_id: &str, to: &str, kept: bool) -> Result<Seat> {
+    let touched = cx.execute(
+        "UPDATE device SET profile_id = ?2, kept = ?3, choosing = 0, held = 0 WHERE id = ?1",
+        rusqlite::params![device_id, to, kept],
+    )?;
+    if touched == 0 {
+        return Err(anyhow!("there is no device {device_id}"));
+    }
+    Ok(Seat {
+        profile_id: to.to_string(),
+        kept,
+        choosing: false,
+        held: false,
+    })
 }
 
 fn name_is_taken(cx: &Cx<'_>, name: &str, except: Option<&str>) -> Result<bool> {

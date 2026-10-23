@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use leaf_server::store::profiles::{
-    CodeScope, Kind, NewProfile, ProfilePatch, ProfileRefusal, Profiles, Rights, COLORS,
+    CodeScope, Kind, NewProfile, ProfilePatch, ProfileRefusal, Profiles, Rights, Seat,
+    SwitchRefusal, COLORS,
 };
 use leaf_server::store::Db;
 
@@ -48,6 +49,23 @@ impl Fixture {
                 NOW,
             )
             .expect("creating")
+    }
+
+    /// A device on `profile`, as `Devices` would have linked it, with the three flags at rest.
+    fn device_on(&self, id: &str, profile: &str) {
+        self.db
+            .write(|cx| {
+                cx.execute(
+                    "INSERT INTO device (id, name, name_key, key_digest, linked_at, linked_by, profile_id)
+                     VALUES (?1, ?1, ?1, x'00', 1, 'terminal', ?2)",
+                    [id, profile],
+                )
+            })
+            .unwrap();
+    }
+
+    fn with_code(&self, scope: CodeScope) {
+        self.profiles.set_code("2468", scope).unwrap().unwrap();
     }
 
     fn restricted(
@@ -675,5 +693,297 @@ fn setting_the_code_and_a_reading_each_cost_one_statement() {
     assert_eq!(
         cost(&fx, |p| p.set_reading("default", &serde_json::json!({}))),
         1
+    );
+}
+
+fn seat(profile: &str, kept: bool) -> Seat {
+    Seat {
+        profile_id: profile.into(),
+        kept,
+        choosing: false,
+        held: false,
+    }
+}
+
+#[test]
+fn leaving_a_restricted_profile_takes_the_code() {
+    let fx = Fixture::new();
+    fx.with_code(CodeScope::Restricted);
+    let leo = fx.restricted("Léo", "bleu", Some(10)).unwrap();
+    let ines = fx.reader("Inès", "rose").unwrap();
+    fx.device_on("d", &leo.id);
+    assert_eq!(
+        fx.profiles.switch("d", &ines.id, None, false).unwrap(),
+        Err(SwitchRefusal::CodeNeeded)
+    );
+    assert_eq!(
+        fx.profiles
+            .switch("d", &ines.id, Some("0000"), false)
+            .unwrap(),
+        Err(SwitchRefusal::WrongCode)
+    );
+    assert_eq!(fx.profiles.seat("d").unwrap(), seat(&leo.id, false));
+    assert_eq!(
+        fx.profiles
+            .switch("d", &ines.id, Some("2468"), false)
+            .unwrap(),
+        Ok(seat(&ines.id, false))
+    );
+    assert_eq!(fx.profiles.seat("d").unwrap(), seat(&ines.id, false));
+}
+
+#[test]
+fn the_principal_is_free_to_reach_unless_the_code_guards_it() {
+    let fx = Fixture::new();
+    fx.with_code(CodeScope::Restricted);
+    let ines = fx.reader("Inès", "rose").unwrap();
+    fx.device_on("d", &ines.id);
+    assert_eq!(
+        fx.profiles.switch("d", "default", None, false).unwrap(),
+        Ok(seat("default", false))
+    );
+    fx.profiles
+        .set_code("2468", CodeScope::Everything)
+        .unwrap()
+        .unwrap();
+    fx.profiles
+        .switch("d", &ines.id, None, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fx.profiles.switch("d", "default", None, false).unwrap(),
+        Err(SwitchRefusal::CodeNeeded)
+    );
+    assert_eq!(
+        fx.profiles
+            .switch("d", "default", Some("2468"), false)
+            .unwrap(),
+        Ok(seat("default", false))
+    );
+    // On the principal without « Retenir »: staying on it is still the code's to allow, since
+    // anybody may open the device next. Retained with the code, staying is free, and going to
+    // a reader asks nothing either way.
+    assert_eq!(
+        fx.profiles.switch("d", "default", None, true).unwrap(),
+        Err(SwitchRefusal::CodeNeeded)
+    );
+    assert_eq!(
+        fx.profiles
+            .switch("d", "default", Some("2468"), true)
+            .unwrap(),
+        Ok(seat("default", true))
+    );
+    assert_eq!(
+        fx.profiles.switch("d", "default", None, true).unwrap(),
+        Ok(seat("default", true))
+    );
+    assert_eq!(
+        fx.profiles.switch("d", &ines.id, None, false).unwrap(),
+        Ok(seat(&ines.id, false))
+    );
+}
+
+#[test]
+fn an_unretained_principal_seat_is_not_a_way_round_the_code() {
+    // Left on the principal without « Retenir », a family laptop reopened on it for anyone,
+    // and the code window took any code because none was checked.
+    let fx = Fixture::new();
+    fx.reader("Inès", "rose").unwrap();
+    fx.device_on("d", "default");
+    fx.with_code(CodeScope::Everything);
+    assert_eq!(
+        fx.profiles.switch("d", "default", None, false).unwrap(),
+        Err(SwitchRefusal::CodeNeeded)
+    );
+    assert_eq!(
+        fx.profiles
+            .switch("d", "default", Some("1357"), false)
+            .unwrap(),
+        Err(SwitchRefusal::WrongCode)
+    );
+    assert_eq!(
+        fx.profiles
+            .switch("d", "default", Some("2468"), false)
+            .unwrap(),
+        Ok(seat("default", false))
+    );
+}
+
+#[test]
+fn a_restricted_profile_cannot_be_kept_from_who_reads() {
+    let fx = Fixture::new();
+    fx.with_code(CodeScope::Restricted);
+    let leo = fx.restricted("Léo", "bleu", Some(10)).unwrap();
+    fx.device_on("d", "default");
+    assert_eq!(
+        fx.profiles.switch("d", &leo.id, None, true).unwrap(),
+        Err(SwitchRefusal::NotYours)
+    );
+    assert_eq!(fx.profiles.seat("d").unwrap(), seat("default", false));
+    assert_eq!(
+        fx.profiles.place("d", &leo.id, true).unwrap(),
+        Ok(seat(&leo.id, true))
+    );
+    assert_eq!(
+        fx.profiles.switch("d", "nobody", None, false).unwrap(),
+        Err(SwitchRefusal::NoSuchProfile)
+    );
+}
+
+#[test]
+fn deleting_the_profile_a_device_sits_on_makes_it_choose() {
+    let fx = Fixture::new();
+    let ines = fx.reader("Inès", "bleu").unwrap();
+    fx.device_on("d", &ines.id);
+    fx.profiles.place("d", &ines.id, true).unwrap().unwrap();
+    fx.profiles.delete(&ines.id).unwrap().unwrap();
+    assert_eq!(
+        fx.profiles.seat("d").unwrap(),
+        Seat {
+            profile_id: "default".into(),
+            kept: false,
+            choosing: true,
+            held: false,
+        }
+    );
+}
+
+#[test]
+fn deleting_a_restricted_profile_leaves_its_device_held() {
+    let fx = Fixture::new();
+    fx.with_code(CodeScope::Restricted);
+    let leo = fx.restricted("Léo", "bleu", Some(10)).unwrap();
+    let ines = fx.reader("Inès", "rose").unwrap();
+    fx.device_on("d", &leo.id);
+    fx.profiles.delete(&leo.id).unwrap().unwrap();
+    let held = fx.profiles.seat("d").unwrap();
+    assert!(held.held && held.choosing && !held.kept);
+    // Parked on the principal, the device is still a child's: any way out asks the code.
+    assert_eq!(
+        fx.profiles.switch("d", &ines.id, None, false).unwrap(),
+        Err(SwitchRefusal::CodeNeeded)
+    );
+    assert_eq!(
+        fx.profiles.switch("d", "default", None, false).unwrap(),
+        Err(SwitchRefusal::CodeNeeded)
+    );
+    assert_eq!(
+        fx.profiles
+            .switch("d", &ines.id, Some("2468"), false)
+            .unwrap(),
+        Ok(seat(&ines.id, false))
+    );
+}
+
+#[test]
+fn a_held_device_with_no_code_left_is_not_stuck() {
+    let fx = Fixture::new();
+    fx.with_code(CodeScope::Restricted);
+    let leo = fx.restricted("Léo", "bleu", Some(10)).unwrap();
+    fx.device_on("d", &leo.id);
+    fx.profiles.delete(&leo.id).unwrap().unwrap();
+    fx.profiles.clear_code().unwrap().unwrap();
+    assert_eq!(
+        fx.profiles.switch("d", "default", None, false).unwrap(),
+        Ok(seat("default", false))
+    );
+}
+
+#[test]
+fn placing_a_device_ends_its_choice_and_its_hold() {
+    let fx = Fixture::new();
+    fx.with_code(CodeScope::Everything);
+    let leo = fx.restricted("Léo", "bleu", Some(10)).unwrap();
+    fx.device_on("d", &leo.id);
+    fx.profiles.delete(&leo.id).unwrap().unwrap();
+    assert_eq!(
+        fx.profiles.place("d", "default", true).unwrap(),
+        Ok(seat("default", true))
+    );
+    assert_eq!(fx.profiles.seat("d").unwrap(), seat("default", true));
+}
+
+#[test]
+fn two_switches_at_once_leave_one_seat() {
+    // The writer is one lock and one transaction per switch, so the two run in turn and the
+    // seat is the whole of whichever ran last. Repeated, because a mixture would only show
+    // on some interleavings.
+    for _ in 0..20 {
+        let fx = Fixture::new();
+        let a = fx.reader("A", "bleu").unwrap();
+        let b = fx.reader("B", "rose").unwrap();
+        fx.device_on("d", "default");
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = [(a.id.clone(), true), (b.id.clone(), false)]
+            .into_iter()
+            .map(|(to, keep)| {
+                let profiles = Profiles::new(fx.db.clone());
+                let gate = gate.clone();
+                std::thread::spawn(move || {
+                    gate.wait();
+                    profiles.switch("d", &to, None, keep).unwrap().unwrap()
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let end = fx.profiles.seat("d").unwrap();
+        let expected_a = seat(&a.id, true);
+        let expected_b = seat(&b.id, false);
+        assert!(end == expected_a || end == expected_b, "a mixture: {end:?}");
+        assert!(!end.choosing && !end.held);
+    }
+}
+
+#[test]
+fn a_device_made_to_choose_is_not_one_that_chooses_again_when_it_switches() {
+    let fx = Fixture::new();
+    let ines = fx.reader("Inès", "bleu").unwrap();
+    fx.device_on("d", &ines.id);
+    fx.profiles.delete(&ines.id).unwrap().unwrap();
+    assert!(fx.profiles.seat("d").unwrap().choosing);
+    fx.profiles
+        .switch("d", "default", None, false)
+        .unwrap()
+        .unwrap();
+    assert!(!fx.profiles.seat("d").unwrap().choosing);
+}
+
+#[test]
+fn seating_costs_a_fixed_handful_of_statements() {
+    let fx = Fixture::new();
+    fx.with_code(CodeScope::Restricted);
+    let leo = fx.restricted("Léo", "bleu", Some(10)).unwrap();
+    let ines = fx.reader("Inès", "rose").unwrap();
+    fx.device_on("d", "default");
+    assert_eq!(cost(&fx, |p| p.seat("d")), 1);
+    // Free switch: the facts read twice (device, target, current profile, household), and the update.
+    assert_eq!(cost(&fx, |p| p.switch("d", &ines.id, None, false)), 9);
+    // Leaving a restricted profile adds the one statement that reads the stored code.
+    fx.profiles.place("d", &leo.id, false).unwrap().unwrap();
+    assert_eq!(
+        cost(&fx, |p| p.switch("d", &ines.id, Some("2468"), false)),
+        10
+    );
+    assert_eq!(cost(&fx, |p| p.place("d", "default", false)), 2);
+}
+
+#[test]
+fn a_device_that_must_choose_is_not_the_principal_when_the_code_guards_it() {
+    let fx = Fixture::new();
+    fx.with_code(CodeScope::Everything);
+    let ines = fx.reader("Inès", "bleu").unwrap();
+    fx.device_on("d", &ines.id);
+    fx.profiles.delete(&ines.id).unwrap().unwrap();
+    assert_eq!(
+        fx.profiles.switch("d", "default", None, false).unwrap(),
+        Err(SwitchRefusal::CodeNeeded)
+    );
+    assert_eq!(
+        fx.profiles
+            .switch("d", "default", Some("2468"), false)
+            .unwrap(),
+        Ok(seat("default", false))
     );
 }

@@ -56,6 +56,16 @@ pub struct Device {
     pub linked_by: String,
     pub seen_at: Option<i64>,
     pub profile_id: String,
+    /// Whether the device holds `profile_id` as its own: Leaf opens on it without asking
+    /// who reads. Whoever reads cannot set it on a restricted profile (`switch` refuses), but
+    /// it can be true of one: the principal may `place` a device on it, and restricting a
+    /// reader keeps the devices that had retained it.
+    pub kept: bool,
+    /// The device must ask who reads before anything else: its profile was deleted under it.
+    pub choosing: bool,
+    /// The profile it sat on was restricted when it was deleted, so leaving the seat it was
+    /// parked on asks for the code like leaving the restricted profile would have.
+    pub held: bool,
 }
 
 #[derive(Clone)]
@@ -475,7 +485,8 @@ fn remove_device(cx: &Cx<'_>, id: &str) -> Result<()> {
     Ok(())
 }
 
-const DEVICE_COLUMNS: &str = "id, name, linked_at, linked_by, seen_at, profile_id";
+const DEVICE_COLUMNS: &str =
+    "id, name, linked_at, linked_by, seen_at, profile_id, kept, choosing, held";
 
 fn device_row(r: &Row<'_>) -> rusqlite::Result<Device> {
     Ok(Device {
@@ -485,6 +496,9 @@ fn device_row(r: &Row<'_>) -> rusqlite::Result<Device> {
         linked_by: r.get(3)?,
         seen_at: r.get(4)?,
         profile_id: r.get(5)?,
+        kept: r.get(6)?,
+        choosing: r.get(7)?,
+        held: r.get(8)?,
     })
 }
 
@@ -544,6 +558,9 @@ fn insert_device(cx: &Cx<'_>, name: &str, linked_by: &str, now: i64) -> Result<L
             linked_by: linked_by.to_string(),
             seen_at: None,
             profile_id: DEFAULT_PROFILE.to_string(),
+            kept: false,
+            choosing: false,
+            held: false,
         },
         key,
     })
