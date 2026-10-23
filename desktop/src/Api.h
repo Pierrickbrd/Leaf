@@ -407,6 +407,9 @@ struct Hit {
     std::optional<int> entryPageCount;
     std::optional<double> chapterNumber;
     std::optional<QString> chapterTitle;
+    /// « Chap. 13 » — what the chapter is called in front of its title. `label` is what was
+    /// searched, the title or what the file said, and names no chapter the way the reader does.
+    std::optional<QString> chapterLabel;
     bool approximate = false;
 };
 

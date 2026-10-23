@@ -1063,19 +1063,34 @@ impl Scanner {
             .unwrap_or(0);
         let settled = entries.iter().all(|e| e.unchanged) && stored == entries.len() as i64;
 
-        if settled {
-            // Still counted, or the report would announce zero chapters for a library that
-            // has fifty thousand — the summary describes the library, not the work done.
-            let count: i64 = cx
-                .query_one(
-                    "SELECT COUNT(*) FROM chapter WHERE edition_id = ?1",
-                    [id.as_str()],
-                    |r| r.get(0),
-                )?
-                .unwrap_or(0);
-            report.chapters += count as u32;
+        // Settled files are not yet settled chapters: what a chapter is called also comes
+        // from the edition's pattern, and from the default one, neither of which is in the
+        // archive. The default changed once — from what the file name held, « #13 », to
+        // « Chap. 13 » — and a library whose files had not moved kept « #13 » through every
+        // rescan. So the names stored are read back, in the one statement that used to only
+        // count them, and the chapters are rewritten when one differs from what was drafted.
+        let kept = if settled {
+            Some(cx.query(
+                "SELECT id, raw, label FROM chapter WHERE edition_id = ?1",
+                [id.as_str()],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        (r.get::<_, String>(1)?, r.get::<_, String>(2)?),
+                    ))
+                },
+            )?)
         } else {
-            self.write_chapters(cx, &id, &entries, report)?;
+            None
+        };
+        match kept {
+            Some(kept) if named_as_drafted(&kept, &entries) => {
+                // Still counted, or the report would announce zero chapters for a library
+                // that has fifty thousand — the summary describes the library, not the work
+                // done.
+                report.chapters += kept.len() as u32;
+            }
+            _ => self.write_chapters(cx, &id, &entries, report)?,
         }
         // The edition's own arcs, or the work's when it declares none: chosen here, so that
         // `write_arcs` is handed one list **and the file it came from**.
@@ -1483,7 +1498,13 @@ impl Scanner {
 
         // An empty label is a decision, not an omission: it says "show the title alone",
         // which is what a specially-named bonus wants even when it carries a number.
-        let composed = label::compose(pattern, number);
+        //
+        // A numbered chapter that nothing gives a pattern to takes the default one rather
+        // than what its file name held: « #13 » named nothing, « Chap. 13 » does.
+        let pattern = pattern
+            .filter(|p| !p.trim().is_empty())
+            .unwrap_or(label::DEFAULT_CHAPTER_LABEL);
+        let composed = label::compose(Some(pattern), number);
         let label_text = c
             .label
             .clone()
@@ -2381,6 +2402,27 @@ fn absolute(path: &Path) -> String {
         .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
         .to_string()
+}
+
+/// Whether the chapters stored for an edition carry the names its entries were just drafted
+/// with — same rows, same `raw`, same `label` — keyed the way [`Scanner::write_chapters`]
+/// writes them.
+fn named_as_drafted(kept: &[(String, (String, String))], entries: &[ReadEntry]) -> bool {
+    let kept: HashMap<&str, (&str, &str)> = kept
+        .iter()
+        .map(|(id, (raw, label))| (id.as_str(), (raw.as_str(), label.as_str())))
+        .collect();
+    let mut drafted = 0usize;
+    for entry in entries {
+        for (rank, chapter) in entry.chapters.iter().enumerate() {
+            drafted += 1;
+            let id = format!("{}-{rank}", entry.id);
+            if kept.get(id.as_str()) != Some(&(chapter.raw.as_str(), chapter.label.as_str())) {
+                return false;
+            }
+        }
+    }
+    drafted == kept.len()
 }
 
 fn name_of(path: &Path) -> String {

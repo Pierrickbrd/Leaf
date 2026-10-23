@@ -1195,7 +1195,8 @@ impl Repository<'_> {
                     search.edition_id AS edition_id, search.entry_id AS entry_id,
                     entry.type AS entry_kind, entry.volume_number AS entry_number,
                     entry.title AS entry_title, entry.page_count AS entry_page_count,
-                    chapter.number AS chapter_number, chapter.title AS chapter_title
+                    chapter.number AS chapter_number, chapter.title AS chapter_title,
+                    chapter.label AS chapter_label
              FROM search
              LEFT JOIN entry
                ON entry.id = COALESCE(search.entry_id,
@@ -1242,6 +1243,7 @@ impl Repository<'_> {
                     entry_page_count: r.get("entry_page_count")?,
                     chapter_number: r.get("chapter_number")?,
                     chapter_title: r.get("chapter_title")?,
+                    chapter_label: r.get("chapter_label")?,
                     approximate: false,
                 })
             })?;
@@ -1335,6 +1337,7 @@ impl Repository<'_> {
                         entry_page_count: None,
                         chapter_number: None,
                         chapter_title: None,
+                        chapter_label: None,
                         approximate: true,
                     },
                     format!(

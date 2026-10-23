@@ -1,5 +1,15 @@
 //! Turning what a file says into what a reader sees.
 
+/// The pattern a numbered chapter is named by when neither its entry, its edition nor its
+/// work says how: « Chap. 13 », and « Chap. 56.5 » between two.
+///
+/// Before it, the label was whatever the file name held in front of its title, and a
+/// library named `#13.cbz` showed « #13 » in every place a chapter is named — a sign that
+/// names nothing. The number stays in `number` and what the file said stays in `raw`; this
+/// is only what is drawn. The space is a no-break one, so the abbreviation never ends a line
+/// with its number on the next.
+pub const DEFAULT_CHAPTER_LABEL: &str = "Chap.\u{a0}{n}";
+
 /// What a raw chapter label was found to mean.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedLabel {

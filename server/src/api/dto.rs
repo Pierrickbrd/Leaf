@@ -381,6 +381,11 @@ pub struct SearchHitDto {
     pub chapter_number: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chapter_title: Option<String>,
+    /// What the chapter is called in front of its title, as `Chapter.label` says it. The hit's
+    /// own label is what was searched — the title, or what the file said when it has none,
+    /// « #13 » — so a result could not name a chapter the way the reader does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chapter_label: Option<String>,
     /// A guess, offered because nothing matched: "did you mean", not "here it is". It has
     /// to reach the screen as a guess — an approximate hit shown like an exact one costs
     /// more trust than finding nothing ever does.
