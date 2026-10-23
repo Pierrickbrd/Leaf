@@ -271,6 +271,27 @@ private slots:
         QVERIFY(m_pretend->heard.contains(R"("id":"default")"));
     }
 
+    /// The screens reach their French through the model: the map for the texts that stand alone,
+    /// one call for each that carries a name, and the line under a profile from its own map.
+    void the_screens_are_handed_their_words()
+    {
+        serving(seating({principal(), reader(), child()}, u"p2"_s));
+        asked();
+
+        const QVariantMap said = m_profiles->words();
+        QCOMPARE(said.value(u"whoReads"_s).toString(), Words::whoReads());
+        QCOMPARE(said.value(u"addAProfile"_s).toString(), Words::addAProfile());
+        QCOMPARE(said.value(u"forgotCode"_s).toString(), Words::forgotCode());
+        QCOMPARE(m_profiles->saySwitchToProfile(u"Élodie"_s), u"Passer à Élodie"_s);
+        QCOMPARE(m_profiles->saySeriesForYou(3), u"3 séries pour vous"_s);
+
+        const QVariantList list = m_profiles->list();
+        QCOMPARE(m_profiles->sayProfileLine(list.at(0).toMap(), {Words::youMark()}),
+                 u"Profil principal · vous"_s);
+        QCOMPARE(m_profiles->sayProfileLine(list.at(2).toMap(), {}),
+                 Words::profileLine(Api::Kind::Restricted, 12, {}));
+    }
+
     void a_switch_is_applied_and_said()
     {
         serving(seating({principal(), reader()}, u"p2"_s));

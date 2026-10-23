@@ -21,6 +21,7 @@
 #include <QQmlEngine>
 #include <QString>
 #include <QVariantList>
+#include <QStringList>
 #include <QVariantMap>
 
 class Profiles : public QObject
@@ -90,6 +91,20 @@ public:
     QVariantList deviceList() const { return m_devices; }
     QVariantMap readingPreferences() const { return m_reading; }
     QVariantMap words() const;
+    /// The texts that carry a name or a number are asked one by one: a map of finished strings
+    /// cannot hold a hole.
+    Q_INVOKABLE QString saySwitchToProfile(const QString &name) const;
+    Q_INVOKABLE QString sayEditProfile(const QString &name) const;
+    Q_INVOKABLE QString sayYearsOld(int age) const;
+    Q_INVOKABLE QString sayCodeHintHeld(const QString &name) const;
+    Q_INVOKABLE QString sayRetainedOn(const QString &device) const;
+    Q_INVOKABLE QString saySeriesUpToYears(int age) const;
+    Q_INVOKABLE QString sayEraseProfile(const QString &name) const;
+    Q_INVOKABLE QString sayOpensOn(const QString &name) const;
+    Q_INVOKABLE QString saySeriesForYou(int count) const;
+    /// The line under a profile's name, from the map `profiles` holds for it: its kind, its age,
+    /// and the marks the screen knows (`you`, a device it is kept on).
+    Q_INVOKABLE QString sayProfileLine(const QVariantMap &profile, const QStringList &marks) const;
 
     /// Who reads, now. Asked at launch and after anything that may have changed it.
     Q_INVOKABLE void ask();

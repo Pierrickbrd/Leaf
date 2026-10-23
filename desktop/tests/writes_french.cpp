@@ -1097,6 +1097,103 @@ private slots:
         QCOMPARE(Words::stageAnd(Words::importStage(Words::Importing::Ready), QString()),
                  Words::importStage(Words::Importing::Ready));
     }
+
+    // ——— Les profils ————————————————————————————————————————————————————————
+
+    /// The two questions of the profile screens, with a non-breaking space in front of the mark
+    /// and a curly apostrophe wherever one stands.
+    void the_profile_questions_keep_their_space_and_their_apostrophe()
+    {
+        const QString nbsp = QString(Words::Nbsp);
+        QCOMPARE(Words::forgotCode(), u"Code oublié"_s + nbsp + u"?"_s);
+        QCOMPARE(Words::eraseProfile(u"Camille"_s), u"Supprimer Camille"_s + nbsp + u"?"_s);
+        QCOMPARE(Words::codeReplacedOnServer(),
+                 u"Le code ne se remplace que sur le serveur, avec cette commande"_s + nbsp
+                     + u":"_s);
+        QCOMPARE(Words::backToShelf(), u"Revenir à l’étagère"_s);
+        QCOMPARE(Words::addNeedsCode(), u"L’ajout d’un profil est protégé par le code."_s);
+    }
+
+    /// A name or a number goes through `%1`, and no sentence is left with its hole open.
+    void a_text_with_a_name_or_a_number_fills_its_hole()
+    {
+        QCOMPARE(Words::switchToProfile(u"Camille"_s), u"Passer à Camille"_s);
+        QCOMPARE(Words::editProfile(u"Camille"_s), u"Modifier Camille"_s);
+        QCOMPARE(Words::yearsOld(10), u"10 ans"_s);
+        QCOMPARE(Words::opensOn(u"Camille"_s), u"S’ouvre sur Camille"_s);
+        QCOMPARE(Words::seriesForYou(42), u"42 séries pour vous"_s);
+        QVERIFY(Words::codeHintHeld(u"Camille"_s).endsWith(u"ici Camille."_s));
+        QVERIFY(!Words::retainedOn(u"Salon"_s).contains(u"%"_s));
+    }
+
+    /// The line under a profile is made of parts, and a part that is empty leaves no separator.
+    void the_line_under_a_profile_is_composed_from_its_parts()
+    {
+        using enum Api::Kind;
+        QCOMPARE(Words::profileLine(Principal, {}, {Words::youMark()}),
+                 u"Profil principal · vous"_s);
+        QCOMPARE(Words::profileLine(Reader, {}, {Words::retainedHere()}),
+                 u"Profil lecteur · retenu sur cet ordinateur"_s);
+        QCOMPARE(Words::profileLine(Reader, {}, {QString(), Words::retainedOn(u"Salon"_s)}),
+                 u"Profil lecteur · retenu sur Salon"_s);
+        QCOMPARE(Words::profileLine(Restricted, 10, {}),
+                 u"Profil restreint · séries jusqu’à 10 ans"_s);
+        // No age, or a kind this client was not taught: the plain word, never « jusqu’à 0 ».
+        QCOMPARE(Words::profileLine(Restricted, {}, {}), u"Profil restreint"_s);
+        QCOMPARE(Words::profileLine(Other, 12, {}), u"Profil restreint"_s);
+    }
+
+    /// The profile texts all read as French: no straight apostrophe, no hole left open.
+    void the_profile_texts_carry_no_straight_apostrophe()
+    {
+        const QStringList said{
+            Words::addOne(), Words::keepOnThisDevice(), Words::manageProfiles(),
+            Words::switchNeedsCode(), Words::leaveNeedsCode(), Words::enterCode(),
+            Words::addAProfile(), Words::back(), Words::confirm(), Words::newProfile(),
+            Words::yourProfile(), Words::profileName(), Words::profileColour(),
+            Words::takenColourNote(), Words::whatItMayDo(), Words::readerRole(),
+            Words::restrictedRole(), Words::mayImport(), Words::mayEdit(), Words::mayErase(),
+            Words::readerExplained(), Words::restrictedExplained(), Words::seriesUpTo(),
+            Words::codeToCreate(), Words::codeAgain(), Words::aCode(), Words::whenCodeAsked(),
+            Words::toLeaveRestricted(), Words::alsoToComeBack(), Words::principalExplained(),
+            Words::codeHintFree(), Words::eraseConsequence(), Words::profilesTab(),
+            Words::whatEachMayDo(), Words::devicesTab(), Words::aboutTab(), Words::atOpening(),
+            Words::opensOnThisComputer(), Words::askWhoReads(), Words::otherDevices(),
+            Words::removeDevice(), Words::shortcuts(), Words::thisClient(),
+            Words::serverHeading(), Words::youMark(), Words::retainedHere()};
+        for (const QString &one : said) {
+            QVERIFY(!one.isEmpty());
+            QVERIFY2(!one.contains(u'\''), qPrintable(one));
+            QVERIFY2(!one.contains(u"%1"_s), qPrintable(one));
+        }
+        // And the ones that take a name or a number, filled: no ordinary space before a
+        // two-part mark, whichever string they end up in.
+        QStringList all = said;
+        all << Words::forgotCode() << Words::codeReplacedOnServer()
+            << Words::switchToProfile(u"Camille"_s) << Words::editProfile(u"Camille"_s)
+            << Words::yearsOld(10) << Words::codeHintHeld(u"Camille"_s)
+            << Words::retainedOn(u"Salon"_s) << Words::seriesUpToYears(10)
+            << Words::eraseProfile(u"Camille"_s) << Words::opensOn(u"Camille"_s)
+            << Words::seriesForYou(3);
+        for (const QString &one : all) {
+            for (const QString &mark : {u" ?"_s, u" :"_s, u" ;"_s, u" !"_s})
+                QVERIFY2(!one.contains(mark), qPrintable(one));
+            QVERIFY2(!one.contains(u'\''), qPrintable(one));
+        }
+    }
+
+    /// French counts nought and one in the singular: « 1 séries pour vous » was what the first
+    /// version said to a profile that sees one series.
+    void a_count_is_singular_for_nought_and_one()
+    {
+        QCOMPARE(Words::seriesForYou(0), u"0 série pour vous"_s);
+        QCOMPARE(Words::seriesForYou(1), u"1 série pour vous"_s);
+        QCOMPARE(Words::seriesForYou(2), u"2 séries pour vous"_s);
+        QCOMPARE(Words::yearsOld(1), u"1 an"_s);
+        QCOMPARE(Words::yearsOld(2), u"2 ans"_s);
+        QCOMPARE(Words::seriesUpToYears(1), u"séries jusqu’à 1 an"_s);
+        QCOMPARE(Words::seriesUpToYears(12), u"séries jusqu’à 12 ans"_s);
+    }
 };
 
 QTEST_APPLESS_MAIN(WritesFrench)

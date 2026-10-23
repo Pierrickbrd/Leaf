@@ -182,7 +182,115 @@ bool Profiles::asksWhoReads() const
 
 QVariantMap Profiles::words() const
 {
-    return {{u"whoReads"_s, Words::whoReads()}, {u"wrongCode"_s, Words::wrongCode()}};
+    return {{u"whoReads"_s, Words::whoReads()},
+            {u"wrongCode"_s, Words::wrongCode()},
+            {u"cancel"_s, Words::cancel()},
+            {u"thisDevice"_s, Words::thisDevice()},
+            {u"addOne"_s, Words::addOne()},
+            {u"keepOnThisDevice"_s, Words::keepOnThisDevice()},
+            {u"manageProfiles"_s, Words::manageProfiles()},
+            {u"switchNeedsCode"_s, Words::switchNeedsCode()},
+            {u"backToShelf"_s, Words::backToShelf()},
+            {u"leaveNeedsCode"_s, Words::leaveNeedsCode()},
+            {u"enterCode"_s, Words::enterCode()},
+            {u"addAProfile"_s, Words::addAProfile()},
+            {u"addNeedsCode"_s, Words::addNeedsCode()},
+            {u"forgotCode"_s, Words::forgotCode()},
+            {u"codeReplacedOnServer"_s, Words::codeReplacedOnServer()},
+            {u"back"_s, Words::back()},
+            {u"confirm"_s, Words::confirm()},
+            {u"newProfile"_s, Words::newProfile()},
+            {u"yourProfile"_s, Words::yourProfile()},
+            {u"profileName"_s, Words::profileName()},
+            {u"profileColour"_s, Words::profileColour()},
+            {u"takenColourNote"_s, Words::takenColourNote()},
+            {u"whatItMayDo"_s, Words::whatItMayDo()},
+            {u"readerRole"_s, Words::readerRole()},
+            {u"restrictedRole"_s, Words::restrictedRole()},
+            {u"mayImport"_s, Words::mayImport()},
+            {u"mayEdit"_s, Words::mayEdit()},
+            {u"mayErase"_s, Words::mayErase()},
+            {u"readerExplained"_s, Words::readerExplained()},
+            {u"restrictedExplained"_s, Words::restrictedExplained()},
+            {u"seriesUpTo"_s, Words::seriesUpTo()},
+            {u"codeToCreate"_s, Words::codeToCreate()},
+            {u"codeAgain"_s, Words::codeAgain()},
+            {u"aCode"_s, Words::aCode()},
+            {u"whenCodeAsked"_s, Words::whenCodeAsked()},
+            {u"toLeaveRestricted"_s, Words::toLeaveRestricted()},
+            {u"alsoToComeBack"_s, Words::alsoToComeBack()},
+            {u"principalExplained"_s, Words::principalExplained()},
+            {u"codeHintFree"_s, Words::codeHintFree()},
+            {u"principalKind"_s, Words::principalKind()},
+            {u"readerKind"_s, Words::readerKind()},
+            {u"restrictedKind"_s, Words::restrictedKind()},
+            {u"youMark"_s, Words::youMark()},
+            {u"retainedHere"_s, Words::retainedHere()},
+            {u"eraseConsequence"_s, Words::eraseConsequence()},
+            {u"profilesTab"_s, Words::profilesTab()},
+            {u"whatEachMayDo"_s, Words::whatEachMayDo()},
+            {u"devicesTab"_s, Words::devicesTab()},
+            {u"aboutTab"_s, Words::aboutTab()},
+            {u"atOpening"_s, Words::atOpening()},
+            {u"opensOnThisComputer"_s, Words::opensOnThisComputer()},
+            {u"askWhoReads"_s, Words::askWhoReads()},
+            {u"otherDevices"_s, Words::otherDevices()},
+            {u"removeDevice"_s, Words::removeDevice()},
+            {u"shortcuts"_s, Words::shortcuts()},
+            {u"thisClient"_s, Words::thisClient()},
+            {u"serverHeading"_s, Words::serverHeading()}};
+}
+
+QString Profiles::saySwitchToProfile(const QString &name) const
+{
+    return Words::switchToProfile(name);
+}
+
+QString Profiles::sayEditProfile(const QString &name) const
+{
+    return Words::editProfile(name);
+}
+
+QString Profiles::sayYearsOld(int age) const
+{
+    return Words::yearsOld(age);
+}
+
+QString Profiles::sayCodeHintHeld(const QString &name) const
+{
+    return Words::codeHintHeld(name);
+}
+
+QString Profiles::sayRetainedOn(const QString &device) const
+{
+    return Words::retainedOn(device);
+}
+
+QString Profiles::saySeriesUpToYears(int age) const
+{
+    return Words::seriesUpToYears(age);
+}
+
+QString Profiles::sayEraseProfile(const QString &name) const
+{
+    return Words::eraseProfile(name);
+}
+
+QString Profiles::sayOpensOn(const QString &name) const
+{
+    return Words::opensOn(name);
+}
+
+QString Profiles::saySeriesForYou(int count) const
+{
+    return Words::seriesForYou(count);
+}
+
+QString Profiles::sayProfileLine(const QVariantMap &profile, const QStringList &marks) const
+{
+    const int age = profile.value(u"maxAge"_s).toInt();
+    const Api::Kind said = Api::kind(profile.value(u"kind"_s).toString());
+    return Words::profileLine(said, age > 0 ? std::optional<int>(age) : std::nullopt, marks);
 }
 
 void Profiles::take(const Api::Seating &seating)

@@ -2092,4 +2092,351 @@ QString profileNote(Api::Kind kind, std::optional<int> maxAge)
     return u"Restreint"_s;
 }
 
+QString addOne()
+{
+    return u"Ajouter"_s;
+}
+
+QString keepOnThisDevice()
+{
+    return u"Retenir sur cet appareil"_s;
+}
+
+QString manageProfiles()
+{
+    return u"Gérer les profils"_s;
+}
+
+QString switchNeedsCode()
+{
+    return u"Changer de profil demande le code."_s;
+}
+
+QString backToShelf()
+{
+    return u"Revenir à l’étagère"_s;
+}
+
+QString switchToProfile(const QString &name)
+{
+    return u"Passer à %1"_s.arg(name);
+}
+
+QString leaveNeedsCode()
+{
+    return u"Quitter votre profil demande le code."_s;
+}
+
+QString enterCode()
+{
+    return u"Saisissez le code."_s;
+}
+
+QString addAProfile()
+{
+    return u"Ajouter un profil"_s;
+}
+
+QString addNeedsCode()
+{
+    return u"L’ajout d’un profil est protégé par le code."_s;
+}
+
+QString forgotCode()
+{
+    return u"Code oublié"_s + Nbsp + u"?"_s;
+}
+
+QString codeReplacedOnServer()
+{
+    return u"Le code ne se remplace que sur le serveur, avec cette commande"_s + Nbsp + u":"_s;
+}
+
+QString back()
+{
+    return u"Retour"_s;
+}
+
+QString confirm()
+{
+    return u"Valider"_s;
+}
+
+QString newProfile()
+{
+    return u"Nouveau profil"_s;
+}
+
+QString yourProfile()
+{
+    return u"Votre profil"_s;
+}
+
+QString editProfile(const QString &name)
+{
+    return u"Modifier %1"_s.arg(name);
+}
+
+QString profileName()
+{
+    return u"Nom"_s;
+}
+
+QString profileColour()
+{
+    return u"Couleur"_s;
+}
+
+QString takenColourNote()
+{
+    return u"Une couleur déjà prise porte l’initiale de son profil."_s;
+}
+
+QString whatItMayDo()
+{
+    return u"Ce que ce profil peut faire"_s;
+}
+
+QString readerRole()
+{
+    return u"Lecteur"_s;
+}
+
+QString restrictedRole()
+{
+    return u"Restreint"_s;
+}
+
+QString mayImport()
+{
+    return u"Importer"_s;
+}
+
+QString mayEdit()
+{
+    return u"Modifier"_s;
+}
+
+QString mayErase()
+{
+    return u"Supprimer"_s;
+}
+
+QString readerExplained()
+{
+    return u"Ce profil lit, et fait en plus ce que vous cochez."_s;
+}
+
+QString restrictedExplained()
+{
+    return u"Ce profil ne voit que les séries jusqu’à l’âge choisi et ne fait que lire. En sortir demande le code."_s;
+}
+
+QString seriesUpTo()
+{
+    return u"Séries jusqu’à"_s;
+}
+
+namespace {
+
+/// French counts 0 and 1 in the singular — « 0 série », « 1 an » — like `volumes` does, which
+/// is not `counted`'s rule (it says « 0 séries »). « 1 séries pour vous » is what this replaces.
+QString plural(int how, const QString &one, const QString &many)
+{
+    return (how >= 2 ? many : one).arg(how);
+}
+
+} // namespace
+
+QString yearsOld(int age)
+{
+    return plural(age, u"%1 an"_s, u"%1 ans"_s);
+}
+
+QString codeToCreate()
+{
+    return u"Le code, à créer"_s;
+}
+
+QString codeAgain()
+{
+    return u"Une seconde fois"_s;
+}
+
+QString aCode()
+{
+    return u"Un code"_s;
+}
+
+QString whenCodeAsked()
+{
+    return u"Il est demandé"_s;
+}
+
+QString toLeaveRestricted()
+{
+    return u"Pour quitter un profil restreint"_s;
+}
+
+QString alsoToComeBack()
+{
+    return u"Aussi pour revenir à votre profil"_s;
+}
+
+QString principalExplained()
+{
+    return u"C’est le profil principal"_s + Nbsp
+           + u": vous gérez les autres profils, les appareils et la bibliothèque."_s;
+}
+
+QString codeHintFree()
+{
+    return u"Le seul code de Leaf, de 4 à 8 caractères. Facultatif tant qu’aucun profil n’est restreint"_s + Nbsp
+           + u"; il devient obligatoire avec le premier."_s;
+}
+
+QString codeHintHeld(const QString &name)
+{
+    return u"Le seul code de Leaf, de 4 à 8 caractères. Il ne peut pas être retiré tant qu’un profil est restreint, ici %1."_s.arg(name);
+}
+
+QString principalKind()
+{
+    return u"Profil principal"_s;
+}
+
+QString readerKind()
+{
+    return u"Profil lecteur"_s;
+}
+
+QString restrictedKind()
+{
+    return u"Profil restreint"_s;
+}
+
+QString youMark()
+{
+    return u"vous"_s;
+}
+
+QString retainedHere()
+{
+    return u"retenu sur cet ordinateur"_s;
+}
+
+QString retainedOn(const QString &device)
+{
+    return u"retenu sur %1"_s.arg(device);
+}
+
+QString seriesUpToYears(int age)
+{
+    return u"séries jusqu’à "_s + plural(age, u"%1 an"_s, u"%1 ans"_s);
+}
+
+QString eraseProfile(const QString &name)
+{
+    return u"Supprimer %1"_s.arg(name) + Nbsp + u"?"_s;
+}
+
+QString eraseConsequence()
+{
+    return u"Les lectures en cours et les préférences de ce profil seront effacées."_s;
+}
+
+QString profilesTab()
+{
+    return u"Profils"_s;
+}
+
+QString whatEachMayDo()
+{
+    return u"Ce que chacun peut faire"_s;
+}
+
+QString devicesTab()
+{
+    return u"Appareils"_s;
+}
+
+QString aboutTab()
+{
+    return u"À propos"_s;
+}
+
+QString atOpening()
+{
+    return u"À l’ouverture"_s;
+}
+
+QString opensOnThisComputer()
+{
+    return u"Sur cet ordinateur, Leaf s’ouvre sur"_s;
+}
+
+QString askWhoReads()
+{
+    return u"Demander qui lit"_s;
+}
+
+QString otherDevices()
+{
+    return u"Les autres appareils"_s;
+}
+
+QString opensOn(const QString &name)
+{
+    return u"S’ouvre sur %1"_s.arg(name);
+}
+
+QString removeDevice()
+{
+    return u"Retirer cet appareil"_s;
+}
+
+QString seriesForYou(int count)
+{
+    return plural(count, u"%1 série pour vous"_s, u"%1 séries pour vous"_s);
+}
+
+QString shortcuts()
+{
+    return u"Raccourcis clavier"_s;
+}
+
+QString thisClient()
+{
+    return u"Ce client"_s;
+}
+
+QString serverHeading()
+{
+    return u"Le serveur"_s;
+}
+
+QString profileLine(Api::Kind kind, std::optional<int> maxAge, const QStringList &marks)
+{
+    QStringList parts;
+    switch (kind) {
+    case Api::Kind::Principal:
+        parts << principalKind();
+        break;
+    case Api::Kind::Reader:
+        parts << readerKind();
+        break;
+    case Api::Kind::Restricted:
+    case Api::Kind::Other:
+        parts << restrictedKind();
+        if (kind == Api::Kind::Restricted && maxAge)
+            parts << seriesUpToYears(*maxAge);
+        break;
+    }
+    for (const QString &mark : marks) {
+        if (!mark.isEmpty())
+            parts << mark;
+    }
+    return parts.join(u" · "_s);
+}
+
 } // namespace Words
