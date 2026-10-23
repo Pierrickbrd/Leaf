@@ -14,8 +14,11 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
-def run(snippet, env=None, stdin=subprocess.DEVNULL):
-    """Sources install.sh without running it, then runs `snippet` in the same shell."""
+def run(snippet, env=None, stdin=subprocess.DEVNULL, input=None):
+    """Sources install.sh without running it, then runs `snippet` in the same shell.
+
+    `input` is what a person would type: it replaces the closed stdin, and the snippet
+    redefines `at_a_terminal` for the installer to ask at all."""
     script = (
         "LEAF_INSTALL_SOURCE_ONLY=1; source install.sh; "
         'as_root() { printf "%s\\n" "$*"; }; ' + snippet
@@ -24,7 +27,8 @@ def run(snippet, env=None, stdin=subprocess.DEVNULL):
         ["bash", "-c", script],
         cwd=ROOT,
         env=env,
-        stdin=stdin,
+        stdin=stdin if input is None else None,
+        input=input,
         capture_output=True,
         text=True,
         check=False,
@@ -349,10 +353,10 @@ class InstallsAGivenBinary(unittest.TestCase):
         self.assertTrue(result.stdout.endswith("server/target/release/leaf-server"))
 
 
-class InstallsTheServer(unittest.TestCase):
+class ServerHarness:
     """install_server end to end on a fresh machine, with every system change printed."""
 
-    def install(self, folder, extra="", real_parent_check=False):
+    def install(self, folder, extra="", real_parent_check=False, input=None):
         binary = pathlib.Path(folder, "leaf-server")
         binary.write_text("#!/bin/sh\necho 'leaf-server 9.9.9'\n")
         binary.chmod(0o755)
@@ -364,16 +368,20 @@ class InstallsTheServer(unittest.TestCase):
             'getent() { [[ $2 == leaf || $2 == nobody-here ]] && return 2; '
             'printf "%s:x:1000:1000::/home/%s:/bin/bash\\n" "$2" "$2"; }; '
             'id() { case $1 in -gn) echo leaf ;; -u) echo 999 ;; *) builtin command id "$@" ;; esac; }; '
-            "openssl() { echo 0123456789abcdef0123456789abcdef; }; curl() { :; }; sleep() { :; }; "
+            "curl() { :; }; sleep() { :; }; "
             # as_root runs nothing here, so the parent check cannot ask the kernel. It has
             # its own tests, and one below that leaves it in place.
             + ("" if real_parent_check else "check_parent_out_of_reach() { :; }; ")
             + extra
-            + "; install_server; echo \"KEY=$client_key\"; echo FINISHED"
+            + "; install_server; echo FINISHED",
+            input=input,
         )
 
     def changes(self, result):
         return [line for line in result.stdout.splitlines() if line.startswith("ROOT ")]
+
+
+class InstallsTheServer(ServerHarness, unittest.TestCase):
 
     def test_a_fresh_install_reaches_the_end(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -382,24 +390,14 @@ class InstallsTheServer(unittest.TestCase):
         self.assertIn("FINISHED", result.stdout)
         self.assertTrue([l for l in self.changes(result) if "useradd" in l])
 
-    def test_an_existing_configuration_without_keys_gets_no_invented_key(self):
-        # server.env is never rewritten on an update, so a key made up here would be
-        # printed as the client key and exist nowhere.
-        with tempfile.TemporaryDirectory() as folder:
-            result = self.install(
-                folder,
-                'as_root() { case "$*" in "test -f /etc/leaf/server.env") return 0 ;; '
-                'sed*) return 0 ;; esac; printf "ROOT %s\\n" "$*"; }',
-            )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("KEY=", result.stdout.splitlines())
-        self.assertFalse([l for l in self.changes(result) if "/etc/leaf/server.env" in l])
-
-    def test_a_fresh_install_writes_the_key_it_reports(self):
+    def test_a_fresh_install_invents_no_key(self):
+        # A device links itself with a code now; a key made up here would sit in clear in
+        # server.env and keep the library open to whoever read it.
         with tempfile.TemporaryDirectory() as folder:
             result = self.install(folder, ":")
+            env = pathlib.Path(folder, "server.env").read_text().splitlines()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("KEY=0123456789abcdef0123456789abcdef", result.stdout.splitlines())
+        self.assertIn("LEAF_KEYS=", env)
         self.assertTrue([l for l in self.changes(result) if l.endswith("/etc/leaf/server.env")])
 
     def test_a_parent_the_service_can_write_stops_before_any_change(self):
@@ -603,25 +601,6 @@ class KeepsTheParentOutOfTheServiceReach(unittest.TestCase):
         self.assertNotIn("CALLED", result.stdout)
 
 
-class ReportsWhatWasInstalled(unittest.TestCase):
-    def test_the_key_written_is_the_key_reported(self):
-        result = run(
-            "LEAF_VERSION=0.1.0; component=server; address=http://127.0.0.1:8081; "
-            "client_key=abc123; report_installation"
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Clé client     : abc123", result.stdout)
-
-    def test_a_library_without_a_key_is_said_to_be_open(self):
-        result = run(
-            "LEAF_VERSION=0.1.0; component=server; address=http://127.0.0.1:8081; "
-            'client_key=""; report_installation'
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("Clé client", result.stdout)
-        self.assertIn("LEAF_KEYS", result.stdout)
-
-
 class RefusesLibrariesThatEscape(unittest.TestCase):
     def check(self, path):
         return run(f"check_library_path '{path}'")
@@ -649,17 +628,394 @@ class RefusesLibrariesThatEscape(unittest.TestCase):
 
 
 class RendersTheEnvironment(unittest.TestCase):
-    def test_quotes_values_and_keeps_the_keys(self):
-        result = run("render_server_env '/srv/a\"b' /srv 127.0.0.1 8081 'desktop:k:read'")
+    def test_quotes_values_and_writes_no_key(self):
+        result = run("render_server_env '/srv/a\"b' /srv 127.0.0.1 8081 'https://leaf.example.net'")
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
         for line in (
             'LEAF_LIBRARY="/srv/a\\"b"',
             'LEAF_INBOX="/srv/inbox"',
-            'LEAF_KEYS="desktop:k:read"',
+            "LEAF_KEYS=",
+            'LEAF_PUBLIC_URL="https://leaf.example.net"',
             "LEAF_DB=/var/lib/leaf/leaf.sqlite",
         ):
             self.assertIn(line, lines)
+
+# The server's update path: server.env exists, and every `sed` or `grep` on it finds
+# nothing unless the test says otherwise.
+UPDATE = (
+    'as_root() { case "$*" in "test -f /etc/leaf/server.env") return 0 ;; '
+    'sed*|grep*) return 1 ;; esac; printf "ROOT %s\\n" "$*"; }'
+)
+
+
+class AsksForThePublicAddress(ServerHarness, unittest.TestCase):
+    def env(self, folder):
+        return pathlib.Path(folder, "server.env").read_text().splitlines()
+
+    def test_a_new_server_env_carries_the_public_url_given_at_the_prompt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.install(folder, "at_a_terminal() { :; }", input="https://leaf.example.net\n")
+            env = self.env(folder)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('LEAF_PUBLIC_URL="https://leaf.example.net"', env)
+
+    def test_an_empty_answer_leaves_the_public_url_empty(self):
+        # "Laisser vide si vous ne savez pas encore": the line is there to fill later.
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.install(folder, "at_a_terminal() { :; }", input="\n")
+            env = self.env(folder)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('LEAF_PUBLIC_URL=""', env)
+
+    def test_an_address_that_is_not_a_url_stops_before_any_change(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.install(folder, "at_a_terminal() { :; }", input="leaf.example.net\n")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("https://", result.stderr)
+        self.assertEqual(self.changes(result), [])
+
+    def test_an_update_adds_the_line_only_when_it_is_missing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.install(
+                folder, UPDATE + "; at_a_terminal() { :; }", input="https://leaf.example.net\n"
+            )
+            env = self.env(folder)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(env[-1], 'LEAF_PUBLIC_URL="https://leaf.example.net"')
+        self.assertIn(
+            f"ROOT install -m 0600 -o root -g root {folder}/server.env /etc/leaf/server.env",
+            self.changes(result),
+        )
+
+        present = (
+            'as_root() { case "$*" in "test -f /etc/leaf/server.env") return 0 ;; '
+            'grep*) return 0 ;; sed*) return 1 ;; esac; printf "ROOT %s\\n" "$*"; }'
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.install(
+                folder, present + "; at_a_terminal() { :; }", input="https://other.example.net\n"
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse([l for l in self.changes(result) if "/etc/leaf/server.env" in l])
+
+    def test_an_update_without_a_terminal_leaves_server_env_untouched(self):
+        # Nobody to ask: server.env stays as it is, LEAF_KEYS included.
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.install(folder, UPDATE)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("FINISHED", result.stdout)
+        self.assertFalse([l for l in self.changes(result) if "/etc/leaf/server.env" in l])
+
+    def test_the_address_option_is_taken_without_a_question(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.install(folder, "parse_arguments server --address https://leaf.example.net")
+            env = self.env(folder)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('LEAF_PUBLIC_URL="https://leaf.example.net"', env)
+
+
+DEVICE_ADD = "/usr/local/bin/leaf-server device add"
+
+
+class ReportsALink(unittest.TestCase):
+    def report(self, device_add, component="server"):
+        return run(
+            f"LEAF_VERSION=0.1.0; component={component}; client_key=SECRET-KEY; "
+            "address=http://127.0.0.1:8081; "
+            f'as_root() {{ if [[ "$*" == "{DEVICE_ADD}" ]]; then {device_add}; '
+            'else printf "ROOT %s\\n" "$*"; fi; }; report_installation'
+        )
+
+    def test_a_new_server_ends_with_the_output_of_device_add(self):
+        result = self.report('echo "Lien : leaf://code@leaf.example.net"; echo "Valable 10 minutes."')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = [l for l in result.stdout.splitlines() if l.strip()]
+        self.assertEqual(lines[-2:], ["Lien : leaf://code@leaf.example.net", "Valable 10 minutes."])
+
+    def test_on_the_loopback_without_a_public_url_it_prints_the_explanation_not_a_key(self):
+        # device add answers 2 there, with no code made: the installation itself succeeded.
+        result = self.report("echo \"Leaf n'écoute que sur cette machine\"; return 2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Leaf n'écoute que sur cette machine", result.stdout)
+        self.assertNotIn("Clé", result.stdout)
+
+    def test_a_device_add_that_fails_otherwise_says_how_to_retry(self):
+        result = self.report("return 1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("leaf-server device add", result.stderr)
+
+    def test_an_unlinked_client_is_told_to_open_the_link_never_to_type_a_code(self):
+        # The client reads a whole leaf:// link — address and fingerprint with the code — and
+        # has no field for a code alone.
+        result = run("LEAF_VERSION=0.1.0; component=client; address=; report_installation")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("collez-le", result.stdout)
+        self.assertNotIn("code", result.stdout)
+
+    def test_it_never_prints_a_key(self):
+        for component in ("server", "client", "all"):
+            with self.subTest(component=component):
+                result = self.report("echo Lien", component)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("SECRET-KEY", result.stdout + result.stderr)
+                self.assertNotIn("Clé client", result.stdout)
+
+
+CLIENT = (
+    "LEAF_TMP=\"$folder\"; LEAF_VERSION=0.1.0; LEAF_ROOT=/src; human_user=alice; "
+    "human_group=alice; human_home=/home/alice; "
+    "install_apt() { :; }; cmake() { :; }; xdg-mime() { :; }; "
+    "update-desktop-database() { :; }; gtk-update-icon-cache() { :; }; "
+)
+
+
+class LinksTheLocalClient(unittest.TestCase):
+    def client(self, folder, snippet, input=None):
+        return run(f"folder='{folder}'; " + CLIENT + snippet, input=input)
+
+    def test_all_enrolls_the_local_client_and_writes_leaf_conf_0600(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.client(
+                folder,
+                "port=8081; uname() { echo machine; }; "
+                'as_root() { case "$*" in '
+                '"/usr/local/bin/leaf-server device enroll machine") echo LINKED-KEY ;; '
+                'test*) return 1 ;; *) printf "ROOT %s\\n" "$*" ;; esac; }; '
+                "link_local_client; install_client",
+            )
+            conf = pathlib.Path(folder, "leaf.conf").read_text().splitlines()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(conf, ["address=http://127.0.0.1:8081", "key=LINKED-KEY"])
+        self.assertIn(
+            f"ROOT install -m 0600 -o alice -g alice {folder}/leaf.conf /home/alice/.config/Leaf/leaf.conf",
+            result.stdout.splitlines(),
+        )
+        self.assertNotIn("LINKED-KEY", result.stdout + result.stderr)
+
+    def test_all_keeps_the_key_the_local_client_already_holds(self):
+        # A second device of the same name would be refused, and the client already reads.
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.client(
+                folder,
+                "port=8081; uname() { echo machine; }; "
+                'as_root() { case "$*" in *enroll*) echo ENROLLED ;; "test -f"*) return 0 ;; '
+                '"sed -n s/^key=//p"*) echo OLD-KEY ;; sed*) echo http://127.0.0.1:8081 ;; esac; }; '
+                'link_local_client; printf "%s" "$client_key"',
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "OLD-KEY")
+
+    def test_all_keeps_a_client_that_linked_itself_with_its_key_in_the_keychain(self):
+        # Unlinked and linked again from the client's own screen: leaf.conf keeps the address,
+        # the key went to the keychain. Enrolling again was « nom déjà pris » after the server
+        # was updated, or a second device whose key overwrote the file.
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.client(
+                folder,
+                "port=8081; uname() { echo machine; }; "
+                'as_root() { case "$*" in *enroll*) echo ENROLLED ;; "test -f"*) return 0 ;; '
+                '"sed -n s/^key=//p"*) ;; sed*) echo https://leaf.example:8443 ;; '
+                '*) printf "ROOT %s\\n" "$*" ;; esac; }; '
+                'link_local_client; install_client; '
+                'printf "[%s|%s|%s]" "$address" "$client_key" "$enrolled_name"',
+            )
+            written = pathlib.Path(folder, "leaf.conf").exists()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("ENROLLED", result.stdout)
+        self.assertTrue(result.stdout.endswith("[https://leaf.example:8443||]"), result.stdout)
+        self.assertFalse(written, "leaf.conf is left as it is")
+        self.assertNotIn(".config/Leaf/leaf.conf", result.stdout)
+
+    def test_a_refused_enrollment_stops_the_installation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.client(
+                folder,
+                "port=8081; uname() { echo machine; }; "
+                'as_root() { case "$*" in *enroll*) return 1 ;; test*) return 1 ;; esac; }; '
+                "link_local_client; echo FINISHED",
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("FINISHED", result.stdout)
+        self.assertIn("device enroll", result.stderr)
+
+    def test_a_client_that_fails_to_install_leaves_no_enrolled_device(self):
+        # The client build failed on a missing zlib after the device was enrolled: its key
+        # was lost with the process, and the rerun stopped on « nom déjà pris ».
+        user = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+        result = run(
+            'install_server() { port=8081; }; install_client() { return 1; }; '
+            "uname() { echo machine; }; "
+            'as_root() { case "$*" in *enroll*) echo KEY ;; test*) return 1 ;; '
+            '*) echo "AS_ROOT $*" ;; esac; }; main all',
+            env={"PATH": "/usr/bin:/bin", "LEAF_INSTALL_USER": user},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("AS_ROOT /usr/local/bin/leaf-server device revoke machine", result.stdout.splitlines())
+
+    def test_a_successful_all_revokes_nothing(self):
+        user = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+        result = run(
+            'install_server() { port=8081; }; install_client() { :; }; report_installation() { :; }; '
+            "uname() { echo machine; }; "
+            'as_root() { case "$*" in *enroll*) echo KEY ;; test*) return 1 ;; '
+            '*) echo "AS_ROOT $*" ;; esac; }; main all',
+            env={"PATH": "/usr/bin:/bin", "LEAF_INSTALL_USER": user},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("revoke", result.stdout)
+
+    def test_the_enrolled_device_is_kept_once_its_key_is_in_leaf_conf(self):
+        # Whatever fails after that (the report, the launcher database) must not revoke a
+        # device whose key the client holds.
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.client(
+                folder,
+                'as_root() { :; }; address=http://127.0.0.1:8081; client_key=K; enrolled_name=machine; '
+                'install_client; printf "[%s]" "$enrolled_name"',
+            )
+        self.assertEqual(result.stdout, "[]")
+
+    def test_the_client_installs_the_zlib_headers_it_builds_against(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.client(
+                folder,
+                'install_apt() { echo "APT $*"; }; as_root() { :; }; address=; client_key=; '
+                "install_client",
+            )
+        self.assertIn("zlib1g-dev", result.stdout.split())
+
+    def test_all_links_after_the_server_has_started(self):
+        # Before the first start /var/lib/leaf does not exist, and device enroll refuses.
+        result = run(
+            'install_server() { echo SERVER; port=8081; }; install_client() { echo CLIENT; }; '
+            "report_installation() { :; }; uname() { echo machine; }; "
+            'as_root() { case "$*" in *enroll*) echo ENROLL >&2; echo KEY ;; test*) return 1 ;; esac; }; '
+            "main all 2>&1",
+            env={"PATH": "/usr/bin:/bin", "LEAF_INSTALL_USER": subprocess.run(
+                ["id", "-un"], capture_output=True, text=True).stdout.strip()},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.stdout.split(), ["SERVER", "ENROLL", "CLIENT"])
+
+    def main_all(self, arguments, as_root='as_root() { echo "AS_ROOT $*"; [[ $1 != test ]]; }; '):
+        user = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+        return run(
+            'install_server() { echo SERVER; port=8081; }; '
+            'install_client() { echo "CLIENT $address"; }; '
+            "report_installation() { :; }; uname() { echo machine; }; "
+            + as_root
+            + f"main all {arguments}",
+            env={"PATH": "/usr/bin:/bin", "LEAF_INSTALL_USER": user},
+        )
+
+    def test_all_refuses_a_host_off_the_loopback_before_touching_anything(self):
+        # The local client would get http://127.0.0.1 and a key for a server that speaks
+        # only https there, or does not listen on 127.0.0.1 at all.
+        for host in ("0.0.0.0", "100.64.0.10", "::"):
+            with self.subTest(host=host):
+                result = self.main_all(f"--host {host}")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("lancez install.sh server", result.stderr)
+                self.assertNotIn("AS_ROOT", result.stdout)
+                self.assertNotIn("SERVER", result.stdout)
+
+    def test_an_update_of_all_refuses_a_server_env_off_the_loopback(self):
+        # server.env is never rewritten: the host it names is the one the server keeps.
+        result = self.main_all(
+            "",
+            'as_root() { case "$*" in "test -f /etc/leaf/server.env") return 0 ;; '
+            '"sed -n s/^LEAF_HOST=//p"*) echo 0.0.0.0 ;; *) echo "AS_ROOT $*" ;; esac; }; ',
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("lancez install.sh server", result.stderr)
+        self.assertNotIn("SERVER", result.stdout)
+
+    def test_all_on_a_loopback_spelling_reaches_the_server_there(self):
+        for arguments, address in (
+            ("", "http://127.0.0.1:8081"),
+            ("--host localhost", "http://localhost:8081"),
+            ("--host ::1", "http://[::1]:8081"),
+        ):
+            with self.subTest(arguments=arguments):
+                result = self.main_all(
+                    arguments, 'as_root() { case "$*" in *enroll*) echo KEY ;; test*) return 1 ;; esac; }; '
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"CLIENT {address}", result.stdout.splitlines())
+
+    def test_client_alone_asks_for_nothing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.client(
+                folder,
+                "at_a_terminal() { :; }; "
+                'as_root() { [[ $1 == test ]] && return 1; printf "ROOT %s\\n" "$*"; }; '
+                "choose_client_configuration; install_client; echo FINISHED",
+                input="",
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("FINISHED", result.stdout)
+        self.assertNotIn("Adresse", result.stderr)
+        self.assertNotIn("Clé", result.stderr)
+        self.assertFalse([l for l in result.stdout.splitlines() if "leaf.conf" in l])
+
+    def test_client_still_takes_an_address_and_a_key_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            key = pathlib.Path(folder, "key")
+            key.write_text("GIVEN-KEY\n")
+            result = self.client(
+                folder,
+                f"address=https://leaf.example.net; key_file='{key}'; "
+                'as_root() { [[ $1 == test ]] && return 1; printf "ROOT %s\\n" "$*"; }; '
+                "choose_client_configuration; install_client",
+            )
+            conf = pathlib.Path(folder, "leaf.conf").read_text().splitlines()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(conf, ["address=https://leaf.example.net", "key=GIVEN-KEY"])
+
+    def test_an_address_without_a_key_is_refused(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.client(
+                folder,
+                'address=https://leaf.example.net; as_root() { [[ $1 == test ]] && return 1; }; '
+                "choose_client_configuration",
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--key-file", result.stderr)
+
+    def test_the_launcher_declares_leaf_links(self):
+        launcher = (ROOT / "packaging" / "leaf.desktop").read_text().splitlines()
+        self.assertIn("Exec=leaf-desktop %u", launcher)
+        self.assertIn("MimeType=x-scheme-handler/leaf;", launcher)
+        # Under the person, with their home: run as root, xdg-mime would set root's default.
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.client(
+                folder,
+                'as_root() { [[ $1 == test ]] && return 1; printf "ROOT %s\\n" "$*"; }; '
+                "install_client",
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "ROOT runuser -u alice -- env HOME=/home/alice xdg-mime default leaf.desktop "
+            "x-scheme-handler/leaf",
+            result.stdout.splitlines(),
+        )
+
+
+class ChecksHealthWhereItListens(ServerHarness, unittest.TestCase):
+    def asked(self, host):
+        with tempfile.TemporaryDirectory() as folder:
+            result = self.install(folder, f"host={host}; curl() {{ echo \"CURL $*\" >&2; }}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return [l for l in result.stderr.splitlines() if l.startswith("CURL")][-1]
+
+    def test_health_is_asked_over_https_off_the_loopback(self):
+        # The server speaks only https there; --insecure because it is this very machine.
+        self.assertEqual(self.asked("100.64.0.10"), "CURL -fsS --insecure https://100.64.0.10:8081/health")
+        self.assertEqual(self.asked("0.0.0.0"), "CURL -fsS --insecure https://127.0.0.1:8081/health")
+
+    def test_health_stays_plain_on_the_loopback(self):
+        self.assertEqual(self.asked("127.0.0.1"), "CURL -fsS http://127.0.0.1:8081/health")
 
 
 if __name__ == "__main__":
