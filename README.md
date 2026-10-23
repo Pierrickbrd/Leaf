@@ -490,8 +490,16 @@ without a key:
 `api` is what a client checks on connecting, so a client carrying last month's build says
 "update the application" instead of failing obscurely three screens later. There is no `/v1`
 prefix on purpose. `format` is the version of the files on disk; migrations of the index are
-tracked by SQLite's own `PRAGMA user_version`, each running once, in order, a failure
-stopping the start rather than leaving a half-migrated schema behind without a word.
+tracked by SQLite's own `PRAGMA user_version`, which holds the number of the last migration
+applied. Each runs once, in order, in one transaction, a failure stopping the start rather
+than leaving a half-migrated schema behind without a word. A server older than its index
+refuses to open it instead of running on a schema it does not know.
+
+That refusal only works from here on. A build from before this numbering reads the number
+as a count of entries, so started on an index that has moved to the new scheme it replays
+migrations it has already run, among them one that resets every volume read several times
+to once. The way back from a newer server is the backup taken before updating, never an
+older binary on the same file.
 
 ### Two ways in
 

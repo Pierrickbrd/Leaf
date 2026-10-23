@@ -25,10 +25,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::{Connection, OpenFlags, Params, Row, Transaction};
 
-use super::schema::{schema_version, MIGRATIONS, SCHEMA, SEARCH_SCHEMA};
+use super::schema::{
+    last_migration_of_old_count, schema_version, LEAF_APPLICATION_ID, MIGRATIONS, SCHEMA,
+    SEARCH_SCHEMA,
+};
 use super::text::search_key;
 
 /// How many reader connections are kept alive between calls. Opening one is not free, and
@@ -172,8 +175,42 @@ impl Db {
     }
 
     /// Creates what is missing and applies what this database has not seen.
+    ///
+    /// What it has seen is decided before anything is written, so an index this server must
+    /// not run on is refused as it was found.
     fn prepare(&self) -> Result<()> {
-        let existed = self.version()? > 0 || self.table_count()? > 0;
+        let found = self.pragma("user_version")?;
+        let marked = self.pragma("application_id")? == LEAF_APPLICATION_ID;
+        let existed = found > 0 || self.table_count()? > 0;
+
+        // The last migration this database has wholly applied, or nothing for a new one.
+        let done = if !existed {
+            None
+        } else if marked {
+            // A server older than its index used to start on it without a word, on a schema
+            // it does not know: columns it never fills, a table rebuilt under it.
+            if found > schema_version() {
+                bail!(
+                    "{} was written by a newer Leaf: its schema is at migration {found} and \
+                     this server knows only up to {}, so it must not run on it — start the \
+                     newer server again, or restore a copy of the index taken before it ran",
+                    self.path.display(),
+                    schema_version()
+                );
+            }
+            Some(found)
+        } else {
+            // No marker: `user_version` counts entries of the old flat list, not migrations.
+            let Some(last) = last_migration_of_old_count(found) else {
+                bail!(
+                    "{} counts {found} steps in the numbering Leaf used before its migrations \
+                     were numbered, more than any release ever wrote: it comes from a build \
+                     whose schema this server cannot know, so it must not run on it",
+                    self.path.display()
+                );
+            };
+            Some(last)
+        };
 
         self.write(|cx| {
             for statement in SCHEMA {
@@ -187,10 +224,21 @@ impl Db {
             for statement in SEARCH_SCHEMA {
                 cx.run(statement)?;
             }
-            Ok(())
+            // Stamped in the transaction that made the tables, so a crash cannot leave a new
+            // database with its tables and no version — one the next start would take for an
+            // old index and replay every migration on. An old-numbering index is restamped in
+            // migrations here, and from then on the marker says how to read it.
+            match done {
+                None => stamp(cx, schema_version()),
+                Some(last) if !marked => stamp(cx, last),
+                Some(_) => Ok(()),
+            }
         })?;
 
-        self.migrate(!existed)
+        match done {
+            Some(last) => self.migrate(last),
+            None => Ok(()),
+        }
     }
 
     /// Applies what this database has not seen, in order, and stops on the first failure.
@@ -198,27 +246,16 @@ impl Db {
     /// Swallowing errors is the real danger here: a migration that failed for a genuine
     /// reason looks exactly like one that had already run, and the server would start on a
     /// half-migrated schema without a word.
-    fn migrate(&self, already_current: bool) -> Result<()> {
-        if already_current {
-            self.set_version(schema_version())?;
-            return Ok(());
-        }
-        let from = self.version()?;
-        if from >= schema_version() {
-            return Ok(());
-        }
-        for (i, sql) in MIGRATIONS.iter().enumerate().skip(from as usize) {
-            let step = i + 1;
-            let outcome = self.write(|cx| cx.run(sql));
-            match outcome {
-                Ok(()) => {}
-                Err(e) if already_satisfied(sql, &e) => {}
-                Err(e) => {
-                    return Err(e)
-                        .with_context(|| format!("migration {step} failed: {}", first_line(sql)))
-                }
-            }
-            self.set_version(step as i32)?;
+    ///
+    /// Each migration and the version that records it are one transaction: stamped apart,
+    /// a crash between the two ran a migration the version did not admit to, and a crash
+    /// between two entries of one migration left it half applied.
+    fn migrate(&self, done: i32) -> Result<()> {
+        for number in done + 1..=schema_version() {
+            self.write(|cx| {
+                apply(cx, number)?;
+                cx.run(&format!("PRAGMA user_version = {number}"))
+            })?;
         }
         Ok(())
     }
@@ -313,18 +350,13 @@ impl Db {
         }
     }
 
-    fn version(&self) -> Result<i32> {
+    /// `user_version` or `application_id`: a name from this file, never from the wire.
+    fn pragma(&self, name: &str) -> Result<i32> {
         self.read(|cx| {
             Ok(cx
-                .query_one("PRAGMA user_version", [], |r| r.get::<_, i32>(0))?
+                .query_one(&format!("PRAGMA {name}"), [], |r| r.get::<_, i32>(0))?
                 .unwrap_or(0))
         })
-    }
-
-    fn set_version(&self, value: i32) -> Result<()> {
-        // A pragma takes no parameters, so the value is formatted in — it is an i32 we
-        // produced ourselves, never anything that came off the wire.
-        self.write(|cx| cx.run(&format!("PRAGMA user_version = {value}")))
     }
 
     fn table_count(&self) -> Result<i64> {
@@ -338,6 +370,60 @@ impl Db {
                 .unwrap_or(0))
         })
     }
+}
+
+/// Marks the database as numbering migrations, at `version`. A pragma takes no parameters,
+/// so the values are formatted in — integers produced here, never anything off the wire.
+fn stamp(cx: &Cx<'_>, version: i32) -> Result<()> {
+    cx.run(&format!(
+        "PRAGMA application_id = {LEAF_APPLICATION_ID}; PRAGMA user_version = {version};"
+    ))
+}
+
+/// Runs migration `number`, statement by statement, inside the caller's transaction.
+///
+/// One at a time rather than as one `execute_batch`, because a batch stops at its first
+/// error: a migration whose `ADD COLUMN` met a column already there skipped every statement
+/// after it, and letting that error pass then called the migration done — migration 3 would
+/// have added nothing and backfilled nothing. Each statement's own failure is weighed here,
+/// and a statement after a tolerated one still runs.
+fn apply(cx: &Cx<'_>, number: i32) -> Result<()> {
+    let statements = usize::try_from(number)
+        .ok()
+        .and_then(|n| n.checked_sub(1))
+        .and_then(|i| MIGRATIONS.get(i))
+        .with_context(|| format!("there is no migration {number}"))?;
+    for sql in *statements {
+        match cx.run(sql) {
+            Ok(()) => {}
+            Err(e) if already_satisfied(sql, &e) => {}
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("migration {number} failed: {}", first_line(sql)))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Runs migration `number` on a bare connection, in a transaction of its own, without
+/// touching the version.
+///
+/// Public for one test: the one that runs every migration twice in a row on an index as old
+/// as the first version, which [`Db::open`] would bring up to date before it could be
+/// handed over.
+pub fn apply_migration(conn: &Connection, number: i32) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let counter = AtomicU64::new(0);
+    apply(
+        &Cx {
+            conn: &tx,
+            counter: &counter,
+        },
+        number,
+    )?;
+    tx.commit()?;
+    Ok(())
 }
 
 fn search_is_not_fts(cx: &Cx<'_>) -> Result<bool> {

@@ -294,6 +294,412 @@ fn data_survives_the_migration() {
     assert_eq!(42, page);
 }
 
+// ------------------------------------------------- what the version counts
+
+use leaf_server::store::schema::{
+    last_migration_of_old_count, schema_version, LEAF_APPLICATION_ID, MIGRATIONS,
+};
+
+fn application_id(path: &std::path::Path) -> i32 {
+    let conn = rusqlite::Connection::open(path).expect("opening");
+    conn.query_row("PRAGMA application_id", [], |r| r.get(0))
+        .expect("reading the application id")
+}
+
+/// One position, as every column of it reads: a migration that loses a column loses part
+/// of somebody's place.
+type Position = (String, String, String, i64, i64, i64, i64);
+
+fn positions(path: &std::path::Path) -> Vec<Position> {
+    let conn = rusqlite::Connection::open(path).expect("opening");
+    let mut st = conn
+        .prepare(
+            "SELECT profile_id, entry_id, edition_id, page, finished, times_finished, updated_at
+               FROM progress ORDER BY profile_id, entry_id",
+        )
+        .expect("preparing");
+    let rows = st
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        })
+        .expect("querying");
+    rows.map(|r| r.expect("a position")).collect()
+}
+
+/// The positions [`an_old_scheme_index_at`] plants, as they must read once migrated: every
+/// one of them handed to the default profile, nothing else about it changed.
+fn planted_positions() -> Vec<Position> {
+    (0..6)
+        .map(|i| {
+            (
+                "default".to_string(),
+                format!("x{i}"),
+                "e".to_string(),
+                10 * i + 3,
+                i % 2,
+                // Read twice, some of them: a count above one is the thing the backfill of
+                // migration 22 would flatten if it ran again unguarded.
+                if i % 2 == 1 { 2 } else { 0 },
+                1_700_000_000_000 + i,
+            )
+        })
+        .collect()
+}
+
+/// An index as a release before this change left it, in the old numbering: `user_version`
+/// counted entries of the list, and there was no marker.
+///
+/// It is the shape of the production index this change exists for — the schema of old main
+/// (d73ae1c), `progress` keyed by entry alone and none of the tables profiles and devices
+/// brought — built from a current index and wound back rather than from a vendored copy of
+/// that old schema: every other table is the same, and these four are the difference. With
+/// `reading_choice`, it is that index exactly, as a branch build whose forty-first entry
+/// created the table left it.
+fn an_old_scheme_index_at(
+    entries: i32,
+    with_reading_choice: bool,
+) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = temp();
+    let file = dir.path().join("old-scheme.sqlite");
+    drop(Db::open(&file).expect("creating"));
+    let conn = rusqlite::Connection::open(&file).expect("opening");
+    conn.execute_batch(
+        "DROP TABLE link_code; DROP TABLE device; DROP TABLE closed;
+         DROP TABLE progress; DROP TABLE profile;
+         CREATE TABLE progress (
+           entry_id    TEXT PRIMARY KEY REFERENCES entry(id) ON DELETE CASCADE,
+           edition_id  TEXT NOT NULL REFERENCES edition(id) ON DELETE CASCADE,
+           page        INTEGER NOT NULL,
+           finished    INTEGER NOT NULL DEFAULT 0,
+           updated_at  INTEGER NOT NULL,
+           times_finished INTEGER NOT NULL DEFAULT 0);
+         CREATE INDEX ix_progress_edition ON progress(edition_id, finished);
+         INSERT INTO work (id, name, path, age_rating) VALUES ('w', 'Essai', '/essai', '12+');
+         INSERT INTO edition (id, work_id, path, implicit, collection, colour, one_shot, summary)
+           VALUES ('e', 'w', '/essai', 1, 'Poche', 1, 0, 'Une édition');",
+    )
+    .expect("winding back");
+    for (_, entry, edition, page, finished, times, updated) in planted_positions() {
+        conn.execute(
+            "INSERT INTO entry (id, edition_id, type, file, size, modified_at)
+             VALUES (?1, ?2, 'VOLUME', '/essai/' || ?1 || '.cbz', 1, 1)",
+            (&entry, &edition),
+        )
+        .expect("an entry");
+        conn.execute(
+            "INSERT INTO progress (entry_id, edition_id, page, finished, times_finished, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (&entry, &edition, page, finished, times, updated),
+        )
+        .expect("a position");
+    }
+    if with_reading_choice {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS reading_choice (
+               edition_id TEXT PRIMARY KEY REFERENCES edition(id) ON DELETE CASCADE,
+               reading_direction TEXT NOT NULL);
+             INSERT INTO reading_choice (edition_id, reading_direction) VALUES ('e', 'RTL');",
+        )
+        .expect("the branch build's table");
+    }
+    conn.execute_batch(&format!(
+        "PRAGMA application_id = 0; PRAGMA user_version = {entries};"
+    ))
+    .expect("stamping in the old numbering");
+    (dir, file)
+}
+
+fn assert_migrated_to_the_end_with_every_position(file: &std::path::Path) {
+    assert_eq!(schema_version(), user_version(file));
+    assert_eq!(LEAF_APPLICATION_ID, application_id(file));
+    assert_eq!(planted_positions(), positions(file));
+    assert!(tables(file).contains(&"closed".to_string()));
+    assert!(tables(file).contains(&"device".to_string()));
+}
+
+/// The version is a migration number and the list has one entry per migration, so the two
+/// can no longer be read apart: a person who read « 41 » on a production index looked for
+/// migration 41, and there were twenty-nine.
+#[test]
+fn the_version_is_the_number_of_the_last_migration() {
+    assert_eq!(29, MIGRATIONS.len());
+    assert_eq!(29, schema_version());
+}
+
+#[test]
+fn a_fresh_database_is_stamped_with_the_marker_and_the_last_migration() {
+    let dir = temp();
+    let file = dir.path().join("fresh.sqlite");
+    drop(Db::open(&file).expect("opening"));
+
+    assert_eq!(29, user_version(&file));
+    assert_eq!(LEAF_APPLICATION_ID, application_id(&file));
+}
+
+/// Frozen: how the old numbering maps onto migrations, pinned at the counts that matter —
+/// the last entry of a migration is that migration, and any entry before it is the one
+/// before.
+#[test]
+fn an_old_entry_count_names_the_last_migration_it_completed() {
+    assert_eq!(Some(0), last_migration_of_old_count(0));
+    assert_eq!(Some(1), last_migration_of_old_count(1));
+    assert_eq!(Some(1), last_migration_of_old_count(2));
+    assert_eq!(Some(2), last_migration_of_old_count(3));
+    assert_eq!(Some(13), last_migration_of_old_count(20));
+    assert_eq!(Some(13), last_migration_of_old_count(23));
+    assert_eq!(Some(14), last_migration_of_old_count(24));
+    assert_eq!(Some(25), last_migration_of_old_count(40));
+    assert_eq!(Some(25), last_migration_of_old_count(41));
+    assert_eq!(Some(26), last_migration_of_old_count(42));
+    assert_eq!(Some(27), last_migration_of_old_count(45));
+    assert_eq!(Some(28), last_migration_of_old_count(46));
+    assert_eq!(Some(29), last_migration_of_old_count(47));
+    // No release ever counted further: guessing what a 48 meant is not a migration.
+    assert_eq!(None, last_migration_of_old_count(48));
+    assert_eq!(None, last_migration_of_old_count(-1));
+}
+
+#[test]
+fn an_old_scheme_index_at_40_is_brought_to_29_with_every_position_under_the_default_profile() {
+    let (_dir, file) = an_old_scheme_index_at(40, false);
+
+    drop(Db::open(&file).expect("migrating"));
+
+    assert_migrated_to_the_end_with_every_position(&file);
+}
+
+/// The production index: 41 in the old numbering, its forty-first entry a branch build's
+/// `reading_choice`. Read as entries of main, 41 falls inside migration 26, so 25 is the
+/// last complete one and 26 to 29 run on a database that holds a table none of them knows.
+#[test]
+fn the_production_index_at_41_keeps_every_position_and_its_reading_choice() {
+    let (_dir, file) = an_old_scheme_index_at(41, true);
+
+    drop(Db::open(&file).expect("migrating"));
+
+    assert_migrated_to_the_end_with_every_position(&file);
+    let conn = rusqlite::Connection::open(&file).expect("opening");
+    let choice: String = conn
+        .query_row(
+            "SELECT reading_direction FROM reading_choice WHERE edition_id = 'e'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("the reader's choice is still there");
+    assert_eq!("RTL", choice);
+}
+
+/// Main as it was before this change: 47 entries, every migration run. Recognised as 29 and
+/// left alone — migration 6 would empty the search index, and a rebuilt `progress` would
+/// hand a second reader's places to the default profile.
+#[test]
+fn an_old_scheme_index_at_47_is_recognised_as_29_and_nothing_runs_again() {
+    let dir = temp();
+    let file = dir.path().join("main-as-it-was.sqlite");
+    drop(Db::open(&file).expect("creating"));
+    rusqlite::Connection::open(&file)
+        .expect("opening")
+        .execute_batch(
+            "INSERT INTO work (id, name, path) VALUES ('w', 'Essai', '/essai');
+             INSERT INTO edition (id, work_id, path, implicit) VALUES ('e', 'w', '/essai', 1);
+             INSERT INTO entry (id, edition_id, type, file, size, modified_at)
+               VALUES ('x', 'e', 'VOLUME', '/essai/1.cbz', 1, 1);
+             INSERT INTO profile (id, name, name_key, created_at) VALUES ('p2', 'Léa', 'léa', 1);
+             INSERT INTO progress (profile_id, entry_id, edition_id, page, finished, times_finished, updated_at)
+               VALUES ('default', 'x', 'e', 12, 1, 3, 5), ('p2', 'x', 'e', 40, 0, 0, 6);
+             INSERT INTO search_ref (kind, ref, row_id, digest) VALUES ('work', 'w', 1, 'd');
+             PRAGMA application_id = 0; PRAGMA user_version = 47;",
+        )
+        .expect("winding the marker back");
+
+    drop(Db::open(&file).expect("opening"));
+
+    assert_eq!(29, user_version(&file));
+    assert_eq!(LEAF_APPLICATION_ID, application_id(&file));
+    assert_eq!(
+        vec![
+            (
+                "default".to_string(),
+                "x".to_string(),
+                "e".to_string(),
+                12,
+                1,
+                3,
+                5
+            ),
+            (
+                "p2".to_string(),
+                "x".to_string(),
+                "e".to_string(),
+                40,
+                0,
+                0,
+                6
+            ),
+        ],
+        positions(&file)
+    );
+    let conn = rusqlite::Connection::open(&file).expect("opening");
+    let kept: i64 = conn
+        .query_row("SELECT COUNT(*) FROM search_ref", [], |r| r.get(0))
+        .expect("counting");
+    assert_eq!(1, kept, "migration 6 must not have run again");
+}
+
+/// A server older than its index runs on a schema it does not know: columns it never
+/// writes, a table rebuilt under it. It used to start without a word.
+#[test]
+fn an_index_written_by_a_newer_leaf_is_refused() {
+    let dir = temp();
+    let file = dir.path().join("newer.sqlite");
+    drop(Db::open(&file).expect("creating"));
+    rusqlite::Connection::open(&file)
+        .expect("opening")
+        .execute_batch("PRAGMA user_version = 30;")
+        .expect("pretending to be newer");
+
+    let said = match Db::open(&file) {
+        Ok(_) => panic!("a newer index must not be opened"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(said.contains("written by a newer Leaf"), "{said}");
+    assert!(said.contains("must not run on it"), "{said}");
+    assert_eq!(30, user_version(&file), "and it is left as it was found");
+}
+
+/// No release ever counted past 47 in the old numbering; a count beyond it comes from a
+/// build this server cannot know the shape of, and is not guessed at.
+#[test]
+fn an_old_count_no_release_ever_wrote_is_refused() {
+    let dir = temp();
+    let file = dir.path().join("unknown.sqlite");
+    drop(Db::open(&file).expect("creating"));
+    rusqlite::Connection::open(&file)
+        .expect("opening")
+        .execute_batch("PRAGMA application_id = 0; PRAGMA user_version = 48;")
+        .expect("an unknown count");
+
+    assert!(Db::open(&file).is_err());
+    assert_eq!(48, user_version(&file), "and it is left as it was found");
+}
+
+/// Every migration may meet a database that already holds part or all of it: an old count
+/// falling inside a migration runs that migration again, and so does a start that crashed
+/// mid-way through one written before it became a single transaction. So each one is run
+/// twice in a row, from an index as old as the first version, and the second run must
+/// neither fail nor take anything from the positions.
+#[test]
+fn every_migration_survives_being_run_twice_in_a_row() {
+    use leaf_server::store::db::apply_migration;
+    use leaf_server::store::schema::{SCHEMA, SEARCH_SCHEMA};
+
+    let dir = temp();
+    let file = dir.path().join("twice.sqlite");
+    let conn = rusqlite::Connection::open(&file).expect("opening");
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         CREATE TABLE work (id TEXT PRIMARY KEY, universe_id TEXT, name TEXT NOT NULL,
+                            path TEXT NOT NULL UNIQUE, author TEXT, genres TEXT);
+         CREATE TABLE edition (id TEXT PRIMARY KEY, work_id TEXT NOT NULL, name TEXT,
+                               path TEXT NOT NULL UNIQUE, implicit INTEGER NOT NULL DEFAULT 0);
+         CREATE TABLE entry (id TEXT PRIMARY KEY, edition_id TEXT NOT NULL, type TEXT NOT NULL,
+                             file TEXT NOT NULL UNIQUE, size INTEGER NOT NULL,
+                             modified_at INTEGER NOT NULL, sort_key REAL,
+                             checksum TEXT);
+         CREATE TABLE progress (entry_id TEXT PRIMARY KEY REFERENCES entry(id),
+                                edition_id TEXT NOT NULL REFERENCES edition(id),
+                                page INTEGER NOT NULL, finished INTEGER NOT NULL DEFAULT 0,
+                                updated_at INTEGER NOT NULL);
+         INSERT INTO work (id, name, path, author) VALUES ('w', 'Essai', '/essai', 'Ōba');
+         INSERT INTO edition (id, work_id, path, implicit) VALUES ('e', 'w', '/essai', 1);
+         INSERT INTO entry (id, edition_id, type, file, size, modified_at)
+           VALUES ('a', 'e', 'VOLUME', '/essai/1.cbz', 1, 1), ('b', 'e', 'VOLUME', '/essai/2.cbz', 1, 1);
+         INSERT INTO progress (entry_id, edition_id, page, finished, updated_at)
+           VALUES ('a', 'e', 189, 1, 5), ('b', 'e', 40, 0, 6);",
+    )
+    .expect("the first version's shape");
+    // What a start does before migrating anything.
+    for statement in SCHEMA.iter().chain(SEARCH_SCHEMA) {
+        conn.execute_batch(statement).expect("the schema");
+    }
+
+    let has = |table: &str, column: &str| -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+            [table, column],
+            |r| r.get::<_, i64>(0),
+        )
+        .expect("reading the shape")
+            > 0
+    };
+    for number in 1..=schema_version() {
+        apply_migration(&conn, number)
+            .unwrap_or_else(|e| panic!("migration {number}, first run: {e:#}"));
+        // Between the two runs, what a reader would do: finish a volume a second time, and
+        // read under a second profile once there are profiles to read under.
+        if has("progress", "times_finished") {
+            conn.execute(
+                "UPDATE progress SET times_finished = 3 WHERE entry_id = 'a'",
+                [],
+            )
+            .expect("reading it again");
+        }
+        if has("progress", "profile_id") {
+            conn.execute_batch(
+                "INSERT OR IGNORE INTO profile (id, name, name_key, created_at)
+                   VALUES ('p2', 'Léa', 'léa', 1);
+                 INSERT OR IGNORE INTO progress
+                   (profile_id, entry_id, edition_id, page, finished, times_finished, updated_at)
+                   VALUES ('p2', 'a', 'e', 7, 0, 0, 9);",
+            )
+            .expect("a second reader");
+        }
+        apply_migration(&conn, number)
+            .unwrap_or_else(|e| panic!("migration {number}, second run: {e:#}"));
+
+        let page: i64 = conn
+            .query_row(
+                "SELECT page FROM progress WHERE entry_id = 'a' ORDER BY page DESC",
+                [],
+                |r| r.get(0),
+            )
+            .expect("the position is still there");
+        assert_eq!(189, page, "after migration {number}");
+        if has("progress", "times_finished") {
+            let times: i64 = conn
+                .query_row(
+                    "SELECT MAX(times_finished) FROM progress WHERE entry_id = 'a'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("the count");
+            assert_eq!(3, times, "migration {number} flattened a count of readings");
+        }
+        if has("progress", "profile_id") {
+            let second: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM progress WHERE profile_id = 'p2'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("the second reader");
+            assert_eq!(1, second, "migration {number} took a second reader's place");
+        }
+    }
+    let total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM progress", [], |r| r.get(0))
+        .expect("counting");
+    assert_eq!(3, total);
+}
+
 // ----------------------------------------------------------------- profiles
 
 fn count(db: &Db, sql: &str) -> i64 {
@@ -814,8 +1220,8 @@ fn a_migration_that_fails_for_a_real_reason_stops_the_start() {
                 "CREATE TRIGGER refuse BEFORE UPDATE ON entry
                  BEGIN SELECT RAISE(ABORT, 'not on my watch'); END",
             )?;
-            // Back to before the step that updates every entry.
-            cx.run("PRAGMA user_version = 3")?;
+            // Back to before migration 3, whose second statement updates every entry.
+            cx.run("PRAGMA user_version = 2")?;
             Ok(())
         })
         .unwrap();
@@ -825,7 +1231,7 @@ fn a_migration_that_fails_for_a_real_reason_stops_the_start() {
         Ok(_) => panic!("a failing migration must stop the start"),
         Err(e) => format!("{e:#}"),
     };
-    assert!(said.contains("migration 5 failed"), "{said}");
+    assert!(said.contains("migration 3 failed"), "{said}");
     assert!(said.contains("not on my watch"), "{said}");
 }
 
