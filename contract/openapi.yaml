@@ -71,6 +71,11 @@ paths:
         Answers without a key, as does `POST /link` — which is what makes it usable as a
         container health check. It says nothing a caller could not learn by trying to
         connect, except the size of the library and whether it is closed to strangers.
+
+        A key is not needed but is read when it is sent: to a key the server recognises, and
+        to nobody else, the answer adds `relay`. A key tried here is judged and counted
+        against the throttle like anywhere else, and a wrong one is answered as though none
+        had been sent.
       security: []
       responses:
         "200":
@@ -139,13 +144,28 @@ paths:
         — which is how a client linked that way links its first device. A device carries
         every right, so a key with fewer may not make one: it would mint itself more. A library still open to everyone issues none: its first
         device is linked from the server's terminal.
+
+        The answer carries the whole link, built by the server the way `leaf-server device
+        add` builds it: `LEAF_PUBLIC_URL` first, else one of its own network addresses, with
+        the certificate to pin when the server could check it at start — none otherwise, so
+        that a guess is never pinned. A client shows it as it is, and never builds one from the
+        address it reaches the server at — on the server's own machine that is the
+        loopback, and through a tunnel it is the tunnel.
       responses:
         "201":
-          description: The code, in clear this once.
+          description: The code, in clear this once, and the link that carries it.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/IssuedCode" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: |
+            No other device can reach this server: it listens only on the loopback and
+            `LEAF_PUBLIC_URL` is not set. `error` is `unreachable`, and no code is made —
+            `relay` in `/health` already said so, and a client does not ask.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
 
   /link/codes/{id}:
@@ -1729,6 +1749,15 @@ components:
             (revoking the last one does not reopen it), a key is configured, or the server
             listens beyond the loopback. `false` means it
             answers everyone, and a client should offer to link rather than ask for a key.
+        relay:
+          type: boolean
+          description: |
+            Only to a key the server recognises. Whether another device can reach this
+            server — `LEAF_PUBLIC_URL` is set, or it listens on an address past the loopback
+            — and so whether a device linked here may link another (`POST /link/codes`). When
+            `false`, nobody reaches the library but its own machine, and a client offers
+            neither to link another device nor to unlink this one, which would leave it
+            nowhere to link back from.
       required: [status, api, format, library, linked]
 
     LinkRequest:
@@ -1766,7 +1795,19 @@ components:
         id: { type: string, description: What follows or cancels the code; not the code. }
         code: { type: string, description: "`ABCD-EFGH`, shown this once." }
         expiresAt: { type: integer, description: Milliseconds since the epoch. }
-      required: [id, code, expiresAt]
+        link:
+          type: string
+          description: |
+            `leaf://HÔTE[:PORT]/lier/CODE[?empreinte=SHA256]`, for the other device to open or
+            scan. The code is in it, so it is as secret as the code.
+          examples: ["leaf://192.0.2.10:8081/lier/ABCDEFGH?empreinte=0123…"]
+        localNetwork:
+          type: boolean
+          description: |
+            The link names a private network address of the server — private, link-local,
+            Tailscale's range, unique-local IPv6 — there being no `LEAF_PUBLIC_URL`: it works
+            from the same network as the server and nowhere else.
+      required: [id, code, expiresAt, link, localNetwork]
 
     CodeState:
       type: object
