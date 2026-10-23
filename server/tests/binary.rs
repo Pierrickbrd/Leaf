@@ -636,6 +636,7 @@ fn help_names_the_device_commands() {
         "device list",
         "device revoke",
         "device enroll",
+        "profile reset-code",
     ] {
         assert!(said.contains(word), "{word}: {said}");
     }
@@ -944,4 +945,154 @@ fn device_list_escapes_a_name_that_could_rewrite_the_terminal() {
     assert!(done.status.success(), "{said}");
     assert!(!said.contains('\u{1b}'), "{said:?}");
     assert!(said.contains("PC\\u{1b}[2J"), "{said}");
+}
+
+/// `sudo leaf-server profile reset-code`, minus sudo, with its stdin a pipe: no terminal, so
+/// no echo to turn off, and the two answers are two lines.
+fn reset_code_with(dir: &tempfile::TempDir, typed: &str) -> std::process::Output {
+    use std::io::Write;
+    let mut command = leaf(dir);
+    let mut child = command
+        .args(["profile", "reset-code"])
+        .env("LEAF_ENV_FILE", dir.path().join("no-server.env"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(typed.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn profile_reset_code_sets_the_code_typed_twice_on_a_pipe() {
+    let dir = a_library();
+    let done = reset_code_with(&dir, "fresh9\nfresh9\n");
+    assert_eq!(done.status.code(), Some(0), "{done:?}");
+    let db = std::sync::Arc::new(
+        leaf_server::store::Db::open(&dir.path().join("index.sqlite")).unwrap(),
+    );
+    assert!(leaf_server::store::profiles::Profiles::new(db)
+        .check_code("fresh9")
+        .unwrap());
+    // The prompts are on stderr and the code is nowhere in what was printed.
+    let said =
+        String::from_utf8_lossy(&done.stdout).to_string() + &String::from_utf8_lossy(&done.stderr);
+    assert!(said.contains("Nouveau code"), "{said}");
+    assert!(!said.contains("fresh9"), "{said}");
+}
+
+#[test]
+fn profile_reset_code_with_two_different_entries_exits_non_zero_and_changes_nothing() {
+    let dir = a_library();
+    let done = reset_code_with(&dir, "fresh9\nfresh8\n");
+    assert_eq!(done.status.code(), Some(1), "{done:?}");
+    let said = String::from_utf8_lossy(&done.stderr);
+    assert!(said.contains("pas identiques"), "{said}");
+    let db = std::sync::Arc::new(
+        leaf_server::store::Db::open(&dir.path().join("index.sqlite")).unwrap(),
+    );
+    assert_eq!(
+        leaf_server::store::profiles::Profiles::new(db)
+            .code()
+            .unwrap(),
+        None
+    );
+}
+
+/// The command on the slave side of a pseudo-terminal, and the master to watch it from.
+///
+/// The child is its own session leader with the slave as controlling terminal, which is what
+/// a shell gives a command; the test then reads the terminal's `ECHO` flag through the master.
+fn on_a_terminal(dir: &tempfile::TempDir) -> (std::process::Child, std::fs::File) {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::process::CommandExt;
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: openpty fills in two fds, which are wrapped at once so they are closed.
+    let (master, slave) = unsafe {
+        let made = libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+        );
+        assert_eq!(made, 0, "openpty");
+        (
+            std::fs::File::from_raw_fd(master),
+            std::fs::File::from_raw_fd(slave),
+        )
+    };
+    let mut command = leaf(dir);
+    command
+        .args(["profile", "reset-code"])
+        .env("LEAF_ENV_FILE", dir.path().join("no-server.env"))
+        .stdin(slave.try_clone().unwrap())
+        .stdout(slave.try_clone().unwrap())
+        .stderr(slave.try_clone().unwrap());
+    let slave_fd = slave.as_raw_fd();
+    // SAFETY: setsid and ioctl on an fd the child inherited; nothing is allocated.
+    unsafe {
+        command.pre_exec(move || {
+            libc::setsid();
+            libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0);
+            Ok(())
+        });
+    }
+    let child = command.spawn().unwrap();
+    drop(slave);
+    (child, master)
+}
+
+fn echo_is_on(master: &std::fs::File) -> bool {
+    use std::os::fd::AsRawFd;
+    // SAFETY: tcgetattr into a zeroed struct on a live fd.
+    unsafe {
+        let mut t: libc::termios = std::mem::zeroed();
+        assert_eq!(libc::tcgetattr(master.as_raw_fd(), &mut t), 0);
+        t.c_lflag & libc::ECHO != 0
+    }
+}
+
+/// Waits for the command to have turned echo off, which is when it is reading.
+fn until_silent(master: &std::fs::File) {
+    for _ in 0..500 {
+        if !echo_is_on(master) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("the command never turned echo off");
+}
+
+#[test]
+fn profile_reset_code_turns_echo_off_while_reading_and_back_on_after() {
+    use std::io::Write;
+    let dir = a_library();
+    let (mut child, mut master) = on_a_terminal(&dir);
+    assert!(echo_is_on(&master), "echo is on before the command asks");
+    until_silent(&master);
+    master.write_all(b"fresh9\nfresh9\n").unwrap();
+    assert!(child.wait().unwrap().success());
+    assert!(echo_is_on(&master), "echo is back after a normal entry");
+}
+
+#[test]
+fn profile_reset_code_puts_echo_back_when_interrupted_or_terminated() {
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        let dir = a_library();
+        let (mut child, master) = on_a_terminal(&dir);
+        until_silent(&master);
+        // SAFETY: a signal to a child this test owns.
+        unsafe { libc::kill(child.id() as i32, signal) };
+        use std::os::unix::process::ExitStatusExt;
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(signal), "dies of the signal it got");
+        assert!(echo_is_on(&master), "echo is back after signal {signal}");
+    }
 }
