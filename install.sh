@@ -62,6 +62,8 @@ cleanup() {
 LEAF_DEFAULT_LIBRARY=/srv/leaf/library
 
 enrolled_name=""
+# Set once this run wrote the local client's leaf.conf with a key it enrolled, for the report.
+client_written=""
 component=""
 library=""
 host=""
@@ -93,6 +95,7 @@ Commands:
   server   build and install the server and its systemd service
   client   build and install the Ubuntu client, icon and launcher
   all      install both and connect the client to the local server
+           (server and client installed one after the other connect the same way)
   update   download the current release, then reinstall the selected component
 
 Options:
@@ -667,8 +670,13 @@ choose_client_configuration() {
         || fail "l’adresse doit commencer par http:// ou https://."
 }
 
-# `all` links the client of this machine itself. After install_server: before the first
-# start /var/lib/leaf does not exist, and device enroll refuses. The key goes from its
+# The client of this machine is linked by the installer itself, with no code: by `all`, by
+# `client` where the server already is, and by `server` where the client already is — in
+# whichever order the two arrive. Only `all` used to, and a person who installed one then
+# the other on a server bound to the loopback was left on a link screen with no link to
+# give it: no other device could reach the library to relay one, and `device add` had no
+# address to print. After install_server: before the first start /var/lib/leaf does not
+# exist, and device enroll refuses. The key goes from its
 # stdout into leaf.conf and nowhere else — never to the screen; and under sudo the
 # keyring of the person's session is out of reach. A client that already holds a key keeps
 # it: a second device of the same name would be refused.
@@ -688,15 +696,71 @@ link_local_client() {
         fi
     fi
     [[ "$reach" != ::1 ]] || reach="[::1]"
-    address=${address:-http://$reach:$port}
+    # The file first: a client that holds a key keeps the address it holds it for. Defaulted
+    # first, a remote library's key went into leaf.conf beside http://127.0.0.1, which the
+    # local server refused, and the client forgot everything.
     read_client_configuration
     [[ -z "$client_key" ]] || return 0
+    address=${address:-http://$reach:$port}
     name=$(uname -n)
     name=${name:0:40}
-    client_key=$(as_root /usr/local/bin/leaf-server device enroll "$name") \
-        || fail "leaf-server device enroll n’a pas relié ce client ; voyez sudo leaf-server device list."
-    [[ -n "$client_key" ]] || fail "leaf-server device enroll n’a rendu aucune clé."
+    # Returned, not failed: whether a refusal stops the run is the caller's call.
+    client_key=$(as_root /usr/local/bin/leaf-server device enroll "$name") || client_key=""
+    [[ -n "$client_key" ]] || return 1
     enrolled_name=$name
+}
+
+# What `all` and `client` say when the client of this machine could not be enrolled: there,
+# linking it is what was asked.
+ENROLL_REFUSED="leaf-server device enroll n’a pas relié ce client ; voyez sudo leaf-server device list."
+
+# What this machine already holds, read from what this installer itself writes: the
+# server's binary and its unit, the client's version file. Nothing is asked of a running
+# process or of the package manager — a source build registers with neither.
+server_installed_here() {
+    as_root test -x /usr/local/bin/leaf-server \
+        && as_root test -f /etc/systemd/system/leaf-server.service
+}
+
+client_installed_here() {
+    as_root test -f /usr/local/share/leaf/client.version
+}
+
+# The client of this machine, linked to the server of this machine when that server is on
+# the loopback — the one place the client reaches it at http://127.0.0.1 with no certificate
+# to pin. Off it the server speaks only https, and the client links from the link `device
+# add` prints, which works there. Root has no session of its own to link: under sudo with no
+# SUDO_USER, the leaf.conf would land in /root for nobody.
+link_client_here() {
+    [[ "$human_user" != root ]] || return 0
+    is_loopback "${host:-127.0.0.1}" || return 0
+    link_local_client
+}
+
+# leaf.conf, 0600 and the person's, when this run holds an address and a key for it.
+write_client_configuration() {
+    [[ -n "$address" && -n "$client_key" ]] || return 0
+    as_root install -d -m 0700 -o "$human_user" -g "$human_group" "$human_home/.config/Leaf"
+    {
+        printf 'address=%s\n' "$address"
+        printf 'key=%s\n' "$client_key"
+    } > "$LEAF_TMP/leaf.conf"
+    as_root install -m 0600 -o "$human_user" -g "$human_group" \
+        "$LEAF_TMP/leaf.conf" "$human_home/.config/Leaf/leaf.conf"
+    # The key is held by the client from here: a failure after this point must not
+    # revoke the device (`cleanup`).
+    [[ -z $enrolled_name ]] || client_written=1
+    enrolled_name=""
+}
+
+# leaf.conf, only for a key this run brought — enrolled now, or given with --key-file. A
+# leaf.conf that already held one is left exactly as it was: rewriting it dropped the name,
+# the fingerprint and the date the client keeps beside the key, and beside a loopback server
+# it swapped a remote library's address for http://127.0.0.1.
+save_client_key() {
+    if [[ -n $enrolled_name || -n $key_file ]]; then
+        write_client_configuration
+    fi
 }
 
 install_client() {
@@ -715,18 +779,7 @@ install_client() {
     printf '%s\n' "$LEAF_VERSION" > "$LEAF_TMP/client.version"
     as_root install -m 0644 "$LEAF_TMP/client.version" /usr/local/share/leaf/client.version
 
-    if [[ -n "$address" && -n "$client_key" ]]; then
-        as_root install -d -m 0700 -o "$human_user" -g "$human_group" "$human_home/.config/Leaf"
-        {
-            printf 'address=%s\n' "$address"
-            printf 'key=%s\n' "$client_key"
-        } > "$LEAF_TMP/leaf.conf"
-        as_root install -m 0600 -o "$human_user" -g "$human_group" \
-            "$LEAF_TMP/leaf.conf" "$human_home/.config/Leaf/leaf.conf"
-        # The key is held by the client from here: a failure after this point must not
-        # revoke the device (`cleanup`).
-        enrolled_name=""
-    fi
+    save_client_key
 
     command -v update-desktop-database >/dev/null && \
         as_root update-desktop-database /usr/local/share/applications >/dev/null || true
@@ -761,9 +814,29 @@ main() {
 
     case "$component" in
         server)
-            install_server ;;
+            install_server
+            # Optional here: the server is installed whatever happens to its neighbour, and a
+            # refusal — another account enrolled this machine's name, say — is said, not
+            # turned into a failed installation.
+            if client_installed_here; then
+                if link_client_here; then
+                    save_client_key
+                else
+                    printf 'Leaf : le client de cette machine n’a pas pu être relié ; ouvrez-y le lien que donne sudo leaf-server device add.\n' >&2
+                fi
+            fi ;;
         client)
             choose_client_configuration
+            # --address and --key-file say where this client goes; without them, a server
+            # installed here is the library it belongs to. The key is written by
+            # install_client once the client is there, as for `all`: a build that fails
+            # first takes its device back (`cleanup`).
+            if [[ -z "$address$client_key" ]] && server_installed_here; then
+                host=$(existing_server_value LEAF_HOST)
+                port=$(existing_server_value LEAF_PORT)
+                port=${port:-8081}
+                link_client_here || fail "$ENROLL_REFUSED"
+            fi
             install_client ;;
         all)
             # An update keeps the host server.env names, and it must be the loopback too.
@@ -771,7 +844,7 @@ main() {
             host=${host:-127.0.0.1}
             all_on_the_loopback "$host"
             install_server
-            link_local_client
+            link_local_client || fail "$ENROLL_REFUSED"
             install_client ;;
     esac
 
@@ -795,6 +868,9 @@ report_installation() {
     printf '\nLeaf %s installé : %s.\n' "$LEAF_VERSION" "$component"
     case "$component" in
         server)
+            if [[ -n $client_written ]]; then
+                printf 'Le client de cette machine est relié au serveur (%s).\n' "$address"
+            fi
             report_server_link ;;
         all)
             printf 'Le client de cette machine est relié au serveur (%s) et apparaît dans le menu des applications.\n' "$address"

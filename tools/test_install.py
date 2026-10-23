@@ -833,7 +833,8 @@ class LinksTheLocalClient(unittest.TestCase):
                 folder,
                 "port=8081; uname() { echo machine; }; "
                 'as_root() { case "$*" in *enroll*) return 1 ;; test*) return 1 ;; esac; }; '
-                "link_local_client; echo FINISHED",
+                # How `all` and `client` call it: there, linking it is what was asked.
+                'link_local_client || fail "$ENROLL_REFUSED"; echo FINISHED',
             )
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("FINISHED", result.stdout)
@@ -1000,6 +1001,171 @@ class LinksTheLocalClient(unittest.TestCase):
             "x-scheme-handler/leaf",
             result.stdout.splitlines(),
         )
+
+
+# What this machine already holds, as the installer wrote it: the server's binary and unit,
+# and the client's version file.
+SERVER_HERE = (
+    '"test -x /usr/local/bin/leaf-server") return 0 ;; '
+    '"test -f /etc/systemd/system/leaf-server.service") return 0 ;; '
+)
+CLIENT_HERE = '"test -f /usr/local/share/leaf/client.version") return 0 ;; '
+
+
+class LinksWhicheverHalfComesSecond(unittest.TestCase):
+    """Client and server on one machine link themselves, in whichever order they arrive.
+
+    Only `all` used to, and a person who ran `install.sh server` then `install.sh client` —
+    or the client first — was left with a link screen and, on the loopback, no link to give
+    it: the relay could not reach anybody, and `device add` had nothing to print."""
+
+    def main(self, component, as_root_cases, install_server="install_server() { echo SERVER; host=127.0.0.1; port=8081; }; "):
+        user = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+        return run(
+            install_server
+            + 'install_client() { echo "CLIENT $address"; save_client_key; }; '
+            "report_installation() { :; }; uname() { echo machine; }; "
+            'as_root() { case "$*" in ' + as_root_cases
+            + '*enroll*) echo ENROLL >&2; echo KEY ;; '
+            '"install -m 0600"*leaf.conf*) echo WRITTEN; cat "${@: -2:1}" ;; '
+            'test*) return 1 ;; esac; }; '
+            f"main {component} 2>&1",
+            env={"PATH": "/usr/bin:/bin", "LEAF_INSTALL_USER": user},
+        )
+
+    def test_client_after_a_server_on_this_machine_links_without_a_code(self):
+        result = self.main(
+            "client",
+            SERVER_HERE
+            + '"test -f /etc/leaf/server.env") return 0 ;; '
+            '"sed -n s/^LEAF_HOST=//p"*) echo 127.0.0.1 ;; '
+            '"sed -n s/^LEAF_PORT=//p"*) echo 8099 ;; ',
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[:2], ["ENROLL", "CLIENT http://127.0.0.1:8099"])
+        self.assertIn("address=http://127.0.0.1:8099", lines)
+        self.assertIn("key=KEY", lines)
+
+    def test_client_update_leaves_a_leaf_conf_that_holds_a_key_exactly_as_it_was(self):
+        # `update client` beside a loopback server rewrote a remote library's leaf.conf with
+        # http://127.0.0.1 and the remote key — refused there, and the client forgot
+        # everything — and even with the same address dropped name=, fingerprint= and linked=.
+        for remote in ("https://leaf.remote.example", "http://127.0.0.1:8081"):
+            with self.subTest(address=remote):
+                result = self.main(
+                    "client",
+                    SERVER_HERE
+                    + '"test -f /etc/leaf/server.env") return 0 ;; '
+                    '"sed -n s/^LEAF_HOST=//p"*) echo 127.0.0.1 ;; '
+                    '"sed -n s/^LEAF_PORT=//p"*) echo 8081 ;; '
+                    '"test -f "*leaf.conf) return 0 ;; '
+                    '"sed -n s/^key=//p"*) echo REMOTE-KEY ;; '
+                    f'"sed -n s/^address=//p"*) echo {remote} ;; ',
+                )
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertNotIn("ENROLL", result.stdout)
+                self.assertNotIn("WRITTEN", result.stdout)
+                self.assertIn(f"CLIENT {remote}", result.stdout.splitlines())
+
+    def test_client_next_to_a_server_off_the_loopback_is_left_to_link_itself(self):
+        # Off the loopback the server speaks only https, and http://127.0.0.1 never answers:
+        # the client links from the link `device add` prints, which does work there.
+        result = self.main(
+            "client",
+            SERVER_HERE
+            + '"test -f /etc/leaf/server.env") return 0 ;; '
+            '"sed -n s/^LEAF_HOST=//p"*) echo 0.0.0.0 ;; ',
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("ENROLL", result.stdout)
+        self.assertNotIn("WRITTEN", result.stdout)
+
+    def test_client_on_a_machine_without_a_server_enrolls_nothing(self):
+        result = self.main("client", "")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("ENROLL", result.stdout)
+        self.assertIn("CLIENT ", result.stdout.splitlines())
+
+    def test_server_after_a_client_on_this_machine_links_it_without_a_code(self):
+        result = self.main("server", CLIENT_HERE)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[:3], ["SERVER", "ENROLL", "WRITTEN"])
+        self.assertIn("address=http://127.0.0.1:8081", lines)
+        self.assertIn("key=KEY", lines)
+        self.assertNotIn("revoke", result.stdout)
+
+    def test_server_after_a_client_that_holds_a_key_leaves_it_alone(self):
+        result = self.main(
+            "server",
+            CLIENT_HERE
+            + '"test -f "*leaf.conf) return 0 ;; '
+            '"sed -n s/^key=//p"*) echo OLD-KEY ;; '
+            '"sed -n s/^address=//p"*) echo http://127.0.0.1:8081 ;; ',
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("ENROLL", result.stdout)
+        self.assertNotIn("WRITTEN", result.stdout)
+
+    def test_server_after_a_client_that_linked_itself_leaves_its_keychain_alone(self):
+        result = self.main(
+            "server",
+            CLIENT_HERE
+            + '"test -f "*leaf.conf) return 0 ;; '
+            '"sed -n s/^key=//p"*) ;; '
+            '"sed -n s/^address=//p"*) echo https://leaf.example:8443 ;; ',
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("ENROLL", result.stdout)
+        self.assertNotIn("WRITTEN", result.stdout)
+
+    def test_server_whose_local_client_cannot_be_enrolled_still_succeeds_and_says_so(self):
+        # Another account already enrolled this machine's name: « nom déjà pris ». The server
+        # was installed all the same, and an update reported failed for an optional step.
+        user = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+        result = run(
+            "install_server() { host=127.0.0.1; port=8081; }; "
+            "report_installation() { echo REPORTED; }; uname() { echo machine; }; "
+            'as_root() { case "$*" in ' + CLIENT_HERE
+            + '*enroll*) return 1 ;; test*) return 1 ;; *) echo "AS_ROOT $*" ;; esac; }; '
+            "main server",
+            env={"PATH": "/usr/bin:/bin", "LEAF_INSTALL_USER": user},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("REPORTED", result.stdout)
+        self.assertIn("client de cette machine", result.stderr)
+        self.assertNotIn("leaf.conf", result.stdout)
+
+    def test_server_off_the_loopback_leaves_the_local_client_to_link_itself(self):
+        result = self.main(
+            "server",
+            CLIENT_HERE,
+            install_server="install_server() { echo SERVER; host=0.0.0.0; port=8081; }; ",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("ENROLL", result.stdout)
+
+    def test_server_whose_client_configuration_cannot_be_written_takes_its_device_back(self):
+        user = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+        result = run(
+            "install_server() { host=127.0.0.1; port=8081; }; report_installation() { :; }; "
+            "uname() { echo machine; }; "
+            'as_root() { case "$*" in ' + CLIENT_HERE
+            + '*enroll*) echo KEY ;; "install -m 0600"*) return 1 ;; test*) return 1 ;; '
+            '*) echo "AS_ROOT $*" ;; esac; }; main server',
+            env={"PATH": "/usr/bin:/bin", "LEAF_INSTALL_USER": user},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("AS_ROOT /usr/local/bin/leaf-server device revoke machine", result.stdout.splitlines())
+
+    def test_the_server_report_says_the_local_client_was_linked(self):
+        result = run(
+            "LEAF_VERSION=0.1.0; component=server; client_written=1; "
+            'as_root() { :; }; report_installation'
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Le client de cette machine est relié", result.stdout)
 
 
 class ChecksHealthWhereItListens(ServerHarness, unittest.TestCase):
