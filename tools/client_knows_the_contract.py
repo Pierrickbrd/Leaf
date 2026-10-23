@@ -77,6 +77,13 @@ WATCHED = {
     # the one thing this answer exists to say, and a client reading the two counts and not
     # the list would report a clean deletion over a library that still holds the file.
     "Erased": ("whole", ["erased"]),
+    # Linking. `whole`, all four: a key, a device, a code and its state are each read for
+    # every field they carry — the key is stored, the name shown, the code put in a link, its
+    # expiry counted down, and the name of the device that used it said on screen.
+    "Linked": ("whole", ["linked"]),
+    "Device": ("whole", ["device"]),
+    "IssuedCode": ("whole", ["issuedCode"]),
+    "CodeState": ("whole", ["codeState"]),
     "Entry": ("part", ["upNext", "entry"]),
     "Progress": ("part", ["upNext", "progress"]),
     "Chapter": ("part", ["upNext"]),
