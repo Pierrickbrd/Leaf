@@ -214,6 +214,19 @@ private slots:
         QVERIFY2(m_pretend->heard.count("GET ") == 1, m_pretend->heard.constData());
     }
 
+    /// A right this key lacks is the route's refusal, not the key's: the key still opens
+    /// everything else, so the client goes on — a reader with a read-only key who presses a
+    /// button for something else keeps the shelf.
+    void a_route_refusing_a_right_leaves_the_client_working()
+    {
+        m_pretend->answers(403, "{\"error\":\"this key does not carry the import right\"}");
+        QVERIFY(!ask().went());
+        QVERIFY(!m_server->stopped());
+
+        m_pretend->answers(200, "{}");
+        QVERIFY(ask().went());
+    }
+
     void a_key_that_changes_is_the_one_reason_to_try_again()
     {
         m_pretend->answers(403, "{\"error\":\"unknown key\"}");

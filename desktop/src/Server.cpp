@@ -1,5 +1,6 @@
 #include "Server.h"
 
+#include "Pinning.h"
 #include "Settings.h"
 #include "Words.h"
 
@@ -9,6 +10,7 @@
 #include <QJsonParseError>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QTimer>
 #include <QUrl>
 
 #include <utility>
@@ -25,6 +27,10 @@ constexpr int MostWaiting = 32;
 
 Server::Server(Settings *settings, QObject *parent) : QObject(parent), m_settings(settings)
 {
+    // Asked at each handshake rather than copied now: the pin changes with the link, and a
+    // manager holding the one it was built with would refuse the server it was just moved to.
+    Pinning::guard(m_network, [settings] { return settings->fingerprint(); });
+
     // A key that changes is a reason to try again, and the only one. Nothing else the client
     // could do would make a refusal into an acceptance.
     connect(settings, &Settings::changed, this, [this] {
@@ -206,7 +212,7 @@ void Server::send(const Sending &what, const QObject *caller,
     if (!what.query.isEmpty()) {
         url.setQuery(what.query);
     }
-    QNetworkRequest request{url};
+    QNetworkRequest request = Pinning::request(url);
     request.setRawHeader(KeyHeader, m_settings->key().toUtf8());
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
@@ -223,15 +229,58 @@ void Server::send(const Sending &what, const QObject *caller,
     if (!what.range.isEmpty()) {
         request.setRawHeader("Content-Range", what.range);
     }
+    Pinning::renew(m_network, m_settings->fingerprint());
     QNetworkReply *reply =
         what.verb == "GET" ? m_network.get(request)
                            : m_network.sendCustomRequest(request, what.verb, what.body);
     connect(reply, &QNetworkReply::finished, this,
-            [this, reply, alive, reading, then = std::move(then)] {
+            [this, reply, what, alive, reading, key = m_settings->key(), sentTo = address,
+             then = std::move(then)] {
                 reply->deleteLater();
+                // Cancelled because the pin changed — a device just linked, or moved — and
+                // not answered: shown, it read « Le serveur est injoignable — Operation
+                // canceled » about a server nobody had asked anything yet. A question is
+                // asked again of whatever the settings now name. A turn later and not from
+                // here: this runs inside `renew`, whose next step drops the connections, and
+                // a request started now would be orphaned by it and never finish.
+                //
+                // Only a question. A command may already have reached the server before the
+                // cancel, and sending it twice is not this file's call to make.
+                if (Pinning::renewed(reply) && what.verb == "GET") {
+                    QTimer::singleShot(0, this, [this, what, alive, reading, then] {
+                        if (alive) {
+                            send(what, alive.data(), then, reading);
+                        }
+                    });
+                    return;
+                }
+                // A command is answered — but not as a failure of the server, which never
+                // saw the cancel and may well have done what was asked. Said as what it is,
+                // so the screen that sent it does not read « injoignable » about a library
+                // that answers.
+                if (Pinning::renewed(reply)) {
+                    if (alive) {
+                        then({0, {}, Words::cutShortByANewPin()});
+                    }
+                    return;
+                }
                 const Answer answer = read(reply, reading);
-                if (answer.status == 403) {
+                // Only for the key still held, at the address still used: a refusal on its
+                // way back for a key since replaced, or from the address a device has just
+                // moved away from, says nothing about the link as it now stands.
+                const bool current =
+                    key == m_settings->key() && sentTo == tidy(m_settings->address());
+                const bool keyRefused =
+                    answer.status == 403
+                    && answer.body.object().value(QStringLiteral("error")).toString()
+                           == QStringLiteral("unknown key");
+                // Only the key's own refusal stops the client — the server's answer to no key
+                // or one it does not know, which it counts towards its throttle. A route that
+                // refuses this key a right (a read-only key asking to import, or to make a
+                // code) answers that request alone: the key still opens everything else.
+                if (keyRefused && current) {
                     m_stopped = answer.trouble;
+                    emit keyUnknown();
                 } else if (answer.status == 429) {
                     const int seconds = reply->rawHeader("Retry-After").toInt();
                     m_notBefore =
@@ -252,8 +301,15 @@ Server::Answer Server::read(QNetworkReply *reply, Reading reading) const
     const int status =
         reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 
-    // Nothing came back at all: the machine is off, the name does not resolve, the
-    // certificate is not the one pinned. Said as what it is rather than as a code.
+    // Refused for its certificate, which is not a server that is down: the server answered,
+    // as somebody this device was not linked to. Said before anything else, because Qt's own
+    // words for it — « the handshake failed » — read as a network hiccup worth retrying.
+    if (Pinning::mismatched(reply)) {
+        return {0, {}, Words::certificateMismatch()};
+    }
+
+    // Nothing came back at all: the machine is off, the name does not resolve, the system
+    // refused a certificate nothing was pinned for. Said as what it is rather than as a code.
     if (status == 0) {
         return {0, {}, Words::unreachable(reply->errorString())};
     }

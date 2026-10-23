@@ -5,11 +5,12 @@
 // and a state you cannot change has no business competing with it. Below the wide band
 // they stack, the actions still first.
 //
-// **What is not here.** The server's address, its version, where the key sits — a reader
-// does not need them, and this is a client for reading comics. They appear under the
-// connection and only when it is broken, which is the one moment they help rather than
-// clutter. `Settings.h` says read, never written, and that rule is about the deployment;
-// how this application looks on this machine is the reader's own business and is written.
+// **What is not here.** The server's version and where the key sits — a reader does not need
+// them, and this is a client for reading comics. They appear under the connection and only
+// when it is broken, which is the one moment they help rather than clutter. The address is
+// the exception, on the library tab: it is where this device was linked, and the one thing
+// a person may have to correct there — with the name, the unlinking and the linking of
+// another device beside it.
 
 import QtQuick
 import QtQuick.Controls
@@ -22,6 +23,9 @@ Item {
     readonly property int notifications: 1
     readonly property int library: 2
     property int section: general
+    /// The name or the address being typed in, in place of the line that shows it.
+    property bool renaming: false
+    property bool moving: false
 
     readonly property bool sideBySide: Widths.band === Widths.Wide
 
@@ -31,6 +35,25 @@ Item {
     Component.onCompleted: {
         Health.ask()
         Scan.ask()
+    }
+
+    // The sentence a clicked link was answered with, kept only while the settings are open:
+    // it was for the person who was sent here.
+    // So is what renaming, moving or unlinking was answered.
+    Component.onDestruction: {
+        Linking.clearNotice()
+        Bond.clearSentence()
+    }
+
+    // The library answers at the new address: what this screen knows of it was asked of the
+    // old one.
+    Connections {
+        target: Bond
+
+        function onMoved() {
+            page.moving = false
+            Health.ask()
+        }
     }
 
     function takeFocus(forward) {
@@ -86,6 +109,14 @@ Item {
                 objectName: "settings-actions"
                 width: columns.side
                 spacing: page.gap
+
+                // First in the column, above the cards: it is what the click that sent the
+                // person here was answered.
+                SettingsNote {
+                    objectName: "settings-already-linked"
+                    visible: page.section === page.library && Linking.notice.length > 0
+                    text: Linking.notice
+                }
 
                 SettingsCard {
                     objectName: "settings-appearance"
@@ -170,6 +201,171 @@ Item {
                                 onDesktopAsked: wanted =>
                                     Preferences.reachTheDesktop(family.value, wanted)
                             }
+                        }
+                    }
+                }
+
+                // The link itself, after the design's « 06 — une fois relié »: where, as whom,
+                // since when — and the two things a person may do to it.
+                SettingsCard {
+                    objectName: "settings-bond"
+                    visible: page.section === page.library
+                    title: Bond.title
+
+                    SettingsStatus {
+                        objectName: "bond-address"
+                        width: parent.width
+                        icon: Health.reachable ? "dns" : "cloud_off"
+                        label: Bond.address
+                        detail: Health.reachable ? Health.holds
+                                                 : (Health.asking ? "" : page.whatIsWrong())
+                        alarming: !Health.reachable && !Health.asking
+                    }
+
+                    Item {
+                        objectName: "bond-name"
+                        width: parent.width
+                        height: 30
+                        visible: !page.renaming
+
+                        Text {
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: Bond.deviceLabel
+                            color: Theme.ink
+                            font.family: Theme.textFamily
+                            font.pixelSize: 14
+                        }
+
+                        Row {
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            spacing: 6
+
+                            Text {
+                                objectName: "bond-name-value"
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: Bond.deviceName
+                                color: Theme.inkSoft
+                                font.family: Theme.textFamily
+                                font.pixelSize: 14
+                            }
+
+                            IconButton {
+                                objectName: "bond-rename"
+                                anchors.verticalCenter: parent.verticalCenter
+                                glyph: "edit"
+                                label: Bond.renameLabel
+                                side: 16
+                                tint: Theme.emerald
+                                onTriggered: {
+                                    renameField.text = Bond.deviceName
+                                    page.renaming = true
+                                    renameField.forceActiveFocus()
+                                    renameField.selectAll()
+                                }
+                            }
+                        }
+                    }
+
+                    // Enter sends it, Escape leaves the name as it was. What the server
+                    // answers comes back in the sentence below.
+                    LeafField {
+                        id: renameField
+
+                        objectName: "bond-rename-field"
+                        width: parent.width
+                        visible: page.renaming
+                        onAccepted: {
+                            Bond.rename(text)
+                            page.renaming = false
+                        }
+                        Keys.onEscapePressed: page.renaming = false
+                    }
+
+                    SettingsLine {
+                        objectName: "bond-linked"
+                        width: parent.width
+                        visible: Bond.linkedOn.length > 0
+                        label: Bond.linkedLabel
+                        value: Bond.linkedOn
+                    }
+
+                    // Another device, linked from this one: the panel asks for its code. Only
+                    // from a library closed to strangers, the one kind that issues codes.
+                    ActionButton {
+                        objectName: "bond-relay"
+                        visible: Health.linksOthers
+                        label: Bond.relayLabel
+                        onTriggered: relay.open()
+
+                        Glyph {
+                            source: "assets/icons/add_link.svg"
+                            side: 16
+                            tint: Theme.onEmerald
+                        }
+                    }
+
+                    Item {
+                        width: parent.width
+                        height: 34
+                        visible: page.moving
+
+                        LeafField {
+                            id: moveField
+
+                            objectName: "bond-move-field"
+                            anchors.left: parent.left
+                            anchors.right: tryIt.left
+                            anchors.rightMargin: 10
+                            placeholderText: Bond.movePlaceholder
+                            enabled: !Bond.busy
+                            onAccepted: Bond.move(text)
+                            Keys.onEscapePressed: page.moving = false
+                        }
+
+                        ActionButton {
+                            id: tryIt
+
+                            objectName: "bond-move-try"
+                            anchors.right: parent.right
+                            anchors.verticalCenter: parent.verticalCenter
+                            label: Bond.moveAction
+                            ready: !Bond.busy && moveField.text.trim().length > 0
+                            onTriggered: Bond.move(moveField.text)
+                        }
+                    }
+
+                    SettingsNote {
+                        objectName: "bond-sentence"
+                        width: parent.width
+                        visible: Bond.sentence.length > 0
+                        text: Bond.sentence
+                        alarming: !Bond.busy
+                    }
+
+                    // Back by the actions' own inset, so their words line up with the
+                    // labels above rather than with the hover behind them.
+                    Row {
+                        x: -8
+                        spacing: 8
+
+                        LeafTextAction {
+                            objectName: "bond-move"
+                            label: Bond.moveLabel
+                            onTriggered: {
+                                moveField.text = Bond.address
+                                page.moving = !page.moving
+                                if (page.moving)
+                                    moveField.forceActiveFocus()
+                            }
+                        }
+
+                        LeafTextAction {
+                            objectName: "bond-unlink"
+                            label: Bond.unlinkLabel
+                            alarming: true
+                            onTriggered: unlinking.open()
                         }
                     }
                 }
@@ -319,6 +515,101 @@ Item {
                 }
             }
         }
+    }
+
+    // « Délier cet appareil ? », after the design: what goes, how to come back, and what to
+    // do on the server should it not answer — this device forgets either way.
+    Popup {
+        id: unlinking
+
+        objectName: "unlink-dialog"
+        width: Math.min(430, Overlay.overlay ? Overlay.overlay.width - 80 : 430)
+        anchors.centerIn: Overlay.overlay
+        padding: 0
+        modal: true
+        focus: true
+        closePolicy: Popup.CloseOnEscape
+
+        Overlay.modal: Rectangle {
+            color: Qt.rgba(12 / 255, 16 / 255, 14 / 255, 0.74)
+        }
+
+        background: Rectangle {
+            radius: Theme.cardRadius
+            color: Theme.surface
+            border.color: Theme.rule
+            border.width: 1
+            antialiasing: true
+
+            CardLift { level: CardLift.Modal }
+        }
+
+        Column {
+            id: unlinkBody
+
+            x: 17
+            y: 16
+            width: parent.width - 34
+            spacing: 10
+
+            Text {
+                objectName: "unlink-question"
+                width: parent.width
+                text: Bond.unlinkQuestion
+                color: Theme.ink
+                font.family: Theme.displayFamily
+                font.pixelSize: 20
+                font.weight: Font.Bold
+                wrapMode: Text.WordWrap
+            }
+
+            Repeater {
+                model: [Bond.unlinkWhat, Bond.unlinkComeBack, Bond.unlinkIfSilent]
+
+                delegate: Text {
+                    required property string modelData
+
+                    width: unlinkBody.width
+                    text: modelData
+                    color: Theme.inkSoft
+                    font.family: Theme.textFamily
+                    font.pixelSize: 12
+                    lineHeight: 1.4
+                    wrapMode: Text.WordWrap
+                }
+            }
+        }
+
+        Row {
+            anchors.right: unlinkBody.right
+            anchors.top: unlinkBody.bottom
+            anchors.topMargin: 16
+            spacing: 8
+
+            LeafTextAction {
+                objectName: "unlink-cancel"
+                label: Bond.cancelLabel
+                anchors.verticalCenter: parent.verticalCenter
+                onTriggered: unlinking.close()
+            }
+
+            ActionButton {
+                objectName: "unlink-go"
+                label: Bond.unlinkGo
+                danger: true
+                ready: !Bond.busy
+                onTriggered: {
+                    unlinking.close()
+                    Bond.unlink()
+                }
+            }
+        }
+
+        implicitHeight: unlinkBody.implicitHeight + 16 + 16 + 32 + 16
+    }
+
+    RelayDialog {
+        id: relay
     }
 
     /// What to say under a connection that is not one. `Settings` writes the sentence when

@@ -189,6 +189,39 @@ private slots:
         QVERIFY(health.trouble().isEmpty());
     }
 
+    /// « Relier un autre appareil » is offered only by a library closed to strangers: an open
+    /// one issues no code, and the button would only ever answer a refusal.
+    void only_a_closed_library_offers_to_link_another_device()
+    {
+        Health health(m_server);
+        QVERIFY(!health.linksOthers());
+
+        m_pretend->answers(200, asJson({{u"status"_s, u"ok"_s},
+                                        {u"api"_s, 1},
+                                        {u"format"_s, 1},
+                                        {u"library"_s, 6},
+                                        {u"linked"_s, false}}));
+        health.ask();
+        settle([&health] { return health.reachable(); });
+        QVERIFY(!health.linked());
+        QVERIFY(!health.linksOthers());
+
+        m_pretend->answers(200, asJson({{u"status"_s, u"ok"_s},
+                                        {u"api"_s, 1},
+                                        {u"format"_s, 1},
+                                        {u"library"_s, 6},
+                                        {u"linked"_s, true}}));
+        health.ask();
+        settle([&health] { return health.linked(); });
+        QVERIFY(health.linksOthers());
+
+        // Out of reach, nothing can be asked of it: not offered either.
+        m_pretend->answers(500, QByteArrayLiteral("{}"));
+        health.ask();
+        settle([&health] { return !health.reachable(); });
+        QVERIFY(!health.linksOthers());
+    }
+
     /// A server that stops answering has not changed version. Blanking what is on screen
     /// would say it had, so what was known stays known and the trouble is said beside it.
     void a_server_that_stops_answering_keeps_what_it_already_said()

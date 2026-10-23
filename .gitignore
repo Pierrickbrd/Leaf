@@ -8,6 +8,9 @@ compile_commands.json
 
 # The index is rebuildable by rescanning: the files are the truth.
 data/
+# Except the client's test certificates, which are fixtures and not an index: ignored, a
+# fresh checkout would build a TLS test with no certificate to serve.
+!desktop/tests/data/
 *.sqlite
 *.sqlite-journal
 *.sqlite-wal

@@ -1036,7 +1036,7 @@ private slots:
     {
         const QJsonObject said{{u"status"_s, u"ok"_s}, {u"api"_s, 1},
                                {u"format"_s, 1},       {u"library"_s, 6},
-                               {u"localDrop"_s, true}};
+                               {u"localDrop"_s, true}, {u"linked"_s, false}};
         const Api::Read<Api::Health> read = Api::health(said);
         QVERIFY2(read.ok(), qPrintable(read.trouble));
         QCOMPARE(read.value->status, u"ok"_s);
@@ -1044,6 +1044,7 @@ private slots:
         QCOMPARE(read.value->format, 1);
         QCOMPARE(read.value->library, 6);
         QVERIFY(read.value->localDrop);
+        QVERIFY(!read.value->linked);
     }
 
     /// No shared folder is the ordinary case for a server on another machine, not a
@@ -1058,6 +1059,42 @@ private slots:
         // A library of zero is a fact, not an absence: a server answering perfectly over an
         // unmounted disk answers exactly this.
         QCOMPARE(read.value->library, 0);
+        // A server older than linking does not say whether it is closed: taken for closed.
+        QVERIFY(read.value->linked);
+    }
+
+    void a_code_made_for_another_device_is_read_in_full()
+    {
+        const Api::Read<Api::IssuedCode> read = Api::issuedCode(QJsonObject{
+            {u"id"_s, u"c-1"_s}, {u"code"_s, u"K7QF-2MXP"_s}, {u"expiresAt"_s, 1792700000000LL}});
+        QVERIFY2(read.ok(), qPrintable(read.trouble));
+        QCOMPARE(read.value->id, u"c-1"_s);
+        QCOMPARE(read.value->code, u"K7QF-2MXP"_s);
+        QCOMPARE(read.value->expiresAt, 1792700000000LL);
+
+        const Api::Read<Api::IssuedCode> empty = Api::issuedCode(
+            QJsonObject{{u"id"_s, u"c-1"_s}, {u"code"_s, u""_s}, {u"expiresAt"_s, 1}});
+        QVERIFY(!empty.ok());
+        // The refusal names what was wrong, never what the code was.
+        QVERIFY(!empty.trouble.contains(u"K7QF"_s));
+    }
+
+    void a_code_says_whether_it_was_used_and_by_whom()
+    {
+        using enum Api::CodeState::State;
+        const Api::Read<Api::CodeState> waiting =
+            Api::codeState(QJsonObject{{u"state"_s, u"waiting"_s}});
+        QVERIFY2(waiting.ok(), qPrintable(waiting.trouble));
+        QCOMPARE(waiting.value->state, Waiting);
+
+        const Api::Read<Api::CodeState> served = Api::codeState(
+            QJsonObject{{u"state"_s, u"served"_s}, {u"name"_s, u"PC du salon"_s}});
+        QVERIFY2(served.ok(), qPrintable(served.trouble));
+        QCOMPARE(served.value->state, Served);
+        QCOMPARE(served.value->name, u"PC du salon"_s);
+
+        QVERIFY(!Api::codeState(QJsonObject{{u"state"_s, u"served"_s}}).ok());
+        QVERIFY(!Api::codeState(QJsonObject{{u"state"_s, u"lost"_s}}).ok());
     }
 
     void a_health_without_its_version_is_refused_by_name()

@@ -24,6 +24,7 @@
 #include <QDBusConnection>
 #include <QQmlApplicationEngine>
 
+class Doorbell;
 class QGuiApplication;
 
 namespace Boot {
@@ -40,7 +41,13 @@ namespace Boot {
 /// `Notifier` takes one: a test that boots the real window boots the real notifier, and a
 /// bubble raised over the shelf then lands on the desktop of whoever ran the test. The
 /// application hands it the session bus; `crosses-the-seam` hands it one that goes nowhere.
+///
+/// `doorbell` and `link` are what a clicked `leaf://` link brings: the link this launch was
+/// started with, and the door a later launch will hand its own to. Both go to `Linking::arrive`
+/// once the window exists, and the window comes to the front for the second kind — somebody
+/// clicked, and has to see what the click did. Either may be absent.
 void run(QQmlApplicationEngine &engine, const QGuiApplication &application,
-         QDBusConnection notifications = QDBusConnection::sessionBus());
+         QDBusConnection notifications = QDBusConnection::sessionBus(),
+         Doorbell *doorbell = nullptr, const QString &link = {});
 
 } // namespace Boot

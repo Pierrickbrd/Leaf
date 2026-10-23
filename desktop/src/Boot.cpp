@@ -1,7 +1,9 @@
 #include "Boot.h"
 
 #include "Covers.h"
+#include "Doorbell.h"
 #include "Fonts.h"
+#include "Linking.h"
 #include "Notifier.h"
 #include "Preferences.h"
 #include "Theme.h"
@@ -60,7 +62,7 @@ private:
 namespace Boot {
 
 void run(QQmlApplicationEngine &engine, const QGuiApplication &application,
-         QDBusConnection notifications)
+         QDBusConnection notifications, Doorbell *doorbell, const QString &link)
 {
     // Before any QML: a family the database does not know resolves to a fallback, and the
     // window would come up in Noto Sans with nothing said about it.
@@ -139,6 +141,32 @@ void run(QQmlApplicationEngine &engine, const QGuiApplication &application,
         qWarning().noquote()
             << u"error resolving the Theme singleton — the interface will stay in its light "
                u"palette"_s;
+
+    // A clicked link, from the command line or from a launch that found this one already
+    // there. Resolved after the load for the reason the `Theme` is: the module does not exist
+    // before it. Whatever it carries is untrusted and goes through `Linking`, which reads it
+    // like a pasted one and never sends anything by itself.
+    if (doorbell || !link.isEmpty()) {
+        if (auto *linking =
+                engine.singletonInstance<Linking *>(qmlTypeId("Leaf", 1, 0, "Linking"))) {
+            if (!link.isEmpty())
+                linking->arrive(link);
+            if (doorbell) {
+                QObject::connect(
+                    doorbell, &Doorbell::rang, linking, [&engine, linking](const QString &heard) {
+                        linking->arrive(heard);
+                        if (engine.rootObjects().isEmpty())
+                            return;
+                        if (auto *window = qobject_cast<QQuickWindow *>(
+                                engine.rootObjects().constFirst())) {
+                            window->show();
+                            window->raise();
+                            window->requestActivate();
+                        }
+                    });
+            }
+        }
+    }
 
     // What escalates to the desktop, put on the bus it was handed. The notifier is owned by
     // the engine so it lives exactly as long as what raises the events, and it is connected

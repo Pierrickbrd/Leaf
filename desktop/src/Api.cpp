@@ -566,6 +566,81 @@ Read<Health> health(const QJsonObject &from)
     // Absent means no shared folder, which is the ordinary case for a server on another
     // machine — not a malformed answer.
     said.localDrop = field.maybeBool(u"localDrop"_s).value_or(false);
+    said.linked = field.maybeBool(u"linked"_s).value_or(true);
+    return {said, {}};
+}
+
+Read<Device> device(const QJsonObject &from)
+{
+    Fields its(from);
+    Device said;
+
+    said.id = its.text(u"id"_s);
+    said.name = its.text(u"name"_s);
+    if (its.broken())
+        return refused<Device>(QStringLiteral("device"), its.trouble());
+    return {said, {}};
+}
+
+Read<Linked> linked(const QJsonObject &from)
+{
+    Fields field(from);
+    Linked said;
+
+    said.key = field.text(u"key"_s);
+    const QJsonObject inside = field.object(u"device"_s);
+    if (field.broken())
+        return refused<Linked>(QStringLiteral("linked"), field.trouble());
+
+    // Read where a rename's answer is read, so the two cannot come to disagree on a device.
+    const Read<Device> its = device(inside);
+    if (!its.ok())
+        return refused<Linked>(QStringLiteral("linked"), its.trouble);
+    said.device = *its.value;
+    // An empty key would be stored, sent, and refused on the first request with a sentence
+    // about a key nobody chose: refused here instead, where the answer is still at hand.
+    if (said.key.isEmpty())
+        return refused<Linked>(QStringLiteral("linked"), QStringLiteral("key is empty"));
+    return {said, {}};
+}
+
+Read<IssuedCode> issuedCode(const QJsonObject &from)
+{
+    Fields field(from);
+    IssuedCode said;
+
+    said.id = field.text(u"id"_s);
+    said.code = field.text(u"code"_s);
+    said.expiresAt = field.big(u"expiresAt"_s);
+    if (field.broken())
+        return refused<IssuedCode>(QStringLiteral("issued code"), field.trouble());
+    // Neither may be empty: an empty id follows nothing, and a link with an empty code is a
+    // link the other device is told is not one.
+    if (said.id.isEmpty() || said.code.isEmpty())
+        return refused<IssuedCode>(QStringLiteral("issued code"),
+                                   QStringLiteral("id or code is empty"));
+    return {said, {}};
+}
+
+Read<CodeState> codeState(const QJsonObject &from)
+{
+    Fields field(from);
+    CodeState said;
+
+    const QString state = field.text(u"state"_s);
+    if (field.broken())
+        return refused<CodeState>(QStringLiteral("code state"), field.trouble());
+    if (state == u"waiting"_s)
+        return {said, {}};
+    // A third word is refused rather than read as waiting: the panel would go on asking a
+    // question whose answer it cannot read, in silence, for ten minutes.
+    if (state != u"served"_s)
+        return refused<CodeState>(QStringLiteral("code state"),
+                                  QStringLiteral("state is unknown"));
+    said.state = CodeState::State::Served;
+    said.name = field.text(u"name"_s);
+    if (field.broken())
+        return refused<CodeState>(QStringLiteral("code state"), field.trouble());
     return {said, {}};
 }
 

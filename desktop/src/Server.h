@@ -132,7 +132,9 @@ public:
     /// quarter of an hour. A client that retried a 403 would lock itself out, and with it
     /// everything else answering from that address.
     ///
-    /// So one refusal stops the client for good, and a 429 stops it until Retry-After. The
+    /// So one refusal of the key — `403 unknown key`, the only one the server counts — stops
+    /// the client for good, and a 429 stops it until Retry-After. A route refusing this key a
+    /// right it lacks is not counted, and stops nothing: the key still opens the rest. The
     /// distinction is the whole reason there is no generic "something went wrong, try again".
     bool stopped() const { return !m_stopped.isEmpty(); }
 
@@ -156,6 +158,13 @@ public:
     /// The address with its edges filed off: a scheme if none was given, no trailing slash.
     /// Typing `leaf.local:8081` into a box is not a mistake anybody should be corrected for.
     static QString tidy(const QString &address);
+
+signals:
+    /// The server refused the key as one it does not know — `403 unknown key`. Not a key
+    /// that lacks a right, nor a library that is shut: this device was removed from it with
+    /// `device revoke`, or never was in it. Said once per refusal, and only for the key this
+    /// device still holds; whoever listens decides what forgetting means — see `Bond`.
+    void keyUnknown();
 
 private:
 
