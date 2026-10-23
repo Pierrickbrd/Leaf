@@ -46,7 +46,7 @@ Server::Server(Settings *settings, QObject *parent) : QObject(parent), m_setting
             if (!one.caller) {
                 continue;
             }
-            send({one.verb, one.path, QUrlQuery(one.encodedQuery), one.body, one.range},
+            send({one.verb, one.path, QUrlQuery(one.encodedQuery), one.body, one.range, one.json},
                  one.caller, one.then, one.reading);
         }
     });
@@ -104,6 +104,12 @@ void Server::post(const QString &path, const QByteArray &body, const QObject *ca
                   std::function<void(const Answer &)> then)
 {
     send({"POST", path, QUrlQuery(), body, {}}, caller, std::move(then));
+}
+
+void Server::putJson(const QString &path, const QByteArray &body, const QObject *caller,
+                     std::function<void(const Answer &)> then)
+{
+    send({"PUT", path, QUrlQuery(), body, {}, true}, caller, std::move(then));
 }
 
 void Server::get(const QString &path, const QUrlQuery &query, const QObject *caller,
@@ -191,7 +197,8 @@ void Server::send(const Sending &what, const QObject *caller,
         // it is not the `QUrlQuery` itself. `FullyEncoded` is the only form that survives the
         // round trip: a `PrettyDecoded` query hands its own ampersands back to the parser.
         m_waiting.append({what.verb, what.path, what.query.toString(QUrl::FullyEncoded),
-                          what.body, what.range, reading, alive, std::move(then)});
+                          what.body, what.range, reading, what.json, alive,
+                          std::move(then)});
         return;
     }
 
@@ -221,10 +228,12 @@ void Server::send(const Sending &what, const QObject *caller,
     // body is empty: `POST /scan` carries nothing, and a POST with no length at all is one
     // some proxies hold open waiting for it.
     if (what.verb != "GET") {
-        // A PUT in this client is always part of a file, and part of a file is never JSON.
+        // A PUT is part of a file, and part of a file is never JSON — unless `putJson` sent
+        // it, which is how a profile is chosen and a code replaced.
         request.setHeader(QNetworkRequest::ContentTypeHeader,
-                          what.verb == "PUT" ? QByteArrayLiteral("application/octet-stream")
-                                        : QByteArrayLiteral("application/json"));
+                          what.verb == "PUT" && !what.json
+                              ? QByteArrayLiteral("application/octet-stream")
+                              : QByteArrayLiteral("application/json"));
     }
     if (!what.range.isEmpty()) {
         request.setRawHeader("Content-Range", what.range);
@@ -274,6 +283,14 @@ void Server::send(const Sending &what, const QObject *caller,
                     answer.status == 403
                     && answer.body.object().value(QStringLiteral("error")).toString()
                            == QStringLiteral("unknown key");
+                // A device that must choose is refused by every route but two, and the refusal
+                // is the same wherever it lands: said here, once, so that a screen which only
+                // asked for a shelf does not have to know what to do with it.
+                if (answer.status == 409 && current
+                    && answer.body.object().value(QStringLiteral("error")).toString()
+                           == QStringLiteral("choose a profile")) {
+                    emit mustChoose();
+                }
                 // Only the key's own refusal stops the client — the server's answer to no key
                 // or one it does not know, which it counts towards its throttle. A route that
                 // refuses this key a right (a read-only key asking to import, or to make a

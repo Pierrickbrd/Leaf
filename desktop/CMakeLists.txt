@@ -89,6 +89,8 @@ qt_add_executable(leaf-desktop
     src/Preferences.cpp
     src/Health.h
     src/Health.cpp
+    src/Profiles.h
+    src/Profiles.cpp
     src/Scan.h
     src/Scan.cpp
     src/Shelf.cpp
@@ -428,6 +430,7 @@ qt_add_executable(crosses-the-seam
     src/Captions.h src/Captions.cpp
     src/Filters.h src/Filters.cpp
     src/Health.h src/Health.cpp
+    src/Profiles.h src/Profiles.cpp
     src/Scan.h src/Scan.cpp
     src/Preferences.h src/Preferences.cpp
     src/Resume.h src/Resume.cpp
@@ -662,6 +665,19 @@ target_include_directories(holds-the-server-state PRIVATE src)
 target_link_libraries(holds-the-server-state PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
 add_test(NAME holds-the-server-state COMMAND holds-the-server-state)
+
+# Who reads. A refusal can arrive while any screen is on show, so the model is headless.
+qt_add_executable(holds-the-profiles
+    tests/holds_the_profiles.cpp tests/Pretend.h
+    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
+    src/Profiles.h src/Profiles.cpp)
+target_include_directories(holds-the-profiles PRIVATE src)
+target_link_libraries(holds-the-profiles PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME holds-the-profiles COMMAND holds-the-profiles)
 
 qt_add_executable(holds-the-filters
     tests/holds_the_filters.cpp tests/Pretend.h

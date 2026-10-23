@@ -2065,4 +2065,31 @@ QString hereToo(const QString &detail)
     return detail.isEmpty() ? u"ici"_s : detail + u" · ici"_s;
 }
 
+QString whoReads()
+{
+    return u"Qui lit"_s + Nbsp + u"?"_s;
+}
+
+QString wrongCode()
+{
+    return u"Ce code n’est pas le bon."_s;
+}
+
+QString profileNote(Api::Kind kind, std::optional<int> maxAge)
+{
+    switch (kind) {
+    case Api::Kind::Principal:
+        return u"Principal"_s;
+    case Api::Kind::Reader:
+        return {};
+    case Api::Kind::Restricted:
+        if (maxAge)
+            return u"Jusqu’à %1 ans"_s.arg(*maxAge);
+        break;
+    case Api::Kind::Other:
+        break;
+    }
+    return u"Restreint"_s;
+}
+
 } // namespace Words

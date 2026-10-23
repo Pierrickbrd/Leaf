@@ -45,6 +45,19 @@ public:
         return value.toInt();
     }
 
+    /// A yes or no that has to be there. `maybeBool` would read a missing right as « no », which
+    /// for a right is the safe answer and for a flag like `kept` is a different fact: the
+    /// contract lists them required so that a server which forgot one is said to have.
+    bool flag(QStringView name)
+    {
+        const QJsonValue value = m_from.value(name);
+        if (!value.isBool()) {
+            complain(name, QStringLiteral("a boolean"));
+            return false;
+        }
+        return value.toBool();
+    }
+
     /// A count of bytes that has to be there. Apart from `whole` because an `int` stops at
     /// two gigabytes and an edition passes that at forty volumes: `toInt` on a larger number
     /// answers 0, which would report a deletion that took nothing.
@@ -648,6 +661,137 @@ Read<CodeState> codeState(const QJsonObject &from)
     said.name = field.text(u"name"_s);
     if (field.broken())
         return refused<CodeState>(QStringLiteral("code state"), field.trouble());
+    return {said, {}};
+}
+
+Kind kind(const QString &word)
+{
+    using enum Kind;
+
+    if (word == u"principal"_s)
+        return Principal;
+    if (word == u"reader"_s)
+        return Reader;
+    if (word == u"restricted"_s)
+        return Restricted;
+    return Other;
+}
+
+CodeScope codeScope(const QString &word)
+{
+    if (word == u"restricted"_s)
+        return CodeScope::Restricted;
+    if (word == u"everything"_s)
+        return CodeScope::Everything;
+    // `none` and any word not taught: no code is the one reading that asks nothing of a
+    // reader, and a server that grew a fourth scope is still guarding with it.
+    return CodeScope::None;
+}
+
+QString spell(CodeScope value)
+{
+    switch (value) {
+    case CodeScope::Restricted:
+        return QStringLiteral("restricted");
+    case CodeScope::Everything:
+        return QStringLiteral("everything");
+    case CodeScope::None:
+        break;
+    }
+    return QStringLiteral("none");
+}
+
+Read<ProfileRights> rights(const QJsonObject &from)
+{
+    Fields field(from);
+    ProfileRights said;
+
+    said.import = field.flag(u"import"_s);
+    said.edit = field.flag(u"edit"_s);
+    said.erase = field.flag(u"delete"_s);
+    if (field.broken())
+        return refused<ProfileRights>(QStringLiteral("rights"), field.trouble());
+    return {said, {}};
+}
+
+Read<Profile> profile(const QJsonObject &from)
+{
+    Fields field(from);
+    Profile said;
+
+    said.id = field.text(u"id"_s);
+    said.name = field.text(u"name"_s);
+    said.color = field.text(u"color"_s);
+    const QString word = field.text(u"kind"_s);
+    const QJsonObject inside = field.object(u"rights"_s);
+    if (field.broken())
+        return refused<Profile>(QStringLiteral("profile"), field.trouble());
+
+    said.kind = kind(word);
+    said.maxAge = field.maybeWhole(u"maxAge"_s);
+    const Read<ProfileRights> its = rights(inside);
+    if (!its.ok())
+        return refused<Profile>(QStringLiteral("profile"), its.trouble);
+    said.rights = *its.value;
+    return {said, {}};
+}
+
+Read<Seating> seating(const QJsonObject &from)
+{
+    Fields field(from);
+    Seating said;
+
+    const QJsonArray all = field.array(u"profiles"_s);
+    said.active = field.text(u"active"_s);
+    said.kept = field.flag(u"kept"_s);
+    said.choosing = field.flag(u"choosing"_s);
+    said.held = field.flag(u"held"_s);
+    const QString scope = field.text(u"code"_s);
+    if (field.broken())
+        return refused<Seating>(QStringLiteral("profiles"), field.trouble());
+
+    said.code = codeScope(scope);
+    for (int i = 0; i < all.size(); ++i) {
+        const Read<Profile> one = profile(all.at(i).toObject());
+        if (!one.ok())
+            return refused<Seating>(QStringLiteral("profiles[%1]").arg(i), one.trouble);
+        said.profiles.append(*one.value);
+    }
+    return {said, {}};
+}
+
+Read<DeviceSeat> deviceSeat(const QJsonObject &from)
+{
+    Fields field(from);
+    DeviceSeat said;
+
+    said.id = field.text(u"id"_s);
+    said.name = field.text(u"name"_s);
+    said.profile = field.text(u"profile"_s);
+    said.kept = field.flag(u"kept"_s);
+    said.here = field.flag(u"here"_s);
+    if (field.broken())
+        return refused<DeviceSeat>(QStringLiteral("device"), field.trouble());
+
+    said.seenAt = field.maybeBig(u"seenAt"_s);
+    return {said, {}};
+}
+
+Read<QList<DeviceSeat>> deviceSeats(const QJsonObject &from)
+{
+    Fields field(from);
+    const QJsonArray all = field.array(u"devices"_s);
+    if (field.broken())
+        return refused<QList<DeviceSeat>>(QStringLiteral("devices"), field.trouble());
+
+    QList<DeviceSeat> said;
+    for (int i = 0; i < all.size(); ++i) {
+        const Read<DeviceSeat> one = deviceSeat(all.at(i).toObject());
+        if (!one.ok())
+            return refused<QList<DeviceSeat>>(QStringLiteral("devices[%1]").arg(i),
+                                              one.trouble);
+        said.append(*one.value);
+    }
     return {said, {}};
 }
 

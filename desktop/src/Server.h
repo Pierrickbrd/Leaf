@@ -102,6 +102,13 @@ public:
     void post(const QString &path, const QByteArray &body, const QObject *caller,
               std::function<void(const Answer &)> then);
 
+    /// A JSON body, with the verb the contract uses to *replace* something whole: the profile
+    /// someone reads as, the code, a profile's reading preferences. `put` below is always a
+    /// file and says so in its content type, so a document sent through it arrived at the
+    /// server as octets and was refused as not being an object.
+    void putJson(const QString &path, const QByteArray &body, const QObject *caller,
+                 std::function<void(const Answer &)> then);
+
     /// Bytes, from an offset — the verb the import's transfers ride on.
     ///
     /// `from` and `whole` become the `Content-Range` the resumable paths read, and the body
@@ -165,6 +172,12 @@ signals:
     /// `device revoke`, or never was in it. Said once per refusal, and only for the key this
     /// device still holds; whoever listens decides what forgetting means — see `Bond`.
     void keyUnknown();
+    /// Some route answered `409 choose a profile`: the profile this device sat on was deleted,
+    /// and the server refuses everything but « Qui lit ? » until it chooses. Said by whichever
+    /// request met it first — the shelf, a cover, a progress write — because no screen knows
+    /// it is the one that will; whoever listens (`Profiles`) turns it into the question.
+    /// Said once per refusal, for the key still held only, like `keyUnknown`.
+    void mustChoose();
 
 private:
 
@@ -208,6 +221,9 @@ private:
         /// back until the keyring answers and then replayed as a document would come back
         /// « unreadable », which is the one thing it is not.
         Reading reading = Reading::Document;
+        /// Whether a PUT's body is a document. Held with the rest for the reason `reading`
+        /// is: replayed as octets, it would be refused as something it was not.
+        bool json = false;
         QPointer<const QObject> caller;
         std::function<void(const Answer &)> then;
     };
@@ -229,6 +245,8 @@ private:
         QByteArray body;
         /// What a PUT carries beyond the key: the range its body starts at.
         QByteArray range;
+        /// A PUT that carries a document and not part of a file.
+        bool json = false;
     };
 
     void send(const Sending &what, const QObject *caller,

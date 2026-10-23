@@ -1034,4 +1034,20 @@ QString stageAnd(const QString &stage, const QString &howFar);
 /// belongs to the sentence, not to the delegate that draws it.
 QString concern(const QString &said);
 
+// ——— Profiles: who reads ———————————————————————————————————————————————————————————
+//
+// Neutral, and in the second person of politeness: « profil », never a gendered noun for the
+// person, and no sentence that says what somebody is. The full set of words the screens use
+// is theirs to add; these are the few the model itself has to say.
+
+/// « Qui lit ? » — the question, and the name of the screen that asks it.
+QString whoReads();
+/// « Ce code n’est pas le bon. » — said by every route that takes the code, and not the
+/// server's own « code », which `keyRefused` would turn into a sentence about the key.
+QString wrongCode();
+/// What stands under a profile's name in a list: « Principal » for the first, nothing for a
+/// reader, « Jusqu’à 12 ans » for a restricted profile, and a plain « Restreint » when that
+/// profile is of a kind this client was not taught or has no age.
+QString profileNote(Api::Kind kind, std::optional<int> maxAge);
+
 } // namespace Words
