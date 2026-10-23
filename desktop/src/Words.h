@@ -531,17 +531,18 @@ QString unreadableAnswer();
 /// « La clé a été refusée. », and what the server said after it when it said anything.
 QString keyRefused(const QString &said);
 
-/// « Le serveur à cette adresse ne présente pas le certificat attendu. … » — the spec's own
-/// sentence, word for word. It offers no way past: a certificate that is not the pinned one
-/// is either a server that changed or somebody standing in front of it, and this client
-/// cannot tell which.
+/// « Le serveur à cette adresse ne se présente pas comme la bibliothèque attendue. … » — the
+/// pinned certificate, refused, in words for anyone. It offers no way past: a certificate
+/// that is not the pinned one is either a server that changed or somebody standing in front
+/// of it, and this client cannot tell which — so it says who can.
 QString certificateMismatch();
 
 // ——— Linking a device: the screen « Aucune bibliothèque reliée » ————————————————————
 //
-// The refusals are the spec's own sentences, word for word, with the typography this file
-// promises: the spec writes them with straight apostrophes and code quotes it cannot carry
-// on a screen.
+// The refusals began as the spec's own sentences. They no longer name a command, an address
+// or a setting: a person on the machine that runs the library was shown 127.0.0.1, a tunnel
+// and sudo by the relay panel, and every sentence about linking was rewritten so that anyone
+// can act on it. The commands are the README's.
 
 /// The screen's title, its one paragraph, and the names of its two fields.
 QString noLibraryLinked();
@@ -558,11 +559,11 @@ QString lookingForTheLibrary();
 /// « Bibliothèque trouvée : 192.168.1.20 », and under it what was checked and what it holds.
 QString libraryFound(const QString &host);
 QString libraryFoundDetail(bool pinned, int series);
-/// « Collez le lien donné par leaf-server device add … » — what is not a link is told what
-/// one looks like.
+/// « Ce n’est pas un lien de liaison. … » — what is not a link is told where one comes from
+/// and what it looks like.
 QString notALink();
-/// « Aucune bibliothèque Leaf ne répond à cette adresse … » — a server gives one link per
-/// address it listens on, and only some of them are reachable from a given device.
+/// « Aucune bibliothèque Leaf ne répond à ce lien … » — `device add` gives one link per
+/// address the server listens on, and only some of them are reachable from a given device.
 QString noLibraryAnswers();
 /// « Ce lien n’est plus valable … » — expired, already used, or never issued: the server
 /// gives one answer for the three, and so does this.
@@ -635,7 +636,8 @@ QString tryThisAddress();
 QString tryingTheAddress();
 /// What was typed is not an address a library can be at.
 QString notAnAddress();
-/// « Leaf ne se relie qu’en https à une autre machine. » — http only ever on the loopback.
+/// « Vers une autre machine, l’adresse d’une bibliothèque commence par https://. » — plain
+/// http only ever on the loopback; what an address looks like, not why.
 QString httpsElsewhere();
 /// The new address answered, and did not know this device's key: not the same library, or
 /// not this device's. Nothing is written.
@@ -644,7 +646,7 @@ QString keyUnknownThere();
 /// what to do when the server does not answer, and the button.
 QString unlinkDevice();
 QString unlinkQuestion();
-QString unlinkWhat(const QString &name, const QString &host);
+QString unlinkWhat(const QString &name);
 QString unlinkComeBack();
 QString unlinkIfSilent(const QString &name);
 QString unlinkGo();
@@ -652,7 +654,8 @@ QString unlinkGo();
 /// the client was holding back and never asked: the key may still work there.
 QString unlinkedWithoutTheServer(const QString &name);
 /// The link screen, after an unlinking the server refused with a 409: this device came in
-/// with a key from `LEAF_KEYS`, which no device command removes — only the file does.
+/// with a key from `LEAF_KEYS`, which no device command removes — only the file does. The
+/// README says how; the screen says who.
 QString unlinkedAnOldKey();
 /// « Cet appareil a été retiré de la bibliothèque. … » — the link screen, opened because the
 /// server no longer knows this device's key: `device revoke` was run.
@@ -675,9 +678,14 @@ QString relayTimeLeft(int seconds);
 QString deviceRelayed(const QString &name);
 /// The code ran out, or was withdrawn elsewhere, before anybody used it.
 QString relayRanOut();
-/// Under a link built from the loopback: it opens this library on this machine and nowhere
-/// else, so another device is pointed to the server's own `device add`.
-QString relayOnlyHere();
+/// Under a link the server built from one of its own network addresses, there being no
+/// public one: it opens the library from the same network and nowhere else.
+QString relaySameNetwork();
+/// In place of « Relier un autre appareil » and « Délier cet appareil », when the server says
+/// nobody else reaches it. Plain words, and nothing more: a person on the machine that runs
+/// the library was once shown 127.0.0.1, a tunnel, sudo and LEAF_PUBLIC_URL here, and the
+/// README is where those belong.
+QString onlyThisComputer();
 /// Another code, for a panel whose code ran out.
 QString anotherLink();
 QString closeThePanel();

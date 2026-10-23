@@ -54,6 +54,11 @@ Item {
             page.moving = false
             Health.ask()
         }
+
+        // The server refused to relay: whatever the tab offers was decided on an older answer.
+        function onNobodyElseReaches() {
+            Health.ask()
+        }
     }
 
     function takeFocus(forward) {
@@ -292,7 +297,8 @@ Item {
                     }
 
                     // Another device, linked from this one: the panel asks for its code. Only
-                    // from a library closed to strangers, the one kind that issues codes.
+                    // from a library closed to strangers, the one kind that issues codes, and
+                    // reached by other devices, the one kind with an address to give them.
                     ActionButton {
                         objectName: "bond-relay"
                         visible: Health.linksOthers
@@ -336,6 +342,15 @@ Item {
                         }
                     }
 
+                    // Nobody reaches this library but the machine it runs on: neither relaying
+                    // nor unlinking, and one plain sentence in their place.
+                    SettingsNote {
+                        objectName: "bond-only-here"
+                        width: parent.width
+                        visible: Health.onlyHere.length > 0
+                        text: Health.onlyHere
+                    }
+
                     SettingsNote {
                         objectName: "bond-sentence"
                         width: parent.width
@@ -363,6 +378,7 @@ Item {
 
                         LeafTextAction {
                             objectName: "bond-unlink"
+                            visible: Health.unlinks
                             label: Bond.unlinkLabel
                             alarming: true
                             onTriggered: unlinking.open()

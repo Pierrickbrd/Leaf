@@ -38,10 +38,19 @@ class Health : public QObject
     Q_PROPERTY(bool localDrop READ localDrop NOTIFY changed)
     /// Whether the library is closed to anyone without a key, as `/health` says.
     Q_PROPERTY(bool linked READ linked NOTIFY changed)
-    /// Whether « Relier un autre appareil » is offered: only by a library that answers and is
-    /// closed. An open one issues no code — its first device is linked from its terminal — and
-    /// the button would only ever bring back a refusal.
+    /// Whether « Relier un autre appareil » is offered: only by a library that answers, is
+    /// closed, and is reached by other devices. An open one issues no code — its first device
+    /// is linked from its terminal — and one nobody else reaches has no address to put in the
+    /// link: the button would only ever bring back a refusal.
     Q_PROPERTY(bool linksOthers READ linksOthers NOTIFY changed)
+    /// Whether « Délier cet appareil » is offered. Not by a library nobody else reaches: this
+    /// device is then on the machine that holds it, and unlinking would strand it on the
+    /// link screen with no device able to give it a link back. Judged on the last answer, so
+    /// that a server out of reach for a moment does not bring the button back.
+    Q_PROPERTY(bool unlinks READ unlinks NOTIFY changed)
+    /// « Cette bibliothèque n'est accessible que depuis cet ordinateur. », in place of the two
+    /// buttons; empty when they are offered.
+    Q_PROPERTY(QString onlyHere READ onlyHere NOTIFY changed)
 
     /// The section's words. Carried by the object that owns the subject, the way `Search`
     /// carries the bar's: French lives in `Words`, and a screen never spells it.
@@ -68,7 +77,9 @@ public:
     int library() const { return m_said.library; }
     bool localDrop() const { return m_said.localDrop; }
     bool linked() const { return m_said.linked; }
-    bool linksOthers() const { return m_reachable && m_said.linked; }
+    bool linksOthers() const { return m_reachable && m_said.linked && m_said.relay; }
+    bool unlinks() const { return m_said.relay; }
+    QString onlyHere() const;
     QString title() const;
     QString answering() const;
     QString connected() const;

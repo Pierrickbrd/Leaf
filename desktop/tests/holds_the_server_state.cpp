@@ -222,6 +222,47 @@ private slots:
         QVERIFY(!health.linksOthers());
     }
 
+    /// On the machine that runs it, a library nobody else can reach offered « Relier un autre
+    /// appareil », whose link worked nowhere, and « Délier cet appareil », which would leave
+    /// this one with no way back but a command run as root. The server says which it is.
+    void a_library_nobody_else_reaches_offers_neither_to_relay_nor_to_unlink()
+    {
+        Health health(m_server);
+        // Nothing said yet: nothing is taken away.
+        QVERIFY(health.unlinks());
+        QVERIFY(health.onlyHere().isEmpty());
+
+        m_pretend->answers(200, asJson({{u"status"_s, u"ok"_s},
+                                        {u"api"_s, 1},
+                                        {u"format"_s, 1},
+                                        {u"library"_s, 6},
+                                        {u"linked"_s, true},
+                                        {u"relay"_s, false}}));
+        health.ask();
+        settle([&health] { return health.reachable(); });
+        QVERIFY(!health.linksOthers());
+        QVERIFY(!health.unlinks());
+        QCOMPARE(health.onlyHere(), Words::onlyThisComputer());
+
+        // Out of reach for a moment: still the library it was.
+        m_pretend->answers(500, QByteArrayLiteral("{}"));
+        health.ask();
+        settle([&health] { return !health.reachable(); });
+        QVERIFY(!health.unlinks());
+
+        m_pretend->answers(200, asJson({{u"status"_s, u"ok"_s},
+                                        {u"api"_s, 1},
+                                        {u"format"_s, 1},
+                                        {u"library"_s, 6},
+                                        {u"linked"_s, true},
+                                        {u"relay"_s, true}}));
+        health.ask();
+        settle([&health] { return health.reachable(); });
+        QVERIFY(health.linksOthers());
+        QVERIFY(health.unlinks());
+        QVERIFY(health.onlyHere().isEmpty());
+    }
+
     /// A server that stops answering has not changed version. Blanking what is on screen
     /// would say it had, so what was known stays known and the trouble is said beside it.
     void a_server_that_stops_answering_keeps_what_it_already_said()

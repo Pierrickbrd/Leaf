@@ -174,6 +174,12 @@ struct Health {
     /// older than linking does not say: a client that thinks it needs a key asks for one,
     /// and one that thinks it does not sends nothing to a server that wanted something.
     bool linked = true;
+    /// Whether another device can reach this library — said only to a key the server
+    /// recognises. `false` means nobody reaches it but the machine it runs on: the settings
+    /// offer neither to link another device nor to unlink this one. Taken for `true` when
+    /// nothing is said, by an older server or to a key it did not know: nothing said is
+    /// nothing taken off the screen.
+    bool relay = true;
 };
 
 /// Where the scan is, and what the last one found.
@@ -662,16 +668,24 @@ struct Linked {
     Device device;
 };
 
-/// What `POST /link/codes` answers: a code for another device, shown this once.
+/// What `POST /link/codes` answers: a code for another device, shown this once, and the
+/// link that carries it.
 ///
 /// `code` is a key-in-waiting for ten minutes — whoever holds it may link a device — so it
 /// goes into the link on screen and nowhere else: never into a log, never into a sentence
-/// about a failure. `id` is what follows it or withdraws it, and is not secret.
+/// about a failure. `link` holds it too, and is kept the same way. `id` is what follows it
+/// or withdraws it, and is not secret.
 struct IssuedCode {
     QString id;
     QString code;
     /// Milliseconds since the epoch, on the server's clock.
     qint64 expiresAt = 0;
+    /// The `leaf://` link, built by the server from an address another device can reach.
+    /// Shown as it is: the address this client uses — the loopback on the server's own
+    /// machine, a tunnel's end — is the one address it must never be built from.
+    QString link;
+    /// The link names one of the server's own network addresses: it works from that network.
+    bool localNetwork = false;
 };
 
 /// What `GET /link/codes/{id}` answers: still waiting, or used, and by whom.
