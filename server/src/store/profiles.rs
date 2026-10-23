@@ -148,9 +148,20 @@ pub enum SwitchRefusal {
 
 const COLUMNS: &str = "id, name, color, restricted, max_age, can_import, can_edit, can_delete";
 
+/// The same columns under a table alias, for a query that joins the profile to something
+/// else — the device that recognises a key reads its profile in the same statement.
+pub(crate) fn columns_of(alias: &str) -> String {
+    super::devices::aliased(COLUMNS, alias)
+}
+
 fn profile_of(r: &Row<'_>) -> rusqlite::Result<Profile> {
-    let id: String = r.get(0)?;
-    let restricted: bool = r.get(3)?;
+    profile_at(r, 0)
+}
+
+/// A profile read from the row's columns starting at `first`, in the order of [`COLUMNS`].
+pub(crate) fn profile_at(r: &Row<'_>, first: usize) -> rusqlite::Result<Profile> {
+    let id: String = r.get(first)?;
+    let restricted: bool = r.get(first + 3)?;
     let kind = if id == DEFAULT_PROFILE {
         Kind::Principal
     } else if restricted {
@@ -166,18 +177,18 @@ fn profile_of(r: &Row<'_>) -> rusqlite::Result<Profile> {
         },
         Kind::Restricted => Rights::default(),
         Kind::Reader => Rights {
-            import: r.get(5)?,
-            edit: r.get(6)?,
-            delete: r.get(7)?,
+            import: r.get(first + 5)?,
+            edit: r.get(first + 6)?,
+            delete: r.get(first + 7)?,
         },
     };
     Ok(Profile {
         id,
-        name: r.get(1)?,
-        color: r.get(2)?,
+        name: r.get(first + 1)?,
+        color: r.get(first + 2)?,
         kind,
         max_age: if kind == Kind::Restricted {
-            r.get::<_, Option<u8>>(4)?
+            r.get::<_, Option<u8>>(first + 4)?
         } else {
             None
         },

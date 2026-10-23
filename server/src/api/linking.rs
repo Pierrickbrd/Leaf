@@ -5,6 +5,11 @@
 //! caller has none yet, it is here to get one. What stands in for the key is the code, and
 //! the throttle: a code nobody can guess in ten minutes is still an endpoint answering
 //! attempts, and the attempts are counted the way wrong keys are.
+//!
+//! Every other route here is the principal profile's: linking another device, renaming this
+//! one or unlinking it lives in the Devices tab, which nobody else is shown. A reader's
+//! tablet that could mint a code would link a device sitting on the principal, which is
+//! every right the reader was not given.
 
 use std::sync::Arc;
 
@@ -19,7 +24,7 @@ use super::dto::{
     NameTakenDto,
 };
 use super::keys::{Key, Permission};
-use super::routes::{blocking, caller, now_in_millis, AppState, Caller, Failure, Refused, Who};
+use super::routes::{blocking, caller, now_in_millis, AppState, Failure, Principal, Refused, Who};
 use crate::net::link::Relay;
 use crate::store::devices::{Creator, Device, Refusal};
 
@@ -103,7 +108,7 @@ fn bad_name(refusal: Refusal) -> Answer {
 /// The device behind a request, for the routes that are about one.
 fn a_device(who: Who) -> Result<Device, Answer> {
     match who {
-        Who::Device(device) => Ok(device),
+        Who::Device(device, _) => Ok(device),
         Who::OldKey(_) => Err(say(StatusCode::CONFLICT, FROM_LEAF_KEYS)),
         // No device exists while the library is open, so this caller is nobody's.
         Who::Open => Err(say(
@@ -167,7 +172,7 @@ pub async fn link(
 /// « Relier un autre appareil » and got a link no other device could follow, explained by a
 /// sentence about 127.0.0.1, tunnels and sudo. Through an SSH tunnel it named the tunnel.
 pub async fn issue_code(
-    Caller(who): Caller,
+    Principal(who): Principal,
     State(state): State<AppState>,
 ) -> Result<(StatusCode, Json<IssuedCodeDto>), Answer> {
     let maker = match who {
@@ -179,10 +184,10 @@ pub async fn issue_code(
                 "an open library issues no codes: link the first device from the server's terminal",
             ))
         }
-        Who::Device(device) => Maker::Device(device.id),
-        // A linked device carries every right, so a key may only make one if it holds them
-        // all: a read-only key from LEAF_KEYS could otherwise mint itself a device that
-        // imports and deletes.
+        Who::Device(device, _) => Maker::Device(device.id),
+        // A linked device sits on the principal and carries every right, so a key may only
+        // make one if it holds them all: a read-only key from LEAF_KEYS could otherwise mint
+        // itself a device that imports and deletes.
         Who::OldKey(key) if !carries_every_right(&key) => {
             return Err(say(
                 StatusCode::FORBIDDEN,
@@ -238,7 +243,7 @@ enum Maker {
 
 /// Whether a code this device made has been used.
 pub async fn follow_code(
-    Caller(who): Caller,
+    Principal(who): Principal,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<CodeStateDto>, Answer> {
@@ -255,7 +260,7 @@ pub async fn follow_code(
 
 /// Withdraws a code this device made.
 pub async fn cancel_code(
-    Caller(who): Caller,
+    Principal(who): Principal,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, Answer> {
@@ -271,7 +276,7 @@ pub async fn cancel_code(
 
 /// The calling device takes another name.
 pub async fn rename_device(
-    Caller(who): Caller,
+    Principal(who): Principal,
     State(state): State<AppState>,
     Json(request): Json<DeviceRenameDto>,
 ) -> Result<Json<DeviceDto>, Answer> {
@@ -289,7 +294,7 @@ pub async fn rename_device(
 
 /// The calling device leaves: its key stops working with this answer.
 pub async fn unlink_device(
-    Caller(who): Caller,
+    Principal(who): Principal,
     State(state): State<AppState>,
 ) -> Result<StatusCode, Answer> {
     let device = a_device(who)?;

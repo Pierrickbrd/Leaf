@@ -1,7 +1,9 @@
 //! The endpoints.
 //!
-//! Two kinds of key open the door. A linked device's own key carries every right; an old
-//! key from `LEAF_KEYS` keeps exactly the rights written beside it — which is what still
+//! Two kinds of key open the door. A linked device's own key carries the rights of the
+//! profile it sits on — all of them for the principal, the ticked ones for a reader, none for
+//! a restricted profile; an old key from `LEAF_KEYS` keeps exactly the rights written beside
+//! it, and is the principal for everything else a profile decides — which is what still
 //! makes "import from the desktop only" a rule the server enforces for those keys, rather
 //! than a button missing from the mobile interface.
 //!
@@ -12,8 +14,10 @@
 //!
 //! The guard is an **extractor**, so it appears in the handler's signature: a route that
 //! reads takes a [`Reader`] (or a [`Caller`], when it needs to know who), one that writes
-//! takes an [`Importer`]. A handler missing one is a handler that reads as unguarded — the
-//! property a check spelled out on every route would buy, without spelling anything out.
+//! takes the guard of its right: [`Importer`], [`Editor`], [`Eraser`], [`Principal`] or
+//! [`Exporter`]. A handler missing one is a handler that reads as unguarded — the property a
+//! check spelled out on every route would buy, without spelling anything out. Every one of
+//! them refuses a device that must choose a profile, but [`Unseated`].
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -49,7 +53,7 @@ use crate::scan::layout;
 use crate::scan::runner::{ScanRunner, ScanStatus};
 use crate::scan::scanner::Scanner;
 use crate::store::devices::{Device, Devices};
-use crate::store::profiles::{Kind, Profiles};
+use crate::store::profiles::{Kind, Profile, Profiles};
 use crate::store::repository::Ceiling;
 use crate::store::schema::DEFAULT_PROFILE;
 use crate::store::{Db, Repository};
@@ -65,8 +69,8 @@ pub struct AppState {
     /// The linked devices, asked on every request so that a removal made by another
     /// process — `leaf-server device remove` in a terminal — holds from the next one.
     pub devices: Arc<Devices>,
-    /// The profiles, asked for the ceiling a device reads under — on every request, like the
-    /// devices, so a profile restricted from another device holds from its next one.
+    /// The profiles, for the routes that manage them. The profile a device reads as is not
+    /// asked here: `Devices::recognise` reads it with the key, in the same statement.
     pub profiles: Arc<Profiles>,
     /// Whether the server listens only on this machine. Only there may a library with no
     /// key and no device be open; see [`AppState::bound_to`].
@@ -279,8 +283,9 @@ pub fn router(state: AppState) -> Router {
 pub enum Who {
     /// A library with no key and no device, reached on the loopback.
     Open,
-    /// A linked device, by its own key.
-    Device(Device),
+    /// A linked device, by its own key, and the profile it sits on — read with the key, in
+    /// the same statement, so what the door decides on is one moment's state.
+    Device(Device, Profile),
     /// A key from `LEAF_KEYS`, with the rights written beside it.
     OldKey(Key),
 }
@@ -290,7 +295,7 @@ impl Who {
     /// default one for an old key or an open library, which have no profile to carry.
     pub fn profile(&self) -> &str {
         match self {
-            Who::Device(device) => &device.profile_id,
+            Who::Device(device, _) => &device.profile_id,
             Who::Open | Who::OldKey(_) => DEFAULT_PROFILE,
         }
     }
@@ -298,30 +303,53 @@ impl Who {
     /// The oldest rating this caller may see. An old key and an open library are the
     /// principal, and see everything; a device sees what the profile it sits on allows.
     ///
-    /// Read from the profile on every request rather than carried on the device, so lowering
-    /// a child's age from the parent's laptop holds from the tablet's next request. Blocking:
-    /// call it inside the `spawn_blocking` that uses it.
-    pub fn ceiling(&self, profiles: &Profiles) -> anyhow::Result<Ceiling> {
-        let Who::Device(device) = self else {
-            return Ok(Ceiling::NONE);
+    /// The profile was read with the key, on this request: lowering a child's age from the
+    /// parent's laptop holds from the tablet's next request, and asks nothing more of the
+    /// index than recognising the tablet already did.
+    pub fn ceiling(&self) -> Ceiling {
+        let Who::Device(device, profile) = self else {
+            return Ceiling::NONE;
         };
         // Held: its restricted profile was deleted under it, and it sits on the principal
-        // only to hold its key until somebody chooses. Read as the principal in the meantime,
-        // a child's tablet would open the whole library because a parent deleted the child's
-        // profile. The strictest ceiling there is, instead.
+        // only to hold its key until somebody chooses. Every route but `/health` refuses it
+        // until then; `/health` counts under this, so the number it says is not the whole
+        // library's because a parent deleted the child's profile.
         if device.held {
-            return Ok(Ceiling(Some(0)));
+            return Ceiling(Some(0));
         }
-        Ok(match profiles.get(&device.profile_id)? {
-            Some(profile) if profile.kind == Kind::Restricted => {
-                Ceiling(Some(profile.max_age.unwrap_or(0)))
-            }
-            Some(_) => Ceiling::NONE,
-            // The foreign key makes this impossible; if it ever is not, the answer that
-            // cannot show a child anything is the one to give.
-            None => Ceiling(Some(0)),
-        })
+        match profile.kind {
+            Kind::Restricted => Ceiling(Some(profile.max_age.unwrap_or(0))),
+            Kind::Principal | Kind::Reader => Ceiling::NONE,
+        }
     }
+
+    /// A device whose profile was deleted under it: it must say who reads before anything
+    /// else. It sits on the principal meanwhile only to hold its key.
+    fn must_choose(&self) -> bool {
+        matches!(self, Who::Device(device, _) if device.choosing || device.held)
+    }
+}
+
+/// What a route asks of its caller, beyond being recognised.
+#[derive(Debug, Clone, Copy)]
+enum Need {
+    Read,
+    Import,
+    Edit,
+    Delete,
+    /// The principal profile: scanning, cleaning up, linking and the devices.
+    Principal,
+    /// The whole file of a volume: any profile but a restricted one, whose limit and code a
+    /// file outside Leaf would escape.
+    Export,
+}
+
+/// Whether a route waits for a device that must choose a profile to have chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seating {
+    Required,
+    /// Only the routes that let it choose: who reads, and the change of profile.
+    Waived,
 }
 
 /// Any recognised caller, and who it is — for the routes whose answer depends on it.
@@ -330,25 +358,60 @@ pub struct Caller(pub Who);
 /// Any caller the door lets through: a key, or none while the library is open.
 pub struct Reader;
 
-/// A key that carries the import right.
-pub struct Importer;
+/// A caller whose profile — or old key — carries the import right.
+pub struct Importer(pub Who);
 
-/// A key that carries the delete right, which no old key has unless it says so.
-pub struct Eraser;
+/// A caller whose profile carries the edit right. An old key has no such right of its own:
+/// it edits with the import right, which is what it always did.
+pub struct Editor(pub Who);
 
-impl FromRequestParts<AppState> for Caller {
-    type Rejection = Refused;
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Refused> {
-        allowed(parts, state, Permission::Read).await.map(Caller)
-    }
+/// A caller whose profile carries the delete right, which no old key has unless it says so.
+pub struct Eraser(pub Who);
+
+/// The principal profile, an open library, or an old key that may import — the keys that
+/// could already scan before profiles existed.
+pub struct Principal(pub Who);
+
+/// Any profile but a restricted one; an old key that may read.
+pub struct Exporter(pub Who);
+
+/// Any recognised caller, including a device that must still choose who reads. Only for the
+/// routes of « Qui lit ? »: every other guard refuses such a device.
+pub struct Unseated(pub Who);
+
+/// Each guard is the same three words — which right, whether seated, what it carries — so
+/// they are written once, and a new one cannot forget the seat.
+macro_rules! guard {
+    ($name:ident, $need:expr, $seating:expr, $wrap:expr) => {
+        impl FromRequestParts<AppState> for $name {
+            type Rejection = Refused;
+            async fn from_request_parts(
+                parts: &mut Parts,
+                state: &AppState,
+            ) -> Result<Self, Refused> {
+                allowed(parts, state, $need, $seating).await.map($wrap)
+            }
+        }
+    };
 }
+
+guard!(Caller, Need::Read, Seating::Required, Caller);
+guard!(Reader, Need::Read, Seating::Required, |_| Reader);
+guard!(Importer, Need::Import, Seating::Required, Importer);
+guard!(Editor, Need::Edit, Seating::Required, Editor);
+guard!(Eraser, Need::Delete, Seating::Required, Eraser);
+guard!(Principal, Need::Principal, Seating::Required, Principal);
+guard!(Exporter, Need::Export, Seating::Required, Exporter);
+guard!(Unseated, Need::Read, Seating::Waived, Unseated);
 
 /// Whether a request offered a key the door recognises — for `/health`, which answers
 /// everyone and says a little more to a caller it knows. Never a refusal: a key that is
 /// wrong, or an address the throttle holds back, is simply not recognised. Offering no key
 /// asks nothing, so an open library is not recognising anybody.
 ///
-/// Who it is when it is: `/health` counts the library under that caller's ceiling.
+/// Who it is when it is: `/health` counts the library under that caller's ceiling. A device
+/// that must choose a profile is recognised here like any other: `/health` is how a client
+/// learns the server is there at all, and a 409 there would read as a server that is not.
 pub struct Recognised(pub Option<Who>);
 
 impl FromRequestParts<AppState> for Recognised {
@@ -361,42 +424,85 @@ impl FromRequestParts<AppState> for Recognised {
         if !offered {
             return Ok(Recognised(None));
         }
-        match allowed(parts, state, Permission::Read).await {
+        match door(parts, state).await {
             Ok(who) => Ok(Recognised(Some(who))),
             Err(Refused::Failed(failure)) => Err(failure),
-            Err(Refused::Forbidden(_) | Refused::TooMany(_)) => Ok(Recognised(None)),
+            Err(Refused::Forbidden(_) | Refused::TooMany(_) | Refused::Choose) => {
+                Ok(Recognised(None))
+            }
         }
     }
 }
 
-impl FromRequestParts<AppState> for Reader {
-    type Rejection = Refused;
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Refused> {
-        allowed(parts, state, Permission::Read)
-            .await
-            .map(|_| Reader)
+/// The door, then the seat, then the right — in that order, so a device that must choose is
+/// told so whatever it asked, rather than told it lacks a right of a profile it is not on.
+async fn allowed(
+    parts: &Parts,
+    state: &AppState,
+    need: Need,
+    seating: Seating,
+) -> Result<Who, Refused> {
+    let who = door(parts, state).await?;
+    if seating == Seating::Required && who.must_choose() {
+        return Err(Refused::Choose);
+    }
+    grant(&who, need)?;
+    Ok(who)
+}
+
+/// Whether a recognised caller carries what the route needs. Never counted by the throttle:
+/// a key that works asking for a right it has not got is guessing nothing.
+fn grant(who: &Who, need: Need) -> Result<(), Refused> {
+    match who {
+        Who::Open => Ok(()),
+        Who::OldKey(key) => {
+            // An old key keeps exactly the rights written beside it. Editing and the
+            // principal's routes were the import right's before profiles, and stay so.
+            let permission = match need {
+                Need::Read | Need::Export => Permission::Read,
+                Need::Import | Need::Edit | Need::Principal => Permission::Import,
+                Need::Delete => Permission::Delete,
+            };
+            if key.permissions.contains(&permission) {
+                return Ok(());
+            }
+            Err(Refused::Forbidden(format!(
+                "this key does not carry the \"{}\" right",
+                permission.name()
+            )))
+        }
+        Who::Device(_, profile) => {
+            let rights = profile.rights;
+            let (carried, refusal) = match need {
+                Need::Read => (true, String::new()),
+                Need::Import => (rights.import, lacking("import")),
+                Need::Edit => (rights.edit, lacking("edit")),
+                Need::Delete => (rights.delete, lacking("delete")),
+                Need::Principal => (
+                    profile.kind == Kind::Principal,
+                    "only the principal profile may do this".to_string(),
+                ),
+                Need::Export => (
+                    profile.kind != Kind::Restricted,
+                    "a restricted profile cannot take the whole file".to_string(),
+                ),
+            };
+            if carried {
+                Ok(())
+            } else {
+                Err(Refused::Forbidden(refusal))
+            }
+        }
     }
 }
 
-impl FromRequestParts<AppState> for Importer {
-    type Rejection = Refused;
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Refused> {
-        allowed(parts, state, Permission::Import)
-            .await
-            .map(|_| Importer)
-    }
+fn lacking(right: &str) -> String {
+    format!("this profile does not carry the \"{right}\" right")
 }
 
-impl FromRequestParts<AppState> for Eraser {
-    type Rejection = Refused;
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Refused> {
-        allowed(parts, state, Permission::Delete)
-            .await
-            .map(|_| Eraser)
-    }
-}
-
-async fn allowed(parts: &Parts, state: &AppState, permission: Permission) -> Result<Who, Refused> {
+/// Who is at the door, without asking what they want: a key the server knows, a device, or
+/// nobody while the library is open.
+async fn door(parts: &Parts, state: &AppState) -> Result<Who, Refused> {
     // The bytes, decoded as UTF-8. `to_str` admits visible ASCII and nothing else, so a
     // secret with an accent in it would be configurable — `Keys::parse` measures it in
     // characters — and then never recognised at the door.
@@ -429,15 +535,7 @@ async fn allowed(parts: &Parts, state: &AppState, permission: Permission) -> Res
     if let Some(key) = state.keys.recognise(offered.as_deref()) {
         // A key that works clears the slate — the device was misconfigured, not hostile.
         state.throttle.record_success(&address);
-        if key.permissions.contains(&permission) {
-            return Ok(Who::OldKey(key.clone()));
-        }
-        // A valid key asking for a right it has not got is not a failed attempt: nothing is
-        // being guessed, so nothing should be counted against it.
-        return Err(Refused::Forbidden(format!(
-            "this key does not carry the \"{}\" right",
-            permission.name()
-        )));
+        return Ok(Who::OldKey(key.clone()));
     }
 
     let device = match offered.filter(|k| !k.trim().is_empty()) {
@@ -448,14 +546,12 @@ async fn allowed(parts: &Parts, state: &AppState, permission: Permission) -> Res
         }
         None => None,
     };
-    let Some(device) = device else {
+    let Some((device, profile)) = device else {
         state.throttle.record_failure(&address);
         return Err(Refused::Forbidden("unknown key".into()));
     };
     state.throttle.record_success(&address);
-    // Every right: a device is linked by someone who could already import, from the
-    // server's terminal or another device, and is removed by name the day it is lost.
-    Ok(Who::Device(device))
+    Ok(Who::Device(device, profile))
 }
 
 /// Who the throttle counts a request against.
@@ -515,6 +611,8 @@ pub enum Refused {
     /// telling a caller which of the three it was is telling it how to get closer.
     Forbidden(String),
     TooMany(u64),
+    /// A device whose profile was deleted under it, asking for anything but the choice.
+    Choose,
     /// The index could not be asked. Not a refusal of the caller, and answered as the
     /// failure it is rather than as a 403 that would send someone hunting for a wrong key.
     Failed(Failure),
@@ -536,6 +634,11 @@ impl IntoResponse for Refused {
                 StatusCode::TOO_MANY_REQUESTS,
                 [("Retry-After", seconds.to_string())],
                 Json(ErrorDto::new("too many wrong keys — try again later")),
+            )
+                .into_response(),
+            Refused::Choose => (
+                StatusCode::CONFLICT,
+                Json(ErrorDto::new("choose a profile")),
             )
                 .into_response(),
             Refused::Failed(failure) => failure.into_response(),
@@ -565,7 +668,7 @@ async fn health(
         // the caller's shelf, not the library's — a child told « 212 séries » while shown
         // eight would learn that the rest is being kept from them, and how much of it.
         let ceiling = match &recognised {
-            Some(who) => who.ceiling(&state.profiles)?,
+            Some(who) => who.ceiling(),
             None => Ceiling::NONE,
         };
         // Counted, not built: reading the length of a list of every series was a real
@@ -630,7 +733,7 @@ async fn list_series(
     let wanted = query.q.unwrap_or_default().trim().to_string();
 
     let page_dto = blocking(move || {
-        let ceiling = who.ceiling(&state.profiles)?;
+        let ceiling = who.ceiling();
         let repository = Repository::new(&state.db);
         let mut filter = filter;
 
@@ -689,7 +792,7 @@ async fn list_universes(
 ) -> Result<Json<Vec<UniverseDto>>, Failure> {
     Ok(Json(
         blocking(move || {
-            let ceiling = who.ceiling(&state.profiles)?;
+            let ceiling = who.ceiling();
             Repository::new(&state.db).universes(&ceiling)
         })
         .await?,
@@ -708,7 +811,7 @@ async fn list_universe_orders(
 ) -> Result<Response, Failure> {
     or_missing::<Vec<ReadingOrderDto>>(
         blocking(move || {
-            let ceiling = who.ceiling(&state.profiles)?;
+            let ceiling = who.ceiling();
             Repository::new(&state.db).orders_of_universe(&id, &ceiling)
         })
         .await?,
@@ -730,7 +833,7 @@ async fn get_filters(
     let over_files = query.over.as_deref() == Some("files");
     let wanted = query.q.unwrap_or_default();
     let facets = blocking(move || {
-        let ceiling = who.ceiling(&state.profiles)?;
+        let ceiling = who.ceiling();
         let repository = Repository::new(&state.db);
         if over_files {
             repository.file_facets(&wanted, who.profile(), &ceiling)
@@ -759,7 +862,7 @@ async fn get_series(
 ) -> Result<Response, Failure> {
     or_missing(
         blocking(move || {
-            let ceiling = who.ceiling(&state.profiles)?;
+            let ceiling = who.ceiling();
             Repository::new(&state.db).one_series(&id, who.profile(), &ceiling)
         })
         .await?,
@@ -781,7 +884,7 @@ async fn list_series_entries(
 ) -> Result<Response, Failure> {
     or_missing::<Vec<EntryDto>>(
         blocking(move || {
-            let ceiling = who.ceiling(&state.profiles)?;
+            let ceiling = who.ceiling();
             Repository::new(&state.db).entries(&id, &ceiling)
         })
         .await?,
@@ -797,7 +900,7 @@ async fn list_series_chapters(
 ) -> Result<Response, Failure> {
     or_missing::<Vec<ChapterDto>>(
         blocking(move || {
-            let ceiling = who.ceiling(&state.profiles)?;
+            let ceiling = who.ceiling();
             Repository::new(&state.db).chapters_of_edition(&id, &ceiling)
         })
         .await?,
@@ -812,7 +915,7 @@ async fn list_series_arcs(
 ) -> Result<Response, Failure> {
     or_missing::<Vec<ArcDto>>(
         blocking(move || {
-            let ceiling = who.ceiling(&state.profiles)?;
+            let ceiling = who.ceiling();
             Repository::new(&state.db).arcs(&id, &ceiling)
         })
         .await?,
@@ -827,7 +930,7 @@ async fn get_entry(
 ) -> Result<Response, Failure> {
     or_missing(
         blocking(move || {
-            let ceiling = who.ceiling(&state.profiles)?;
+            let ceiling = who.ceiling();
             Repository::new(&state.db).entry(&id, &ceiling)
         })
         .await?,
@@ -843,7 +946,7 @@ async fn list_entry_chapters(
 ) -> Result<Response, Failure> {
     or_missing::<Vec<ChapterDto>>(
         blocking(move || {
-            let ceiling = who.ceiling(&state.profiles)?;
+            let ceiling = who.ceiling();
             Repository::new(&state.db).chapters_of_entry(&id, &ceiling)
         })
         .await?,
@@ -865,7 +968,7 @@ async fn list_entry_pages(
     let width = query.width;
     or_missing::<Vec<PageDto>>(
         blocking(move || {
-            let ceiling = who.ceiling(&state.profiles)?;
+            let ceiling = who.ceiling();
             let pages = Repository::new(&state.db).pages(&id, &ceiling)?;
             // Only for an entry this caller may open: warming one it may not would be work
             // done for a reader who is about to be told it is not there.
@@ -891,8 +994,7 @@ async fn scan_status(
     State(state): State<AppState>,
 ) -> Result<Json<ScanStatus>, Failure> {
     let mut status = state.runner.status();
-    let profiles = Arc::clone(&state.profiles);
-    if blocking(move || who.ceiling(&profiles)).await? != Ceiling::NONE {
+    if who.ceiling() != Ceiling::NONE {
         status.report = None;
     }
     Ok(Json(status))
@@ -903,7 +1005,7 @@ async fn scan_status(
 /// Answers at once and scans behind: a full library takes tens of seconds, which no client
 /// should hold a connection open for. One at a time — a second request is told so rather
 /// than queued, because the second would read the same disk.
-async fn start_scan(_: Importer, State(state): State<AppState>) -> Response {
+async fn start_scan(_: Principal, State(state): State<AppState>) -> Response {
     let scanner = Arc::clone(&state.scanner);
     let roots = Arc::clone(&state.roots);
     let pages = Arc::clone(&state.pages);
@@ -947,7 +1049,7 @@ async fn get_page(
     };
     let width = query.width;
     let served = blocking(move || {
-        let ceiling = who.ceiling(&state.profiles)?;
+        let ceiling = who.ceiling();
         let served = state.pages.page(&id, number, width, &ceiling)?;
         // Only when a width was asked for: serving the source costs nothing to begin with.
         // And never from a cover or from the warming itself — without that distinction the
@@ -972,7 +1074,7 @@ async fn entry_cover(
 ) -> Result<Response, Failure> {
     let width = query.width;
     let served = blocking(move || {
-        let ceiling = who.ceiling(&state.profiles)?;
+        let ceiling = who.ceiling();
         state.pages.cover(&id, width, &ceiling)
     })
     .await?;
@@ -990,7 +1092,7 @@ async fn series_cover(
 ) -> Result<Response, Failure> {
     let width = query.width;
     let served = blocking(move || {
-        let ceiling = who.ceiling(&state.profiles)?;
+        let ceiling = who.ceiling();
         state.pages.series_cover(&id, width, &ceiling)
     })
     .await?;
@@ -999,12 +1101,12 @@ async fn series_cover(
 
 /// The original file: this is how a volume comes back down to be retouched.
 async fn download_entry_file(
-    Caller(who): Caller,
+    Exporter(who): Exporter,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, Failure> {
     let path = blocking(move || {
-        let ceiling = who.ceiling(&state.profiles)?;
+        let ceiling = who.ceiling();
         // Asked before the stamp, not after: the stamp writes into the file, and a request
         // for a volume the caller may not see must not touch it.
         let Some(path) = Repository::new(&state.db).entry_path(&id, &ceiling)? else {
@@ -1189,7 +1291,7 @@ async fn search(
 
     if paged {
         let found = blocking(move || {
-            let ceiling = who.ceiling(&state.profiles)?;
+            let ceiling = who.ceiling();
             Repository::new(&state.db).search_page_ordered(
                 &wanted,
                 size,
@@ -1205,7 +1307,7 @@ async fn search(
         Ok(Json(found).into_response())
     } else if order.is_some() {
         let found = blocking(move || {
-            let ceiling = who.ceiling(&state.profiles)?;
+            let ceiling = who.ceiling();
             Repository::new(&state.db)
                 .search_page_ordered(
                     &wanted,
@@ -1223,7 +1325,7 @@ async fn search(
         Ok(Json(found).into_response())
     } else {
         let found = blocking(move || {
-            let ceiling = who.ceiling(&state.profiles)?;
+            let ceiling = who.ceiling();
             Repository::new(&state.db).search(
                 &wanted,
                 size,
@@ -1259,7 +1361,7 @@ async fn entry_progress(
     Path(id): Path<String>,
 ) -> Result<Response, Failure> {
     let found = blocking(move || {
-        let ceiling = who.ceiling(&state.profiles)?;
+        let ceiling = who.ceiling();
         Progress::new(&state.db).of_entry(&id, who.profile(), &ceiling)
     })
     .await?;
@@ -1285,7 +1387,7 @@ async fn record_progress(
     let profile = who.profile().to_owned();
     or_missing(
         blocking(move || {
-            let ceiling = who.ceiling(&state.profiles)?;
+            let ceiling = who.ceiling();
             Progress::new(&state.db).record(&profile, &id, &patch, now, &ceiling)
         })
         .await?,
@@ -1312,7 +1414,7 @@ async fn series_progress(
 ) -> Result<Response, Failure> {
     or_missing::<Vec<ProgressDto>>(
         blocking(move || {
-            let ceiling = who.ceiling(&state.profiles)?;
+            let ceiling = who.ceiling();
             Progress::new(&state.db).of_series(&id, who.profile(), &ceiling)
         })
         .await?,
@@ -1331,7 +1433,7 @@ async fn record_series_progress(
     let profile = who.profile().to_owned();
     or_missing(
         blocking(move || {
-            let ceiling = who.ceiling(&state.profiles)?;
+            let ceiling = who.ceiling();
             Progress::new(&state.db).record_series(&profile, &id, patch.finished, now, &ceiling)
         })
         .await?,
@@ -1388,7 +1490,7 @@ async fn up_next(
     let limit = query.limit.unwrap_or(20);
     Ok(Json(
         blocking(move || {
-            let ceiling = who.ceiling(&state.profiles)?;
+            let ceiling = who.ceiling();
             Progress::new(&state.db).up_next(limit, who.profile(), &ceiling)
         })
         .await?,
@@ -1402,7 +1504,7 @@ async fn up_next(
 /// The edit goes into a sidecar on the disk, never into the index; the rescan that follows
 /// reads it back. See [`super::records`] for why.
 async fn patch_series(
-    _: Importer,
+    Editor(who): Editor,
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(patch): Json<SeriesPatch>,
@@ -1415,9 +1517,10 @@ async fn patch_series(
             &state,
             Repository::new(&state.db).work_folder_of_series(&id)?,
         );
-        // No ceiling: an importer's own edit read back. A restricted profile carries no
-        // right to edit, which the door of this route is what enforces.
-        Repository::new(&state.db).one_series(&id, DEFAULT_PROFILE, &Ceiling::NONE)
+        // Read back as whoever edited: their own read status, under their own ceiling. A
+        // restricted profile has no right to edit and never gets this far, but an answer
+        // read as the principal is the principal's answer whoever it is handed to.
+        Repository::new(&state.db).one_series(&id, who.profile(), &who.ceiling())
     })
     .await?;
     or_missing(series, "unknown series")
@@ -1426,7 +1529,7 @@ async fn patch_series(
 /// Replaces a series' arcs outright: an arc list is a whole, and patching one entry of it
 /// would need a name for each, which the sidecar deliberately does not have.
 async fn patch_arcs(
-    _: Importer,
+    Editor(who): Editor,
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(arcs): Json<Vec<ArcJson>>,
@@ -1439,14 +1542,14 @@ async fn patch_arcs(
             &state,
             Repository::new(&state.db).work_folder_of_series(&id)?,
         );
-        Repository::new(&state.db).arcs(&id, &Ceiling::NONE)
+        Repository::new(&state.db).arcs(&id, &who.ceiling())
     })
     .await?;
     or_missing(arcs, "unknown series")
 }
 
 async fn patch_entry(
-    _: Importer,
+    Editor(who): Editor,
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(patch): Json<EntryPatch>,
@@ -1459,7 +1562,7 @@ async fn patch_entry(
             &state,
             Repository::new(&state.db).work_folder_of_entry(&id)?,
         );
-        Repository::new(&state.db).entry(&id, &Ceiling::NONE)
+        Repository::new(&state.db).entry(&id, &who.ceiling())
     })
     .await?;
     or_missing(entry, "unknown entry")
@@ -1471,7 +1574,7 @@ async fn patch_entry(
 /// — see [`super::relocate`] — and the rescan is aimed at the work rather than swept over the
 /// library, which would cost as much as the library is big.
 async fn move_work(
-    _: Importer,
+    _: Editor,
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(request): Json<MoveRequest>,
@@ -1882,7 +1985,7 @@ async fn abandon_import(
 
 /// Deletion on an explicit, by-name order, never inferred from a manifest.
 async fn cleanup(
-    _: Importer,
+    _: Principal,
     State(state): State<AppState>,
     Json(request): Json<CleanupRequest>,
 ) -> Result<Response, Failure> {

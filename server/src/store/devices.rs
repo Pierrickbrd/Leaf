@@ -17,6 +17,7 @@ use rusqlite::{params, Row};
 use sha2::{Digest, Sha256};
 
 use super::db::{Cx, Db};
+use super::profiles::{columns_of, profile_at, Profile};
 use super::schema::DEFAULT_PROFILE;
 
 /// How long a code can be typed: long enough to fetch the other device and find the
@@ -285,30 +286,42 @@ impl Devices {
         })
     }
 
-    /// The device a key belongs to, if it still belongs to one.
+    /// The device a key belongs to, if it still belongs to one, and the profile it reads as.
     ///
     /// Asked of the database on every request, so a revocation made by another process
     /// holds from the next one. The lookup is by the key's SHA-256 on an indexed column,
     /// compared by SQLite and not in constant time: the digest of 256 random bits cannot be
     /// guessed a byte at a time, because nobody can choose a key whose digest starts with
     /// the bytes they want.
-    pub fn recognise(&self, key: &str, now: i64) -> Result<Option<Device>> {
+    ///
+    /// The profile comes in the same statement. Read apart, it was a second question on
+    /// every request a device made — every page of every volume — asked only to learn the
+    /// rights and the age the door decides on; and two reads are two moments, between which
+    /// a parent's change of age or of rights could land.
+    pub fn recognise(&self, key: &str, now: i64) -> Result<Option<(Device, Profile)>> {
         let key_digest = digest(key);
         let found = self.db.read(|cx| {
+            // An inner join: `device.profile_id` is a foreign key, and a device whose profile
+            // vanished anyway is safer unrecognised than read as somebody.
             cx.query_one(
-                &format!("SELECT {DEVICE_COLUMNS} FROM device WHERE key_digest = ?1"),
+                &format!(
+                    "SELECT {}, {} FROM device d JOIN profile p ON p.id = d.profile_id
+                     WHERE d.key_digest = ?1",
+                    aliased(DEVICE_COLUMNS, "d"),
+                    columns_of("p")
+                ),
                 [&key_digest[..]],
-                device_row,
+                |r| Ok((device_row(r)?, profile_at(r, DEVICE_COLUMN_COUNT)?)),
             )
         })?;
-        let Some(mut device) = found else {
+        let Some((mut device, profile)) = found else {
             return Ok(None);
         };
         if device
             .seen_at
             .is_some_and(|seen| now - seen <= SEEN_REFRESH)
         {
-            return Ok(Some(device));
+            return Ok(Some((device, profile)));
         }
         let still_there = self.db.write(|cx| {
             cx.execute(
@@ -321,7 +334,7 @@ impl Devices {
             return Ok(None);
         }
         device.seen_at = Some(now);
-        Ok(Some(device))
+        Ok(Some((device, profile)))
     }
 
     /// Whether a device was ever linked — the moment a library stops being open, for good.
@@ -487,6 +500,16 @@ fn remove_device(cx: &Cx<'_>, id: &str) -> Result<()> {
 
 const DEVICE_COLUMNS: &str =
     "id, name, linked_at, linked_by, seen_at, profile_id, kept, choosing, held";
+/// Where the columns that follow [`DEVICE_COLUMNS`] in a joined row begin.
+const DEVICE_COLUMN_COUNT: usize = 9;
+
+pub(crate) fn aliased(columns: &str, alias: &str) -> String {
+    columns
+        .split(", ")
+        .map(|column| format!("{alias}.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 fn device_row(r: &Row<'_>) -> rusqlite::Result<Device> {
     Ok(Device {

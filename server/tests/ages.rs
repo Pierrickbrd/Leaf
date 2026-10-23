@@ -389,7 +389,6 @@ async fn a_series_above_its_age_is_not_there() {
         "/entries/{e}/pages/1",
         "/entries/{e}/pages/0",
         "/entries/{e}/cover",
-        "/entries/{e}/file",
         "/entries/{e}/progress",
         "/universes/{u}/orders",
     ];
@@ -410,6 +409,15 @@ async fn a_series_above_its_age_is_not_there() {
             "{route}"
         );
     }
+
+    // The whole file is refused to a restricted profile whatever the volume, so a hidden one
+    // and one that never existed are refused alike.
+    let (status, body) = get(&server, &format!("/entries/{entry}/file"), &child).await;
+    assert_eq!(StatusCode::FORBIDDEN, status, "{body}");
+    assert_eq!(
+        get(&server, "/entries/nothing/file", &child).await,
+        (status, body)
+    );
 
     // Recording a place in it is reaching it too.
     for (uri, patch) in [
@@ -690,7 +698,7 @@ async fn a_restricted_profile_is_not_told_what_a_scan_found() {
 /// A restricted profile deleted while its device sits on it leaves the device on the
 /// principal, only to hold its key until somebody chooses. Until then it must not read as the
 /// principal: the tablet of a child would open the whole library because a parent removed
-/// the child's profile.
+/// the child's profile. Every route refuses it but `/health`, which counts nothing for it.
 #[tokio::test]
 async fn a_device_held_after_its_restricted_profile_is_deleted_sees_nothing_rated_above_nought() {
     let server = a_library();
@@ -700,8 +708,10 @@ async fn a_device_held_after_its_restricted_profile_is_deleted_sees_nothing_rate
     profiles.delete(&seat.profile_id).unwrap().unwrap();
 
     let (status, shelf) = get(&server, "/series", &child).await;
-    assert_eq!(StatusCode::OK, status, "{shelf}");
-    assert_eq!(0, shelf["total"], "{shelf}");
+    assert_eq!(StatusCode::CONFLICT, status, "{shelf}");
+    let (status, health) = get(&server, "/health", &child).await;
+    assert_eq!(StatusCode::OK, status, "{health}");
+    assert_eq!(0, health["library"], "{health}");
 }
 
 /// Another branch numbers a migration 30 of its own, and the numbers move when the two meet.
