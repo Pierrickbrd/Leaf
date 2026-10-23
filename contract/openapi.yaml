@@ -55,6 +55,11 @@ tags:
     description: Getting files in, one at a time or a folder at once.
   - name: maintenance
     description: Scanning, and knowing whether one is running.
+  - name: linking
+    description: |
+      Getting a key of one's own. A code, made on a device that is already linked (or in the
+      server's terminal), is typed on the new one and exchanged once for a key; the device
+      may then rename itself or leave.
 
 paths:
   /health:
@@ -63,9 +68,9 @@ paths:
       tags: [reading]
       summary: What the server is, and whether it is up.
       description: |
-        The only route that answers without a key — which is what makes it usable as a
+        Answers without a key, as does `POST /link` — which is what makes it usable as a
         container health check. It says nothing a caller could not learn by trying to
-        connect, except the size of the library.
+        connect, except the size of the library and whether it is closed to strangers.
       security: []
       responses:
         "200":
@@ -73,6 +78,184 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Health" }
+
+  # ------------------------------------------------------------------ linking
+
+  /link:
+    post:
+      operationId: link
+      tags: [linking]
+      summary: Exchange a code for a key of this device's own.
+      description: |
+        Answers without a key: the caller has none yet. What stands in for it is the code,
+        which lives ten minutes, is used once, and is read whatever its case, dashes and
+        spaces. Wrong codes and unusable names count against the throttle exactly as wrong
+        keys do; a name that is taken does not, since it is only told to someone who held a
+        valid code.
+
+        The key is in this answer and nowhere else, ever.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LinkRequest" }
+      responses:
+        "201":
+          description: Linked. Keep the key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Linked" }
+        "400":
+          description: |
+            The name is empty, longer than forty characters once trimmed, or holds a
+            control character.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: |
+            Another device already carries that name, as `name` spells it. The code is
+            still good: choose another name and send the same code.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NameTaken" }
+        "410":
+          description: |
+            The code is unknown, expired or already used — one answer for the three, so that
+            it does not say which codes exist. `error` is `code`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /link/codes:
+    post:
+      operationId: issueLinkCode
+      tags: [linking]
+      summary: Make a code for another device to link with.
+      description: |
+        Needs a linked device, or a key from `LEAF_KEYS` that carries read, import and delete
+        — which is how a client linked that way links its first device. A device carries
+        every right, so a key with fewer may not make one: it would mint itself more. A library still open to everyone issues none: its first
+        device is linked from the server's terminal.
+      responses:
+        "201":
+          description: The code, in clear this once.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuedCode" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /link/codes/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+        description: The `id` of the code, as `POST /link/codes` answered it.
+    get:
+      operationId: getLinkCode
+      tags: [linking]
+      summary: Whether a code this device made has been used.
+      description: |
+        Only the device that made the code may ask. A key from `LEAF_KEYS` is not a device
+        and is answered `409`.
+      responses:
+        "200":
+          description: Still waiting, or used — and by whom.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CodeState" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: Not a code this device made, or it expired unused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: The key comes from `LEAF_KEYS`, which has no device to follow a code.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+    delete:
+      operationId: cancelLinkCode
+      tags: [linking]
+      summary: Withdraw a code this device made.
+      responses:
+        "204":
+          description: Withdrawn. It can no longer be used.
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: Not a waiting code this device made.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: The key comes from `LEAF_KEYS`, which has no device to own a code.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /device:
+    patch:
+      operationId: renameDevice
+      tags: [linking]
+      summary: Give the calling device another name.
+      description: |
+        The same rules as the name it linked with: one to forty characters once trimmed, no
+        control character, and not another device's, compared without regard to case or
+        repeated spaces.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceRename" }
+      responses:
+        "200":
+          description: The name as it is now stored.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Device" }
+        "400":
+          description: |
+            The name is empty, longer than forty characters once trimmed, or holds a
+            control character.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: |
+            Another device carries that name (`error` is `name`, and `name` spells it), or
+            the key comes from `LEAF_KEYS` and is renamed in `server.env`.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: "#/components/schemas/NameTaken" }
+                  - { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+    delete:
+      operationId: unlinkDevice
+      tags: [linking]
+      summary: Unlink the calling device.
+      description: |
+        Its key stops working with this answer. The server forgets the device and the code it
+        linked with; the devices it linked keep their own keys.
+      responses:
+        "204":
+          description: Unlinked.
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: "The key comes from `LEAF_KEYS`: remove it in `server.env`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
 
   # ------------------------------------------------------------------ reading
 
@@ -1381,8 +1564,14 @@ components:
         Recording progress deliberately needs only the read right: otherwise the phone
         could not remember where you stopped.
 
-        With no key configured at all the server answers everyone, and says so loudly at
-        startup. It refuses to start in that state on anything but the loopback.
+        **Two kinds of key.** A linked device's own key, made by `POST /link`, carries every
+        right and is removed by name. A key from the configuration carries the rights
+        written beside it, and cannot be renamed or unlinked over the wire.
+
+        With no key configured and no device ever linked, the server answers everyone on
+        the loopback, and says so loudly at startup; off the loopback it starts closed, and
+        only `/health` and `POST /link` answer. Once a device has been linked the library
+        stays closed, even after the last device is removed.
 
   parameters:
     Id:
@@ -1533,7 +1722,73 @@ components:
           type: boolean
           default: false
           description: Whether the shared-folder path is configured.
-      required: [status, api, format, library]
+        linked:
+          type: boolean
+          description: |
+            Whether the library is closed to anyone without a key — a device was ever linked
+            (revoking the last one does not reopen it), a key is configured, or the server
+            listens beyond the loopback. `false` means it
+            answers everyone, and a client should offer to link rather than ask for a key.
+      required: [status, api, format, library, linked]
+
+    LinkRequest:
+      type: object
+      properties:
+        code:
+          type: string
+          description: As typed, `ABCD-EFGH` or however the person wrote it.
+        name:
+          type: string
+          description: What this device is called, one to forty characters once trimmed.
+      required: [code, name]
+
+    Device:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string, description: "As stored: trimmed, in the case it was given." }
+      required: [id, name]
+
+    Linked:
+      type: object
+      properties:
+        key:
+          type: string
+          description: |
+            43 characters of base64url. Sent as `X-Leaf-Key` from now on; the server keeps
+            only its digest, so this answer is the one place it can be read.
+        device: { $ref: "#/components/schemas/Device" }
+      required: [key, device]
+
+    IssuedCode:
+      type: object
+      properties:
+        id: { type: string, description: What follows or cancels the code; not the code. }
+        code: { type: string, description: "`ABCD-EFGH`, shown this once." }
+        expiresAt: { type: integer, description: Milliseconds since the epoch. }
+      required: [id, code, expiresAt]
+
+    CodeState:
+      type: object
+      properties:
+        state: { type: string, enum: [waiting, served] }
+        name:
+          type: string
+          description: "Only once `served`: what the device that used the code calls itself."
+      required: [state]
+
+    DeviceRename:
+      type: object
+      properties:
+        name: { type: string }
+      required: [name]
+
+    NameTaken:
+      type: object
+      properties:
+        error: { type: string, enum: [name] }
+        name: { type: string, description: The name as the device that holds it spells it. }
+      required: [error, name]
 
     Series:
       type: object
