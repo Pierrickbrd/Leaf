@@ -122,13 +122,24 @@ fn a_library_that_already_finished_volumes_keeps_having_finished_them() {
     let file = dir.path().join("read.sqlite");
     {
         // A database at version 21: everything before this migration has run, and progress
-        // holds one volume finished and one merely started.
+        // holds one volume finished and one merely started. Wound back from a current one
+        // so the volumes exist: the rebuild of `progress` that came with profiles copies
+        // rows under their foreign keys, and a position for a volume that is not there is
+        // not one a real index can hold.
+        drop(Db::open(&file).expect("creating"));
         let conn = rusqlite::Connection::open(&file).expect("opening");
         conn.execute_batch(
-            "CREATE TABLE progress (entry_id TEXT PRIMARY KEY, edition_id TEXT NOT NULL,
+            "DROP TABLE link_code; DROP TABLE device; DROP TABLE progress; DROP TABLE profile;
+             CREATE TABLE progress (entry_id TEXT PRIMARY KEY, edition_id TEXT NOT NULL,
                                     page INTEGER NOT NULL,
                                     finished INTEGER NOT NULL DEFAULT 0,
                                     updated_at INTEGER NOT NULL);
+             INSERT INTO work (id, name, path) VALUES ('w', 'Essai', '/essai');
+             INSERT INTO edition (id, work_id, path, implicit) VALUES ('e', 'w', '/essai', 1);
+             INSERT INTO entry (id, edition_id, type, file, size, modified_at)
+               VALUES ('done', 'e', 'VOLUME', '/essai/1.cbz', 1, 1);
+             INSERT INTO entry (id, edition_id, type, file, size, modified_at)
+               VALUES ('midway', 'e', 'VOLUME', '/essai/2.cbz', 1, 1);
              INSERT INTO progress (entry_id, edition_id, page, finished, updated_at)
                VALUES ('done', 'e', 189, 1, 1);
              INSERT INTO progress (entry_id, edition_id, page, finished, updated_at)
@@ -281,6 +292,124 @@ fn data_survives_the_migration() {
         })
         .expect("reading");
     assert_eq!(42, page);
+}
+
+// ----------------------------------------------------------------- profiles
+
+fn count(db: &Db, sql: &str) -> i64 {
+    db.read(|cx| Ok(cx.query_one(sql, [], |r| r.get::<_, i64>(0))?.unwrap_or(0)))
+        .expect("counting")
+}
+
+/// A database as the version before profiles left it: the progress table without its
+/// owner, and none of the three tables that came with them. Built from a current one so
+/// that every other table is real, then wound back.
+fn an_index_at_the_version_before_profiles_with(rows: i64) -> (tempfile::TempDir, Db) {
+    let (dir, file) = an_unmigrated_index_before_profiles_with(rows);
+    let db = Db::open(&file).expect("migrating");
+    (dir, db)
+}
+
+fn an_unmigrated_index_before_profiles_with(rows: i64) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = temp();
+    let file = dir.path().join("before-profiles.sqlite");
+    drop(Db::open(&file).expect("creating"));
+    let conn = rusqlite::Connection::open(&file).expect("opening");
+    conn.execute_batch(
+        "DROP TABLE link_code; DROP TABLE device; DROP TABLE progress; DROP TABLE profile;
+         CREATE TABLE progress (
+           entry_id TEXT PRIMARY KEY REFERENCES entry(id) ON DELETE CASCADE,
+           edition_id TEXT NOT NULL REFERENCES edition(id) ON DELETE CASCADE,
+           page INTEGER NOT NULL, finished INTEGER NOT NULL DEFAULT 0,
+           times_finished INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL);
+         CREATE INDEX ix_progress_edition ON progress(edition_id, finished);
+         INSERT INTO work (id, name, path) VALUES ('w', 'Essai', '/essai');
+         INSERT INTO edition (id, work_id, path, implicit) VALUES ('e', 'w', '/essai', 1);",
+    )
+    .expect("winding back");
+    for i in 0..rows {
+        conn.execute(
+            "INSERT INTO entry (id, edition_id, type, file, size, modified_at)
+             VALUES (?1, 'e', 'VOLUME', ?2, 1, 1)",
+            (format!("x{i}"), format!("/essai/{i}.cbz")),
+        )
+        .expect("an entry");
+        conn.execute(
+            "INSERT INTO progress (entry_id, edition_id, page, finished, times_finished, updated_at)
+             VALUES (?1, 'e', ?2, 1, 1, 7)",
+            (format!("x{i}"), i),
+        )
+        .expect("a position");
+    }
+    conn.execute_batch("PRAGMA user_version = 25;")
+        .expect("stamping");
+    (dir, file)
+}
+
+/// A rebuild that fails part-way must leave the positions where they were, and the old
+/// table as it was: the migrator stamps the version per entry, so a rebuild split in steps
+/// leaves `progress_new` behind, or worse, `progress` dropped with its rows stranded. A
+/// position whose volume is gone makes the copy fail under the foreign keys.
+#[test]
+fn a_progress_rebuild_that_fails_late_loses_no_position() {
+    let (_dir, file) = an_unmigrated_index_before_profiles_with(16);
+    rusqlite::Connection::open(&file)
+        .expect("opening")
+        .execute_batch(
+            "PRAGMA foreign_keys = OFF; INSERT INTO progress (entry_id, edition_id, page, updated_at) VALUES ('ghost', 'e', 1, 1);",
+        )
+        .expect("planting a position with no volume");
+
+    assert!(Db::open(&file).is_err(), "the migration has to fail");
+
+    let conn = rusqlite::Connection::open(&file).expect("opening");
+    let kept: i64 = conn
+        .query_row("SELECT COUNT(*) FROM progress", [], |r| r.get(0))
+        .expect("the old table is still there");
+    assert_eq!(17, kept);
+    assert!(!tables(&file).contains(&"progress_new".to_string()));
+    // Untouched, not half-done: the next start has to be able to run the rebuild again.
+    assert!(!columns(&file, "progress").contains(&"profile_id".to_string()));
+}
+
+#[test]
+fn a_fresh_index_holds_the_default_profile() {
+    let dir = temp();
+    let db = Db::open(&dir.path().join("fresh.sqlite")).expect("opening");
+    let names: Vec<String> = db
+        .read(|cx| cx.query("SELECT id FROM profile", [], |r| r.get(0)))
+        .unwrap();
+    assert_eq!(vec!["default".to_string()], names);
+}
+
+#[test]
+fn progress_kept_before_profiles_existed_belongs_to_the_default_profile() {
+    // Those rows are not rebuilt by a scan: losing them or leaving them ownerless would
+    // cost every reader their place.
+    let (_dir, db) = an_index_at_the_version_before_profiles_with(16);
+    assert_eq!(
+        16,
+        count(
+            &db,
+            "SELECT COUNT(*) FROM progress WHERE profile_id = 'default'"
+        )
+    );
+    assert_eq!(1, count(&db, "SELECT COUNT(*) FROM profile"));
+    // The rebuilt table keeps what the old one carried, index included.
+    assert_eq!(
+        16,
+        count(
+            &db,
+            "SELECT SUM(times_finished) FROM progress WHERE updated_at = 7"
+        )
+    );
+    assert_eq!(
+        1,
+        count(
+            &db,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'ix_progress_edition'"
+        )
+    );
 }
 
 // -------------------------------------------------------------- concurrency
@@ -712,4 +841,45 @@ fn a_column_a_migration_adds_twice_is_not_a_failure() {
     }
     // Every ALTER TABLE ADD COLUMN now meets a column that is already there.
     Db::open(&path).expect("a second start must not be a failure");
+}
+
+/// An index that already held a device before closing was recorded was closed the day that
+/// device was linked; it must not be found open the day its last device is revoked.
+#[test]
+fn an_index_that_already_held_a_device_is_stamped_closed_by_the_migration() {
+    let dir = temp();
+    let file = dir.path().join("before-closing.sqlite");
+    drop(Db::open(&file).expect("creating"));
+    rusqlite::Connection::open(&file)
+        .expect("opening")
+        .execute_batch(
+            "DROP TABLE closed;
+             INSERT INTO device (id, name, name_key, key_digest, linked_at, linked_by)
+             VALUES ('d', 'PC du salon', 'pc du salon', x'00', 7, 'terminal');
+             PRAGMA user_version = 28;",
+        )
+        .expect("winding back");
+
+    let db = Db::open(&file).expect("migrating");
+    let closed_at: Option<i64> = db
+        .read(|cx| cx.query_one("SELECT closed_at FROM closed", [], |r| r.get(0)))
+        .expect("reading");
+    assert_eq!(Some(7), closed_at);
+}
+
+#[test]
+fn an_index_with_no_device_is_not_stamped_closed_by_the_migration() {
+    let dir = temp();
+    let file = dir.path().join("never-linked.sqlite");
+    drop(Db::open(&file).expect("creating"));
+    rusqlite::Connection::open(&file)
+        .expect("opening")
+        .execute_batch("DROP TABLE closed; PRAGMA user_version = 28;")
+        .expect("winding back");
+
+    let db = Db::open(&file).expect("migrating");
+    let rows: Option<i64> = db
+        .read(|cx| cx.query_one("SELECT COUNT(*) FROM closed", [], |r| r.get(0)))
+        .expect("reading");
+    assert_eq!(Some(0), rows);
 }

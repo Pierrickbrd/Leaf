@@ -13,7 +13,7 @@
 //! Verified against a running server rather than assumed — an unread series omits
 //! `readStatus` entirely, because "UNREAD" *is* the default.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The version of this API. Bumped whenever a change would break a client that has not
 /// been rebuilt — a removed field, a renamed route, a changed meaning.
@@ -34,6 +34,64 @@ pub struct HealthDto {
     pub library: i64,
     #[serde(skip_serializing_if = "is_false")]
     pub local_drop: bool,
+    /// Whether the library is closed to anyone without a key. Always sent, `false`
+    /// included: a client that gets no field cannot tell "open" from "an older server".
+    pub linked: bool,
+}
+
+// ------------------------------------------------------------------ linking
+
+/// What a new device sends to be linked.
+/// No `Debug`: it carries the code, which is a secret for as long as it lives.
+#[derive(Deserialize)]
+pub struct LinkRequest {
+    pub code: String,
+    pub name: String,
+}
+
+/// A device as the one that holds it may see it.
+#[derive(Debug, Serialize)]
+pub struct DeviceDto {
+    pub id: String,
+    pub name: String,
+}
+
+/// The answer to a code: the key, which is shown this once and never again.
+///
+/// No `Debug`: the key is the secret, and a derived one would print it.
+#[derive(Serialize)]
+pub struct LinkedDto {
+    pub key: String,
+    pub device: DeviceDto,
+}
+
+/// A code just made, and when it stops working.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssuedCodeDto {
+    pub id: String,
+    pub code: String,
+    pub expires_at: i64,
+}
+
+/// What became of a code this device made.
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "lowercase")]
+pub enum CodeStateDto {
+    Waiting,
+    Served { name: String },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeviceRenameDto {
+    pub name: String,
+}
+
+/// A name already carried by another device, as it spells it.
+#[derive(Debug, Serialize)]
+pub struct NameTakenDto {
+    pub error: &'static str,
+    pub name: String,
 }
 
 /// A series is an **edition**: the level that carries entries, chapters and progress.

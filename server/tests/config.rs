@@ -153,6 +153,17 @@ fn the_tls_hosts_are_a_list_and_the_spaces_around_them_do_not_count() {
 }
 
 #[test]
+fn the_public_url_is_read_and_an_empty_one_is_none() {
+    // Only links are made from it: it changes nothing about where the server listens.
+    let it = given(&[("LEAF_PUBLIC_URL", "https://leaf.example.org")]);
+    assert_eq!(it.public_url.as_deref(), Some("https://leaf.example.org"));
+    assert_eq!(it.host, "127.0.0.1");
+
+    assert_eq!(given(&[("LEAF_PUBLIC_URL", "")]).public_url, None);
+    assert_eq!(nothing_set().public_url, None);
+}
+
+#[test]
 fn the_environment_is_the_only_place_it_looks() {
     // `from_env` is `read` with the process environment behind it, and nothing else.
     let it = Config::from_env();

@@ -6,11 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
-use leaf_server::api::keys::Keys;
 use leaf_server::boot::{
-    cache_ceiling, jpeg_quality, refuse_an_open_library, split_volumes, tls_hosts, Invocation,
-    Outcome,
+    cache_ceiling, jpeg_quality, split_volumes, tls_hosts, tls_paths, Device, Invocation, Outcome,
 };
+use leaf_server::config::Config;
 
 /// Parses a line that is expected to run rather than to print usage or be refused.
 fn asked(args: &[&str]) -> Invocation {
@@ -135,29 +134,59 @@ fn help_is_a_question_not_a_mistake() {
     }
 }
 
-#[test]
-fn the_loopback_needs_no_key() {
-    let open = Keys::parse(None).unwrap();
-    assert!(open.open());
-    assert!(refuse_an_open_library("127.0.0.1", &open).is_ok());
-    assert!(refuse_an_open_library("localhost", &open).is_ok());
+fn configured(pairs: &[(&str, &str)]) -> Config {
+    let set: std::collections::HashMap<String, String> = pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
+    Config::read(move |name| set.get(name).cloned())
 }
 
 #[test]
-fn binding_wider_with_no_key_is_refused_rather_than_warned_about() {
-    let open = Keys::parse(None).unwrap();
-    for host in ["0.0.0.0", "192.168.1.20", "::"] {
-        let refused = refuse_an_open_library(host, &open).unwrap_err().to_string();
-        assert!(refused.contains(host), "{refused}");
-        assert!(refused.contains("Set LEAF_KEYS"), "{refused}");
+fn the_loopback_may_stay_plain_http() {
+    // Nothing leaves the machine, and it is how a proxy or a tunnel on the same machine
+    // talks to Leaf.
+    for host in ["127.0.0.1", "::1", "localhost"] {
+        assert_eq!(
+            None,
+            tls_paths(&configured(&[("LEAF_HOST", host)])),
+            "{host}"
+        );
     }
 }
 
 #[test]
-fn binding_wider_is_allowed_once_a_key_exists() {
-    let keys = Keys::parse(Some("desktop:un-secret-assez-long:read")).unwrap();
-    assert!(!keys.open());
-    assert!(refuse_an_open_library("0.0.0.0", &keys).is_ok());
+fn any_other_host_is_served_over_tls_with_a_default_certificate() {
+    for host in ["0.0.0.0", "192.168.1.20", "::", "127.0.0.2"] {
+        let config = configured(&[("LEAF_HOST", host), ("LEAF_DB", "/x/leaf.sqlite")]);
+        assert_eq!(
+            Some((
+                PathBuf::from("/x/tls/leaf.crt"),
+                PathBuf::from("/x/tls/leaf.key")
+            )),
+            tls_paths(&config),
+            "{host}"
+        );
+    }
+}
+
+#[test]
+fn a_named_certificate_wins_over_the_default() {
+    for host in ["0.0.0.0", "127.0.0.1"] {
+        let config = configured(&[
+            ("LEAF_HOST", host),
+            ("LEAF_DB", "/x/leaf.sqlite"),
+            ("LEAF_TLS_CERT", "/etc/leaf/mine.pem"),
+        ]);
+        assert_eq!(
+            Some((
+                PathBuf::from("/etc/leaf/mine.pem"),
+                PathBuf::from("/etc/leaf/mine.key")
+            )),
+            tls_paths(&config),
+            "{host}"
+        );
+    }
 }
 
 #[test]
@@ -207,4 +236,64 @@ fn a_folder_that_is_not_there_yet_is_no_answer_rather_than_a_wrong_one() {
     let dir = tempfile::tempdir().unwrap();
     assert!(!split_volumes(dir.path(), &dir.path().join("not yet")));
     assert!(!split_volumes(Path::new("/no/such/library"), dir.path()));
+}
+
+fn device_line(args: &[&str]) -> Device {
+    asked(args).device.expect("a device command")
+}
+
+#[test]
+fn device_names_what_to_do_to_a_device() {
+    assert_eq!(
+        device_line(&["device", "add"]),
+        Device::Add {
+            address: None,
+            qr: None
+        }
+    );
+    assert_eq!(
+        device_line(&[
+            "device",
+            "add",
+            "--qr",
+            "Tailscale",
+            "--address",
+            "https://leaf.example.net"
+        ]),
+        Device::Add {
+            address: Some("https://leaf.example.net".into()),
+            qr: Some("Tailscale".into())
+        }
+    );
+    assert_eq!(device_line(&["device", "list"]), Device::List);
+    assert_eq!(
+        device_line(&["device", "revoke", "PC du salon"]),
+        Device::Revoke("PC du salon".into())
+    );
+    assert_eq!(
+        device_line(&["device", "enroll", "PC du salon"]),
+        Device::Enroll("PC du salon".into())
+    );
+    assert!(asked(&["scan"]).device.is_none());
+}
+
+#[test]
+fn a_device_line_that_says_too_little_or_too_much_is_refused() {
+    for (args, named) in [
+        (vec!["device"], "add"),
+        (vec!["device", "remove", "x"], "remove"),
+        (vec!["device", "revoke"], "revoke"),
+        (vec!["device", "enroll"], "enroll"),
+        (vec!["device", "list", "extra"], "extra"),
+        (vec!["device", "revoke", "a", "b"], "b"),
+        (vec!["device", "add", "--address"], "--address"),
+        (vec!["device", "add", "--qr"], "--qr"),
+        (vec!["device", "add", "--bogus"], "--bogus"),
+        (vec!["device", "list", "--qr", "x"], "--qr"),
+        (vec!["scan", "--address", "x"], "--address"),
+        (vec!["device", "add", "--no-dimensions"], "--no-dimensions"),
+    ] {
+        let message = refused(&args);
+        assert!(message.contains(named), "{args:?}: {message}");
+    }
 }

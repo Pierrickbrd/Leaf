@@ -22,8 +22,11 @@ use sha2::{Digest, Sha256};
 
 pub struct Tls {
     pub config: RustlsConfig,
-    /// SHA-256 over the certificate, colon-separated — what a client pins.
+    /// SHA-256 over the certificate, colon-separated — the form the log has always printed,
+    /// and the one a person compares by eye.
     pub fingerprint: String,
+    /// The same digest as a link carries it: 64 lowercase hex digits, no colons.
+    pub fingerprint_hex: String,
     pub certificate: PathBuf,
 }
 
@@ -36,14 +39,7 @@ impl Tls {
         // knows rustls exists.
         let _ = rustls::crypto::ring::default_provider().install_default();
 
-        if !certificate.exists() {
-            tracing::info!(
-                path = %certificate.display(),
-                hosts = hosts.join(", "),
-                "no certificate — generating a self-signed one"
-            );
-            generate(certificate, key, hosts)?;
-        }
+        made_if_absent(certificate, key, hosts)?;
 
         // On every start, not only the one that generates. Generating is the rare path: the
         // usual one is a pair already on disk — left at 0644 by an earlier version, restored
@@ -59,18 +55,45 @@ impl Tls {
             .await
             .with_context(|| format!("reading {}", key.display()))?;
 
-        let fingerprint = fingerprint(&certificate_pem)?;
+        let digest = digest_of_first(&certificate_pem)?;
+        let fingerprint = colon_separated(&digest);
+        let fingerprint_hex = hex(&digest);
         tracing::info!("TLS on, certificate fingerprint (pin this in the applications):");
         tracing::info!("  {fingerprint}");
+        tracing::info!("  {fingerprint_hex} (as a link carries it)");
 
         Ok(Tls {
             config: RustlsConfig::from_pem(certificate_pem, key_pem)
                 .await
                 .context("the certificate and the key do not make a usable pair")?,
             fingerprint,
+            fingerprint_hex,
             certificate: certificate.to_path_buf(),
         })
     }
+}
+
+/// The fingerprint a link to this server carries, as 64 lowercase hex digits, read from the
+/// certificate it serves — made now if the server has never started, by the same path
+/// [`Tls::of`] takes, so that the link printed before the first start and the certificate
+/// served after it are one certificate.
+pub fn own_fingerprint(certificate: &Path, key: &Path, hosts: &[String]) -> Result<String> {
+    made_if_absent(certificate, key, hosts)?;
+    let pem =
+        std::fs::read(certificate).with_context(|| format!("reading {}", certificate.display()))?;
+    Ok(hex(&digest_of_first(&pem)?))
+}
+
+fn made_if_absent(certificate: &Path, key: &Path, hosts: &[String]) -> Result<()> {
+    if !certificate.exists() {
+        tracing::info!(
+            path = %certificate.display(),
+            hosts = hosts.join(", "),
+            "no certificate — generating a self-signed one"
+        );
+        generate(certificate, key, hosts)?;
+    }
+    Ok(())
 }
 
 fn generate(certificate: &Path, key: &Path, hosts: &[String]) -> Result<()> {
@@ -187,16 +210,196 @@ fn close_private(_: &Path) -> Result<()> {
 
 /// Over the DER, not over the PEM: the fingerprint a client computes from the certificate
 /// it was handed on the wire is a digest of the DER, and anything else would never match.
-fn fingerprint(pem: &[u8]) -> Result<String> {
+fn digest_of_first(pem: &[u8]) -> Result<[u8; 32]> {
     let mut reader = std::io::BufReader::new(pem);
     let first = rustls_pemfile::certs(&mut reader)
         .next()
         .context("no certificate in the file")?
         .context("unreadable certificate")?;
-    let digest = Sha256::digest(&first);
-    Ok(digest
+    Ok(Sha256::digest(&first).into())
+}
+
+fn colon_separated(digest: &[u8]) -> String {
+    digest
         .iter()
         .map(|b| format!("{b:02X}"))
         .collect::<Vec<_>>()
-        .join(":"))
+        .join(":")
+}
+
+fn hex(digest: &[u8]) -> String {
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// What an address answers with when asked for a certificate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Presented {
+    /// A certificate the system already trusts. A link to it carries no fingerprint: a
+    /// public one is renewed every ninety days, and a pinned fingerprint would lock every
+    /// client out at the first renewal.
+    PublicAuthority,
+    /// Anything else — Leaf's own certificate, a proxy passing it through, a private
+    /// authority — by the fingerprint a link carries (64 lowercase hex digits).
+    Pinned(String),
+    /// Nothing could be read from it, and why.
+    Unreachable(String),
+}
+
+/// How long one connection, or one read or write on it, may take before the address counts
+/// as unreachable. A command waiting on an address that drops packets has to give up and say
+/// so; five seconds is long for a server on the same network and short for a person.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Which certificate `host:port` presents.
+///
+/// Two handshakes, the first validated by the system's roots: when it succeeds there is
+/// nothing to pin. When it fails on the certificate, the second accepts anything and reads
+/// back what was presented — this is a question about the address, not a connection that
+/// trusts it, and nothing is sent over either.
+pub fn observe(host: &str, port: u16) -> Presented {
+    // Handed its provider rather than leaning on the process default: the command that asks
+    // this never builds a `Tls`, which is what installs one.
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+
+    let mut roots = rustls::RootCertStore::empty();
+    // A store that partly failed to load still answers for the roots it did load; one that
+    // loaded nothing makes every certificate « not public », which is the side that pins.
+    roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+    let trusting = rustls::ClientConfig::builder_with_provider(std::sync::Arc::clone(&provider))
+        .with_safe_default_protocol_versions()
+        .map(|b| b.with_root_certificates(roots).with_no_client_auth());
+    let trusting = match trusting {
+        Ok(config) => config,
+        Err(e) => return Presented::Unreachable(e.to_string()),
+    };
+    match handshake(host, port, trusting) {
+        Ok(_) => return Presented::PublicAuthority,
+        Err(Shake::Unreachable(why)) => return Presented::Unreachable(why),
+        Err(Shake::Refused) => {}
+    }
+
+    let accepting = rustls::ClientConfig::builder_with_provider(std::sync::Arc::clone(&provider))
+        .with_safe_default_protocol_versions()
+        .map(|b| {
+            b.dangerous()
+                .with_custom_certificate_verifier(std::sync::Arc::new(AnyCertificate(provider)))
+                .with_no_client_auth()
+        });
+    let accepting = match accepting {
+        Ok(config) => config,
+        Err(e) => return Presented::Unreachable(e.to_string()),
+    };
+    match handshake(host, port, accepting) {
+        Ok(Some(certificate)) => Presented::Pinned(hex(&Sha256::digest(certificate.as_ref()))),
+        Ok(None) => Presented::Unreachable(format!("{host}:{port} presented no certificate")),
+        Err(Shake::Unreachable(why)) => Presented::Unreachable(why),
+        Err(Shake::Refused) => Presented::Unreachable(format!(
+            "{host}:{port} refused the handshake even with any certificate accepted"
+        )),
+    }
+}
+
+/// Why a handshake did not complete: the address could not be talked to at all, or it was
+/// talked to and its certificate was not one the verifier accepts.
+enum Shake {
+    Unreachable(String),
+    Refused,
+}
+
+/// One handshake and nothing after it; the certificate the server presented first.
+fn handshake(
+    host: &str,
+    port: u16,
+    config: rustls::ClientConfig,
+) -> std::result::Result<Option<rustls::pki_types::CertificateDer<'static>>, Shake> {
+    use std::net::ToSocketAddrs;
+
+    let unreachable = |e: &dyn std::fmt::Display| Shake::Unreachable(format!("{host}:{port}: {e}"));
+    let name =
+        rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|e| unreachable(&e))?;
+    let address = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| unreachable(&e))?
+        .next()
+        .ok_or_else(|| unreachable(&"the name resolves to no address"))?;
+    let mut socket =
+        std::net::TcpStream::connect_timeout(&address, PATIENCE).map_err(|e| unreachable(&e))?;
+    socket
+        .set_read_timeout(Some(PATIENCE))
+        .and_then(|_| socket.set_write_timeout(Some(PATIENCE)))
+        .map_err(|e| unreachable(&e))?;
+
+    let mut connection = rustls::ClientConnection::new(std::sync::Arc::new(config), name)
+        .map_err(|e| unreachable(&e))?;
+    while connection.is_handshaking() {
+        if let Err(e) = connection.complete_io(&mut socket) {
+            // rustls hands its own refusals back wrapped in an I/O error of kind
+            // `InvalidData`; a certificate it would not accept is the one refusal that
+            // means « ask again, without trusting », and anything else is the address.
+            let refused = e
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+                .is_some_and(|inner| matches!(inner, rustls::Error::InvalidCertificate(_)));
+            return Err(if refused {
+                Shake::Refused
+            } else {
+                unreachable(&e)
+            });
+        }
+    }
+    Ok(connection
+        .peer_certificates()
+        .and_then(|chain| chain.first())
+        .map(|first| first.clone().into_owned()))
+}
+
+/// Accepts whatever certificate is presented, and still checks that the server holds its
+/// key: a handshake signed by somebody else is not the certificate it claims to present.
+#[derive(Debug)]
+struct AnyCertificate(std::sync::Arc<rustls::crypto::CryptoProvider>);
+
+impl rustls::client::danger::ServerCertVerifier for AnyCertificate {
+    fn verify_server_cert(
+        &self,
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &[rustls::pki_types::CertificateDer<'_>],
+        _: &rustls::pki_types::ServerName<'_>,
+        _: &[u8],
+        _: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        certificate: &rustls::pki_types::CertificateDer<'_>,
+        signed: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            certificate,
+            signed,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        certificate: &rustls::pki_types::CertificateDer<'_>,
+        signed: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            certificate,
+            signed,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
 }

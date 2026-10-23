@@ -5,7 +5,7 @@
 //! moved would lock every client out — and that the key is not readable by the machine at
 //! large.
 
-use leaf_server::net::tls::Tls;
+use leaf_server::net::tls::{observe, Presented, Tls};
 
 /// The server's own logging, on: without a subscriber every `tracing!` short-circuits
 /// before it evaluates its arguments, so the line that announces a generated certificate
@@ -207,4 +207,72 @@ async fn a_certificate_that_does_not_match_its_key_is_refused_at_startup() {
     assert!(Tls::of(&certificate, &key, &["leaf.local".to_string()])
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn the_fingerprint_for_a_link_is_sixty_four_lowercase_hex_digits() {
+    let dir = tempfile::tempdir().unwrap();
+    let tls = Tls::of(
+        &dir.path().join("leaf.crt"),
+        &dir.path().join("leaf.key"),
+        &["leaf.local".to_string()],
+    )
+    .await
+    .expect("generating");
+
+    assert_eq!(64, tls.fingerprint_hex.len());
+    assert!(
+        tls.fingerprint_hex
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+        "{}",
+        tls.fingerprint_hex
+    );
+    // The same digest as the one the log has always printed, written the way a link carries
+    // it: a link pasted with colons and capitals would be two forms of one fingerprint.
+    assert_eq!(
+        tls.fingerprint.replace(':', "").to_lowercase(),
+        tls.fingerprint_hex
+    );
+}
+
+#[tokio::test]
+async fn observing_a_self_signed_server_answers_its_fingerprint() {
+    let dir = tempfile::tempdir().unwrap();
+    let tls = Tls::of(
+        &dir.path().join("leaf.crt"),
+        &dir.path().join("leaf.key"),
+        &["127.0.0.1".to_string()],
+    )
+    .await
+    .expect("generating");
+
+    // Handed the listener rather than a port number, so nothing else can take the port
+    // between finding it and serving on it.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // tokio takes over a socket only once it is non-blocking, and says so with a panic.
+    listener.set_nonblocking(true).unwrap();
+    let server = axum_server::from_tcp_rustls(listener, tls.config.clone())
+        .unwrap()
+        .serve(axum::Router::new().into_make_service());
+    tokio::spawn(server);
+
+    // `observe` blocks, and the server it observes runs on this same runtime.
+    let seen = tokio::task::spawn_blocking(move || observe("127.0.0.1", port))
+        .await
+        .unwrap();
+    assert_eq!(Presented::Pinned(tls.fingerprint_hex.clone()), seen);
+}
+
+#[test]
+fn observing_a_closed_port_says_it_is_unreachable() {
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    match observe("127.0.0.1", port) {
+        Presented::Unreachable(why) => assert!(!why.is_empty()),
+        other => panic!("a closed port presents nothing, got {other:?}"),
+    }
 }

@@ -30,6 +30,10 @@ pub struct Config {
     pub tls_hosts: Vec<String>,
     pub host: String,
     pub port: u16,
+    /// The address as the clients type it, scheme and port included. Changes nothing about
+    /// where the server listens: links are made from it, and behind a proxy or a tunnel it is
+    /// the only address a client can reach.
+    pub public_url: Option<String>,
 }
 
 impl Config {
@@ -90,6 +94,7 @@ impl Config {
             port: get("LEAF_PORT")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8081),
+            public_url: get("LEAF_PUBLIC_URL"),
             library,
         }
     }
