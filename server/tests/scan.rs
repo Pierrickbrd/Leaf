@@ -1595,6 +1595,110 @@ fn an_arc_repeated_in_every_volume_becomes_one_range_of_volumes() {
     );
 }
 
+/// One volume of Solo Leveling whose chapters say what `chapters` says, under an edition
+/// that declares `edition` when it is given.
+fn named(edition: Option<&str>, chapters: &str) -> Library {
+    let library = Library::new();
+    if let Some(edition) = edition {
+        library.write("Solo Leveling/edition.json", edition);
+    }
+    archive(
+        &library.folder("Solo Leveling").join("Tome 1.cbz"),
+        3,
+        Some((
+            "entry.json",
+            &format!(r#"{{"leaf":1,"work":"Solo Leveling","number":1,"chapters":{chapters}}}"#),
+        )),
+    );
+    library.scan();
+    library
+}
+
+#[test]
+fn a_numbered_chapter_nothing_names_is_chap_and_its_number() {
+    // A file called « #13 » showed « #13 » in every place a chapter is named. What the file
+    // said stays in `raw`; what is drawn is the default pattern.
+    let library = named(None, r##"[{"raw":"#13 : Le réveil"},{"number":56.5}]"##);
+
+    assert_eq!(
+        vec!["Chap.\u{a0}13".to_string(), "Chap.\u{a0}56.5".to_string()],
+        library.all("SELECT label FROM chapter ORDER BY position")
+    );
+    assert_eq!(
+        Some("#13 : Le réveil".to_string()),
+        library.one::<String>("SELECT raw FROM chapter WHERE number = 13")
+    );
+    assert_eq!(
+        Some("Le réveil".to_string()),
+        library.one::<String>("SELECT title FROM chapter WHERE number = 13")
+    );
+}
+
+#[test]
+fn the_edition_pattern_names_a_chapter_before_the_default_does() {
+    let library = named(
+        Some(r#"{"leaf":1,"chapterLabel":"Level.{n:00}"}"#),
+        r##"[{"raw":"#1 : Nom"}]"##,
+    );
+    assert_eq!(
+        Some("Level.01".to_string()),
+        library.one::<String>("SELECT label FROM chapter")
+    );
+}
+
+#[test]
+fn a_chapter_label_wins_over_every_pattern() {
+    let library = named(
+        Some(r#"{"leaf":1,"chapterLabel":"Level.{n:00}"}"#),
+        r#"[{"number":1,"label":"Prologue"}]"#,
+    );
+    assert_eq!(
+        Some("Prologue".to_string()),
+        library.one::<String>("SELECT label FROM chapter")
+    );
+}
+
+#[test]
+fn an_empty_chapter_label_leaves_the_title_alone_even_when_numbered() {
+    let library = named(None, r#"[{"number":4,"label":"","title":"Épilogue"}]"#);
+    assert_eq!(
+        Some(String::new()),
+        library.one::<String>("SELECT label FROM chapter")
+    );
+}
+
+#[test]
+fn an_unnumbered_bonus_keeps_the_label_its_file_gave_it() {
+    let library = named(
+        None,
+        r#"[{"number":1},{"raw":"Bonus : Note de l'auteur","after":1}]"#,
+    );
+    assert_eq!(
+        Some("Bonus".to_string()),
+        library.one::<String>("SELECT label FROM chapter WHERE kind = 'BONUS'")
+    );
+}
+
+#[test]
+fn a_rescan_renames_a_chapter_its_files_have_not_moved_since() {
+    // Labels are computed at scan, and a scan does not recompute the chapters of an edition
+    // whose files have not moved. A library indexed while the file name still named the
+    // chapter kept « #13 » through every rescan after the default changed.
+    let library = named(None, r##"[{"raw":"#13 : Le réveil"}]"##);
+    library
+        .db
+        .write(|cx| cx.execute("UPDATE chapter SET label = '#13'", []))
+        .unwrap();
+
+    let report = library.scan();
+
+    assert_eq!(0, report.reanalysed, "not one archive is opened for it");
+    assert_eq!(
+        Some("Chap.\u{a0}13".to_string()),
+        library.one::<String>("SELECT label FROM chapter")
+    );
+}
+
 #[test]
 fn a_standalone_chapter_file_is_described_by_its_own_name() {
     // Its file name is all there is: no entry.json, and the whole file is the chapter.

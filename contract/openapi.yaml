@@ -2183,7 +2183,12 @@ components:
       properties:
         id: { type: string }
         raw: { type: string, description: What the file actually said. }
-        label: { type: string, description: What to show. }
+        label:
+          type: string
+          description: |
+            What to show in front of the title. The chapter's own label, else its edition's
+            pattern, else « Chap. n » for a numbered chapter, else what the file said before
+            its title. Empty means the title alone.
         number:
           type: [number, "null"]
           description: Unique within an edition. Null for an unnumbered bonus.
@@ -2370,6 +2375,12 @@ components:
         entryPageCount: { type: [integer, "null"] }
         chapterNumber: { type: [number, "null"] }
         chapterTitle: { type: [string, "null"] }
+        chapterLabel:
+          type: [string, "null"]
+          description: |
+            What the chapter is called in front of its title, as `Chapter.label` says it.
+            `label` is what was searched — the title, or what the file said when there is
+            none — and does not name a chapter the way the reader does.
         approximate:
           type: boolean
           default: false

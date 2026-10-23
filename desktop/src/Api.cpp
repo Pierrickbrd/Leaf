@@ -491,6 +491,7 @@ Read<Hit> hit(const QJsonObject &from)
     found.entryPageCount = field.maybeWhole(u"entryPageCount"_s);
     found.chapterNumber = field.maybeReal(u"chapterNumber"_s);
     found.chapterTitle = field.maybeText(u"chapterTitle"_s);
+    found.chapterLabel = field.maybeText(u"chapterLabel"_s);
     // Absent is not approximate: the contract's default is false, and a client reading a
     // missing field as "maybe" would put a guess mark on every exact hit an older server sent.
     found.approximate = field.maybeBool(u"approximate"_s).value_or(false);

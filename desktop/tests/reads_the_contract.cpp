@@ -904,6 +904,7 @@ private slots:
             {u"entryPageCount"_s, 189},
             {u"chapterNumber"_s, 99.0},
             {u"chapterTitle"_s, u"Cadeau (2e leçon)"_s},
+            {u"chapterLabel"_s, u"Chap. 99"_s},
         });
         QVERIFY2(read.ok(), qPrintable(read.trouble));
         QCOMPARE(read.value->entryKind, Api::UpNext::Kind::Volume);
@@ -912,6 +913,7 @@ private slots:
         QCOMPARE(read.value->entryPageCount.value_or(0), 189);
         QCOMPARE(read.value->chapterNumber.value_or(0), 99.0);
         QCOMPARE(read.value->chapterTitle.value_or(QString()), u"Cadeau (2e leçon)"_s);
+        QCOMPARE(read.value->chapterLabel.value_or(QString()), u"Chap. 99"_s);
     }
 
     /// And an edition carries none of them: it is not inside anything.
@@ -926,6 +928,7 @@ private slots:
         QVERIFY(!read.value->entryKind.has_value());
         QVERIFY(!read.value->entryPageCount.has_value());
         QVERIFY(!read.value->chapterTitle.has_value());
+        QVERIFY(!read.value->chapterLabel.has_value());
     }
 
     /// The envelope, when a page was asked for: the counts a heading needs come with it.

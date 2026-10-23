@@ -51,7 +51,7 @@ Four files carry the metadata, each holding only what belongs to its level:
 |---|---|---|
 | `universe.json` | universe folder | a name, a default order, and named reading orders |
 | `work.json` | work folder | title, authors, artists, status, reading direction, genres, tags, age rating |
-| `edition.json` | edition folder | publisher, collection, volume count, language, chapter label pattern, arcs, colour |
+| `edition.json` | edition folder | publisher, collection, volume count, language, chapter label pattern (`Chap. {n}` when none is given), arcs, colour |
 | `entry.json` | **inside the CBZ** | number, title, chapters, their start pages and the volume they came from |
 
 `entry.json` lives inside the archive so a volume downloaded for offline reading carries its

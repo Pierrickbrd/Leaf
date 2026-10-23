@@ -222,6 +222,9 @@ fn a_paged_search_counts_the_whole_answer_and_describes_its_files() {
     assert_eq!(Some(1.0), chapter.entry_number);
     assert_eq!(Some(2.0), chapter.chapter_number);
     assert_eq!(Some(190), chapter.entry_page_count);
+    // What the chapter is called, beside what was searched: a result names a chapter the
+    // way the reader does, and not by what its file said.
+    assert_eq!(Some("Chapitre 2"), chapter.chapter_label.as_deref());
 }
 
 /// The guess answers about the level that was asked for, or not at all.
