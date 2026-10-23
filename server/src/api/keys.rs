@@ -1,6 +1,8 @@
-//! Authentication in the simplest form that holds: a secret string each device knows,
-//! compared against the ones in the configuration. No accounts, no passwords, no sign-in
-//! screen.
+//! The old way in: a secret string each device knows, compared against the ones in
+//! `LEAF_KEYS`. Still honoured, with exactly the rights each key was written with, so that
+//! nothing configured before linked devices stops working — but a new device is linked
+//! (`store::devices`) and given a key of its own, which can be removed by name without
+//! editing this file or restarting.
 //!
 //! The key is not compiled into the applications — it is pasted once, into settings.
 //! Otherwise anyone unpacking the APK could read it, and changing it would mean rebuilding
@@ -62,7 +64,8 @@ pub struct Keys {
 }
 
 impl Keys {
-    /// True when nothing is configured, and the server therefore accepts everyone.
+    /// True when nothing is configured. The library is then open only while it is also on
+    /// the loopback with no device linked — the guard in `routes` decides, not this.
     pub fn open(&self) -> bool {
         self.keys.is_empty()
     }
@@ -105,13 +108,22 @@ impl Keys {
     /// still helps.
     fn announce(&self) {
         if self.open() {
-            tracing::warn!("No key configured: the server accepts everyone. Do not expose it.");
+            tracing::warn!(
+                "No LEAF_KEYS configured: open on the loopback until a device is linked, \
+                 closed anywhere else."
+            );
             return;
         }
         for key in &self.keys {
             let rights: Vec<&str> = key.permissions.iter().map(|p| p.name()).collect();
             tracing::info!(key = %key.name, rights = %rights.join(", "), "Key");
         }
+    }
+
+    /// Every configured key, by name and rights — the secret is only ever held as a digest,
+    /// so there is nothing here that could print it. `device list` shows these.
+    pub fn iter(&self) -> impl Iterator<Item = &Key> {
+        self.keys.iter()
     }
 
     /// The key behind a secret, or nothing.

@@ -7,6 +7,7 @@ pub mod erase;
 pub mod format;
 pub mod intake;
 pub mod keys;
+pub mod linking;
 pub mod local_drop;
 pub mod pages;
 pub mod progress;

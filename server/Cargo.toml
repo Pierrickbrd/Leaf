@@ -68,19 +68,41 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 # moment it could be changed for free.
 sha2 = "0.10"
 
+# A device key and a link code are drawn from the system's own randomness, and from nothing
+# seeded by the process: a key that can be predicted is a library anyone can read.
+getrandom = "0.3"
+# The key goes to the client as base64url without padding — 43 characters for 32 bytes,
+# safe in a header, a keychain entry and a JSON string alike.
+base64 = "0.22"
+
 thiserror = "2"
 anyhow = "1"
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rcgen = { version = "0.14.9", default-features = false, features = ["pem", "ring"] }
 rustls-pemfile = "2.2.0"
+# The system's own trust store, for one question only: whether the certificate an address
+# presents is one every client already trusts (Let's Encrypt behind a proxy), in which case a
+# link carries no fingerprint — it would change every ninety days.
+rustls-native-certs = "0.8"
+# `device add` prints its link as a QR code in the terminal, to be scanned by a phone rather
+# than typed. Without its image features: text is the only thing drawn here.
+qrcode = { version = "0.14", default-features = false }
+# The addresses of the machine, for a server bound to every interface: one link per address
+# it can actually be reached on, rather than `0.0.0.0`, which no client can dial.
+if-addrs = "0.13"
+
+[target.'cfg(unix)'.dependencies]
+# `device` commands run under sudo and must give up root for the database owner's account
+# before opening it (`cli::become_owner`), and `device list` prints local times: setgid,
+# setuid, localtime_r — nothing in the standard library does any of the three. Also what the
+# tests use to send the binary the signal a unit file would.
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
 # Only to hand a route a body that arrives in pieces, which is the shape the real one has.
 futures-util = "=0.3.31"
-# Only to send the binary the signal a unit file would: there is no portable Rust for it.
-libc = "0.2"
 zip = { version = "6", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 tower = { version = "0.5", features = ["util"] }

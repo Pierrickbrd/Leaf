@@ -184,6 +184,7 @@ impl<'a> Progress<'a> {
     /// in SQLite, where the row is locked anyway.
     pub fn record(
         &self,
+        profile_id: &str,
         entry_id: &str,
         patch: &ProgressPatch,
         now: i64,
@@ -201,9 +202,9 @@ impl<'a> Progress<'a> {
 
             cx.execute(
                 "INSERT INTO progress
-                   (entry_id, edition_id, page, finished, times_finished, updated_at)
-                 VALUES (?1, ?2, COALESCE(?3, 0), COALESCE(?4, 0), COALESCE(?4, 0), ?5)
-                 ON CONFLICT(entry_id) DO UPDATE SET
+                   (entry_id, edition_id, page, finished, times_finished, updated_at, profile_id)
+                 VALUES (?1, ?2, COALESCE(?3, 0), COALESCE(?4, 0), COALESCE(?4, 0), ?5, ?7)
+                 ON CONFLICT(profile_id, entry_id) DO UPDATE SET
                    page = CASE
                             WHEN ?6 THEN COALESCE(?3, progress.page)
                             ELSE MAX(progress.page, COALESCE(?3, progress.page))
@@ -224,6 +225,7 @@ impl<'a> Progress<'a> {
                     patch.finished.map(i64::from),
                     now,
                     i64::from(patch.rewind),
+                    profile_id,
                 ],
             )?;
             Ok(true)
@@ -245,6 +247,7 @@ impl<'a> Progress<'a> {
     /// contradiction the shelf would draw as an empty bar over the word « lu ».
     pub fn record_series(
         &self,
+        profile_id: &str,
         edition_id: &str,
         finished: bool,
         now: i64,
@@ -260,24 +263,25 @@ impl<'a> Progress<'a> {
             if finished {
                 cx.execute(
                     "INSERT INTO progress
-                       (entry_id, edition_id, page, finished, times_finished, updated_at)
-                     SELECT x.id, x.edition_id, MAX(x.page_count - 1, 0), 1, 1, ?2
+                       (entry_id, edition_id, page, finished, times_finished, updated_at, profile_id)
+                     SELECT x.id, x.edition_id, MAX(x.page_count - 1, 0), 1, 1, ?2, ?3
                        FROM entry x WHERE x.edition_id = ?1
-                     ON CONFLICT(entry_id) DO UPDATE SET
+                     ON CONFLICT(profile_id, entry_id) DO UPDATE SET
                        page = MAX(progress.page, excluded.page),
                        finished = 1,
                        times_finished = progress.times_finished
                          + CASE WHEN progress.finished = 0 THEN 1 ELSE 0 END,
                        updated_at = ?2",
-                    rusqlite::params![edition_id, now],
+                    rusqlite::params![edition_id, now, profile_id],
                 )?;
             } else {
                 // No row is created for a volume that was never opened: saying « not
                 // finished » about a book nobody started is not a fact worth storing, and
                 // an absent record is already that answer.
                 cx.execute(
-                    "UPDATE progress SET finished = 0, updated_at = ?2 WHERE edition_id = ?1",
-                    rusqlite::params![edition_id, now],
+                    "UPDATE progress SET finished = 0, updated_at = ?2
+                     WHERE edition_id = ?1 AND profile_id = ?3",
+                    rusqlite::params![edition_id, now, profile_id],
                 )?;
             }
             Ok(true)
@@ -288,18 +292,26 @@ impl<'a> Progress<'a> {
         Ok(Some(self.of_series(edition_id)?))
     }
 
-    pub fn forget(&self, entry_id: &str) -> Result<()> {
+    /// Forgets one profile's place in an entry. Only that profile's: another reader's
+    /// position in the same volume is theirs to forget.
+    pub fn forget(&self, profile_id: &str, entry_id: &str) -> Result<()> {
         self.db.write(|cx| {
-            cx.execute("DELETE FROM progress WHERE entry_id = ?1", [entry_id])?;
+            cx.execute(
+                "DELETE FROM progress WHERE entry_id = ?1 AND profile_id = ?2",
+                [entry_id, profile_id],
+            )?;
             Ok(())
         })
     }
 
-    /// Forgets every position in a series. One statement, and silent about whether there was
-    /// anything to forget — the same contract as forgetting one.
-    pub fn forget_series(&self, edition_id: &str) -> Result<()> {
+    /// Forgets every position a profile holds in a series. One statement, and silent about
+    /// whether there was anything to forget — the same contract as forgetting one.
+    pub fn forget_series(&self, profile_id: &str, edition_id: &str) -> Result<()> {
         self.db.write(|cx| {
-            cx.execute("DELETE FROM progress WHERE edition_id = ?1", [edition_id])?;
+            cx.execute(
+                "DELETE FROM progress WHERE edition_id = ?1 AND profile_id = ?2",
+                [edition_id, profile_id],
+            )?;
             Ok(())
         })
     }

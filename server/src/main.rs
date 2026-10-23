@@ -5,6 +5,7 @@
 //! opening the index, binding a socket and waiting for a signal — the three or four things
 //! that are not a decision at all.
 
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -14,23 +15,14 @@ use leaf_server::api::keys::Keys;
 use leaf_server::api::pages::Pages;
 use leaf_server::api::routes::{router, AppState};
 use leaf_server::boot::{
-    cache_ceiling, jpeg_quality, refuse_an_open_library, split_volumes, tls_hosts, Invocation,
-    Outcome,
+    cache_ceiling, jpeg_quality, split_volumes, tls_hosts, tls_paths, Invocation, Outcome,
 };
 use leaf_server::config::Config;
 use leaf_server::net::tls::Tls;
 use leaf_server::scan::scanner::Scanner;
 use leaf_server::store::Db;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_env("LEAF_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_target(false)
-        .init();
-
+fn main() -> Result<ExitCode> {
     // `--help` and an argument this cannot read are both settled here, before `Config`
     // touches the environment or `Db::open` touches the disk — a question about how to run
     // this, or a typo in how it was asked to, must not start anything on its way to an
@@ -38,19 +30,56 @@ async fn main() -> Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments.as_slice() == ["--version"] {
         println!("leaf-server {}", env!("LEAF_VERSION"));
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
 
     let asked = match Invocation::of(arguments)? {
         Outcome::Usage(usage) => {
             println!("{usage}");
-            return Ok(());
+            return Ok(ExitCode::SUCCESS);
         }
         Outcome::Run(it) => it,
     };
+
+    // Before the runtime and before the log subscriber. Before the runtime, because a
+    // `device` command may give up root (`cli::become_owner`), and an account is changed for
+    // the whole process only while it is the one thread there is. Before the subscriber,
+    // because nothing on that path is to be logged: one of its commands holds a device key.
+    if let Some(device) = &asked.device {
+        use std::io::IsTerminal;
+        let terminal = std::io::stdout().is_terminal();
+        let (mut out, mut err) = (std::io::stdout().lock(), std::io::stderr().lock());
+        let mut console = leaf_server::cli::device::Console {
+            out: &mut out,
+            err: &mut err,
+            terminal,
+        };
+        return leaf_server::cli::device::run(device, &mut console);
+    }
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_env("LEAF_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .with_target(false)
+        .init();
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting the runtime")?
+        .block_on(serve(asked))
+        .map(|()| ExitCode::SUCCESS)
+}
+
+/// `scan` and `serve`: what `#[tokio::main]` used to wrap, unchanged.
+async fn serve(asked: Invocation) -> Result<()> {
     let config = Config::from_env();
+    // No refusal here any more for a host past the loopback with no key: the request guard
+    // closes such a library instead (`AppState::bound_to`), answering only `/health` and the
+    // code exchange — refusing to start left a server on a home network with no way to link
+    // its first device.
     let keys = Keys::parse(std::env::var("LEAF_KEYS").ok().as_deref())?;
-    refuse_an_open_library(&config.host, &keys)?;
 
     let db = Arc::new(Db::open(&config.db).context("opening the index")?);
     let roots = asked.roots(&config.library);
@@ -106,6 +135,7 @@ async fn main() -> Result<()> {
     let state = AppState::with_pages(Arc::clone(&db), keys, pages)
         .with_library(roots.clone(), asked.all_dimensions)
         .trusting_proxy(config.trust_proxy)
+        .bound_to(&config.host)
         .with_import(
             &config.inbox,
             &config.library,
@@ -125,19 +155,18 @@ async fn main() -> Result<()> {
 
     let app = router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
 
-    // TLS only when a certificate is named. The recommended path is still a reverse proxy
-    // or `tailscale serve`, which hold a certificate a browser already trusts; this is for
-    // the port opened with nothing in front of it, which would otherwise send the API key
-    // in clear on every request.
+    // https whenever the server is reachable from anywhere but this machine, with no setting
+    // to turn it off: a key sent in clear on a home network is anyone's who listens. Plain
+    // http stays on the loopback, which is where a proxy or a tunnel beside it talks to it.
     let address = format!("{}:{}", config.host, config.port);
     let address: std::net::SocketAddr = address
         .parse()
         .with_context(|| format!("{address} is not an address to bind"))?;
-    match (&config.tls_certificate, &config.tls_key) {
-        (Some(certificate), Some(key)) => {
+    match tls_paths(&config) {
+        Some((certificate, key)) => {
             let tls = Tls::of(
-                certificate,
-                key,
+                &certificate,
+                &key,
                 &tls_hosts(&config.tls_hosts, &config.host),
             )
             .await?;
@@ -157,7 +186,7 @@ async fn main() -> Result<()> {
                 .await
                 .context("serving")
         }
-        _ => {
+        None => {
             let listener = tokio::net::TcpListener::bind(address)
                 .await
                 .with_context(|| format!("binding {address}"))?;
@@ -199,9 +228,8 @@ async fn main() -> Result<()> {
 /// as started and when what depends on it may run.
 ///
 /// And closing it properly means blocking both signals before the runtime has a thread to
-/// inherit the mask — `#[tokio::main]` unwound by hand, `libc` promoted out of the
-/// dev-dependencies it is in for the tests alone, and an unblock on each of the two paths —
-/// to protect a stretch where nothing is at stake: nothing has been written, no request is in
+/// inherit the mask — `pthread_sigmask` ahead of the runtime `main` now builds by hand, and
+/// an unblock on each of the two paths — to protect a stretch where nothing is at stake: nothing has been written, no request is in
 /// flight, the scan has not started, and SQLite rolls back a migration killed halfway. The
 /// sentence at the top says what this is for, and it is the writer.
 struct Stopping {

@@ -1,13 +1,19 @@
 //! The endpoints.
 //!
-//! Reading is open to any recognised key; importing requires a key that carries that right
-//! — which is what makes "import from the desktop only" a rule the server enforces, rather
+//! Two kinds of key open the door. A linked device's own key carries every right; an old
+//! key from `LEAF_KEYS` keeps exactly the rights written beside it — which is what still
+//! makes "import from the desktop only" a rule the server enforces for those keys, rather
 //! than a button missing from the mobile interface.
 //!
+//! A library with neither is open on the loopback, as it always was, and closed everywhere
+//! else; the first linked device closes it on the loopback too, or a library behind a proxy
+//! on the same machine would stay readable by everyone who reaches the proxy. For good:
+//! revoking the last device leaves it closed.
+//!
 //! The guard is an **extractor**, so it appears in the handler's signature: a route that
-//! reads takes a [`Reader`], one that writes takes an [`Importer`]. A handler missing one
-//! is a handler that reads as unguarded — the property a check spelled out on every route
-//! would buy, without spelling anything out.
+//! reads takes a [`Reader`] (or a [`Caller`], when it needs to know who), one that writes
+//! takes an [`Importer`]. A handler missing one is a handler that reads as unguarded — the
+//! property a check spelled out on every route would buy, without spelling anything out.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,7 +23,7 @@ use axum::extract::{ConnectInfo, FromRequestParts, Path, State};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use http_body_util::BodyExt;
 
@@ -29,7 +35,8 @@ use super::dto::{
 };
 use super::erase::Erase;
 use super::intake::{Collision, FileRequest, Intake, Proposal};
-use super::keys::{Keys, Permission, HEADER};
+use super::keys::{Key, Keys, Permission, HEADER};
+use super::linking;
 use super::local_drop::{DropListing, DropRequest, LocalDrop};
 use super::pages::{Pages, ServedImage};
 use super::progress::{Progress, ProgressDto, ProgressPatch, SeriesProgressPatch, UpNextDto};
@@ -40,6 +47,8 @@ use crate::metadata::sidecars::ArcJson;
 use crate::scan::layout;
 use crate::scan::runner::{ScanRunner, ScanStatus};
 use crate::scan::scanner::Scanner;
+use crate::store::devices::{Device, Devices};
+use crate::store::schema::DEFAULT_PROFILE;
 use crate::store::{Db, Repository};
 
 /// Enough for any grid, small enough that a thousand series never cross the wire at once.
@@ -50,7 +59,16 @@ const MAX_PAGE: i64 = 500;
 pub struct AppState {
     pub db: Arc<Db>,
     pub keys: Arc<Keys>,
+    /// The linked devices, asked on every request so that a removal made by another
+    /// process — `leaf-server device remove` in a terminal — holds from the next one.
+    pub devices: Arc<Devices>,
+    /// Whether the server listens only on this machine. Only there may a library with no
+    /// key and no device be open; see [`AppState::bound_to`].
+    pub loopback: bool,
     pub throttle: Arc<Throttle>,
+    /// Wrong codes on `/link`, counted apart: a recognised key wipes `throttle`, and a
+    /// caller holding any key could otherwise guess a code, wipe, and guess again for ever.
+    pub link_throttle: Arc<Throttle>,
     pub pages: Arc<Pages>,
     pub scanner: Arc<Scanner>,
     pub runner: Arc<ScanRunner>,
@@ -110,9 +128,14 @@ impl AppState {
             max_upload_bytes: 2048 * 1024 * 1024,
             trust_proxy: false,
             intake,
+            devices: Arc::new(Devices::new(Arc::clone(&db))),
+            // The safe guess would be `false`, but every state built without saying where it
+            // listens is a test's, and the binary always says: `main.rs` calls `bound_to`.
+            loopback: true,
             db,
             keys: Arc::new(keys),
             throttle: Arc::new(Throttle::default()),
+            link_throttle: Arc::new(Throttle::default()),
             pages,
         }
     }
@@ -130,6 +153,13 @@ impl AppState {
         self.drop = Arc::new(LocalDrop::new(drop_folder, Arc::clone(&intake)));
         self.intake = intake;
         self.max_upload_bytes = max_upload_bytes;
+        self
+    }
+
+    /// Where the server listens, which decides whether a library with no key and no device
+    /// is open (the loopback) or closed (anywhere else, where only `/health` answers).
+    pub fn bound_to(mut self, host: &str) -> Self {
+        self.loopback = crate::boot::is_loopback(host);
         self
     }
 
@@ -153,6 +183,17 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        // No key: the caller has none yet. The code, and the throttle, stand in for it.
+        .route("/link", post(linking::link))
+        .route("/link/codes", post(linking::issue_code))
+        .route(
+            "/link/codes/{id}",
+            get(linking::follow_code).delete(linking::cancel_code),
+        )
+        .route(
+            "/device",
+            delete(linking::unlink_device).patch(linking::rename_device),
+        )
         .route("/series", get(list_series))
         .route("/filters", get(get_filters))
         .route("/universes", get(list_universes))
@@ -215,69 +256,133 @@ pub fn router(state: AppState) -> Router {
 
 // -------------------------------------------------------------------- guards
 
-/// Any recognised key is welcome, but one is required.
+/// Who a request is, once it is past the door.
+pub enum Who {
+    /// A library with no key and no device, reached on the loopback.
+    Open,
+    /// A linked device, by its own key.
+    Device(Device),
+    /// A key from `LEAF_KEYS`, with the rights written beside it.
+    OldKey(Key),
+}
+
+impl Who {
+    /// The profile whose progress this caller reads and writes: the device's own, and the
+    /// default one for an old key or an open library, which have no profile to carry.
+    pub fn profile(&self) -> &str {
+        match self {
+            Who::Device(device) => &device.profile_id,
+            Who::Open | Who::OldKey(_) => DEFAULT_PROFILE,
+        }
+    }
+}
+
+/// Any recognised caller, and who it is — for the routes whose answer depends on it.
+pub struct Caller(pub Who);
+
+/// Any caller the door lets through: a key, or none while the library is open.
 pub struct Reader;
 
 /// A key that carries the import right.
 pub struct Importer;
 
-/// A key that carries the delete right, which no key has unless it says so.
+/// A key that carries the delete right, which no old key has unless it says so.
 pub struct Eraser;
+
+impl FromRequestParts<AppState> for Caller {
+    type Rejection = Refused;
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Refused> {
+        allowed(parts, state, Permission::Read).await.map(Caller)
+    }
+}
 
 impl FromRequestParts<AppState> for Reader {
     type Rejection = Refused;
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Refused> {
-        allowed(parts, state, Permission::Read).map(|()| Reader)
+        allowed(parts, state, Permission::Read)
+            .await
+            .map(|_| Reader)
     }
 }
 
 impl FromRequestParts<AppState> for Importer {
     type Rejection = Refused;
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Refused> {
-        allowed(parts, state, Permission::Import).map(|()| Importer)
+        allowed(parts, state, Permission::Import)
+            .await
+            .map(|_| Importer)
     }
 }
 
 impl FromRequestParts<AppState> for Eraser {
     type Rejection = Refused;
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Refused> {
-        allowed(parts, state, Permission::Delete).map(|()| Eraser)
+        allowed(parts, state, Permission::Delete)
+            .await
+            .map(|_| Eraser)
     }
 }
 
-fn allowed(parts: &Parts, state: &AppState, permission: Permission) -> Result<(), Refused> {
-    if state.keys.open() {
-        return Ok(());
-    }
-    let address = caller(parts, state.trust_proxy);
-
-    if let Some(wait) = state.throttle.blocked_for(&address) {
-        return Err(Refused::TooMany(wait.as_secs().max(1)));
-    }
-
+async fn allowed(parts: &Parts, state: &AppState, permission: Permission) -> Result<Who, Refused> {
     // The bytes, decoded as UTF-8. `to_str` admits visible ASCII and nothing else, so a
     // secret with an accent in it would be configurable — `Keys::parse` measures it in
     // characters — and then never recognised at the door.
     let offered = parts
         .headers
         .get(HEADER)
-        .and_then(|v| std::str::from_utf8(v.as_bytes()).ok());
-    let Some(key) = state.keys.recognise(offered) else {
+        .and_then(|v| std::str::from_utf8(v.as_bytes()).ok())
+        .map(str::to_owned);
+
+    // Open only while nothing could close it: no old key configured, no device ever linked,
+    // and nobody but this machine able to connect. Ever, not now: a library whose last
+    // device was revoked stays closed. And only to a request that offers no key — one that
+    // offers a key is asking to be recognised, and a key this server does not know is
+    // refused, so a revoked key never reads through an open door. The keys are asked first
+    // because they cost nothing; the marker is a query.
+    let keyless = offered.as_deref().is_none_or(|k| k.trim().is_empty());
+    if keyless && state.loopback && state.keys.open() {
+        let devices = Arc::clone(&state.devices);
+        if !blocking(move || devices.closed()).await? {
+            return Ok(Who::Open);
+        }
+    }
+    let address = caller(parts, state.trust_proxy);
+
+    // Before either lookup, so that a blocked address costs no query at all.
+    if let Some(wait) = state.throttle.blocked_for(&address) {
+        return Err(Refused::TooMany(wait.as_secs().max(1)));
+    }
+
+    if let Some(key) = state.keys.recognise(offered.as_deref()) {
+        // A key that works clears the slate — the device was misconfigured, not hostile.
+        state.throttle.record_success(&address);
+        if key.permissions.contains(&permission) {
+            return Ok(Who::OldKey(key.clone()));
+        }
+        // A valid key asking for a right it has not got is not a failed attempt: nothing is
+        // being guessed, so nothing should be counted against it.
+        return Err(Refused::Forbidden(format!(
+            "this key does not carry the \"{}\" right",
+            permission.name()
+        )));
+    }
+
+    let device = match offered.filter(|k| !k.trim().is_empty()) {
+        Some(key) => {
+            let devices = Arc::clone(&state.devices);
+            let now = now_in_millis();
+            blocking(move || devices.recognise(&key, now)).await?
+        }
+        None => None,
+    };
+    let Some(device) = device else {
         state.throttle.record_failure(&address);
         return Err(Refused::Forbidden("unknown key".into()));
     };
-    // A key that works clears the slate — the device was misconfigured, not hostile.
     state.throttle.record_success(&address);
-
-    if key.permissions.contains(&permission) {
-        return Ok(());
-    }
-    // A valid key asking for a right it has not got is not a failed attempt: nothing is
-    // being guessed, so nothing should be counted against it.
-    Err(Refused::Forbidden(format!(
-        "this key does not carry the \"{}\" right",
-        permission.name()
-    )))
+    // Every right: a device is linked by someone who could already import, from the
+    // server's terminal or another device, and is removed by name the day it is lost.
+    Ok(Who::Device(device))
 }
 
 /// Who the throttle counts a request against.
@@ -303,7 +408,7 @@ fn allowed(parts: &Parts, state: &AppState, permission: Permission) -> Result<()
 /// CDN, identical for every reader, and one device guessing keys would shut out the whole
 /// deployment. Reading any of it untrusted would hand the forgery to everybody, so it is
 /// opt-in and the socket is what stands otherwise.
-fn caller(parts: &Parts, trust_proxy: bool) -> String {
+pub(super) fn caller(parts: &Parts, trust_proxy: bool) -> String {
     if trust_proxy {
         if let Some(written) = parts
             .headers
@@ -337,6 +442,15 @@ pub enum Refused {
     /// telling a caller which of the three it was is telling it how to get closer.
     Forbidden(String),
     TooMany(u64),
+    /// The index could not be asked. Not a refusal of the caller, and answered as the
+    /// failure it is rather than as a 403 that would send someone hunting for a wrong key.
+    Failed(Failure),
+}
+
+impl From<Failure> for Refused {
+    fn from(failure: Failure) -> Self {
+        Refused::Failed(failure)
+    }
 }
 
 impl IntoResponse for Refused {
@@ -351,22 +465,30 @@ impl IntoResponse for Refused {
                 Json(ErrorDto::new("too many wrong keys — try again later")),
             )
                 .into_response(),
+            Refused::Failed(failure) => failure.into_response(),
         }
     }
 }
 
 // -------------------------------------------------------------------- routes
 
-/// What the server is, and whether it is up. The only route that answers without a key.
+/// What the server is, and whether it is up. With `POST /link`, the only route that answers without a key.
 async fn health(State(state): State<AppState>) -> Result<Json<HealthDto>, Failure> {
     let local_drop = state.drop.enabled();
-    let library = blocking(move || {
+    let could_be_open = state.loopback && state.keys.open();
+    let (library, closed) = blocking(move || {
         // Counted, not built: reading the length of a list of every series was a real
         // defect on the one route anyone can call.
+        // One statement for both answers: `linked` rides along rather than costing a
+        // second trip on the route a container polls every few seconds.
         state.db.read(|cx| {
             Ok(cx
-                .query_one("SELECT COUNT(*) FROM edition", [], |r| r.get::<_, i64>(0))?
-                .unwrap_or(0))
+                .query_one(
+                    "SELECT (SELECT COUNT(*) FROM edition), EXISTS (SELECT 1 FROM closed)",
+                    [],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?)),
+                )?
+                .unwrap_or((0, false)))
         })
     })
     .await?;
@@ -377,6 +499,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<HealthDto>, Failur
         format: FORMAT_VERSION,
         library,
         local_drop,
+        linked: !could_be_open || closed,
     }))
 }
 
@@ -900,9 +1023,9 @@ async fn search(
 
 // ----------------------------------------------------------------- progress
 
-/// The clock both recording handlers stamp with. Written once because two copies of the
-/// same expression drift the day one of them is fixed.
-fn now_in_millis() -> i64 {
+/// The clock the recording handlers and the door stamp with. Written once because two
+/// copies of the same expression drift the day one of them is fixed.
+pub(super) fn now_in_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -928,24 +1051,26 @@ async fn entry_progress(
 /// Recording progress is part of reading, so a read-only key is allowed to do it —
 /// otherwise the phone could not remember where you stopped.
 async fn record_progress(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(patch): Json<ProgressPatch>,
 ) -> Result<Response, Failure> {
     let now = now_in_millis();
+    let profile = who.profile().to_owned();
     or_missing(
-        blocking(move || Progress::new(&state.db).record(&id, &patch, now)).await?,
+        blocking(move || Progress::new(&state.db).record(&profile, &id, &patch, now)).await?,
         "unknown entry",
     )
 }
 
 async fn forget_progress(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, Failure> {
-    blocking(move || Progress::new(&state.db).forget(&id)).await?;
+    let profile = who.profile().to_owned();
+    blocking(move || Progress::new(&state.db).forget(&profile, &id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -962,24 +1087,29 @@ async fn series_progress(
 
 /// Marks a whole series read, or unread — one statement rather than one call per volume.
 async fn record_series_progress(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(patch): Json<SeriesProgressPatch>,
 ) -> Result<Response, Failure> {
     let now = now_in_millis();
+    let profile = who.profile().to_owned();
     or_missing(
-        blocking(move || Progress::new(&state.db).record_series(&id, patch.finished, now)).await?,
+        blocking(move || {
+            Progress::new(&state.db).record_series(&profile, &id, patch.finished, now)
+        })
+        .await?,
         "unknown series",
     )
 }
 
 async fn forget_series_progress(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, Failure> {
-    blocking(move || Progress::new(&state.db).forget_series(&id)).await?;
+    let profile = who.profile().to_owned();
+    blocking(move || Progress::new(&state.db).forget_series(&profile, &id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

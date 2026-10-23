@@ -307,7 +307,7 @@ fn progress_never_moves_backwards_on_its_own() {
     let at = |p: &leaf_server::api::progress::ProgressDto| p.page;
     let set = |patch: ProgressPatch| {
         progress
-            .record("v1", &patch, 1_000)
+            .record("default", "v1", &patch, 1_000)
             .expect("recording")
             .expect("the entry")
     };
@@ -340,10 +340,44 @@ fn progress_never_moves_backwards_on_its_own() {
 }
 
 #[test]
+fn two_profiles_keep_two_places_in_the_same_volume() {
+    let f = Fixture::new();
+    f.db.write(|cx| {
+        cx.execute(
+            "INSERT INTO profile (id, name, name_key, created_at) VALUES ('kid', 'Kid', 'kid', 1)",
+            [],
+        )
+    })
+    .unwrap();
+    let progress = Progress::new(&f.db);
+    for (profile, page) in [("default", 3), ("kid", 9)] {
+        let patch = ProgressPatch {
+            page: Some(page),
+            ..Default::default()
+        };
+        progress.record(profile, "v1", &patch, 1_000).unwrap();
+    }
+    let pages: Vec<(String, i64)> =
+        f.db.read(|cx| {
+            cx.query(
+                "SELECT profile_id, page FROM progress WHERE entry_id = 'v1' ORDER BY profile_id",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        vec![("default".to_string(), 3), ("kid".to_string(), 9)],
+        pages
+    );
+}
+
+#[test]
 fn a_position_that_does_not_exist_is_clamped_to_one_that_does() {
     let f = Fixture::new();
     let recorded = Progress::new(&f.db)
         .record(
+            "default",
             "v1",
             &ProgressPatch {
                 page: Some(9_999),
@@ -365,6 +399,7 @@ fn the_chapter_is_derived_from_the_markers_not_stored() {
 
     let early = progress
         .record(
+            "default",
             "v1",
             &ProgressPatch {
                 page: Some(10),
@@ -381,6 +416,7 @@ fn the_chapter_is_derived_from_the_markers_not_stored() {
 
     let later = progress
         .record(
+            "default",
             "v1",
             &ProgressPatch {
                 page: Some(100),
@@ -413,6 +449,7 @@ fn a_volume_with_no_start_pages_answers_that_it_does_not_know() {
 
     let recorded = Progress::new(&f.db)
         .record(
+            "default",
             "v1",
             &ProgressPatch {
                 page: Some(100),
@@ -433,6 +470,7 @@ fn an_unknown_entry_records_nothing() {
     let f = Fixture::new();
     let recorded = Progress::new(&f.db)
         .record(
+            "default",
             "nexistepas",
             &ProgressPatch {
                 page: Some(1),
@@ -455,6 +493,7 @@ fn what_to_open_next_is_next_for_you_and_not_a_catalogue() {
 
     progress
         .record(
+            "default",
             "v1",
             &ProgressPatch {
                 page: Some(40),
@@ -471,6 +510,7 @@ fn what_to_open_next_is_next_for_you_and_not_a_catalogue() {
     // Finished, so what follows it is the offer — and it is a different one.
     progress
         .record(
+            "default",
             "v1",
             &ProgressPatch {
                 finished: Some(true),
@@ -495,6 +535,7 @@ fn what_to_open_next_does_not_ask_one_question_per_line() {
     let progress = Progress::new(&f.db);
     progress
         .record(
+            "default",
             "v1",
             &ProgressPatch {
                 finished: Some(true),
@@ -505,6 +546,7 @@ fn what_to_open_next_does_not_ask_one_question_per_line() {
         .unwrap();
     progress
         .record(
+            "default",
             "x1",
             &ProgressPatch {
                 page: Some(3),
@@ -532,6 +574,7 @@ fn the_progress_of_a_series_is_read_once_not_once_per_volume() {
     for entry in ["v1", "v2"] {
         progress
             .record(
+                "default",
                 entry,
                 &ProgressPatch {
                     page: Some(10),
@@ -556,6 +599,7 @@ fn progress_belongs_to_the_edition() {
     let progress = Progress::new(&f.db);
     progress
         .record(
+            "default",
             "v1",
             &ProgressPatch {
                 page: Some(40),
@@ -596,6 +640,7 @@ fn read_status(f: &Fixture, edition: &str) -> String {
 fn finish(progress: &Progress, entry: &str, at: i64) {
     progress
         .record(
+            "default",
             entry,
             &ProgressPatch {
                 page: Some(189),
@@ -611,6 +656,7 @@ fn finish(progress: &Progress, entry: &str, at: i64) {
 fn start_over(progress: &Progress, entry: &str, at: i64) {
     progress
         .record(
+            "default",
             entry,
             &ProgressPatch {
                 page: Some(0),
@@ -716,7 +762,7 @@ fn marking_a_whole_series_read_fills_in_the_page_it_was_finished_at() {
     let progress = Progress::new(&f.db);
 
     let records = progress
-        .record_series("e", true, 5_000)
+        .record_series("default", "e", true, 5_000)
         .expect("recording")
         .expect("the series");
 
@@ -740,7 +786,9 @@ fn marking_a_whole_series_read_costs_the_same_whatever_it_holds() {
     let progress = Progress::new(&f.db);
 
     let before = f.db.statements();
-    progress.record_series("e", true, 5_000).expect("recording");
+    progress
+        .record_series("default", "e", true, 5_000)
+        .expect("recording");
     let two_volumes = f.db.statements() - before;
 
     f.db.write(|cx| {
@@ -757,7 +805,9 @@ fn marking_a_whole_series_read_costs_the_same_whatever_it_holds() {
     .expect("seeding thirty more");
 
     let before = f.db.statements();
-    progress.record_series("e", true, 6_000).expect("recording");
+    progress
+        .record_series("default", "e", true, 6_000)
+        .expect("recording");
     let thirty_two_volumes = f.db.statements() - before;
 
     assert_eq!(
@@ -775,7 +825,7 @@ fn marking_a_whole_series_unread_records_nothing_about_what_was_never_opened() {
     let progress = Progress::new(&f.db);
 
     let records = progress
-        .record_series("e", false, 5_000)
+        .record_series("default", "e", false, 5_000)
         .expect("recording")
         .expect("the series");
 
@@ -790,9 +840,11 @@ fn marking_a_read_series_unread_keeps_the_page_and_forgetting_it_does_not() {
     let f = Fixture::new();
     let progress = Progress::new(&f.db);
 
-    progress.record_series("e", true, 5_000).expect("recording");
+    progress
+        .record_series("default", "e", true, 5_000)
+        .expect("recording");
     let cleared = progress
-        .record_series("e", false, 6_000)
+        .record_series("default", "e", false, 6_000)
         .expect("recording")
         .expect("the series");
     assert_eq!(2, cleared.len());
@@ -801,7 +853,7 @@ fn marking_a_read_series_unread_keeps_the_page_and_forgetting_it_does_not() {
     // The endings are not undone by saying the book is not open at its last page.
     assert!(cleared.iter().all(|p| p.times_finished == 1));
 
-    progress.forget_series("e").expect("forgetting");
+    progress.forget_series("default", "e").expect("forgetting");
     assert!(progress.of_series("e").unwrap().is_empty());
     assert_eq!("UNREAD", read_status(&f, "e"));
 }
@@ -810,9 +862,11 @@ fn marking_a_read_series_unread_keeps_the_page_and_forgetting_it_does_not() {
 #[test]
 fn forgetting_a_series_that_holds_nothing_is_not_a_failure() {
     let f = Fixture::new();
-    Progress::new(&f.db).forget_series("e").expect("forgetting");
     Progress::new(&f.db)
-        .forget_series("nowhere")
+        .forget_series("default", "e")
+        .expect("forgetting");
+    Progress::new(&f.db)
+        .forget_series("default", "nowhere")
         .expect("forgetting");
 }
 
@@ -820,7 +874,7 @@ fn forgetting_a_series_that_holds_nothing_is_not_a_failure() {
 fn marking_a_series_that_is_not_there_records_nothing() {
     let f = Fixture::new();
     assert!(Progress::new(&f.db)
-        .record_series("nowhere", true, 5_000)
+        .record_series("default", "nowhere", true, 5_000)
         .expect("recording")
         .is_none());
 }
@@ -831,7 +885,9 @@ fn marking_a_series_read_leaves_the_other_editions_alone() {
     let f = Fixture::new();
     let progress = Progress::new(&f.db);
 
-    progress.record_series("e", true, 5_000).expect("recording");
+    progress
+        .record_series("default", "e", true, 5_000)
+        .expect("recording");
 
     assert!(progress.of_series("e2").unwrap().is_empty());
     assert_eq!("UNREAD", read_status(&f, "e2"));
@@ -851,7 +907,7 @@ fn two_positions_arriving_together_cannot_lose_the_further_one() {
     let db = Arc::clone(&f.db);
 
     for round in 0..200 {
-        Progress::new(&db).forget(&entry).unwrap();
+        Progress::new(&db).forget("default", &entry).unwrap();
         let ahead = Arc::clone(&db);
         let behind = Arc::clone(&db);
         let (a, b) = (entry.clone(), entry.clone());
@@ -859,6 +915,7 @@ fn two_positions_arriving_together_cannot_lose_the_further_one() {
         let far = std::thread::spawn(move || {
             Progress::new(&ahead)
                 .record(
+                    "default",
                     &a,
                     &ProgressPatch {
                         page: Some(9),
@@ -871,6 +928,7 @@ fn two_positions_arriving_together_cannot_lose_the_further_one() {
         let near = std::thread::spawn(move || {
             Progress::new(&behind)
                 .record(
+                    "default",
                     &b,
                     &ProgressPatch {
                         page: Some(2),
@@ -940,6 +998,7 @@ fn the_shelf_says_how_many_volumes_of_a_series_are_finished() {
     // A page turned is started, and not finished.
     progress
         .record(
+            "default",
             "v1",
             &ProgressPatch {
                 page: Some(10),
@@ -964,6 +1023,7 @@ fn the_shelf_says_how_many_volumes_of_a_series_are_finished() {
 
     progress
         .record(
+            "default",
             "v1",
             &ProgressPatch {
                 finished: Some(true),
@@ -984,5 +1044,46 @@ fn the_shelf_says_how_many_volumes_of_a_series_are_finished() {
     assert!(
         cost < 12,
         "listing a shelf took {cost} statements for the count it carries"
+    );
+}
+
+/// Forgetting is the reader's own act: a profile clearing its place in a series must not
+/// clear the place another profile holds in it.
+#[test]
+fn forgetting_a_series_leaves_another_profiles_progress() {
+    let f = Fixture::new();
+    f.db.write(|cx| {
+        cx.execute(
+            "INSERT INTO profile (id, name, name_key, created_at) VALUES ('kid', 'Kid', 'kid', 1)",
+            [],
+        )
+    })
+    .unwrap();
+    let progress = Progress::new(&f.db);
+    progress.record_series("default", "e", true, 5_000).unwrap();
+    progress.record_series("kid", "e", true, 5_000).unwrap();
+
+    // Marking unread, forgetting one volume, forgetting the series: each under `default`.
+    progress
+        .record_series("default", "e", false, 6_000)
+        .unwrap();
+    progress.forget("default", "v1").unwrap();
+    progress.forget_series("default", "e").unwrap();
+
+    let rows: Vec<(String, String, bool)> =
+        f.db.read(|cx| {
+            cx.query(
+                "SELECT profile_id, entry_id, finished FROM progress ORDER BY profile_id, entry_id",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? == 1)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        vec![
+            ("kid".to_string(), "v1".to_string(), true),
+            ("kid".to_string(), "v2".to_string(), true),
+        ],
+        rows
     );
 }

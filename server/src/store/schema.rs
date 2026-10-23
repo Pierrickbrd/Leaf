@@ -1,4 +1,4 @@
-//! The schema, deliberately hand-written in plain SQL: ten tables justify neither code
+//! The schema, deliberately hand-written in plain SQL: fourteen tables justify neither code
 //! generation nor a query builder.
 //!
 //! Nothing here requires chapters to exist: a series may be flat volumes. Chapter markers
@@ -6,6 +6,10 @@
 //!
 //! The SQL is written out rather than generated: it is where the model lives, and it has
 //! tests behind it.
+
+/// The profile every position belonged to before profiles existed, and the one a device
+/// reads under until it is given another.
+pub const DEFAULT_PROFILE: &str = "default";
 
 /// Run in order on every start. `IF NOT EXISTS` throughout, so this is idempotent and a
 /// fresh database is created already current.
@@ -182,16 +186,72 @@ pub const SCHEMA: &[&str] = &[
       PRIMARY KEY (entry_id, number)
     )
     "#,
+    // Who reads. Only the default row exists until profiles can be made; it is inserted
+    // here as well as in migration 26 because a fresh database skips the migrations.
+    r#"
+    CREATE TABLE IF NOT EXISTS profile (
+      id          TEXT PRIMARY KEY,
+      name        TEXT NOT NULL,
+      name_key    TEXT NOT NULL UNIQUE,
+      restricted  INTEGER NOT NULL DEFAULT 0,
+      max_age     INTEGER,
+      code_digest BLOB,
+      created_at  INTEGER NOT NULL
+    )
+    "#,
+    "INSERT OR IGNORE INTO profile (id, name, name_key, restricted, max_age, code_digest, created_at)
+     VALUES ('default', 'Par défaut', 'par défaut', 0, NULL, NULL, CAST(strftime('%s', 'now') AS INTEGER) * 1000)",
+    // A linked device. Only the SHA-256 of its key is kept, so a copy of the index cannot
+    // be used to read the library.
+    r#"
+    CREATE TABLE IF NOT EXISTS device (
+      id         TEXT PRIMARY KEY,
+      name       TEXT NOT NULL,
+      name_key   TEXT NOT NULL UNIQUE,
+      key_digest BLOB NOT NULL UNIQUE,
+      linked_at  INTEGER NOT NULL,
+      linked_by  TEXT NOT NULL,
+      seen_at    INTEGER,
+      profile_id TEXT NOT NULL DEFAULT 'default' REFERENCES profile(id)
+    )
+    "#,
+    "CREATE INDEX IF NOT EXISTS ix_device_profile ON device(profile_id)",
+    // Set by the first device ever linked and never cleared. Whether a keyless library on
+    // the loopback is open cannot be read from `device`: revoking the last one would empty
+    // it, open the library again, and let a key nobody holds any more read it. One row at
+    // most, so the question is an `EXISTS`.
+    r#"
+    CREATE TABLE IF NOT EXISTS closed (
+      id        INTEGER PRIMARY KEY CHECK (id = 1),
+      closed_at INTEGER NOT NULL
+    )
+    "#,
+    // A code waiting to be typed on another device. Its creator's own row goes with it, so
+    // unlinking a device leaves no live code behind.
+    r#"
+    CREATE TABLE IF NOT EXISTS link_code (
+      id             TEXT PRIMARY KEY,
+      code_digest    BLOB NOT NULL UNIQUE,
+      created_at     INTEGER NOT NULL,
+      expires_at     INTEGER NOT NULL,
+      created_by     TEXT NOT NULL,
+      creator_device TEXT REFERENCES device(id) ON DELETE CASCADE,
+      served_device  TEXT REFERENCES device(id) ON DELETE SET NULL
+    )
+    "#,
     // Progress belongs to the edition: reading chapter 100 in the Perfect Edition does
-    // not mark it read in the original.
+    // not mark it read in the original. And to whoever reads: two people in one household
+    // do not share a place in the same volume.
     r#"
     CREATE TABLE IF NOT EXISTS progress (
-      entry_id    TEXT PRIMARY KEY REFERENCES entry(id) ON DELETE CASCADE,
+      profile_id  TEXT NOT NULL DEFAULT 'default' REFERENCES profile(id) ON DELETE CASCADE,
+      entry_id    TEXT NOT NULL REFERENCES entry(id) ON DELETE CASCADE,
       edition_id  TEXT NOT NULL REFERENCES edition(id) ON DELETE CASCADE,
       page        INTEGER NOT NULL,
       finished    INTEGER NOT NULL DEFAULT 0,
       times_finished INTEGER NOT NULL DEFAULT 0,
-      updated_at  INTEGER NOT NULL
+      updated_at  INTEGER NOT NULL,
+      PRIMARY KEY (profile_id, entry_id)
     )
     "#,
     // Keyed by entry, but read by edition: the read status of a shelf asks "what has this
@@ -431,6 +491,86 @@ pub const MIGRATIONS: &[&str] = &[
     // different sentences: the work's says what the story is, and an edition's says what
     // *this printing* of it is — restored, coloured, three volumes in one.
     "ALTER TABLE edition ADD COLUMN summary TEXT",
+    // 26 — who reads. Until now the server knew one reader, and `progress` was keyed by
+    // entry alone. The default profile is the one every existing position is handed to.
+    r#"
+    CREATE TABLE IF NOT EXISTS profile (
+      id          TEXT PRIMARY KEY,
+      name        TEXT NOT NULL,
+      name_key    TEXT NOT NULL UNIQUE,
+      restricted  INTEGER NOT NULL DEFAULT 0,
+      max_age     INTEGER,
+      code_digest BLOB,
+      created_at  INTEGER NOT NULL
+    )
+    "#,
+    "INSERT OR IGNORE INTO profile (id, name, name_key, restricted, max_age, code_digest, created_at)
+     VALUES ('default', 'Par défaut', 'par défaut', 0, NULL, NULL, CAST(strftime('%s', 'now') AS INTEGER) * 1000)",
+    // 27 — the devices linked to this server, and the codes that link them. Created here
+    // as well as in SCHEMA, which is a no-op on a fresh database.
+    r#"
+    CREATE TABLE IF NOT EXISTS device (
+      id         TEXT PRIMARY KEY,
+      name       TEXT NOT NULL,
+      name_key   TEXT NOT NULL UNIQUE,
+      key_digest BLOB NOT NULL UNIQUE,
+      linked_at  INTEGER NOT NULL,
+      linked_by  TEXT NOT NULL,
+      seen_at    INTEGER,
+      profile_id TEXT NOT NULL DEFAULT 'default' REFERENCES profile(id)
+    )
+    "#,
+    "CREATE INDEX IF NOT EXISTS ix_device_profile ON device(profile_id)",
+    r#"
+    CREATE TABLE IF NOT EXISTS link_code (
+      id             TEXT PRIMARY KEY,
+      code_digest    BLOB NOT NULL UNIQUE,
+      created_at     INTEGER NOT NULL,
+      expires_at     INTEGER NOT NULL,
+      created_by     TEXT NOT NULL,
+      creator_device TEXT REFERENCES device(id) ON DELETE CASCADE,
+      served_device  TEXT REFERENCES device(id) ON DELETE SET NULL
+    )
+    "#,
+    // 28 — progress keyed by profile as well as entry. The key is part of the table, so it
+    // is rebuilt rather than altered, and every row is handed to the default profile. These
+    // rows are the one thing a rescan cannot bring back: a reader's places, kept nowhere
+    // else, so the copy has to carry every column or it loses them.
+    //
+    // **One entry, run as one batch inside one transaction.** The migrator stamps the version
+    // after each entry, so split in steps a crash between DROP and RENAME left `progress`
+    // gone and the rows stranded in `progress_new`: the next start recreates an empty
+    // `progress` from SCHEMA and the RENAME then fails for ever.
+    r#"
+    CREATE TABLE progress_new (
+      profile_id  TEXT NOT NULL DEFAULT 'default' REFERENCES profile(id) ON DELETE CASCADE,
+      entry_id    TEXT NOT NULL REFERENCES entry(id) ON DELETE CASCADE,
+      edition_id  TEXT NOT NULL REFERENCES edition(id) ON DELETE CASCADE,
+      page        INTEGER NOT NULL,
+      finished    INTEGER NOT NULL DEFAULT 0,
+      times_finished INTEGER NOT NULL DEFAULT 0,
+      updated_at  INTEGER NOT NULL,
+      PRIMARY KEY (profile_id, entry_id)
+    );
+    INSERT INTO progress_new
+       (profile_id, entry_id, edition_id, page, finished, times_finished, updated_at)
+     SELECT 'default', entry_id, edition_id, page, finished, times_finished, updated_at
+       FROM progress;
+    DROP TABLE progress;
+    ALTER TABLE progress_new RENAME TO progress;
+    CREATE INDEX IF NOT EXISTS ix_progress_edition ON progress(edition_id, finished);
+    "#,
+    // 29 — closing is for good. A database that already holds a device was closed the day
+    // that device was linked, so it is stamped closed on the way in rather than found open
+    // the day its last device is revoked.
+    r#"
+    CREATE TABLE IF NOT EXISTS closed (
+      id        INTEGER PRIMARY KEY CHECK (id = 1),
+      closed_at INTEGER NOT NULL
+    );
+    INSERT OR IGNORE INTO closed (id, closed_at)
+     SELECT 1, MIN(linked_at) FROM device HAVING COUNT(*) > 0;
+    "#,
 ];
 
 /// What a fresh database is stamped with. Deriving it from the list is what makes adding a

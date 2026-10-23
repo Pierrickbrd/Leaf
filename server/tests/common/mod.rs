@@ -15,6 +15,7 @@ use leaf_server::api::keys::Keys;
 use leaf_server::api::routes::{router, AppState};
 use leaf_server::metadata::sidecars::{self, EntryJson};
 use leaf_server::scan::scanner::Scanner;
+use leaf_server::store::devices::Devices;
 use leaf_server::store::Db;
 use tower::ServiceExt;
 
@@ -107,6 +108,19 @@ impl Server {
                 self.drop.clone(),
                 4 * 1024,
             )
+    }
+
+    /// Links a device the way `leaf-server device enroll` does, and hands back its key.
+    pub fn linked_device(&self, name: &str) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        Devices::new(Arc::clone(&self.db))
+            .enroll(name, now)
+            .expect("enrolling")
+            .expect("a linked device")
+            .key
     }
 
     pub fn scan(&self) {
