@@ -83,6 +83,7 @@ public:
     QString nothingToFilterLabel() const;
     QString noValueByThatNameLabel() const;
     /// « Chercher dans auteur… » — the placeholder of one axis's own field.
+    Q_INVOKABLE QString quotedAxis(const QString &axisTitle) const;
     Q_INVOKABLE QString searchWithin(const QString &axisTitle) const;
 
     QString sortLabel() const;

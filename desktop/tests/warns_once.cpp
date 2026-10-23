@@ -187,6 +187,24 @@ private slots:
         QCOMPARE(m_bubbles->count(), drawn);
     }
 
+    /// A switch left on while another profile read must not speak for a profile it does not
+    /// concern: neither the bubble nor the desktop, while a failure still does.
+    void a_family_that_does_not_concern_the_profile_neither_bubbles_nor_reaches_the_desktop()
+    {
+        m_awake = false;
+        m_preferences->concern(false, false, false);
+        QSignalSpy reached(m_bubbles, &Toasts::escalated);
+
+        m_bubbles->scanFinished(u"21 séries"_s);
+        m_bubbles->copySaved(u"/tmp/Tome 5.cbz"_s);
+        QCOMPARE(m_bubbles->count(), 0);
+        QCOMPARE(reached.size(), 0);
+
+        m_bubbles->scanFailed(u"le disque ne répond pas"_s);
+        QCOMPARE(m_bubbles->count(), 1);
+        QCOMPARE(reached.size(), 1);
+    }
+
     void a_family_that_may_not_escalate_stays_in_the_window()
     {
         m_preferences->reachTheDesktop(Preferences::Warns::Downloads, false);

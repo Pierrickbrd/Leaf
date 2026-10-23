@@ -53,6 +53,11 @@ QString Health::holds() const
     return Words::libraryHolds(m_said.library);
 }
 
+QString Health::access() const
+{
+    return Words::libraryAccess(m_said.linked);
+}
+
 QString Health::sharedFolder() const
 {
     return Words::sharedFolder(m_said.localDrop);

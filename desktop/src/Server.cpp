@@ -119,6 +119,12 @@ void Server::remove(const QString &path, const QObject *caller,
     send({"DELETE", path, QUrlQuery(), {}, {}}, caller, std::move(then));
 }
 
+void Server::remove(const QString &path, const QByteArray &body, const QObject *caller,
+                    std::function<void(const Answer &)> then)
+{
+    send({"DELETE", path, QUrlQuery(), body, {}, false}, caller, std::move(then));
+}
+
 void Server::patch(const QString &path, const QByteArray &body, const QObject *caller,
                    std::function<void(const Answer &)> then)
 {
@@ -282,6 +288,14 @@ void Server::send(const Sending &what, const QObject *caller,
                     answer.status == 403
                     && answer.body.object().value(QStringLiteral("error")).toString()
                            == QStringLiteral("unknown key");
+                // A device that must choose is refused by every route but two, and the refusal
+                // is the same wherever it lands: said here, once, so that a screen which only
+                // asked for a shelf does not have to know what to do with it.
+                if (answer.status == 409 && current
+                    && answer.body.object().value(QStringLiteral("error")).toString()
+                           == QStringLiteral("choose a profile")) {
+                    emit mustChoose();
+                }
                 // Only the key's own refusal stops the client — the server's answer to no key
                 // or one it does not know, which it counts towards its throttle. A route that
                 // refuses this key a right (a read-only key asking to import, or to make a
@@ -349,10 +363,10 @@ Server::Answer Server::read(QNetworkReply *reply, Reading reading) const
     case 403:
         return {status, body,
                 Words::keyRefused(said)};
-    case 429:
-        return {status, body,
-                Words::tooManyWrongKeys(
-                    QString::fromUtf8(reply->rawHeader("Retry-After")))};
+    case 429: {
+        const QString seconds = QString::fromUtf8(reply->rawHeader("Retry-After"));
+        return {status, body, Words::tooManyWrongKeys(seconds), {}, seconds};
+    }
     case 404:
         return {status, body, said.isEmpty() ? Words::noSuchThing() : said};
     default:

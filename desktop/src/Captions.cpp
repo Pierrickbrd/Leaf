@@ -151,6 +151,11 @@ QString Captions::noValueByThatNameLabel() const
     return Words::noValueByThatName();
 }
 
+QString Captions::quotedAxis(const QString &axisTitle) const
+{
+    return Words::quotedAxis(axisTitle);
+}
+
 QString Captions::searchWithin(const QString &axisTitle) const
 {
     return Words::searchWithin(axisTitle);

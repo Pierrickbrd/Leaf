@@ -47,6 +47,9 @@ public:
         /// built with a brace list, warnings are errors, and a field added with none would
         /// break the five of them that have nothing to say about it.
         QByteArray file = {};
+        /// The seconds a 429 says to wait, as sent. `trouble` words them for the key, and a
+        /// route that takes the code has its own throttle and its own sentence for it.
+        QString retryAfter = {};
 
         bool went() const { return trouble.isEmpty(); }
     };
@@ -162,6 +165,11 @@ public:
     void remove(const QString &path, const QObject *caller,
                 std::function<void(const Answer &)> then);
 
+    /// The same with a document, for the one removal that has to prove who asks: taking the
+    /// code off carries the code it is now.
+    void remove(const QString &path, const QByteArray &body, const QObject *caller,
+                std::function<void(const Answer &)> then);
+
     /// The address with its edges filed off: a scheme if none was given, no trailing slash.
     /// Typing `leaf.local:8081` into a box is not a mistake anybody should be corrected for.
     static QString tidy(const QString &address);
@@ -172,6 +180,12 @@ signals:
     /// `device revoke`, or never was in it. Said once per refusal, and only for the key this
     /// device still holds; whoever listens decides what forgetting means — see `Bond`.
     void keyUnknown();
+    /// Some route answered `409 choose a profile`: the profile this device sat on was deleted,
+    /// and the server refuses everything but « Qui lit ? » until it chooses. Said by whichever
+    /// request met it first — the shelf, a cover, a progress write — because no screen knows
+    /// it is the one that will; whoever listens (`Profiles`) turns it into the question.
+    /// Said once per refusal, for the key still held only, like `keyUnknown`.
+    void mustChoose();
 
 private:
 

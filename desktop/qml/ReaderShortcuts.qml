@@ -132,86 +132,12 @@ Item {
                 height: Math.max(Widths.scale.size(52),
                                  does.implicitHeight + Widths.scale.size(8))
 
-                Row {
+                KeyRow {
                     id: keys
 
                     anchors.verticalCenter: parent.verticalCenter
                     width: Widths.scale.icon(232)
-                    spacing: Widths.scale.size(7)
-
-                    Repeater {
-                        model: line.modelData.keys
-
-                        Item {
-                            id: one
-
-                            required property var modelData
-
-                            width: drawn.item ? drawn.item.width : 0
-                            height: Widths.scale.icon(34)
-
-                            Loader {
-                                id: drawn
-
-                                anchors.verticalCenter: parent.verticalCenter
-                                sourceComponent: one.modelData.kind === "key" ? aKey
-                                               : one.modelData.kind === "gesture" ? aGesture
-                                               : one.modelData.kind === "hint" ? aHint
-                                               : aSign
-                            }
-
-                            Component {
-                                id: aKey
-
-                                Keycap {
-                                    text: one.modelData.text || ""
-                                    glyph: one.modelData.glyph || ""
-                                    wide: !!one.modelData.wide
-                                }
-                            }
-
-                            Component {
-                                id: aGesture
-
-                                Item {
-                                    width: Widths.scale.icon(34)
-                                    height: width
-
-                                    Glyph {
-                                        anchors.centerIn: parent
-                                        source: "assets/icons/" + one.modelData.glyph + ".svg"
-                                        side: Widths.scale.icon(32)
-                                        tint: Theme.emerald
-                                    }
-                                }
-                            }
-
-                            Component {
-                                id: aHint
-
-                                Text {
-                                    leftPadding: Widths.scale.size(4)
-                                    text: one.modelData.text
-                                    color: Theme.inkSoft
-                                    font.family: Theme.textFamily
-                                    font.pixelSize: Widths.scale.caption(12)
-                                }
-                            }
-
-                            Component {
-                                id: aSign
-
-                                Text {
-                                    leftPadding: Widths.scale.size(2)
-                                    rightPadding: Widths.scale.size(2)
-                                    text: one.modelData.text
-                                    color: Theme.inkFaint
-                                    font.family: Theme.textFamily
-                                    font.pixelSize: Widths.scale.caption(12)
-                                }
-                            }
-                        }
-                    }
+                    keys: line.modelData.keys
                 }
 
                 Text {

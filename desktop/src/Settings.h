@@ -87,12 +87,13 @@ public:
     /// a screen that spells French is a screen no test reads.
     Q_PROPERTY(QString keyTitle READ keyTitle CONSTANT)
     Q_PROPERTY(QString storageLabel READ storageLabel NOTIFY changed)
-    /// The settings screen's own sections, `[{ name, label }]`. Held by the object the
-    /// screen is named after, because they belong to no one section.
-    Q_PROPERTY(QVariantList sections READ sections CONSTANT)
     QString keyTitle() const;
     QString storageLabel() const;
-    QVariantList sections() const;
+    /// The settings screen's own sections, `[{ name, label }]`, for a profile of `kind` (the
+    /// server's word): what that profile manages and nothing else. Held by the object the
+    /// screen is named after, because they belong to no one section; asked with the kind
+    /// rather than bound to it so that switching profile redraws the tabs.
+    Q_INVOKABLE QVariantList sections(const QString &kind) const;
     QString missing() const;
 
     /// Writes everything, then emits `changed`. The key goes to the keyring; if the keyring

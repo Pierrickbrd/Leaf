@@ -46,7 +46,7 @@ QString Navigation::backLabel() const
     // would be a button that tells you nothing you did not know.
     if (m_stack.size() < 2)
         return Words::backTo({});
-    return Words::backTo(Words::destination(m_stack.at(m_stack.size() - 2).where));
+    return Words::backTo(m_stack.at(m_stack.size() - 2).where);
 }
 
 bool Navigation::open(Destination where, const QVariantMap &with)

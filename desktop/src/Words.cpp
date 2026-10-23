@@ -3,6 +3,7 @@
 #include <QDate>
 #include <QDateTime>
 #include <QFileInfo>
+#include <QHash>
 #include <QLocale>
 
 #include <QStringList>
@@ -146,6 +147,12 @@ QString searchWithin(const QString &axisTitle)
     return u"Chercher dans %1…"_s.arg(axisTitle.toLower());
 }
 
+QString quotedAxis(const QString &axisTitle)
+{
+    // « Chercher dans auteur… » named no thing; the axis is a name and is quoted as one.
+    return u"« %1 »"_s.arg(axisTitle);
+}
+
 QString noValueByThatName()
 {
     return u"Aucune valeur ne porte ce nom."_s;
@@ -196,9 +203,25 @@ QString connected(bool reachable)
     return reachable ? u"Bibliothèque connectée"_s : u"Pas de connexion"_s;
 }
 
-QString backTo(const QString &destination)
+QString backTo(std::optional<Navigation::Destination> destination)
 {
-    return destination.isEmpty() ? u"Retour"_s : u"Retour à %1"_s.arg(destination.toLower());
+    // The article is the destination's own — « à l’étagère », « aux réglages » — so it is
+    // written with each, never inserted: « Retour à étagère » was what the rule produced.
+    if (!destination)
+        return u"Retour"_s;
+    switch (*destination) {
+    case Navigation::Destination::Shelf:
+        return u"Retour à l’étagère"_s;
+    case Navigation::Destination::Series:
+        return u"Retour à la série"_s;
+    case Navigation::Destination::Reader:
+        return u"Retour au lecteur"_s;
+    case Navigation::Destination::Health:
+        return u"Retour à la santé"_s;
+    case Navigation::Destination::Settings:
+        return u"Retour aux réglages"_s;
+    }
+    return u"Retour"_s;
 }
 
 QString whatItFound()
@@ -261,11 +284,29 @@ QString startAScan()
 
 namespace {
 
-/// « 6 séries », « 1 série ». Written once because seven counts follow the same rule and
-/// six of them would otherwise each grow their own plural.
+/// French counts 0 and 1 in the singular — « 0 série », « 1 an » — like `volumes` does.
+/// « 1 séries pour vous » is what this replaced.
+QString plural(int how, const QString &one, const QString &many)
+{
+    return (how >= 2 ? many : one).arg(how);
+}
+
+/// « 1 seconde », « 30 secondes » from the `Retry-After` header as it came, a string: one that
+/// is not a number is a wait of no length worth printing, and said as « un instant » rather
+/// than « Attendez  secondes ».
+QString waitOf(const QString &seconds)
+{
+    bool number = false;
+    const int count = seconds.toInt(&number);
+    return number ? plural(count, u"%1 seconde"_s, u"%1 secondes"_s) : u"un instant"_s;
+}
+
+/// « 6 séries », « 1 série », « 0 série ». Written once because seven counts follow the same
+/// rule and six of them would otherwise each grow their own plural. It said « 0 séries » and
+/// « 0 tomes envoyés » until the language was read through on 24/10/2026.
 QString counted(int how, const QString &one, const QString &many)
 {
-    return u"%1 %2"_s.arg(how).arg(how == 1 ? one : many);
+    return u"%1 %2"_s.arg(how).arg(how >= 2 ? many : one);
 }
 
 } // namespace
@@ -1064,6 +1105,16 @@ QString keyName(KeyName which)
         return u"0"_s;
     case W:
         return u"W"_s;
+    case Enter:
+        return u"Entrée"_s;
+    case Tab:
+        return u"Tab"_s;
+    case Menu:
+        return u"Menu"_s;
+    case F10:
+        return u"F10"_s;
+    case Slash:
+        return u"/"_s;
     }
     return {};
 }
@@ -1085,7 +1136,7 @@ QString shortcutOr()
 
 QString doubleClick()
 {
-    return u"double clic"_s;
+    return u"double-clic"_s;
 }
 
 QString notSetUp(Asking what)
@@ -1232,13 +1283,12 @@ QString nameNotAccepted()
 
 QString tooManyTries(const QString &seconds)
 {
-    return u"Trop d’essais ratés depuis cet appareil. Attendez %1 secondes."_s.arg(seconds);
+    return u"Trop d’essais ratés depuis cet appareil. Attendez %1."_s.arg(waitOf(seconds));
 }
 
 QString tooManyWrongKeys(const QString &seconds)
 {
-    return u"Trop de clés fausses ont été essayées. Attendez %1 secondes."_s
-        .arg(seconds);
+    return u"Trop de clés fausses ont été essayées. Attendez %1."_s.arg(waitOf(seconds));
 }
 
 QString noSuchThing()
@@ -1255,7 +1305,7 @@ QString serverAnswered(int status, const QString &said)
 
 QString waitingBeforeAsking(int seconds)
 {
-    return u"Encore %1 secondes avant de redemander."_s.arg(seconds);
+    return u"Encore %1 avant de redemander."_s.arg(plural(seconds, u"%1 seconde"_s, u"%1 secondes"_s));
 }
 
 QString tooManyWaiting()
@@ -1449,7 +1499,7 @@ QString relayIntro()
 {
     // Unbroken between the number and its unit: « 10 » alone at the end of a line reads as
     // ten of something the next line has to say.
-    return u"Ouvrez ce lien sur l’appareil à relier, ou scannez le QR code. Valable 10"_s
+    return u"Ouvrez ce lien sur l’appareil à relier, ou scannez le code QR. Valable 10"_s
            + Nbsp + u"minutes, une seule fois."_s;
 }
 
@@ -1973,17 +2023,17 @@ QString catalogueMissing()
 
 QString sidecarTooBig()
 {
-    return u"Le sidecar de cette archive est trop gros pour en être un."_s;
+    return u"Le fichier de métadonnées de cette archive est trop gros pour en être un."_s;
 }
 
 QString sidecarCompressedInAnUnknownWay()
 {
-    return u"Le sidecar de cette archive est compressé d’une façon inconnue."_s;
+    return u"Le fichier de métadonnées de cette archive est compressé d’une façon inconnue."_s;
 }
 
 QString sidecarCouldNotBeInflated()
 {
-    return u"Le sidecar de cette archive n’a pas pu être décompressé."_s;
+    return u"Le fichier de métadonnées de cette archive n’a pas pu être décompressé."_s;
 }
 
 QString folderTooDeep()
@@ -2352,10 +2402,16 @@ QString whatAWholeEditionTakes(int files, qint64 bytes, int finished, bool oneOp
         lost << u"la position dans le %1%2"_s.arg(which).arg(which == 1 ? u"ᵉʳ"_s : u"ᵉ"_s);
     }
     QString what = lost.join(u" et "_s);
-    if (lost.size() == 1 && oneOpen)
+    const bool onlyPosition = lost.size() == 1 && oneOpen;
+    if (onlyPosition)
         what = u"La position dans le %1%2"_s.arg(which).arg(which == 1 ? u"ᵉʳ"_s : u"ᵉ"_s);
-    said += u" %1 %2 oubliés avec eux."_s.arg(what, lost.size() == 1 && oneOpen ? u"sera"_s
-                                                                                : u"seront"_s);
+    // « La position … sera oubliée », « Le tome lu sera oublié », « Les 3 tomes lus seront
+    // oubliés »: the verb and the participle follow what is lost, not whether one thing was.
+    const bool several = lost.size() > 1 || finished >= 2;
+    said += u" %1 %2 %3 avec eux."_s.arg(what, several ? u"seront"_s : u"sera"_s,
+                                         several      ? u"oubliés"_s
+                                         : onlyPosition ? u"oubliée"_s
+                                                        : u"oublié"_s);
     return said;
 }
 
@@ -2523,6 +2579,11 @@ QString whereBubblesAppear()
     return u"Où les bulles apparaissent"_s;
 }
 
+QString eventColumn()
+{
+    return u"Événement"_s;
+}
+
 QString bubbleColumn()
 {
     return u"Bulle"_s;
@@ -2558,5 +2619,628 @@ QString hereToo(const QString &detail)
 {
     return detail.isEmpty() ? u"ici"_s : detail + u" · ici"_s;
 }
+
+QString whoReads()
+{
+    return u"Qui lit"_s + Nbsp + u"?"_s;
+}
+
+QString wrongCode()
+{
+    return u"Ce code n’est pas le bon."_s;
+}
+
+QString profileNote(Api::Kind kind, std::optional<int> maxAge)
+{
+    switch (kind) {
+    case Api::Kind::Principal:
+        return u"Principal"_s;
+    case Api::Kind::Reader:
+        return {};
+    case Api::Kind::Restricted:
+        if (maxAge)
+            return u"Jusqu’à %1"_s.arg(yearsOld(*maxAge));
+        break;
+    case Api::Kind::Other:
+        break;
+    }
+    return u"Restreint"_s;
+}
+
+QString addOne()
+{
+    return u"Ajouter"_s;
+}
+
+QString keepOnThisDevice()
+{
+    return u"Retenir sur cet appareil"_s;
+}
+
+QString manageProfiles()
+{
+    return u"Gérer les profils"_s;
+}
+
+QString switchNeedsCode()
+{
+    return u"Changer de profil demande le code."_s;
+}
+
+QString backToShelf()
+{
+    return u"Revenir à l’étagère"_s;
+}
+
+QString closeWhoReads()
+{
+    return u"Fermer"_s;
+}
+
+QString switchToProfile(const QString &name)
+{
+    return u"Passer à %1"_s.arg(name);
+}
+
+QString leaveNeedsCode()
+{
+    return u"Quitter votre profil demande le code."_s;
+}
+
+QString enterCode()
+{
+    return u"Saisissez le code."_s;
+}
+
+QString addAProfile()
+{
+    return u"Ajouter un profil"_s;
+}
+
+QString addNeedsCode()
+{
+    return u"L’ajout d’un profil est protégé par le code."_s;
+}
+
+QString forgotCode()
+{
+    return u"Code oublié"_s + Nbsp + u"?"_s;
+}
+
+QString resetCodeCommand()
+{
+    return u"sudo leaf-server profile reset-code"_s;
+}
+
+QString back()
+{
+    return u"Retour"_s;
+}
+
+QString confirm()
+{
+    return u"Valider"_s;
+}
+
+QString newProfile()
+{
+    return u"Nouveau profil"_s;
+}
+
+QString yourProfile()
+{
+    return u"Votre profil"_s;
+}
+
+QString editProfile(const QString &name)
+{
+    return u"Modifier %1"_s.arg(name);
+}
+
+QString profileName()
+{
+    return u"Nom"_s;
+}
+
+QString profileColour()
+{
+    return u"Couleur"_s;
+}
+
+QString takenColourNote()
+{
+    return u"Une couleur déjà prise porte l’initiale de son profil."_s;
+}
+
+QString whatItMayDo()
+{
+    return u"Ce que ce profil peut faire"_s;
+}
+
+QString readerRole()
+{
+    return u"Lecteur"_s;
+}
+
+QString restrictedRole()
+{
+    return u"Restreint"_s;
+}
+
+QString mayImport()
+{
+    return u"Importer"_s;
+}
+
+QString mayEdit()
+{
+    return u"Modifier"_s;
+}
+
+QString mayErase()
+{
+    return u"Supprimer"_s;
+}
+
+QString readerExplained()
+{
+    return u"Ce profil lit, et fait en plus ce que vous cochez."_s;
+}
+
+QString restrictedExplained()
+{
+    return u"Ce profil ne fait que lire, et seulement les séries dont l’âge indiqué ne dépasse pas la limite choisie. Une série sans âge indiqué lui reste cachée."_s;
+}
+
+QString seriesUpTo()
+{
+    return u"Âge maximal"_s;
+}
+
+QString ageLimitNote()
+{
+    return u"De 3 à 17 ans. À 18 ans le profil verrait aussi les séries réservées aux adultes, et le rôle Lecteur le fait déjà."_s;
+}
+
+QString yearsOld(int age)
+{
+    return plural(age, u"%1 an"_s, u"%1 ans"_s);
+}
+
+QString codeToCreate()
+{
+    return u"Le code, à créer"_s;
+}
+
+QString recoveryTitle()
+{
+    return u"Votre code de secours"_s;
+}
+
+QString recoveryExplained()
+{
+    return u"Notez-le et gardez-le à part, pas sur cet appareil"_s + Nbsp
+           + u": il ne sera plus montré. Si vous oubliez le code, il permet d’en choisir un "
+             u"nouveau, depuis n’importe quel appareil."_s;
+}
+
+QString recoveryNoted()
+{
+    return u"J’ai noté mon code de secours"_s;
+}
+
+QString recoveryCardExplained()
+{
+    return u"Si vous oubliez le code, ce code de secours permet d’en choisir un nouveau, depuis "
+           u"n’importe quel appareil, sans passer par le serveur. Il n’est montré qu’une fois."_s;
+}
+
+QString recoveryRedraw()
+{
+    return u"Créer un nouveau code de secours"_s;
+}
+
+QString recoveryRedrawNote()
+{
+    return u"L’ancien cesse de fonctionner tout de suite."_s;
+}
+
+QString recoverExplained()
+{
+    return u"Entrez votre code de secours, puis choisissez un nouveau code."_s;
+}
+
+QString recoveryField()
+{
+    return u"Code de secours"_s;
+}
+
+QString newCodeField()
+{
+    return u"Nouveau code"_s;
+}
+
+QString recoveryNotDrawn(const QString &why)
+{
+    return u"Le code est enregistré, mais son code de secours n’a pas pu être créé"_s + Nbsp
+           + u": "_s + why
+           + u" Créez-le depuis l’onglet Profils, avec « Créer un nouveau code de secours »."_s;
+}
+
+QString currentCode()
+{
+    return u"Code actuel"_s;
+}
+
+QString currentCodeAsked()
+{
+    return u"Changer le code, ou le retirer, demande celui qui est en place."_s;
+}
+
+QString replaceCode()
+{
+    return u"Remplacer le code"_s;
+}
+
+QString wrongRecovery()
+{
+    return u"Ce code de secours n’est pas le bon."_s;
+}
+
+QString noRecoveryCommand()
+{
+    return u"Pas de code de secours"_s + Nbsp
+           + u"? Il ne reste que le serveur, avec cette commande"_s + Nbsp + u":"_s;
+}
+
+QString codeFirst()
+{
+    return u"Le code"_s;
+}
+
+QString codeAgain()
+{
+    return u"Une seconde fois"_s;
+}
+
+QString aCode()
+{
+    return u"Un code"_s;
+}
+
+QString whenCodeAsked()
+{
+    return u"Il est demandé"_s;
+}
+
+QString toLeaveRestricted()
+{
+    return u"Pour quitter un profil restreint"_s;
+}
+
+QString alsoToComeBack()
+{
+    return u"Aussi pour revenir à votre profil"_s;
+}
+
+QString principalExplained()
+{
+    return u"C’est le profil principal"_s + Nbsp
+           + u": vous gérez les autres profils, les appareils et la bibliothèque."_s;
+}
+
+QString codeHintFree()
+{
+    return u"Le seul code de Leaf, de 4 à 8 caractères. Facultatif tant qu’aucun profil n’est restreint"_s + Nbsp
+           + u"; il devient obligatoire avec le premier."_s;
+}
+
+QString codeHintHeld(const QString &name)
+{
+    return u"Le seul code de Leaf, de 4 à 8 caractères. Il ne peut pas être retiré tant qu’un profil est restreint, ici %1."_s.arg(name);
+}
+
+QString principalKind()
+{
+    return u"Profil principal"_s;
+}
+
+QString readerKind()
+{
+    return u"Profil lecteur"_s;
+}
+
+QString restrictedKind()
+{
+    return u"Profil restreint"_s;
+}
+
+QString youMark()
+{
+    return u"vous"_s;
+}
+
+QString retainedHere()
+{
+    return u"retenu sur cet ordinateur"_s;
+}
+
+QString retainedOn(const QString &device)
+{
+    return u"retenu sur %1"_s.arg(device);
+}
+
+QString seriesUpToYears(int age)
+{
+    return u"séries jusqu’à "_s + plural(age, u"%1 an"_s, u"%1 ans"_s);
+}
+
+QString eraseProfile(const QString &name)
+{
+    return u"Supprimer %1"_s.arg(name) + Nbsp + u"?"_s;
+}
+
+QString eraseConsequence()
+{
+    return u"Les lectures en cours et les préférences de ce profil seront effacées."_s;
+}
+
+QString eraseLeavesDevices()
+{
+    return u"Les appareils qui le retenaient demanderont qui lit. Les tomes de la bibliothèque ne bougent pas."_s;
+}
+
+QString eraseProfileButton(const QString &name)
+{
+    return u"Supprimer %1"_s.arg(name);
+}
+
+QString addProfileButton(const QString &name)
+{
+    return name.isEmpty() ? addOne() : u"Ajouter %1"_s.arg(name);
+}
+
+QString saveProfile()
+{
+    return u"Enregistrer"_s;
+}
+
+QString firstCodeHint()
+{
+    return u"Il n’y a pas encore de code, et un profil restreint en demande un"_s + Nbsp
+           + u": c’est lui qui permet d’en sortir. De 4 à 8 caractères, à saisir deux fois. Dans votre profil, vous choisirez s’il protège aussi le retour vers le vôtre."_s;
+}
+
+QString principalManages(const QString &principal)
+{
+    return u"Ce profil pourra changer son nom et sa couleur, comme vous. Les droits et les profils restreints, c’est le profil principal, %1, qui les gère."_s.arg(principal);
+}
+
+QString fewerYears()
+{
+    return u"Un an de moins"_s;
+}
+
+QString moreYears()
+{
+    return u"Un an de plus"_s;
+}
+
+QString colourName(const QString &id, const QString &owner)
+{
+    static const QHash<QString, QString> names{
+        {u"emeraude"_s, u"Émeraude"_s}, {u"sapin"_s, u"Sapin"_s},
+        {u"sauge"_s, u"Sauge"_s},       {u"olive"_s, u"Olive"_s},
+        {u"ocre"_s, u"Ocre"_s},         {u"ambre"_s, u"Ambre"_s},
+        {u"corail"_s, u"Corail"_s},     {u"framboise"_s, u"Framboise"_s},
+        {u"rose"_s, u"Rose"_s},         {u"prune"_s, u"Prune"_s},
+        {u"violet"_s, u"Violet"_s},     {u"indigo"_s, u"Indigo"_s},
+        {u"bleu"_s, u"Bleu"_s},         {u"azur"_s, u"Azur"_s},
+        {u"ardoise"_s, u"Ardoise"_s},   {u"terre"_s, u"Terre"_s}};
+    const QString name = names.value(id, id);
+    return owner.isEmpty() ? name : u"%1, déjà prise par %2"_s.arg(name, owner);
+}
+
+QString profilesTab()
+{
+    return u"Profils"_s;
+}
+
+QString whatEachMayDo()
+{
+    return u"Ce que chacun peut faire"_s;
+}
+
+QString devicesTab()
+{
+    return u"Appareils"_s;
+}
+
+QString aboutTab()
+{
+    return u"À propos"_s;
+}
+
+QString atOpening()
+{
+    return u"À l’ouverture"_s;
+}
+
+QString opensOnThisComputer()
+{
+    return u"Sur cet ordinateur, Leaf s’ouvre sur"_s;
+}
+
+QString askWhoReads()
+{
+    return u"Demander qui lit"_s;
+}
+
+QString otherDevices()
+{
+    return u"Les autres appareils"_s;
+}
+
+QString opensOn(const QString &name)
+{
+    return u"S’ouvre sur %1"_s.arg(name);
+}
+
+QString removeDevice()
+{
+    return u"Retirer cet appareil"_s;
+}
+
+QString seriesForYou(int count)
+{
+    return plural(count, u"%1 série pour vous"_s, u"%1 séries pour vous"_s);
+}
+
+QString shortcuts()
+{
+    return u"Raccourcis clavier"_s;
+}
+
+QString thisClient()
+{
+    return u"Ce client"_s;
+}
+
+QString serverHeading()
+{
+    return u"Le serveur"_s;
+}
+
+QString profileLine(Api::Kind kind, std::optional<int> maxAge, const QStringList &marks)
+{
+    QStringList parts;
+    switch (kind) {
+    case Api::Kind::Principal:
+        parts << principalKind();
+        break;
+    case Api::Kind::Reader:
+        parts << readerKind();
+        break;
+    case Api::Kind::Restricted:
+    case Api::Kind::Other:
+        parts << restrictedKind();
+        if (kind == Api::Kind::Restricted && maxAge)
+            parts << seriesUpToYears(*maxAge);
+        break;
+    }
+    for (const QString &mark : marks) {
+        if (!mark.isEmpty())
+            parts << mark;
+    }
+    return parts.join(u" · "_s);
+}
+
+QString managedByPrincipal(const QString &principal)
+{
+    return u"Gérer les autres profils et leurs droits"_s + Nbsp
+           + u": c’est le rôle du profil principal, %1."_s.arg(principal);
+}
+
+QString onlyReads(const QString &name)
+{
+    return u"Le profil de %1, restreint, ne fait que lire, quoi qu’il arrive."_s.arg(name);
+}
+
+QString rightsExplained()
+{
+    return u"Modifier, c’est changer les informations d’une série ou d’un tome. Vous, profil principal, pouvez tout faire"_s
+           + Nbsp + u"; un nouveau profil ne fait que lire tant que rien n’est coché."_s;
+}
+
+QString devicesExplained()
+{
+    return u"Retirer un appareil coupe sa clé tout de suite"_s + Nbsp
+           + u": une tablette perdue ne lit plus rien. Chacun peut faire retenir son propre profil depuis « Qui lit"_s
+           + Nbsp + u"? »"_s + Nbsp
+           + u"; qu’un appareil s’ouvre sur un profil restreint, vous seul le décidez, ici."_s;
+}
+
+QString eraseExplained()
+{
+    return u"Supprimer un profil efface ses lectures en cours et ses préférences"_s + Nbsp
+           + u"; les appareils qui le retenaient demanderont qui lit."_s;
+}
+
+QString asksWhoReadsThere()
+{
+    return u"Demande qui lit à l’ouverture"_s;
+}
+
+QString chooseItsProfile()
+{
+    return u"Choisir son profil"_s;
+}
+
+QString removeDeviceQuestion(const QString &name)
+{
+    return u"Retirer %1"_s.arg(name) + Nbsp + u"?"_s;
+}
+
+QString removeDeviceConsequence()
+{
+    return u"Sa clé cesse de fonctionner tout de suite. Pour qu’il lise de nouveau, il faudra le relier."_s;
+}
+
+QString appShortcut(AppShortcut which)
+{
+    switch (which) {
+    case AppShortcut::Search:
+        return u"Chercher"_s;
+    case AppShortcut::Back:
+        return u"Revenir en arrière"_s;
+    case AppShortcut::Move:
+        return u"Aller d’un élément à l’autre"_s;
+    case AppShortcut::Activate:
+        return u"Ouvrir, activer"_s;
+    case AppShortcut::SeriesMenu:
+        return u"Le menu d’une série"_s;
+    case AppShortcut::ReaderKeys:
+        return u"Les raccourcis du lecteur, quand un tome est ouvert"_s;
+    }
+    return {};
+}
+
+QString aboutFact(AboutFact which)
+{
+    switch (which) {
+    case AboutFact::Version:
+        return u"Version de Leaf"_s;
+    case AboutFact::Device:
+        return u"Cet appareil"_s;
+    case AboutFact::Qt:
+        return u"Qt, la bibliothèque graphique"_s;
+    case AboutFact::System:
+        return u"Système"_s;
+    case AboutFact::State:
+        return u"État"_s;
+    case AboutFact::Access:
+        return u"Accès"_s;
+    case AboutFact::Api:
+        return u"Version de l’API"_s;
+    case AboutFact::Format:
+        return u"Version du format"_s;
+    }
+    return {};
+}
+
+QString libraryAccess(bool closed)
+{
+    // « Accès » is masculine: fermé, ouvert — the lines beside it are not about the library.
+    return closed ? u"Fermé"_s + Nbsp + u": il faut une clé"_s
+                  : u"Ouvert, sur cet ordinateur seulement"_s;
+}
+
+QString apiExplained()
+{
+    return u"L’API est la langue que parlent le client et le serveur"_s + Nbsp
+           + u": s’ils n’ont pas la même, ils ne se comprennent pas. Le format est celui des "
+             u"fichiers de la bibliothèque, lus par le serveur."_s;
+}
+
 
 } // namespace Words

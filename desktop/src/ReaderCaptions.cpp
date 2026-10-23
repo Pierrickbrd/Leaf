@@ -1,5 +1,6 @@
 #include "ReaderCaptions.h"
 
+#include "KeyShapes.h"
 #include "Words.h"
 
 #include <QVariantMap>
@@ -289,34 +290,10 @@ QString ReaderCaptions::shortcuts() const
 
 namespace {
 
-/// A key with a word on it. Wide when the word is longer than a letter, as the mockup pads
-/// « Ctrl » and not « F ».
-QVariantMap key(Words::KeyName name)
-{
-    const QString text = Words::keyName(name);
-    return {{u"kind"_s, u"key"_s}, {u"text"_s, text}, {u"wide"_s, text.size() > 1}};
-}
-
-/// A key with a Tabler glyph on it.
-QVariantMap key(const QString &glyph, bool wide = false)
-{
-    return {{u"kind"_s, u"key"_s}, {u"glyph"_s, glyph}, {u"wide"_s, wide}};
-}
-
-QVariantMap sign(const QString &text)
-{
-    return {{u"kind"_s, u"sign"_s}, {u"text"_s, text}};
-}
-
-QVariantMap gesture(const QString &glyph)
-{
-    return {{u"kind"_s, u"gesture"_s}, {u"glyph"_s, glyph}};
-}
-
-QVariantMap hint(const QString &text)
-{
-    return {{u"kind"_s, u"hint"_s}, {u"text"_s, text}};
-}
+using KeyShapes::gesture;
+using KeyShapes::hint;
+using KeyShapes::key;
+using KeyShapes::sign;
 
 QVariantMap row(Words::ShortcutDoes does, const QVariantList &keys)
 {

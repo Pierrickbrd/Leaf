@@ -139,7 +139,7 @@ Item {
             x: 8
             width: parent.width - 16
             visible: axisItem.searchable
-            placeholder: axisItem.title
+            placeholder: Captions.quotedAxis(axisItem.title)
             onAsked: text => axisItem.looking = text
         }
 

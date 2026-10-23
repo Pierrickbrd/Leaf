@@ -61,6 +61,8 @@ class Health : public QObject
     Q_PROPERTY(QString connected READ connected NOTIFY changed)
     Q_PROPERTY(QString versions READ versions NOTIFY changed)
     Q_PROPERTY(QString holds READ holds NOTIFY changed)
+    /// « Fermée : il faut une clé », or the open library of one machine.
+    Q_PROPERTY(QString access READ access NOTIFY changed)
     Q_PROPERTY(QString sharedFolder READ sharedFolder NOTIFY changed)
 
 public:
@@ -85,6 +87,7 @@ public:
     QString connected() const;
     QString versions() const;
     QString holds() const;
+    QString access() const;
     QString sharedFolder() const;
 
     Q_INVOKABLE void ask();

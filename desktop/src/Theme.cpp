@@ -1,5 +1,6 @@
 #include "Theme.h"
 
+#include <QFontDatabase>
 #include <QGuiApplication>
 #include <QPalette>
 
@@ -15,6 +16,25 @@ QColor pick(bool dark, QRgb light, QRgb night)
 {
     return QColor::fromRgb(dark ? night : light);
 }
+
+/// The sixteen profile tints, in palette order. The id is what the server stores, without
+/// accent; the two values are the measured ones, light then dark.
+struct Tint {
+    const char *id;
+    QRgb light;
+    QRgb night;
+};
+constexpr Tint Tints[] = {
+    {"emeraude", 0x0A6A55u, 0x2FB98Bu}, {"sapin", 0x2E5E2Au, 0x7CC46Fu},
+    {"sauge", 0x4A6650u, 0x9DBEA2u},    {"olive", 0x5E6216u, 0xC2C55Au},
+    {"ocre", 0x855A0Cu, 0xE5B04Au},     {"ambre", 0x8F4A0Au, 0xF0A050u},
+    {"corail", 0xA23B2Au, 0xF2846Eu},   {"framboise", 0xA3264Au, 0xF07A95u},
+    {"rose", 0xA33C7Au, 0xEB8CC4u},     {"prune", 0x6E2A63u, 0xD58BCBu},
+    {"violet", 0x5B3A8Eu, 0xB49AEEu},   {"indigo", 0x3B4392u, 0x949DF0u},
+    {"bleu", 0x1F5590u, 0x6FA8EEu},     {"azur", 0x0C6283u, 0x4FBCE4u},
+    {"ardoise", 0x4A5768u, 0xA6B4C6u},  {"terre", 0x6B4E3Au, 0xC9A58Au},
+};
+constexpr int Slate = 14;
 } // namespace
 
 Theme::Theme(QObject *parent) : QObject(parent) {}
@@ -106,3 +126,37 @@ QColor Theme::readerPaper() const  { return pick(m_dark, 0xDCD2BCu, 0x070908u); 
 QColor Theme::readerBlack() const  { return pick(m_dark, 0x0A0C0Bu, 0x070908u); }
 QColor Theme::readerGrey() const   { return pick(m_dark, 0x2B2F2Cu, 0x292D2Au); }
 QColor Theme::readerWhite() const  { return pick(m_dark, 0xF4F3EFu, 0xF2F1EDu); }
+
+QVariantMap Theme::profileTints() const
+{
+    QVariantMap tints;
+    for (const Tint &tint : Tints)
+        tints.insert(QString::fromUtf8(tint.id), pick(m_dark, tint.light, tint.night));
+    return tints;
+}
+
+QColor Theme::profileTintIn(const QVariantMap &tints, const QString &color) const
+{
+    const QVariant found = tints.value(color);
+    if (found.isValid())
+        return found.value<QColor>();
+    return pick(m_dark, Tints[Slate].light, Tints[Slate].night);
+}
+
+// The initial is the surface tone of the theme it is in, the same inversion `onEmerald`
+// makes: pale on the dark tints of the light theme, near-black on the bright ones of the
+// dark theme. `keeps_its_contrast` holds all thirty-two pairs at 4,5:1.
+QColor Theme::profileInk() const   { return pick(m_dark, 0xF0ECE3u, 0x0C100Eu); }
+
+QStringList Theme::profileColors() const
+{
+    QStringList ids;
+    for (const Tint &tint : Tints)
+        ids << QString::fromUtf8(tint.id);
+    return ids;
+}
+
+QString Theme::commandFamily() const
+{
+    return QFontDatabase::systemFont(QFontDatabase::FixedFont).family();
+}
