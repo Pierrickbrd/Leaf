@@ -82,12 +82,22 @@ const QByteArray NoSeries = R"({"items":[],"total":0})";
 const QString Key = u"Zm9yLXRoZS1kZXZpY2Utb25seS0wMTIzNDU2Nzg5YWJjZGVm"_s;
 const QByteArray Withdrawn = "HTTP/1.1 204 .\r\nConnection: close\r\n\r\n";
 
-/// What `POST /link/codes` answers: a code living `lifetime` milliseconds from now.
-QByteArray issued(qint64 lifetime = 600000)
+/// The link a server reached at its public address builds around the code.
+const QString PublicLink =
+    u"leaf://leaf.exemple.fr/lier/K7QF2MXP?empreinte="_s + QString(64, u'a');
+
+/// What `POST /link/codes` answers: a code living `lifetime` milliseconds from now, and the
+/// link the server built around it.
+QByteArray issued(qint64 lifetime = 600000, const QString &link = PublicLink,
+                  bool localNetwork = false)
 {
     const qint64 expiresAt = QDateTime::currentMSecsSinceEpoch() + lifetime;
-    return reply(201, R"({"id":"c-1","code":"K7QF-2MXP","expiresAt":)"
-                          + QByteArray::number(expiresAt) + "}");
+    return reply(201, QJsonDocument(QJsonObject{{u"id"_s, u"c-1"_s},
+                                                {u"code"_s, u"K7QF-2MXP"_s},
+                                                {u"expiresAt"_s, expiresAt},
+                                                {u"link"_s, link},
+                                                {u"localNetwork"_s, localNetwork}})
+                          .toJson(QJsonDocument::Compact));
 }
 
 /// A Leaf server over TLS, as far as these tests need one: answers what `answerFor` says for
@@ -455,30 +465,64 @@ private slots:
         QCOMPARE(m_linking->sentence(), Words::deviceRevoked());
     }
 
-    void a_name_in_the_revoke_command_is_quoted_for_the_shell()
+    void the_unlink_sentences_say_whose_list_and_which_installation_they_mean()
     {
-        // Pasted into a root terminal: nothing in a name may be read by the shell.
-        const QString name = u"a$(x)`y`\"b'c"_s;
-        const QString quoted = u"'a$(x)`y`\"b'\\''c'"_s;
-        QVERIFY(Words::unlinkIfSilent(name).contains(u"device revoke "_s + quoted + u"."_s));
-        QVERIFY(Words::unlinkedWithoutTheServer(name).contains(u"device revoke "_s + quoted));
+        // « la personne qui l’a installée » pointed at the old key, and « de ses appareils »
+        // at that person's own devices.
+        for (const QString &said :
+             {Words::unlinkIfSilent(u"Bureau"_s), Words::unlinkedWithoutTheServer(u"Bureau"_s)}) {
+            QVERIFY2(said.contains(u"retirer Bureau de la liste des appareils de la bibliothèque"_s),
+                     qPrintable(said));
+            QVERIFY2(!said.contains(u"de ses appareils"_s), qPrintable(said));
+        }
+        QVERIFY(Words::unlinkedAnOldKey().contains(u"la personne qui a installé la bibliothèque"_s));
+        QVERIFY(!Words::unlinkedAnOldKey().contains(u"qui l’a installée"_s));
+        QVERIFY(Words::libraryFoundDetail(true, 12).startsWith(u"Vérifiée · "_s));
     }
 
-    void the_commands_to_remove_a_device_by_hand_run_under_sudo()
+    void no_sentence_about_linking_speaks_of_addresses_commands_or_settings()
     {
-        // They read /etc/leaf/server.env, which only root may read: copied without `sudo`,
-        // each one fails on the line it was pasted.
-        for (const QString &name : {u"Bureau"_s, QString()}) {
-            for (const QString &said :
-                 {Words::unlinkIfSilent(name), Words::unlinkedWithoutTheServer(name)}) {
-                QVERIFY2(said.contains(u"sudo leaf-server device revoke"_s), qPrintable(said));
-                QVERIFY2(!said.contains(QRegularExpression(u"(?<!sudo )leaf-server device"_s)),
-                         qPrintable(said));
-            }
+        // A person on the machine that runs the library opened « Relier un autre appareil »
+        // and was told about 127.0.0.1, tunnels, sudo and LEAF_PUBLIC_URL. The commands live
+        // in the README now; what a screen says, anybody can act on.
+        const QStringList said{
+            Words::linkIntro(),
+            Words::notALink(),
+            Words::noLibraryAnswers(),
+            Words::linkNoLongerValid(),
+            Words::certificateMismatch(),
+            Words::libraryFoundDetail(true, 12),
+            Words::alreadyLinked(),
+            Words::httpsElsewhere(),
+            Words::notAnAddress(),
+            Words::keyUnknownThere(),
+            Words::unlinkWhat(u"Bureau"_s),
+            Words::unlinkComeBack(),
+            Words::unlinkIfSilent(u"Bureau"_s),
+            Words::unlinkIfSilent({}),
+            Words::unlinkedWithoutTheServer(u"Bureau"_s),
+            Words::unlinkedWithoutTheServer({}),
+            Words::unlinkedAnOldKey(),
+            Words::deviceRevoked(),
+            Words::revokedUnderEnvironment(),
+            Words::settingsFromEnvironment(),
+            Words::relayIntro(),
+            Words::relaySameNetwork(),
+            Words::relayRanOut(),
+            Words::onlyThisComputer(),
+        };
+        const QRegularExpression jargon(
+            u"127\\.0|::1|\\d+\\.\\d+\\.\\d+\\.\\d+|:\\d{2,5}\\b|sudo|leaf-server|"
+            "device (add|revoke|list)|tunnel|LEAF_|server\\.env|loopback|boucle locale|"
+            "\\bhttps?\\b(?!://)|SHA|empreinte|certificat|chmod"_s,
+            QRegularExpression::CaseInsensitiveOption);
+        for (const QString &sentence : said) {
+            QVERIFY2(!sentence.isEmpty(), "every sentence says something");
+            QVERIFY2(!jargon.match(sentence).hasMatch(), qPrintable(sentence));
         }
     }
 
-    void an_unlink_refused_for_a_key_from_leaf_keys_forgets_and_says_where_that_key_lives()
+    void an_unlink_refused_for_a_key_from_leaf_keys_forgets_and_says_who_removes_that_key()
     {
         linked();
         // Linked with an old key, which has no device to remove: the server cannot do it, and
@@ -494,9 +538,9 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(unlinked.count(), 1, 5000);
         QVERIFY(!m_settings->configured());
         QCOMPARE(m_linking->sentence(), Words::unlinkedAnOldKey());
-        QVERIFY(m_linking->sentence().contains(u"LEAF_KEYS"_s));
-        QVERIFY(m_linking->sentence().contains(u"/etc/leaf/server.env"_s));
-        QVERIFY(!m_linking->sentence().contains(u"device revoke"_s));
+        // Where that key lives is the README's to say; the screen sends whoever reads it to
+        // the person who can remove it.
+        QVERIFY(m_linking->sentence().contains(u"personne qui a installé la bibliothèque"_s));
         QVERIFY(!m_linking->sentence().contains(Key));
     }
 
@@ -604,10 +648,12 @@ private slots:
         QVERIFY(!m_bond->busy());
     }
 
-    void relaying_from_the_loopback_says_the_link_works_only_here_and_still_shows_it()
+    void a_device_at_the_loopback_relays_the_link_the_server_built()
     {
-        // `install.sh all`, or an SSH tunnel: this device reaches the library at 127.0.0.1,
-        // and so would a link built from that address — on whichever device opens it.
+        // `install.sh all`, or an SSH tunnel: this device reaches the library at 127.0.0.1.
+        // A link built from that address worked on no other device, and a window explained
+        // 127.0.0.1, tunnels and sudo to whoever opened it. The server knows where it is
+        // reached; the link is its.
         Pretend plain;
         QVERIFY(plain.listen(QHostAddress::LocalHost));
         plain.answerFor = [](const QByteArray &request) {
@@ -623,22 +669,19 @@ private slots:
 
         m_bond->relay();
         QTRY_VERIFY_WITH_TIMEOUT(!m_bond->relayLink().isEmpty(), 5000);
-        QVERIFY(m_bond->relayLink().startsWith(u"leaf://127.0.0.1:"_s));
-        QCOMPARE(m_bond->relayOnlyHere(), Words::relayOnlyHere());
-        QVERIFY(m_bond->relayOnlyHere().contains(u"sudo leaf-server device add"_s));
-        QVERIFY(m_bond->relayOnlyHere().contains(u"LEAF_PUBLIC_URL"_s));
-
-        // Gone with the link.
-        m_bond->stopRelay();
-        QVERIFY(m_bond->relayOnlyHere().isEmpty());
+        QCOMPARE(m_bond->relayLink(), PublicLink);
+        // The public address works from anywhere: nothing to say under it.
+        QVERIFY(m_bond->relaySameNetwork().isEmpty());
     }
 
-    void relaying_shows_a_link_built_from_this_devices_own_address_and_pin()
+    void relaying_shows_the_link_the_server_answered_and_where_it_works()
     {
         linked();
-        m_library->answerFor = [](const QByteArray &request) {
+        const QString network = u"leaf://192.0.2.10:8081/lier/K7QF2MXP?empreinte="_s
+                                + pinOf(u"pinned"_s);
+        m_library->answerFor = [network](const QByteArray &request) {
             if (request.startsWith("POST /link/codes ")) {
-                return issued();
+                return issued(600000, network, true);
             }
             return request.startsWith("GET /link/codes/c-1 ")
                        ? reply(200, R"({"state":"waiting"})")
@@ -647,23 +690,52 @@ private slots:
         m_bond->relay();
         QTRY_VERIFY_WITH_TIMEOUT(!m_bond->relayLink().isEmpty(), 5000);
 
-        // Composed here, from what this device itself uses — the server only made the code.
-        const QUrl address(m_library->address());
-        QCOMPARE(m_bond->relayLink(), u"leaf://127.0.0.2:%1/lier/K7QF-2MXP?empreinte=%2"_s.arg(
-                                          address.port())
-                                          .arg(pinOf(u"pinned"_s)));
-        // And read back by the link screen into this very library.
+        // As the server built it — not this device's own address, 127.0.0.2.
+        QCOMPARE(m_bond->relayLink(), network);
         const std::optional<Link> read = Link::read(m_bond->relayLink());
         QVERIFY(read);
-        QCOMPARE(read->address.toString(), m_settings->address());
-        QCOMPARE(read->fingerprint, m_settings->fingerprint());
         QCOMPARE(read->code, u"K7QF2MXP"_s);
+        // One of the server's own network addresses: it works from that network only.
+        QCOMPARE(m_bond->relaySameNetwork(), Words::relaySameNetwork());
 
         QVERIFY(m_bond->relaySeconds() > 590 && m_bond->relaySeconds() <= 600);
         QVERIFY(m_bond->relayed().isEmpty());
-        // Another machine's address: the link works from anywhere that reaches it.
-        QVERIFY(m_bond->relayOnlyHere().isEmpty());
         QVERIFY(m_library->heard.contains("X-Leaf-Key: " + Key.toUtf8()));
+
+        // Gone with the link.
+        m_bond->stopRelay();
+        QVERIFY(m_bond->relaySameNetwork().isEmpty());
+    }
+
+    void a_server_nobody_else_reaches_says_so_in_plain_words_and_the_tab_asks_again()
+    {
+        // The settings had not heard yet — an older answer, or one given before the key was
+        // recognised — and « 409 : unreachable » reached the screen, English and a status.
+        linked();
+        m_library->answerFor = [](const QByteArray &request) {
+            return request.startsWith("POST /link/codes ")
+                       ? reply(409, R"({"error":"unreachable"})")
+                       : QByteArray();
+        };
+        QSignalSpy nobody(m_bond, &Bond::nobodyElseReaches);
+        m_bond->relay();
+        QTRY_COMPARE_WITH_TIMEOUT(m_bond->relaySentence(), Words::onlyThisComputer(), 5000);
+        QVERIFY(m_bond->relayLink().isEmpty());
+        QCOMPARE(nobody.count(), 1);
+    }
+
+    void a_link_the_other_device_could_not_read_is_not_shown()
+    {
+        linked();
+        m_library->answerFor = [](const QByteArray &request) {
+            if (request.startsWith("POST /link/codes ")) {
+                return issued(600000, u"https://leaf.exemple.fr/lier/K7QF2MXP"_s);
+            }
+            return request.startsWith("DELETE ") ? Withdrawn : QByteArray();
+        };
+        m_bond->relay();
+        QTRY_COMPARE_WITH_TIMEOUT(m_bond->relaySentence(), Words::unreadableAnswer(), 5000);
+        QVERIFY(m_bond->relayLink().isEmpty());
     }
 
     void the_relay_says_the_name_of_the_device_that_used_it()

@@ -567,6 +567,7 @@ Read<Health> health(const QJsonObject &from)
     // machine — not a malformed answer.
     said.localDrop = field.maybeBool(u"localDrop"_s).value_or(false);
     said.linked = field.maybeBool(u"linked"_s).value_or(true);
+    said.relay = field.maybeBool(u"relay"_s).value_or(true);
     return {said, {}};
 }
 
@@ -612,13 +613,19 @@ Read<IssuedCode> issuedCode(const QJsonObject &from)
     said.id = field.text(u"id"_s);
     said.code = field.text(u"code"_s);
     said.expiresAt = field.big(u"expiresAt"_s);
+    said.link = field.text(u"link"_s);
+    const std::optional<bool> local = field.maybeBool(u"localNetwork"_s);
     if (field.broken())
         return refused<IssuedCode>(QStringLiteral("issued code"), field.trouble());
-    // Neither may be empty: an empty id follows nothing, and a link with an empty code is a
-    // link the other device is told is not one.
-    if (said.id.isEmpty() || said.code.isEmpty())
+    if (!local.has_value())
         return refused<IssuedCode>(QStringLiteral("issued code"),
-                                   QStringLiteral("id or code is empty"));
+                                   QStringLiteral("localNetwork is missing"));
+    said.localNetwork = *local;
+    // None may be empty: an empty id follows nothing, a link with an empty code is a link
+    // the other device is told is not one, and without the link there is nothing to show.
+    if (said.id.isEmpty() || said.code.isEmpty() || said.link.isEmpty())
+        return refused<IssuedCode>(QStringLiteral("issued code"),
+                                   QStringLiteral("id, code or link is empty"));
     return {said, {}};
 }
 

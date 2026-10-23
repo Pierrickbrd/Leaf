@@ -1045,6 +1045,12 @@ private slots:
         QCOMPARE(read.value->library, 6);
         QVERIFY(read.value->localDrop);
         QVERIFY(!read.value->linked);
+
+        QJsonObject keyed = said;
+        keyed.insert(u"relay"_s, false);
+        const Api::Read<Api::Health> told = Api::health(keyed);
+        QVERIFY2(told.ok(), qPrintable(told.trouble));
+        QVERIFY(!told.value->relay);
     }
 
     /// No shared folder is the ordinary case for a server on another machine, not a
@@ -1061,16 +1067,33 @@ private slots:
         QCOMPARE(read.value->library, 0);
         // A server older than linking does not say whether it is closed: taken for closed.
         QVERIFY(read.value->linked);
+        // Said only to a key it recognises, and not by an older server: nothing said is
+        // nothing taken away from the screen.
+        QVERIFY(read.value->relay);
     }
 
     void a_code_made_for_another_device_is_read_in_full()
     {
-        const Api::Read<Api::IssuedCode> read = Api::issuedCode(QJsonObject{
-            {u"id"_s, u"c-1"_s}, {u"code"_s, u"K7QF-2MXP"_s}, {u"expiresAt"_s, 1792700000000LL}});
+        const QString link = u"leaf://192.0.2.10:8081/lier/K7QF2MXP"_s;
+        const QJsonObject said{{u"id"_s, u"c-1"_s},
+                               {u"code"_s, u"K7QF-2MXP"_s},
+                               {u"expiresAt"_s, 1792700000000LL},
+                               {u"link"_s, link},
+                               {u"localNetwork"_s, true}};
+        const Api::Read<Api::IssuedCode> read = Api::issuedCode(said);
         QVERIFY2(read.ok(), qPrintable(read.trouble));
         QCOMPARE(read.value->id, u"c-1"_s);
         QCOMPARE(read.value->code, u"K7QF-2MXP"_s);
         QCOMPARE(read.value->expiresAt, 1792700000000LL);
+        QCOMPARE(read.value->link, link);
+        QVERIFY(read.value->localNetwork);
+
+        // The link is the server's to build: without it, the client has none to show.
+        QJsonObject linkless = said;
+        linkless.remove(u"link"_s);
+        const Api::Read<Api::IssuedCode> refused = Api::issuedCode(linkless);
+        QVERIFY(!refused.ok());
+        QVERIFY(!refused.trouble.contains(u"K7QF"_s));
 
         const Api::Read<Api::IssuedCode> empty = Api::issuedCode(
             QJsonObject{{u"id"_s, u"c-1"_s}, {u"code"_s, u""_s}, {u"expiresAt"_s, 1}});

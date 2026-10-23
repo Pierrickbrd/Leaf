@@ -1,6 +1,7 @@
 #include "Bond.h"
 
 #include "Api.h"
+#include "Link.h"
 #include "Linking.h"
 #include "Pinning.h"
 #include "Server.h"
@@ -60,27 +61,6 @@ QString presented(const QNetworkReply *reply)
 {
     const QSslCertificate certificate = reply->sslConfiguration().peerCertificate();
     return certificate.isNull() ? QString() : Pinning::fingerprint(certificate);
-}
-
-/// The link another device opens: this device's own address and pin, around the server's
-/// code. Written for `Link::read` to read back into that same address — the port left out
-/// only where it reads a missing one as the same port.
-QString linkTo(const QString &address, const QString &fingerprint, const QString &code)
-{
-    const QUrl at(address);
-    const QString host = at.host();
-    // QUrl hands an IPv6 host back without its brackets, and a link needs them.
-    QString link = u"leaf://"_s + (host.contains(u':') ? u"[%1]"_s.arg(host) : host);
-    // No port in a link means 443, except on the loopback, which is read as plain http.
-    const int port = at.port();
-    if (port != -1 && !(port == 443 && !loopback(host))) {
-        link += u":"_s + QString::number(port);
-    }
-    link += u"/lier/"_s + code;
-    if (!fingerprint.isEmpty()) {
-        link += u"?empreinte="_s + fingerprint;
-    }
-    return link;
 }
 
 /// The path that follows or withdraws a code. Its id is the server's, and goes in encoded all
@@ -210,7 +190,7 @@ QString Bond::unlinkQuestion() const
 
 QString Bond::unlinkWhat() const
 {
-    return Words::unlinkWhat(m_settings->deviceName(), QUrl(address()).host());
+    return Words::unlinkWhat(m_settings->deviceName());
 }
 
 QString Bond::unlinkComeBack() const
@@ -553,6 +533,16 @@ void Bond::relay()
     endRelay({});
     m_server->post(u"/link/codes"_s, "{}", this, [this](const Server::Answer &answer) {
         m_relayAsking = false;
+        // The server knows nobody else reaches it, and the tab did not yet: said in the
+        // tab's own words rather than « 409 : unreachable », and the tab asks again.
+        if (answer.status == 409
+            && answer.body.object().value(u"error"_s).toString() == u"unreachable"_s) {
+            if (!m_relayWithdrawn) {
+                endRelay(Words::onlyThisComputer());
+            }
+            emit nobodyElseReaches();
+            return;
+        }
         if (!answer.went()) {
             // Closed meanwhile: there is nobody left to tell.
             if (!m_relayWithdrawn) {
@@ -567,19 +557,31 @@ void Bond::relay()
             }
             return;
         }
-        issued(read.value->id, read.value->code, read.value->expiresAt);
+        // A link the other device could not read back would be a QR code that opens nothing.
+        if (!Link::read(read.value->link)) {
+            if (!m_relayWithdrawn) {
+                endRelay(Words::unreadableAnswer());
+            }
+            withdraw(read.value->id);
+            return;
+        }
+        issued(*read.value);
     });
 }
 
-void Bond::issued(const QString &id, const QString &code, qint64 expiresAt)
+void Bond::issued(const Api::IssuedCode &code)
 {
     // The panel closed while the code was being made: it is withdrawn before anybody saw it.
     if (std::exchange(m_relayWithdrawn, false)) {
-        withdraw(id);
+        withdraw(code.id);
         return;
     }
-    m_relayId = id;
-    m_relayLink = linkTo(Server::tidy(m_settings->address()), m_settings->fingerprint(), code);
+    m_relayId = code.id;
+    // The server's, as it is: never this device's own address, which is the loopback on the
+    // server's machine and a tunnel's end through SSH.
+    m_relayLink = code.link;
+    m_relayLocal = code.localNetwork;
+    const qint64 expiresAt = code.expiresAt;
     // Counted on this machine's steady clock from here on, so that the clock being set while
     // the panel is open does not stretch or cut the code short.
     qint64 left = expiresAt - QDateTime::currentMSecsSinceEpoch();
@@ -593,15 +595,10 @@ void Bond::issued(const QString &id, const QString &code, qint64 expiresAt)
     tick();
 }
 
-QString Bond::relayOnlyHere() const
+QString Bond::relaySameNetwork() const
 {
-    // Read from the link itself, not the settings: it is the link that goes to the other
-    // device, and the sentence goes with it — shown while it is, gone when it is.
-    if (m_relayLink.isEmpty()) {
-        return {};
-    }
-    return loopback(QUrl(Server::tidy(m_settings->address())).host()) ? Words::relayOnlyHere()
-                                                                        : QString();
+    // Goes with the link: shown while it is, gone when it is.
+    return !m_relayLink.isEmpty() && m_relayLocal ? Words::relaySameNetwork() : QString();
 }
 
 void Bond::follow()
@@ -700,6 +697,7 @@ void Bond::endRelay(const QString &why)
     m_relayFollow.stop();
     m_relayId.clear();
     m_relayLink.clear();
+    m_relayLocal = false;
     m_relaySeconds = 0;
     m_relaySentence = why;
     emit relayChanged();

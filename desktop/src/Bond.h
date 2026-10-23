@@ -18,12 +18,14 @@
 //     the sentence that says why. Not when the environment set the key: the environment is
 //     never overwritten, so it is told rather than erased.
 //
-// And one thing it does for another device: **relay** — `POST /link/codes`, and a link
-// composed here, from the address and the pin this device itself uses, for a device that
-// is not linked yet. The server only makes the code; what it is reached at is this
-// device's knowledge, not the server's guess. The code is asked about every two seconds
-// until it is used, and withdrawn if the panel closes first: a code nobody is looking at
-// any more is a key waiting for whoever finds it. Never logged, for the same reason.
+// And one thing it does for another device: **relay** — `POST /link/codes`, and the link the
+// server answers with, shown as it is. It used to be composed here, from the address and the
+// pin this device uses — which on the server's own machine is the loopback, and through an
+// SSH tunnel the tunnel's end: a person there was handed a link no other device could follow,
+// with a sentence about 127.0.0.1, tunnels and sudo under it. The server knows where other
+// devices reach it; this device only knows where it does. The code is asked about every two
+// seconds until it is used, and withdrawn if the panel closes first: a code nobody is looking
+// at any more is a key waiting for whoever finds it. Never logged, for the same reason.
 //
 // Its own network manager for a move, and not `Server`'s, for the reason `Linking` gives:
 // trying an address this device is not linked to yet must not change the pin every request
@@ -37,6 +39,9 @@
 #include <QString>
 #include <QTimer>
 
+namespace Api {
+struct IssuedCode;
+}
 class Linking;
 class QNetworkReply;
 class Server;
@@ -84,9 +89,9 @@ class Bond : public QObject
     Q_PROPERTY(QString relayed READ relayed NOTIFY relayChanged)
     /// What stopped the relay — a refusal, a code run out. Empty when there is nothing to say.
     Q_PROPERTY(QString relaySentence READ relaySentence NOTIFY relayChanged)
-    /// Beside a link built from the loopback, which no other device can follow; empty for
-    /// any other address, and when there is no link.
-    Q_PROPERTY(QString relayOnlyHere READ relayOnlyHere NOTIFY relayChanged)
+    /// Under a link to one of the server's own network addresses, which works from that
+    /// network only; empty for a public address, and when there is no link.
+    Q_PROPERTY(QString relaySameNetwork READ relaySameNetwork NOTIFY relayChanged)
     /// « Valable encore 9:42 · une seule fois », and « PC du salon relié ».
     Q_PROPERTY(QString relayTimeLeft READ relayTimeLeft NOTIFY relayChanged)
     Q_PROPERTY(QString relayedSaid READ relayedSaid NOTIFY relayChanged)
@@ -130,7 +135,7 @@ public:
     int relaySeconds() const { return m_relaySeconds; }
     QString relayed() const { return m_relayed; }
     QString relaySentence() const { return m_relaySentence; }
-    QString relayOnlyHere() const;
+    QString relaySameNetwork() const;
     QString relayTimeLeft() const;
     QString relayedSaid() const;
     QString relayLabel() const;
@@ -163,6 +168,9 @@ signals:
     /// worth asking again.
     void moved();
     void relayChanged();
+    /// The server refused a code because nobody else reaches it: what the tab offers was
+    /// decided on an older answer, and is worth asking again.
+    void nobodyElseReaches();
 
 private:
     /// A `403 unknown key`, from any request `Server` made.
@@ -176,7 +184,7 @@ private:
     void say(const QString &sentence);
     void setBusy(bool busy);
     /// The server's answer to `POST /link/codes`.
-    void issued(const QString &id, const QString &code, qint64 expiresAt);
+    void issued(const Api::IssuedCode &code);
     /// Asks whether the code has been used, unless the last question is still out.
     void follow();
     /// Counts the second down, and lets the link go when there are none left.
@@ -208,6 +216,8 @@ private:
     /// code itself, which lives only inside `m_relayLink`.
     QString m_relayId;
     QString m_relayLink;
+    /// The link names one of the server's network addresses rather than a public one.
+    bool m_relayLocal = false;
     QString m_relayed;
     QString m_relaySentence;
     int m_relaySeconds = 0;

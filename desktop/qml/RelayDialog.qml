@@ -164,13 +164,12 @@ Popup {
             }
         }
 
-        // A link from the loopback opens this library on this machine only: said under it,
-        // and the link still shown, for a tunnel or this machine's own second session.
+        // A link to one of the server's network addresses works from that network only.
         SettingsNote {
-            objectName: "relay-only-here"
+            objectName: "relay-same-network"
             width: parent.width
-            visible: Bond.relayOnlyHere.length > 0
-            text: Bond.relayOnlyHere
+            visible: Bond.relaySameNetwork.length > 0
+            text: Bond.relaySameNetwork
         }
 
         SettingsNote {

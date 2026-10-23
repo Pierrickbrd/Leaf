@@ -38,6 +38,11 @@ QString Health::connected() const
     return Words::connected(m_reachable);
 }
 
+QString Health::onlyHere() const
+{
+    return m_said.relay ? QString() : Words::onlyThisComputer();
+}
+
 QString Health::versions() const
 {
     return Words::apiVersion(m_said.api, m_said.format);
