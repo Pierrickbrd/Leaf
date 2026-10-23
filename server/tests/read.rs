@@ -11,6 +11,7 @@ use http_body_util::BodyExt;
 use leaf_server::api::dto::{SeriesFilter, SeriesSort};
 use leaf_server::api::keys::Keys;
 use leaf_server::api::routes::{router, AppState};
+use leaf_server::store::repository::Ceiling;
 use leaf_server::store::text::search_key;
 use leaf_server::store::{Db, Repository};
 use tower::ServiceExt;
@@ -149,7 +150,7 @@ impl Library {
     fn names(&self, filter: &SeriesFilter) -> Vec<String> {
         let mut found: Vec<String> = self
             .repository()
-            .series(filter, SeriesSort::Name, 0, 0)
+            .series(filter, SeriesSort::Name, 0, 0, "default", &Ceiling::NONE)
             .expect("listing")
             .into_iter()
             .map(|s| s.work)
@@ -270,7 +271,14 @@ fn the_other_editions_of_a_work_are_asked_for_by_the_work() {
 
     let siblings = library
         .repository()
-        .series(&filter_of("work", &["death"]), SeriesSort::Name, 0, 0)
+        .series(
+            &filter_of("work", &["death"]),
+            SeriesSort::Name,
+            0,
+            0,
+            "default",
+            &Ceiling::NONE,
+        )
         .expect("listing");
 
     assert_eq!(2, siblings.len());
@@ -286,7 +294,7 @@ fn a_universe_the_work_already_names_is_not_repeated() {
     let library = Library::new();
     let elfes = library
         .repository()
-        .one_series("e-elfes")
+        .one_series("e-elfes", "default", &Ceiling::NONE)
         .expect("reading")
         .expect("there");
     assert_eq!("Terres d'Arran · Elfes", elfes.name);
@@ -303,7 +311,7 @@ fn a_series_carries_the_id_of_its_universe_and_not_only_its_name() {
     let one = |id: &str| {
         library
             .repository()
-            .one_series(id)
+            .one_series(id, "default", &Ceiling::NONE)
             .expect("reading")
             .expect("there")
     };
@@ -323,7 +331,10 @@ fn a_series_carries_the_id_of_its_universe_and_not_only_its_name() {
 #[test]
 fn the_menu_only_offers_what_returns_something() {
     let library = Library::new();
-    let facets = library.repository().facets().expect("facets");
+    let facets = library
+        .repository()
+        .facets("default", &Ceiling::NONE)
+        .expect("facets");
 
     let authors: Vec<(&str, i64)> = facets
         .authors
@@ -375,7 +386,7 @@ fn a_series_counts_what_it_owns_and_names_what_it_misses() {
 
     let nains = library
         .repository()
-        .one_series("e-nains")
+        .one_series("e-nains", "default", &Ceiling::NONE)
         .expect("reading")
         .expect("there");
     assert_eq!(2, nains.owned_volumes);
@@ -407,7 +418,7 @@ fn a_volume_whose_chapters_are_here_is_not_reported_missing() {
 
     let nains = library
         .repository()
-        .one_series("e-nains")
+        .one_series("e-nains", "default", &Ceiling::NONE)
         .expect("reading")
         .expect("there");
     assert!(
@@ -431,7 +442,14 @@ fn listing_the_series_does_not_ask_one_question_per_series() {
     let three = cost(&library.db, || {
         library
             .repository()
-            .series(&SeriesFilter::default(), SeriesSort::Name, 0, 0)
+            .series(
+                &SeriesFilter::default(),
+                SeriesSort::Name,
+                0,
+                0,
+                "default",
+                &Ceiling::NONE,
+            )
             .unwrap();
     });
 
@@ -450,7 +468,14 @@ fn listing_the_series_does_not_ask_one_question_per_series() {
     let fifteen = cost(&library.db, || {
         library
             .repository()
-            .series(&SeriesFilter::default(), SeriesSort::Name, 0, 0)
+            .series(
+                &SeriesFilter::default(),
+                SeriesSort::Name,
+                0,
+                0,
+                "default",
+                &Ceiling::NONE,
+            )
             .unwrap();
     });
 
@@ -484,11 +509,21 @@ fn one_series_does_not_cost_the_whole_library() {
     let whole = cost(&library.db, || {
         library
             .repository()
-            .series(&SeriesFilter::default(), SeriesSort::Name, 0, 0)
+            .series(
+                &SeriesFilter::default(),
+                SeriesSort::Name,
+                0,
+                0,
+                "default",
+                &Ceiling::NONE,
+            )
             .unwrap();
     });
     let one = cost(&library.db, || {
-        library.repository().one_series("e-elfes").unwrap();
+        library
+            .repository()
+            .one_series("e-elfes", "default", &Ceiling::NONE)
+            .unwrap();
     });
 
     assert!(
@@ -894,7 +929,7 @@ async fn the_ways_through_an_universe_are_answered_whole_and_in_two_questions() 
     let both = cost(&library.db, || {
         library
             .repository()
-            .orders_of_universe("u-arran")
+            .orders_of_universe("u-arran", &Ceiling::NONE)
             .expect("orders");
     });
     assert_eq!(2, both, "{both} questions for two orders");
@@ -909,7 +944,7 @@ async fn the_ways_through_an_universe_are_answered_whole_and_in_two_questions() 
     let one = cost(&library.db, || {
         library
             .repository()
-            .orders_of_universe("u-arran")
+            .orders_of_universe("u-arran", &Ceiling::NONE)
             .expect("orders");
     });
     assert_eq!(both, one, "one order cost {one} where two cost {both}");
@@ -1232,7 +1267,10 @@ fn asking_for_the_chapters_of_no_series_at_all_asks_the_database_nothing() {
     // query with an empty IN list, which SQLite answers slowly and pointlessly.
     let library = Library::new();
     let repository = Repository::new(&library.db);
-    assert!(repository.chapters_of_entries(&[]).unwrap().is_empty());
+    assert!(repository
+        .chapters_of_entries(&[], &Ceiling::NONE)
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

@@ -8,6 +8,7 @@ mod common;
 use common::{read_only, writable};
 
 use leaf_server::api::pages::Pages;
+use leaf_server::store::repository::Ceiling;
 use leaf_server::store::Db;
 
 /// A CBZ with pages of a known size, so "was it resized" has an answer.
@@ -133,7 +134,7 @@ fn without_a_width_the_original_bytes_go_back_untouched() {
     let f = Fixture::new();
     let served = f
         .pages()
-        .page("v1", 0, None)
+        .page("v1", 0, None, &Ceiling::NONE)
         .expect("serving")
         .expect("a page");
 
@@ -155,15 +156,21 @@ fn a_width_gives_back_something_smaller_and_keeps_it() {
     let f = Fixture::new();
     let pages = f.pages();
 
-    let source = pages.page("v1", 0, None).unwrap().unwrap();
-    let resized = pages.page("v1", 0, Some(400)).unwrap().unwrap();
+    let source = pages.page("v1", 0, None, &Ceiling::NONE).unwrap().unwrap();
+    let resized = pages
+        .page("v1", 0, Some(400), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
 
     assert!(resized.bytes.len() < source.bytes.len());
     assert_eq!("image/webp", resized.media_type);
     assert_eq!(1, f.cache_files(), "the resize is kept");
 
     // And the second time it comes off the disk, tag and bytes unchanged.
-    let again = pages.page("v1", 0, Some(400)).unwrap().unwrap();
+    let again = pages
+        .page("v1", 0, Some(400), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     assert_eq!(resized.tag, again.tag);
     assert_eq!(resized.bytes, again.bytes);
     assert_eq!(1, f.cache_files(), "and not written twice");
@@ -173,11 +180,14 @@ fn a_width_gives_back_something_smaller_and_keeps_it() {
 fn a_page_is_never_upscaled() {
     let f = Fixture::new();
     let pages = f.pages();
-    let source = pages.page("v1", 2, None).unwrap().unwrap(); // 300 wide
+    let source = pages.page("v1", 2, None, &Ceiling::NONE).unwrap().unwrap(); // 300 wide
 
     // Asking for 4000 on a 300-wide page returns the original rather than a blurred
     // enlargement — and writes nothing, because there is nothing to keep.
-    let asked = pages.page("v1", 2, Some(4000)).unwrap().unwrap();
+    let asked = pages
+        .page("v1", 2, Some(4000), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     assert_eq!(source.bytes, asked.bytes);
     assert_eq!(0, f.cache_files());
 }
@@ -186,16 +196,22 @@ fn a_page_is_never_upscaled() {
 fn a_resize_that_would_barely_help_is_not_done() {
     let f = Fixture::new();
     let pages = f.pages();
-    let source = pages.page("v1", 0, None).unwrap().unwrap(); // 1200 wide
+    let source = pages.page("v1", 0, None, &Ceiling::NONE).unwrap().unwrap(); // 1200 wide
 
     // 1000 out of 1200 is above the ratio worth paying for: decoding, scaling and
     // re-encoding would cost several hundred milliseconds and give back a file the same
     // size.
-    let asked = pages.page("v1", 0, Some(1000)).unwrap().unwrap();
+    let asked = pages
+        .page("v1", 0, Some(1000), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     assert_eq!(source.bytes, asked.bytes, "1000/1200 is not worth the work");
 
     // 600 out of 1200 is.
-    let smaller = pages.page("v1", 0, Some(600)).unwrap().unwrap();
+    let smaller = pages
+        .page("v1", 0, Some(600), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     assert!(smaller.bytes.len() < source.bytes.len());
 }
 
@@ -207,8 +223,14 @@ fn a_spread_is_given_twice_the_width_it_asked_for() {
     // Page 1 is 2400×1700: wider than tall, so it holds two pages side by side. ?width is
     // the width you want *per page* — each half would otherwise come back at half the
     // resolution of a single page, and unreadable the moment you zoom.
-    let spread = pages.page("v1", 1, Some(600)).unwrap().unwrap();
-    let single = pages.page("v1", 0, Some(600)).unwrap().unwrap();
+    let spread = pages
+        .page("v1", 1, Some(600), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    let single = pages
+        .page("v1", 0, Some(600), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
 
     let width_of = |bytes: &[u8]| leaf_server::archive::images::dimension(bytes).unwrap().0;
     assert_eq!(
@@ -223,7 +245,11 @@ fn a_spread_is_given_twice_the_width_it_asked_for() {
 fn the_tag_changes_when_the_file_does() {
     let f = Fixture::new();
     let pages = f.pages();
-    let before = pages.page("v1", 0, Some(400)).unwrap().unwrap().tag;
+    let before = pages
+        .page("v1", 0, Some(400), &Ceiling::NONE)
+        .unwrap()
+        .unwrap()
+        .tag;
 
     // The tag carries the file's modification time, so a retouched volume invalidates its
     // cached pages on its own — no sweep to run, no stale image to explain.
@@ -236,7 +262,11 @@ fn the_tag_changes_when_the_file_does() {
     })
     .unwrap();
 
-    let after = pages.page("v1", 0, Some(400)).unwrap().unwrap().tag;
+    let after = pages
+        .page("v1", 0, Some(400), &Ceiling::NONE)
+        .unwrap()
+        .unwrap()
+        .tag;
     assert_ne!(before, after);
 }
 
@@ -249,7 +279,7 @@ fn the_cache_is_trimmed_back_under_its_budget() {
     let pages = f.pages_with_budget(80 * 1024);
 
     for width in [200, 300, 400, 500, 600, 700] {
-        pages.page("v1", 0, Some(width)).unwrap();
+        pages.page("v1", 0, Some(width), &Ceiling::NONE).unwrap();
     }
 
     let total: u64 = walk(&f.dir.path().join("cache"));
@@ -338,7 +368,7 @@ fn a_page_too_tall_to_encode_comes_back_whole_rather_than_cut() {
     let pages = Pages::new(Arc::new(db), dir.path().join("cache"), 85, 64 * 1024 * 1024);
     pages.prepare();
     let served = pages
-        .page("v1", 0, Some(12))
+        .page("v1", 0, Some(12), &Ceiling::NONE)
         .expect("serving")
         .expect("a page");
 
@@ -350,7 +380,14 @@ fn a_page_too_tall_to_encode_comes_back_whole_rather_than_cut() {
     // touched. Asked three times over, because the shape of the waste is that this path
     // stores nothing — so every reader used to pay the whole 7.8 MB decode again.
     for _ in 0..3 {
-        assert_eq!(png, pages.page("v1", 0, Some(12)).unwrap().unwrap().bytes);
+        assert_eq!(
+            png,
+            pages
+                .page("v1", 0, Some(12), &Ceiling::NONE)
+                .unwrap()
+                .unwrap()
+                .bytes
+        );
     }
     assert_eq!(
         0,
@@ -372,9 +409,12 @@ fn a_width_of_nothing_gives_the_page_back_rather_than_one_pixel_of_it() {
     let pages = f.pages();
 
     // Page 1 is the spread, which is where the doubling happens.
-    let whole = pages.page("v1", 1, None).expect("serving").expect("a page");
+    let whole = pages
+        .page("v1", 1, None, &Ceiling::NONE)
+        .expect("serving")
+        .expect("a page");
     let served = pages
-        .page("v1", 1, Some(0))
+        .page("v1", 1, Some(0), &Ceiling::NONE)
         .expect("serving")
         .expect("a page");
 
@@ -390,7 +430,10 @@ fn a_width_of_nothing_gives_the_page_back_rather_than_one_pixel_of_it() {
 
     // A width that means something is still honoured, so this is not a way of refusing to
     // work.
-    let smaller = pages.page("v1", 1, Some(600)).unwrap().unwrap();
+    let smaller = pages
+        .page("v1", 1, Some(600), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     assert!(smaller.bytes.len() < whole.bytes.len());
 }
 
@@ -406,9 +449,18 @@ fn a_cover_asked_for_at_no_width_is_a_tile_and_not_the_whole_page() {
     let f = Fixture::new();
     let pages = f.pages();
 
-    let tile = pages.cover("v1", None).unwrap().expect("a cover");
-    let nought = pages.cover("v1", Some(0)).unwrap().expect("a cover");
-    let whole = pages.page("v1", 0, None).unwrap().expect("a page");
+    let tile = pages
+        .cover("v1", None, &Ceiling::NONE)
+        .unwrap()
+        .expect("a cover");
+    let nought = pages
+        .cover("v1", Some(0), &Ceiling::NONE)
+        .unwrap()
+        .expect("a cover");
+    let whole = pages
+        .page("v1", 0, None, &Ceiling::NONE)
+        .unwrap()
+        .expect("a page");
 
     // The same answer, down to the tag: a cover asked for at no width is a cover.
     assert_eq!(tile.tag, nought.tag);
@@ -432,10 +484,22 @@ fn a_nought_does_not_take_a_real_width_s_place_in_the_sweep() {
     let f = Fixture::new();
     let pages = Arc::new(f.pages());
 
-    pages.series_cover("e", Some(300)).unwrap().expect("a tile");
-    pages.series_cover("e", Some(600)).unwrap().expect("a tile");
-    pages.series_cover("e", Some(0)).unwrap().expect("a tile");
-    pages.series_cover("e", Some(0)).unwrap().expect("a tile");
+    pages
+        .series_cover("e", Some(300), &Ceiling::NONE)
+        .unwrap()
+        .expect("a tile");
+    pages
+        .series_cover("e", Some(600), &Ceiling::NONE)
+        .unwrap()
+        .expect("a tile");
+    pages
+        .series_cover("e", Some(0), &Ceiling::NONE)
+        .unwrap()
+        .expect("a tile");
+    pages
+        .series_cover("e", Some(0), &Ceiling::NONE)
+        .unwrap()
+        .expect("a tile");
 
     // Emptied, so that what appears below can only have come from the sweep.
     std::fs::remove_dir_all(f.dir.path().join("cache")).unwrap();
@@ -527,11 +591,14 @@ fn a_width_that_leaves_no_rows_at_all_is_decided_before_the_decode() {
     let cache = dir.path().join("cache");
     let pages = Pages::new(Arc::new(db), cache.clone(), 85, 64 * 1024 * 1024);
     pages.prepare();
-    let whole = pages.page("v1", 0, None).unwrap().unwrap();
+    let whole = pages.page("v1", 0, None, &Ceiling::NONE).unwrap().unwrap();
 
     let before = pages.decodes();
     for _ in 0..3 {
-        let served = pages.page("v1", 0, Some(1)).unwrap().unwrap();
+        let served = pages
+            .page("v1", 0, Some(1), &Ceiling::NONE)
+            .unwrap()
+            .unwrap();
         assert_eq!(whole.bytes, served.bytes);
     }
     assert_eq!(
@@ -543,7 +610,10 @@ fn a_width_that_leaves_no_rows_at_all_is_decided_before_the_decode() {
 
     // A width this page has the rows for still resizes, so the decision is about this page
     // rather than about giving up on narrow ones — and it costs the one decode it should.
-    let smaller = pages.page("v1", 0, Some(1000)).unwrap().unwrap();
+    let smaller = pages
+        .page("v1", 0, Some(1000), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     assert!(smaller.bytes.len() < whole.bytes.len());
     assert_eq!(before + 1, pages.decodes());
 }
@@ -552,8 +622,14 @@ fn a_width_that_leaves_no_rows_at_all_is_decided_before_the_decode() {
 fn an_unknown_page_or_entry_is_nothing_rather_than_an_error() {
     let f = Fixture::new();
     let pages = f.pages();
-    assert!(pages.page("v1", 99, Some(400)).unwrap().is_none());
-    assert!(pages.page("nexistepas", 0, Some(400)).unwrap().is_none());
+    assert!(pages
+        .page("v1", 99, Some(400), &Ceiling::NONE)
+        .unwrap()
+        .is_none());
+    assert!(pages
+        .page("nexistepas", 0, Some(400), &Ceiling::NONE)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -561,8 +637,11 @@ fn a_cover_is_a_page_asked_for_narrow() {
     let f = Fixture::new();
     let pages = f.pages();
 
-    let cover = pages.cover("v1", None).unwrap().unwrap();
-    let explicit = pages.page("v1", 0, Some(300)).unwrap().unwrap();
+    let cover = pages.cover("v1", None, &Ceiling::NONE).unwrap().unwrap();
+    let explicit = pages
+        .page("v1", 0, Some(300), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     // There is no separate thing: the default cover is page zero at 300.
     assert_eq!(explicit.tag, cover.tag);
     assert_eq!(explicit.bytes, cover.bytes);
@@ -572,8 +651,11 @@ fn a_cover_is_a_page_asked_for_narrow() {
 fn a_series_cover_is_the_first_entrys() {
     let f = Fixture::new();
     let pages = f.pages();
-    let series = pages.series_cover("e", None).unwrap().unwrap();
-    let entry = pages.cover("v1", None).unwrap().unwrap();
+    let series = pages
+        .series_cover("e", None, &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    let entry = pages.cover("v1", None, &Ceiling::NONE).unwrap().unwrap();
     assert_eq!(entry.tag, series.tag);
 }
 
@@ -592,8 +674,11 @@ fn a_cover_chosen_on_disk_wins_over_page_zero() {
     .unwrap();
 
     let pages = f.pages();
-    let series = pages.series_cover("e", None).unwrap().unwrap();
-    let first = pages.cover("v1", None).unwrap().unwrap();
+    let series = pages
+        .series_cover("e", None, &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    let first = pages.cover("v1", None, &Ceiling::NONE).unwrap().unwrap();
     // "cover.jpg beside the volumes" is what this is for: one file speaking for the whole
     // series, rather than whatever the first volume happens to open on.
     assert_ne!(first.tag, series.tag);
@@ -662,7 +747,7 @@ fn a_cover_does_not_start_a_volume_warming() {
     let pages = Arc::new(f.pages());
     pages.start_warming(2, 8);
 
-    pages.cover("v1", None).unwrap();
+    pages.cover("v1", None, &Ceiling::NONE).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     assert_eq!(
@@ -762,7 +847,7 @@ fn the_shelf_covers_are_prepared_behind_the_reader() {
     // One request teaches it a width. The cache is then emptied, so what appears next can
     // only have come from the sweep.
     pages
-        .series_cover("e", Some(300))
+        .series_cover("e", Some(300), &Ceiling::NONE)
         .unwrap()
         .expect("a cover");
     std::fs::remove_dir_all(f.dir.path().join("cache")).unwrap();
@@ -780,7 +865,10 @@ fn the_shelf_covers_are_prepared_behind_the_reader() {
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    assert!(pages.series_cover("e", Some(300)).unwrap().is_some());
+    assert!(pages
+        .series_cover("e", Some(300), &Ceiling::NONE)
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -824,7 +912,10 @@ fn a_page_whose_bytes_no_codec_reads_comes_back_as_it_is() {
 
     let pages = Pages::new(Arc::new(db), dir.path().join("cache"), 85, 64 * 1024 * 1024);
     pages.prepare();
-    let served = pages.page("v1", 0, Some(200)).unwrap().expect("a page");
+    let served = pages
+        .page("v1", 0, Some(200), &Ceiling::NONE)
+        .unwrap()
+        .expect("a page");
     assert!(
         served.bytes.starts_with(b"\xff\xd8\xff"),
         "the original bytes, untouched"
@@ -848,8 +939,14 @@ fn a_cover_chosen_on_disk_is_served_at_the_width_that_was_asked_for() {
     .unwrap();
 
     let pages = f.pages();
-    let wide = pages.cover("v1", Some(600)).unwrap().expect("a cover");
-    let narrow = pages.cover("v1", Some(200)).unwrap().expect("a cover");
+    let wide = pages
+        .cover("v1", Some(600), &Ceiling::NONE)
+        .unwrap()
+        .expect("a cover");
+    let narrow = pages
+        .cover("v1", Some(200), &Ceiling::NONE)
+        .unwrap()
+        .expect("a cover");
     assert!(narrow.bytes.len() < wide.bytes.len());
 }
 
@@ -868,8 +965,11 @@ fn a_cover_whose_file_has_gone_is_nothing_rather_than_an_error() {
     .unwrap();
 
     let pages = f.pages();
-    assert!(pages.cover("v1", Some(300)).unwrap().is_none());
-    assert!(pages.cover("v1", None).unwrap().is_none());
+    assert!(pages
+        .cover("v1", Some(300), &Ceiling::NONE)
+        .unwrap()
+        .is_none());
+    assert!(pages.cover("v1", None, &Ceiling::NONE).unwrap().is_none());
 }
 
 #[test]
@@ -886,9 +986,12 @@ fn a_page_the_index_names_and_the_archive_does_not_hold_is_nothing() {
     .unwrap();
 
     let pages = f.pages();
-    assert!(pages.page("v1", 9, Some(300)).unwrap().is_none());
+    assert!(pages
+        .page("v1", 9, Some(300), &Ceiling::NONE)
+        .unwrap()
+        .is_none());
     // And without a width either: the two go down different paths.
-    assert!(pages.page("v1", 9, None).unwrap().is_none());
+    assert!(pages.page("v1", 9, None, &Ceiling::NONE).unwrap().is_none());
 }
 
 #[test]
@@ -903,7 +1006,10 @@ fn a_page_whose_size_the_index_does_not_know_is_resized_anyway() {
     .unwrap();
 
     let pages = f.pages();
-    let served = pages.page("v1", 0, Some(300)).unwrap().expect("a page");
+    let served = pages
+        .page("v1", 0, Some(300), &Ceiling::NONE)
+        .unwrap()
+        .expect("a page");
     assert!(!served.bytes.is_empty());
 }
 
@@ -912,9 +1018,15 @@ fn the_second_ask_for_one_page_at_one_width_comes_out_of_the_cache() {
     // The whole point of the cache: a page is resized once, and read many times.
     let f = Fixture::new();
     let pages = f.pages();
-    let first = pages.page("v1", 0, Some(400)).unwrap().expect("a page");
+    let first = pages
+        .page("v1", 0, Some(400), &Ceiling::NONE)
+        .unwrap()
+        .expect("a page");
     let files = f.cache_files();
-    let second = pages.page("v1", 0, Some(400)).unwrap().expect("a page");
+    let second = pages
+        .page("v1", 0, Some(400), &Ceiling::NONE)
+        .unwrap()
+        .expect("a page");
 
     assert_eq!(first.bytes, second.bytes);
     assert_eq!(first.tag, second.tag);
@@ -961,7 +1073,10 @@ fn a_cache_that_cannot_be_made_is_said_and_the_pages_still_serve() {
         64 * 1024 * 1024,
     );
     pages.prepare();
-    let served = pages.page("v1", 0, Some(300)).unwrap().expect("a page");
+    let served = pages
+        .page("v1", 0, Some(300), &Ceiling::NONE)
+        .unwrap()
+        .expect("a page");
     assert!(!served.bytes.is_empty());
 
     writable(&closed);
@@ -984,9 +1099,15 @@ fn a_page_the_index_thinks_is_wider_than_it_is_comes_back_untouched() {
 
     let pages = f.pages();
     // 002.jpg is really 300 wide. Asking for 900 looks worth doing and turns out not to be.
-    let served = pages.page("v1", 2, Some(900)).unwrap().expect("a page");
+    let served = pages
+        .page("v1", 2, Some(900), &Ceiling::NONE)
+        .unwrap()
+        .expect("a page");
     assert_eq!(served.bytes, {
-        let plain = pages.page("v1", 2, None).unwrap().expect("a page");
+        let plain = pages
+            .page("v1", 2, None, &Ceiling::NONE)
+            .unwrap()
+            .expect("a page");
         plain.bytes
     });
 }
@@ -1014,7 +1135,10 @@ fn a_cover_file_that_cannot_be_read_is_nothing_rather_than_an_error() {
     .unwrap();
 
     let pages = f.pages();
-    assert!(pages.cover("v1", Some(300)).unwrap().is_none());
+    assert!(pages
+        .cover("v1", Some(300), &Ceiling::NONE)
+        .unwrap()
+        .is_none());
     // Put back readable: this fixture's directory outlives the test, and a file left at 0
     // would still be sitting there, wrongly, for whatever runs in it next.
     writable(&beside);
@@ -1042,7 +1166,7 @@ fn a_shelf_tile_that_cannot_be_made_is_said_and_the_sweep_carries_on() {
 
     let pages = Arc::new(f.pages());
     pages
-        .series_cover("e", Some(300))
+        .series_cover("e", Some(300), &Ceiling::NONE)
         .unwrap()
         .expect("a cover");
     std::fs::remove_dir_all(f.dir.path().join("cache")).unwrap();
@@ -1144,10 +1268,13 @@ fn a_page_whose_resize_comes_out_larger_is_decoded_once_across_three_requests() 
     let dir = tempfile::tempdir().unwrap();
     let db = flat_volume(dir.path());
     let pages = pages_over(&db, dir.path());
-    let whole = pages.page("v1", 0, None).unwrap().unwrap();
+    let whole = pages.page("v1", 0, None, &Ceiling::NONE).unwrap().unwrap();
 
     for _ in 0..3 {
-        let served = pages.page("v1", 0, Some(100)).unwrap().unwrap();
+        let served = pages
+            .page("v1", 0, Some(100), &Ceiling::NONE)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             whole.bytes, served.bytes,
             "the original, not a larger resize"
@@ -1165,12 +1292,15 @@ fn a_page_not_worth_resizing_is_still_known_after_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let db = flat_volume(dir.path());
     pages_over(&db, dir.path())
-        .page("v1", 0, Some(100))
+        .page("v1", 0, Some(100), &Ceiling::NONE)
         .unwrap()
         .unwrap();
 
     let restarted = pages_over(&db, dir.path());
-    let served = restarted.page("v1", 0, Some(100)).unwrap().unwrap();
+    let served = restarted
+        .page("v1", 0, Some(100), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     assert!(is_the_flat_original(&served.bytes));
     assert_eq!(0, restarted.decodes());
 }
@@ -1180,7 +1310,10 @@ fn a_retouched_page_is_reconsidered_rather_than_taken_on_its_old_verdict() {
     let dir = tempfile::tempdir().unwrap();
     let db = flat_volume(dir.path());
     let pages = pages_over(&db, dir.path());
-    pages.page("v1", 0, Some(100)).unwrap().unwrap();
+    pages
+        .page("v1", 0, Some(100), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     db.write(|cx| {
         cx.execute(
             "UPDATE entry SET modified_at = 1800000000000 WHERE id = 'v1'",
@@ -1190,7 +1323,10 @@ fn a_retouched_page_is_reconsidered_rather_than_taken_on_its_old_verdict() {
     })
     .unwrap();
 
-    let served = pages.page("v1", 0, Some(100)).unwrap().unwrap();
+    let served = pages
+        .page("v1", 0, Some(100), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     assert!(is_the_flat_original(&served.bytes));
     assert_eq!(2, pages.decodes(), "a new file is a new question");
 }
@@ -1205,14 +1341,17 @@ fn a_client_holding_the_tag_is_answered_without_a_decode_or_the_archive() {
     // A page that resizes.
     let f = Fixture::new();
     let pages = f.pages();
-    let resized = pages.page("v1", 0, Some(400)).unwrap().unwrap();
-    let original = pages.page("v1", 0, None).unwrap().unwrap();
+    let resized = pages
+        .page("v1", 0, Some(400), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    let original = pages.page("v1", 0, None, &Ceiling::NONE).unwrap().unwrap();
     let decodes = pages.decodes();
     std::fs::remove_file(f.dir.path().join("Tome 1.cbz")).unwrap();
     std::fs::remove_dir_all(f.dir.path().join("cache")).unwrap();
     for (width, tag) in [(Some(400), &resized.tag), (None, &original.tag)] {
         match pages
-            .page_or_unchanged("v1", 0, width, Some(tag))
+            .page_or_unchanged("v1", 0, width, Some(tag), &Ceiling::NONE)
             .expect("no archive needed")
         {
             Some(Served::Unchanged(said)) => assert_eq!(*tag, said),
@@ -1225,7 +1364,10 @@ fn a_client_holding_the_tag_is_answered_without_a_decode_or_the_archive() {
     let dir = tempfile::tempdir().unwrap();
     let db = flat_volume(dir.path());
     let pages = pages_over(&db, dir.path());
-    let first = pages.page("v1", 0, Some(100)).unwrap().unwrap();
+    let first = pages
+        .page("v1", 0, Some(100), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     assert!(
         is_the_flat_original(&first.bytes),
         "the resize came out larger"
@@ -1233,7 +1375,7 @@ fn a_client_holding_the_tag_is_answered_without_a_decode_or_the_archive() {
     let held = first.tag;
     std::fs::remove_file(dir.path().join("Tome 1.cbz")).unwrap();
     match pages
-        .page_or_unchanged("v1", 0, Some(100), Some(&held))
+        .page_or_unchanged("v1", 0, Some(100), Some(&held), &Ceiling::NONE)
         .expect("no archive needed")
     {
         Some(Served::Unchanged(said)) => assert_eq!(held, said),
@@ -1262,7 +1404,10 @@ fn markers_left_by_many_tags_are_trimmed_under_the_budget() {
             Ok(())
         })
         .unwrap();
-        let served = pages.page("v1", 0, Some(100)).unwrap().unwrap();
+        let served = pages
+            .page("v1", 0, Some(100), &Ceiling::NONE)
+            .unwrap()
+            .unwrap();
         assert!(is_the_flat_original(&served.bytes), "at {n}");
     }
     assert_eq!(150, pages.decodes(), "every one of them a new question");
@@ -1306,8 +1451,14 @@ fn widths_in_one_step_share_one_entry_and_one_decode() {
     let dir = tempfile::tempdir().unwrap();
     let db = a_wide_page(dir.path());
     let pages = pages_over(&db, dir.path());
-    let a = pages.page("v1", 0, Some(1001)).unwrap().unwrap();
-    let b = pages.page("v1", 0, Some(1200)).unwrap().unwrap();
+    let a = pages
+        .page("v1", 0, Some(1001), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    let b = pages
+        .page("v1", 0, Some(1200), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     assert_eq!(a.tag, b.tag);
     assert_eq!(a.bytes, b.bytes);
     // Rounded up: never fewer pixels than were asked for.
@@ -1321,9 +1472,13 @@ fn a_tag_got_at_one_width_revalidates_at_another_in_its_step() {
     let dir = tempfile::tempdir().unwrap();
     let db = a_wide_page(dir.path());
     let pages = pages_over(&db, dir.path());
-    let held = pages.page("v1", 0, Some(1100)).unwrap().unwrap().tag;
+    let held = pages
+        .page("v1", 0, Some(1100), &Ceiling::NONE)
+        .unwrap()
+        .unwrap()
+        .tag;
     match pages
-        .page_or_unchanged("v1", 0, Some(1200), Some(&held))
+        .page_or_unchanged("v1", 0, Some(1200), Some(&held), &Ceiling::NONE)
         .unwrap()
     {
         Some(Served::Unchanged(said)) => assert_eq!(held, said),
@@ -1347,7 +1502,13 @@ fn one_page_asked_at_every_width_has_at_most_twenty_one_answers() {
     let pages = pages_over(&db, dir.path());
     let mut tags = std::collections::HashSet::new();
     for width in 1..=4096 {
-        tags.insert(pages.page("v1", 0, Some(width)).unwrap().unwrap().tag);
+        tags.insert(
+            pages
+                .page("v1", 0, Some(width), &Ceiling::NONE)
+                .unwrap()
+                .unwrap()
+                .tag,
+        );
     }
     assert!(tags.len() <= 21, "{} answers for one page", tags.len());
     assert!(
@@ -1393,7 +1554,10 @@ fn a_resized_page_is_a_webp_at_its_step_and_smaller_than_the_jpeg_it_replaced() 
     let db = volume_of(dir.path(), "000.png", &source, "image/png", 2000, 2800);
     let pages = pages_over(&db, dir.path());
 
-    let served = pages.page("v1", 0, Some(1001)).unwrap().unwrap();
+    let served = pages
+        .page("v1", 0, Some(1001), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     assert_eq!("image/webp", served.media_type);
     let back = image::load_from_memory_with_format(&served.bytes, image::ImageFormat::WebP)
         .expect("a WebP that decodes");
@@ -1428,7 +1592,11 @@ fn a_cover_is_resized_to_webp_too() {
     let pages = f.pages();
     assert_eq!(
         "image/webp",
-        pages.cover("v1", None).unwrap().unwrap().media_type
+        pages
+            .cover("v1", None, &Ceiling::NONE)
+            .unwrap()
+            .unwrap()
+            .media_type
     );
 
     let chosen = f.dir.path().join("cover.jpg");
@@ -1441,7 +1609,10 @@ fn a_cover_is_resized_to_webp_too() {
         Ok(())
     })
     .unwrap();
-    let tile = pages.series_cover("e", Some(300)).unwrap().unwrap();
+    let tile = pages
+        .series_cover("e", Some(300), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     assert_eq!("image/webp", tile.media_type);
     assert_eq!(400, image::load_from_memory(&tile.bytes).unwrap().width());
 }
@@ -1464,7 +1635,10 @@ fn nothing_cached_when_pages_were_jpeg_is_served_or_believed_now() {
     std::fs::write(folder.join(format!("{then}.jpg")), jpeg(400, 567)).unwrap();
     std::fs::write(folder.join(format!("{then}.original")), b"").unwrap();
 
-    let served = pages.page("v1", 0, Some(400)).unwrap().unwrap();
+    let served = pages
+        .page("v1", 0, Some(400), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     assert_ne!(then, served.tag, "a new encoding is a new tag");
     assert_eq!("image/webp", served.media_type);
     assert!(image::load_from_memory_with_format(&served.bytes, image::ImageFormat::WebP).is_ok());
@@ -1486,7 +1660,10 @@ fn a_png_asked_near_or_past_its_own_width_still_comes_back_as_a_smaller_webp() {
     let pages = pages_over(&db, dir.path());
 
     for (asked, expected) in [(1000, 1000), (1600, 1000)] {
-        let served = pages.page("v1", 0, Some(asked)).unwrap().unwrap();
+        let served = pages
+            .page("v1", 0, Some(asked), &Ceiling::NONE)
+            .unwrap()
+            .unwrap();
         assert_eq!("image/webp", served.media_type, "at {asked}");
         assert!(served.bytes.len() < source.len(), "at {asked}");
         let back = image::load_from_memory(&served.bytes).unwrap();
@@ -1495,7 +1672,7 @@ fn a_png_asked_near_or_past_its_own_width_still_comes_back_as_a_smaller_webp() {
     }
 
     // Without a width, the original bytes, as the contract says.
-    let whole = pages.page("v1", 0, None).unwrap().unwrap();
+    let whole = pages.page("v1", 0, None, &Ceiling::NONE).unwrap().unwrap();
     assert_eq!("image/png", whole.media_type);
     assert_eq!(source, whole.bytes);
 }
@@ -1510,14 +1687,20 @@ fn a_strip_too_tall_for_a_webp_is_resized_to_a_jpeg_instead() {
     let db = volume_of(dir.path(), "000.jpg", &source, "image/jpeg", 400, 40_000);
     let pages = pages_over(&db, dir.path());
 
-    let served = pages.page("v1", 0, Some(200)).unwrap().unwrap();
+    let served = pages
+        .page("v1", 0, Some(200), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     assert_eq!("image/jpeg", served.media_type);
     assert!(served.bytes.len() < source.len());
     let back = image::load_from_memory_with_format(&served.bytes, image::ImageFormat::Jpeg)
         .expect("a JPEG that decodes");
     assert_eq!((200, 20_000), (back.width(), back.height()));
 
-    let again = pages.page("v1", 0, Some(200)).unwrap().unwrap();
+    let again = pages
+        .page("v1", 0, Some(200), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     assert_eq!(served.tag, again.tag);
     assert_eq!(served.bytes, again.bytes);
     assert_eq!(
@@ -1596,7 +1779,10 @@ fn prepared_by_opening(progress: Option<(i64, bool)>, width: Option<u32>) -> Vec
     let mut prepared = Vec::new();
     for n in 0..70 {
         let before = pages.decodes();
-        pages.page("v1", n, Some(200)).unwrap().unwrap();
+        pages
+            .page("v1", n, Some(200), &Ceiling::NONE)
+            .unwrap()
+            .unwrap();
         if pages.decodes() == before {
             prepared.push(n);
         }
@@ -1657,12 +1843,18 @@ fn a_page_asked_for_while_it_is_being_warmed_is_made_once() {
     pages.warm_ahead("v1", -1, 600);
     std::thread::sleep(std::time::Duration::from_millis(50));
 
-    let asked = pages.page("v1", 0, Some(600)).unwrap().unwrap();
+    let asked = pages
+        .page("v1", 0, Some(600), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while pages.pending() > 0 && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    let kept = pages.page("v1", 0, Some(600)).unwrap().unwrap();
+    let kept = pages
+        .page("v1", 0, Some(600), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
     assert_eq!(asked.bytes, kept.bytes);
     assert_eq!("image/webp", asked.media_type);
     assert_eq!(

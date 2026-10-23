@@ -309,3 +309,22 @@ fn a_device_line_that_says_too_little_or_too_much_is_refused() {
         assert!(message.contains(named), "{args:?}: {message}");
     }
 }
+
+#[test]
+fn profile_reset_code_is_read_and_anything_else_under_profile_is_refused() {
+    use leaf_server::boot::ProfileCommand;
+    assert_eq!(
+        asked(&["profile", "reset-code"]).profile,
+        Some(ProfileCommand::ResetCode)
+    );
+    for args in [
+        &["profile"][..],
+        &["profile", "reset"],
+        &["profile", "reset-code", "extra"],
+    ] {
+        assert!(
+            Invocation::of(args.iter().copied().map(String::from)).is_err(),
+            "{args:?}"
+        );
+    }
+}

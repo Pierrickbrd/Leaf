@@ -3,10 +3,12 @@
 pub mod db;
 pub mod devices;
 pub mod files;
+pub mod profiles;
 pub mod repository;
 pub mod schema;
 pub mod text;
 
 pub use db::{Cx, Db};
 pub use devices::Devices;
+pub use profiles::Profiles;
 pub use repository::Repository;

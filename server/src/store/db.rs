@@ -29,10 +29,11 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{Connection, OpenFlags, Params, Row, Transaction};
 
 use super::schema::{
-    last_migration_of_old_count, schema_version, LEAF_APPLICATION_ID, MIGRATIONS, SCHEMA,
-    SEARCH_SCHEMA,
+    adds_work_age, last_migration_of_old_count, schema_version, LEAF_APPLICATION_ID, MIGRATIONS,
+    SCHEMA, SEARCH_SCHEMA,
 };
 use super::text::search_key;
+use crate::metadata::age::age_of;
 
 /// How many reader connections are kept alive between calls. Opening one is not free, and
 /// a handful covers a household: the writer is the thing that serialises, not these.
@@ -402,6 +403,32 @@ fn apply(cx: &Cx<'_>, number: i32) -> Result<()> {
                     .with_context(|| format!("migration {number} failed: {}", first_line(sql)))
             }
         }
+    }
+    after(cx, number).with_context(|| format!("migration {number} failed after its SQL"))
+}
+
+/// What a migration needs that SQL cannot say, run in the same transaction as its statements.
+///
+/// Only `work.age` so far: every rating already in the index is read by the same `age_of` the
+/// scanner calls, so a work scanned yesterday and one scanned tomorrow cannot disagree about
+/// its age. Run again, it writes the same numbers: it reads `age_rating` and nothing it wrote.
+///
+/// Found by the statement the migration holds and not by its number — see `WORK_AGE` for
+/// the merge that would otherwise move it.
+fn after(cx: &Cx<'_>, number: i32) -> Result<()> {
+    if !adds_work_age(number) {
+        return Ok(());
+    }
+    let rated = cx.query(
+        "SELECT id, age_rating FROM work WHERE age_rating IS NOT NULL",
+        [],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+    )?;
+    for (id, rating) in rated {
+        cx.execute(
+            "UPDATE work SET age = ?2 WHERE id = ?1",
+            rusqlite::params![id, age_of(&rating)],
+        )?;
     }
     Ok(())
 }

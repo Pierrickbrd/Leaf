@@ -45,6 +45,10 @@ READING_DIRECTION = "/series/{id}/reading-direction"
 UP_NEXT = "/next"
 IMPORT = "/import"
 ONE_IMPORT = "/import/{id}"
+PROFILES = "/profiles"
+ONE_PROFILE = "/profiles/{id}"
+READING = "/profile/reading"
+ONE_DEVICE = "/devices/{id}"
 
 
 def trust(base, pin):
@@ -146,9 +150,12 @@ class Run:
         self.server = server
         self.contract = contract
         self.failures = []
+        # The status of the last answer, for the check that depends on how the one before went.
+        self.last_status = None
 
     def check(self, label, path, template, method="GET", body=None, headers=None):
         status, payload = self.server.call(path, method, body, headers)
+        self.last_status = status
         schema, why = self.contract.schema_for(template, method, status)
         if why:
             self.failures.append(f"{label}: {status} — {why}")
@@ -248,6 +255,38 @@ def records(run, series, entry):
               "PUT", {"readingDirection": "VERTICAL"})
 
 
+# The code is deliberately not set nor cleared here, for the reason the deletions above are
+# not driven: pointed at a real library, a shape check that changed the household's code would
+# lock its restricted profiles in, or let them out. A profile is made and taken away again,
+# and the reading preferences are written back exactly as they were read.
+def profiles(run):
+    print("— profiles —")
+    who = run.check("who reads", PROFILES, PROFILES)
+    run.check("switch without a device", "/profiles/active", "/profiles/active", "PUT",
+              {"id": "default"})
+    # A colour no profile holds yet, from the palette the contract itself declares: a real
+    # library may have taken some, and a copy of the list here would drift from it.
+    palette = run.contract.spec["components"]["schemas"]["Profile"]["properties"]["color"]["enum"]
+    taken = {p.get("color") for p in (who or {}).get("profiles", [])}
+    free = next((c for c in palette if c not in taken), palette[0])
+    made = run.check("add a reader", PROFILES, PROFILES, "POST",
+                     {"name": "Conformance", "color": free, "kind": "reader"})
+    if isinstance(made, dict) and "id" in made:
+        one = f"/profiles/{made['id']}"
+        run.check("rename it", one, ONE_PROFILE, "PATCH", {"name": "Conformance 2"})
+        run.check("delete it", one, ONE_PROFILE, "DELETE")
+    run.check("patch unknown profile", "/profiles/nope", ONE_PROFILE, "PATCH", {"name": "x"})
+    kept = run.check("reading preferences", READING, READING)
+    # Only what was actually read: writing `{}` after a failed read would erase a real
+    # profile's preferences on the server this was pointed at.
+    if run.last_status == 200 and isinstance(kept, dict):
+        run.check("write them back", READING, READING, "PUT", kept)
+    run.check("devices", "/devices", "/devices")
+    run.check("place unknown device", "/devices/nope", ONE_DEVICE, "PATCH",
+              {"profile": "default", "kept": False})
+    run.check("remove unknown device", "/devices/nope", ONE_DEVICE, "DELETE")
+
+
 def importing(run):
     print("— import —")
     run.check("drop listing", "/drop", "/drop")
@@ -290,6 +329,7 @@ def main(argv=None, contract=CONTRACT):
     series, entry = reading(run)
     progress(run, series, entry)
     records(run, series, entry)
+    profiles(run)
     importing(run)
     if key:
         the_guard(run)

@@ -32,6 +32,7 @@ use sha2::{Digest, Sha256};
 
 use super::flight::{Flights, Takeoff, PATIENCE};
 use crate::archive::cbz;
+use crate::store::repository::Ceiling;
 use crate::store::Db;
 
 /// Above this, a "width" is a client bug rather than a request.
@@ -222,14 +223,18 @@ impl Pages {
     }
 
     /// A page, at the width asked for. Without a width the original bytes go back untouched.
+    ///
+    /// Under a ceiling, a page of a series above it is not there: the same `None` as a page
+    /// number past the end, so the 404 it becomes cannot tell the two apart.
     pub fn page(
         &self,
         entry_id: &str,
         number: i64,
         width: Option<u32>,
+        ceiling: &Ceiling,
     ) -> Result<Option<ServedImage>> {
         Ok(self
-            .page_or_unchanged(entry_id, number, width, None)?
+            .page_or_unchanged(entry_id, number, width, None, ceiling)?
             .and_then(Served::into_image))
     }
 
@@ -240,14 +245,17 @@ impl Pages {
         number: i64,
         width: Option<u32>,
         held: Option<&str>,
+        ceiling: &Ceiling,
     ) -> Result<Option<Served>> {
-        self.page_for(entry_id, number, width, held, false)
+        self.page_for(entry_id, number, width, held, false, ceiling)
     }
 
     /// A page for the warming, which skips one somebody is already making rather than
-    /// waiting for it: it has other pages to prepare.
+    /// waiting for it: it has other pages to prepare. Without a ceiling: warming prepares the
+    /// cache and shows nothing to anyone, and every page it is handed was asked for through a
+    /// route that already applied the caller's.
     fn warm_page(&self, entry_id: &str, number: i64, width: u32) -> Result<()> {
-        self.page_for(entry_id, number, Some(width), None, true)
+        self.page_for(entry_id, number, Some(width), None, true, &Ceiling::NONE)
             .map(|_| ())
     }
 
@@ -258,25 +266,26 @@ impl Pages {
         width: Option<u32>,
         held: Option<&str>,
         warming: bool,
+        ceiling: &Ceiling,
     ) -> Result<Option<Served>> {
         let width = width.map(stepped);
+        let sql = format!(
+            "SELECT e.file, e.modified_at, p.entry_name, p.media_type, p.width, p.height
+             FROM page p JOIN entry e ON e.id = p.entry_id
+             WHERE p.entry_id = ?1 AND p.number = ?2{}",
+            ceiling.and_edition("e.edition_id")
+        );
         let row = self.db.read(|cx| {
-            cx.query_one(
-                "SELECT e.file, e.modified_at, p.entry_name, p.media_type, p.width, p.height
-                 FROM page p JOIN entry e ON e.id = p.entry_id
-                 WHERE p.entry_id = ?1 AND p.number = ?2",
-                (entry_id, number),
-                |r| {
-                    Ok(Source {
-                        file: r.get(0)?,
-                        modified_at: r.get::<_, i64>(1)?,
-                        entry_name: r.get(2)?,
-                        media_type: r.get(3)?,
-                        width: r.get(4)?,
-                        height: r.get(5)?,
-                    })
-                },
-            )
+            cx.query_one(&sql, (entry_id, number), |r| {
+                Ok(Source {
+                    file: r.get(0)?,
+                    modified_at: r.get::<_, i64>(1)?,
+                    entry_name: r.get(2)?,
+                    media_type: r.get(3)?,
+                    width: r.get(4)?,
+                    height: r.get(5)?,
+                })
+            })
         })?;
         let Some(source) = row else { return Ok(None) };
         self.serve(
@@ -290,9 +299,14 @@ impl Pages {
 
     /// The cover of an entry. A thumbnail is a page asked for narrow; there is no separate
     /// thing.
-    pub fn cover(&self, entry_id: &str, width: Option<u32>) -> Result<Option<ServedImage>> {
+    pub fn cover(
+        &self,
+        entry_id: &str,
+        width: Option<u32>,
+        ceiling: &Ceiling,
+    ) -> Result<Option<ServedImage>> {
         Ok(self
-            .cover_or_unchanged(entry_id, width, None)?
+            .cover_or_unchanged(entry_id, width, None, ceiling)?
             .and_then(Served::into_image))
     }
 
@@ -301,23 +315,28 @@ impl Pages {
         entry_id: &str,
         width: Option<u32>,
         held: Option<&str>,
+        ceiling: &Ceiling,
     ) -> Result<Option<Served>> {
         // A cover chosen on disk wins over page zero — that is what "cover.jpg beside the
         // volumes" is for.
-        let chosen: Option<String> = self.db.read(|cx| {
-            cx.query_one(
-                "SELECT cover_file FROM entry WHERE id = ?1",
-                [entry_id],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .map(Option::flatten)
-        })?;
+        let sql = format!(
+            "SELECT x.cover_file FROM entry x WHERE x.id = ?1{}",
+            ceiling.and_edition("x.edition_id")
+        );
+        let chosen: Option<Option<String>> = self
+            .db
+            .read(|cx| cx.query_one(&sql, [entry_id], |r| r.get::<_, Option<String>>(0)))?;
+        // Not there for this caller: not even page zero, which the line below would
+        // otherwise reach by asking again with the same ceiling and a second query.
+        let Some(chosen) = chosen else {
+            return Ok(None);
+        };
         let requested = tile_width(width);
         if let Some(path) = chosen {
             return self.serve_file(Path::new(&path), requested, held);
         }
         // Not a read: a cover is a tile on a shelf, and nobody has opened the volume.
-        self.page_or_unchanged(entry_id, 0, Some(requested), held)
+        self.page_or_unchanged(entry_id, 0, Some(requested), held, ceiling)
     }
 
     /// The tile of a grid: one request, not one to find the first entry and another for its
@@ -326,9 +345,10 @@ impl Pages {
         &self,
         edition_id: &str,
         width: Option<u32>,
+        ceiling: &Ceiling,
     ) -> Result<Option<ServedImage>> {
         Ok(self
-            .series_cover_or_unchanged(edition_id, width, None)?
+            .series_cover_or_unchanged(edition_id, width, None, ceiling)?
             .and_then(Served::into_image))
     }
 
@@ -337,6 +357,7 @@ impl Pages {
         edition_id: &str,
         width: Option<u32>,
         held: Option<&str>,
+        ceiling: &Ceiling,
     ) -> Result<Option<Served>> {
         let requested = stepped(tile_width(width));
         // Remembered at the width it is served at, never at the one that was typed. A `0`
@@ -348,14 +369,14 @@ impl Pages {
         if width.is_some() {
             self.remember_width(requested);
         }
-        let chosen: Option<String> = self.db.read(|cx| {
-            cx.query_one(
-                "SELECT cover_file FROM edition WHERE id = ?1",
-                [edition_id],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .map(Option::flatten)
-        })?;
+        let visible = ceiling.and_edition("ed.id");
+        let sql = format!("SELECT ed.cover_file FROM edition ed WHERE ed.id = ?1{visible}");
+        let chosen: Option<Option<String>> = self
+            .db
+            .read(|cx| cx.query_one(&sql, [edition_id], |r| r.get::<_, Option<String>>(0)))?;
+        let Some(chosen) = chosen else {
+            return Ok(None);
+        };
         if let Some(path) = chosen {
             return self.serve_file(Path::new(&path), requested, held);
         }
@@ -367,7 +388,8 @@ impl Pages {
             )
         })?;
         match first {
-            Some(entry) => self.cover_or_unchanged(&entry, Some(requested), held),
+            // The series was already found visible above, and its entries are its own.
+            Some(entry) => self.cover_or_unchanged(&entry, Some(requested), held, ceiling),
             None => Ok(None),
         }
     }
@@ -966,7 +988,7 @@ impl Pages {
                             continue;
                         }
                         let released = Claim(&pages, &key);
-                        if let Err(e) = pages.series_cover(&id, Some(*width)) {
+                        if let Err(e) = pages.series_cover(&id, Some(*width), &Ceiling::NONE) {
                             tracing::debug!(key, error = %e, "could not warm");
                         }
                         drop(released);
