@@ -430,8 +430,8 @@ fn assert_migrated_to_the_end_with_every_position(file: &std::path::Path) {
 /// migration 41, and there were thirty.
 #[test]
 fn the_version_is_the_number_of_the_last_migration() {
-    assert_eq!(30, MIGRATIONS.len());
-    assert_eq!(30, schema_version());
+    assert_eq!(31, MIGRATIONS.len());
+    assert_eq!(31, schema_version());
 }
 
 #[test]
@@ -440,7 +440,7 @@ fn a_fresh_database_is_stamped_with_the_marker_and_the_last_migration() {
     let file = dir.path().join("fresh.sqlite");
     drop(Db::open(&file).expect("opening"));
 
-    assert_eq!(30, user_version(&file));
+    assert_eq!(31, user_version(&file));
     assert_eq!(LEAF_APPLICATION_ID, application_id(&file));
 }
 
@@ -522,8 +522,8 @@ fn an_old_scheme_index_at_47_is_recognised_as_29_and_only_what_is_new_runs() {
 
     drop(Db::open(&file).expect("opening"));
 
-    // 29 recognised, then migration 30 on top of it and nothing before.
-    assert_eq!(30, user_version(&file));
+    // 29 recognised, then migrations 30 and 31 on top of it and nothing before.
+    assert_eq!(31, user_version(&file));
     assert_eq!(LEAF_APPLICATION_ID, application_id(&file));
     assert_eq!(
         vec![
@@ -564,7 +564,7 @@ fn an_index_written_by_a_newer_leaf_is_refused() {
     drop(Db::open(&file).expect("creating"));
     rusqlite::Connection::open(&file)
         .expect("opening")
-        .execute_batch("PRAGMA user_version = 31;")
+        .execute_batch("PRAGMA user_version = 32;")
         .expect("pretending to be newer");
 
     let said = match Db::open(&file) {
@@ -573,7 +573,7 @@ fn an_index_written_by_a_newer_leaf_is_refused() {
     };
     assert!(said.contains("written by a newer Leaf"), "{said}");
     assert!(said.contains("must not run on it"), "{said}");
-    assert_eq!(31, user_version(&file), "and it is left as it was found");
+    assert_eq!(32, user_version(&file), "and it is left as it was found");
 }
 
 /// No release ever counted past 47 in the old numbering; a count beyond it comes from a

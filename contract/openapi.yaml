@@ -384,7 +384,9 @@ paths:
       description: |
         Declared in `universe.json` and derived at every scan, in the order the file writes
         them. A universe declaring none answers an empty list rather than a 404: declaring
-        no order is the ordinary case, and the answer is true either way.
+        no order is the ordinary case, and the answer is true either way. A universe that is
+        not there answers 404 — and so does one holding nothing the caller's profile may see,
+        whose orders also lose every step it may not: the two must read the same.
 
         A step that could not be resolved — a work the universe does not hold, a volume
         range naming no edition, a range running backwards — is left out here and reported
@@ -401,6 +403,7 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/ReadingOrder" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /filters:
     get:
@@ -559,6 +562,7 @@ paths:
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Entry" } }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /series/{id}/chapters:
     parameters: [{ $ref: "#/components/parameters/Id" }]
@@ -578,6 +582,7 @@ paths:
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Chapter" } }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /series/{id}/arcs:
     parameters: [{ $ref: "#/components/parameters/Id" }]
@@ -593,6 +598,7 @@ paths:
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Arc" } }
+        "404": { $ref: "#/components/responses/NotFound" }
     patch:
       operationId: replaceSeriesArcs
       tags: [records]
@@ -651,6 +657,7 @@ paths:
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Progress" } }
+        "404": { $ref: "#/components/responses/NotFound" }
     patch:
       operationId: recordSeriesProgress
       tags: [progress]
@@ -764,6 +771,7 @@ paths:
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Chapter" } }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /entries/{id}/pages:
     parameters:
@@ -785,6 +793,7 @@ paths:
           content:
             application/json:
               schema: { type: array, items: { $ref: "#/components/schemas/Page" } }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /entries/{id}/pages/{number}:
     parameters:
@@ -888,6 +897,7 @@ paths:
               schema: { $ref: "#/components/schemas/Progress" }
         "204":
           description: Never opened. Not an error, and not an empty object either.
+        "404": { $ref: "#/components/responses/NotFound" }
     patch:
       operationId: recordProgress
       tags: [progress]

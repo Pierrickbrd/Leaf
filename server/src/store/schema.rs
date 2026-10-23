@@ -32,7 +32,8 @@ pub const SCHEMA: &[&str] = &[
       status            TEXT,
       reading_direction TEXT,
       summary           TEXT,
-      age_rating        TEXT
+      age_rating        TEXT,
+      age               INTEGER
     )
     "#,
     // One row per genre, and the only record of one. A comma-joined column beside this
@@ -701,7 +702,34 @@ pub const MIGRATIONS: &[&[&str]] = &[
         "ALTER TABLE device ADD COLUMN choosing INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE device ADD COLUMN held INTEGER NOT NULL DEFAULT 0",
     ],
+    // 31 — the age a rating stands for, beside the rating. « 16+ » and « Mature 17+ » are
+    // what a person wrote; a restricted profile compares a number, and parsing the string in
+    // every `WHERE` of every list would put the rule in SQL, where it cannot be tested on
+    // its own. Filled for the rows already there by `age_of` itself, in Rust, after this
+    // statement: see `ADD_WORK_AGE` and `db::after`.
+    &[ADD_WORK_AGE],
 ];
+
+/// The statement that adds `work.age`. `db::after` follows the migration holding it with the
+/// backfill only Rust can write — the rule is `metadata::age::age_of`, and a second copy of
+/// it in SQL would be the one that drifts.
+pub const ADD_WORK_AGE: &str = "ALTER TABLE work ADD COLUMN age INTEGER";
+
+/// Where that migration sits today. **Not what `db::after` keys off**: another branch holds
+/// a migration 30 of its own, and the numbers shift when the two meet. Keyed off the number,
+/// the backfill would then run after whatever landed at 31, before the column exists, and
+/// leave every age empty — every rated series hidden from every child, in silence. It keys
+/// off [`adds_work_age`] instead; this constant is for the test that holds the two together.
+pub const WORK_AGE: i32 = 31;
+
+/// Whether migration `number` is the one that adds `work.age`, read from its statements.
+pub fn adds_work_age(number: i32) -> bool {
+    usize::try_from(number)
+        .ok()
+        .and_then(|n| n.checked_sub(1))
+        .and_then(|i| MIGRATIONS.get(i))
+        .is_some_and(|statements| statements.contains(&ADD_WORK_AGE))
+}
 
 /// What a fresh database is stamped with, and the number of the last migration. Deriving it
 /// from the list is what makes adding a migration a one-line change that cannot be got

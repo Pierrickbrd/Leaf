@@ -49,6 +49,8 @@ use crate::scan::layout;
 use crate::scan::runner::{ScanRunner, ScanStatus};
 use crate::scan::scanner::Scanner;
 use crate::store::devices::{Device, Devices};
+use crate::store::profiles::{Kind, Profiles};
+use crate::store::repository::Ceiling;
 use crate::store::schema::DEFAULT_PROFILE;
 use crate::store::{Db, Repository};
 
@@ -63,6 +65,9 @@ pub struct AppState {
     /// The linked devices, asked on every request so that a removal made by another
     /// process — `leaf-server device remove` in a terminal — holds from the next one.
     pub devices: Arc<Devices>,
+    /// The profiles, asked for the ceiling a device reads under — on every request, like the
+    /// devices, so a profile restricted from another device holds from its next one.
+    pub profiles: Arc<Profiles>,
     /// Whether the server listens only on this machine. Only there may a library with no
     /// key and no device be open; see [`AppState::bound_to`].
     pub loopback: bool,
@@ -133,6 +138,7 @@ impl AppState {
             trust_proxy: false,
             intake,
             devices: Arc::new(Devices::new(Arc::clone(&db))),
+            profiles: Arc::new(Profiles::new(Arc::clone(&db))),
             // The safe guess would be `false`, but every state built without saying where it
             // listens is a test's, and the binary always says: `main.rs` calls `bound_to`.
             loopback: true,
@@ -288,6 +294,34 @@ impl Who {
             Who::Open | Who::OldKey(_) => DEFAULT_PROFILE,
         }
     }
+
+    /// The oldest rating this caller may see. An old key and an open library are the
+    /// principal, and see everything; a device sees what the profile it sits on allows.
+    ///
+    /// Read from the profile on every request rather than carried on the device, so lowering
+    /// a child's age from the parent's laptop holds from the tablet's next request. Blocking:
+    /// call it inside the `spawn_blocking` that uses it.
+    pub fn ceiling(&self, profiles: &Profiles) -> anyhow::Result<Ceiling> {
+        let Who::Device(device) = self else {
+            return Ok(Ceiling::NONE);
+        };
+        // Held: its restricted profile was deleted under it, and it sits on the principal
+        // only to hold its key until somebody chooses. Read as the principal in the meantime,
+        // a child's tablet would open the whole library because a parent deleted the child's
+        // profile. The strictest ceiling there is, instead.
+        if device.held {
+            return Ok(Ceiling(Some(0)));
+        }
+        Ok(match profiles.get(&device.profile_id)? {
+            Some(profile) if profile.kind == Kind::Restricted => {
+                Ceiling(Some(profile.max_age.unwrap_or(0)))
+            }
+            Some(_) => Ceiling::NONE,
+            // The foreign key makes this impossible; if it ever is not, the answer that
+            // cannot show a child anything is the one to give.
+            None => Ceiling(Some(0)),
+        })
+    }
 }
 
 /// Any recognised caller, and who it is — for the routes whose answer depends on it.
@@ -313,7 +347,9 @@ impl FromRequestParts<AppState> for Caller {
 /// everyone and says a little more to a caller it knows. Never a refusal: a key that is
 /// wrong, or an address the throttle holds back, is simply not recognised. Offering no key
 /// asks nothing, so an open library is not recognising anybody.
-pub struct Recognised(pub bool);
+///
+/// Who it is when it is: `/health` counts the library under that caller's ceiling.
+pub struct Recognised(pub Option<Who>);
 
 impl FromRequestParts<AppState> for Recognised {
     type Rejection = Failure;
@@ -323,12 +359,12 @@ impl FromRequestParts<AppState> for Recognised {
             .get(HEADER)
             .is_some_and(|v| !v.as_bytes().trim_ascii().is_empty());
         if !offered {
-            return Ok(Recognised(false));
+            return Ok(Recognised(None));
         }
         match allowed(parts, state, Permission::Read).await {
-            Ok(_) => Ok(Recognised(true)),
+            Ok(who) => Ok(Recognised(Some(who))),
             Err(Refused::Failed(failure)) => Err(failure),
-            Err(Refused::Forbidden(_) | Refused::TooMany(_)) => Ok(Recognised(false)),
+            Err(Refused::Forbidden(_) | Refused::TooMany(_)) => Ok(Recognised(None)),
         }
     }
 }
@@ -521,21 +557,31 @@ async fn health(
     State(state): State<AppState>,
     Recognised(recognised): Recognised,
 ) -> Result<Json<HealthDto>, Failure> {
-    let relay = recognised.then(|| state.relay.possible());
+    let relay = recognised.is_some().then(|| state.relay.possible());
     let local_drop = state.drop.enabled();
     let could_be_open = state.loopback && state.keys.open();
     let (library, closed) = blocking(move || {
+        // A restricted profile's connection line reads « N séries pour vous »: the count is
+        // the caller's shelf, not the library's — a child told « 212 séries » while shown
+        // eight would learn that the rest is being kept from them, and how much of it.
+        let ceiling = match &recognised {
+            Some(who) => who.ceiling(&state.profiles)?,
+            None => Ceiling::NONE,
+        };
         // Counted, not built: reading the length of a list of every series was a real
         // defect on the one route anyone can call.
         // One statement for both answers: `linked` rides along rather than costing a
         // second trip on the route a container polls every few seconds.
+        let sql = format!(
+            "SELECT (SELECT COUNT(*) FROM edition e WHERE 1 = 1{}),
+                    EXISTS (SELECT 1 FROM closed)",
+            ceiling.and_edition("e.id")
+        );
         state.db.read(|cx| {
             Ok(cx
-                .query_one(
-                    "SELECT (SELECT COUNT(*) FROM edition), EXISTS (SELECT 1 FROM closed)",
-                    [],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?)),
-                )?
+                .query_one(&sql, [], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, bool>(1)?))
+                })?
                 .unwrap_or((0, false)))
         })
     })
@@ -560,7 +606,7 @@ const EDITIONS: &str = "EDITION";
 const SEARCH_CEILING: i64 = MAX_PAGE;
 
 async fn list_series(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     query: ListQuery,
 ) -> Result<Json<SeriesPageDto>, Failure> {
@@ -584,6 +630,7 @@ async fn list_series(
     let wanted = query.q.unwrap_or_default().trim().to_string();
 
     let page_dto = blocking(move || {
+        let ceiling = who.ceiling(&state.profiles)?;
         let repository = Repository::new(&state.db);
         let mut filter = filter;
 
@@ -593,8 +640,14 @@ async fn list_series(
             // `/search`. The chips go in with it, so the search happens inside what is
             // showing rather than beside it, and the ids it finds become the filter the
             // shelf already knows how to apply — which is why there is no second query here.
-            let found =
-                repository.search(&wanted, SEARCH_CEILING, &[EDITIONS.to_string()], &filter)?;
+            let found = repository.search(
+                &wanted,
+                SEARCH_CEILING,
+                &[EDITIONS.to_string()],
+                &filter,
+                who.profile(),
+                &ceiling,
+            )?;
             let ids: Vec<String> = found.into_iter().map(|hit| hit.id).collect();
             if ids.is_empty() {
                 // An empty shelf, and not the whole one. `ids` empty means "no restriction"
@@ -611,8 +664,16 @@ async fn list_series(
         }
 
         Ok(SeriesPageDto {
-            items: repository.series_ordered(&filter, sort, direction, size, offset)?,
-            total: repository.count_series(&filter)?,
+            items: repository.series_ordered(
+                &filter,
+                sort,
+                direction,
+                size,
+                offset,
+                who.profile(),
+                &ceiling,
+            )?,
+            total: repository.count_series(&filter, who.profile(), &ceiling)?,
             page,
             size,
         })
@@ -623,32 +684,42 @@ async fn list_series(
 
 /// The universes this library holds, and how many ways through each one it declares.
 async fn list_universes(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<UniverseDto>>, Failure> {
     Ok(Json(
-        blocking(move || Repository::new(&state.db).universes()).await?,
+        blocking(move || {
+            let ceiling = who.ceiling(&state.profiles)?;
+            Repository::new(&state.db).universes(&ceiling)
+        })
+        .await?,
     ))
 }
 
 /// The named ways through one universe, in the order its file writes them.
 ///
 /// An empty list and not a 404 for a universe that declares none: declaring no order is the
-/// ordinary case, and a client asking has learnt something true either way.
+/// ordinary case, and a client asking has learnt something true either way. A 404 for one
+/// that is not there — or holds nothing the caller may see, which must read the same.
 async fn list_universe_orders(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<ReadingOrderDto>>, Failure> {
-    Ok(Json(
-        blocking(move || Repository::new(&state.db).orders_of_universe(&id)).await?,
-    ))
+) -> Result<Response, Failure> {
+    or_missing::<Vec<ReadingOrderDto>>(
+        blocking(move || {
+            let ceiling = who.ceiling(&state.profiles)?;
+            Repository::new(&state.db).orders_of_universe(&id, &ceiling)
+        })
+        .await?,
+        "unknown universe",
+    )
 }
 
 /// The values the filters can take, so the application can offer them rather than make you
 /// spell them.
 async fn get_filters(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     query: ListQuery,
 ) -> Result<Json<FacetsDto>, Failure> {
@@ -659,11 +730,12 @@ async fn get_filters(
     let over_files = query.over.as_deref() == Some("files");
     let wanted = query.q.unwrap_or_default();
     let facets = blocking(move || {
+        let ceiling = who.ceiling(&state.profiles)?;
         let repository = Repository::new(&state.db);
         if over_files {
-            repository.file_facets(&wanted)
+            repository.file_facets(&wanted, who.profile(), &ceiling)
         } else {
-            repository.facets()
+            repository.facets(who.profile(), &ceiling)
         }
     })
     .await?;
@@ -681,68 +753,102 @@ async fn get_format(_: Reader) -> Json<super::format::Format> {
 }
 
 async fn get_series(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, Failure> {
     or_missing(
-        blocking(move || Repository::new(&state.db).one_series(&id)).await?,
+        blocking(move || {
+            let ceiling = who.ceiling(&state.profiles)?;
+            Repository::new(&state.db).one_series(&id, who.profile(), &ceiling)
+        })
+        .await?,
         "unknown series",
     )
 }
 
+// The four lists of a series below answer 404 for a series that is not there, where they
+// used to answer `[]`. An empty list for an unknown id was harmless while every caller saw
+// every series; under a ceiling it is the one difference between « hidden » and « absent »
+// that a 404 on the series itself would not cover, so both now answer what `/series/{id}`
+// answers.
+
 /// Volumes and standalone chapters, mixed, in reading order.
 async fn list_series_entries(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<EntryDto>>, Failure> {
-    Ok(Json(
-        blocking(move || Repository::new(&state.db).entries(&id)).await?,
-    ))
+) -> Result<Response, Failure> {
+    or_missing::<Vec<EntryDto>>(
+        blocking(move || {
+            let ceiling = who.ceiling(&state.profiles)?;
+            Repository::new(&state.db).entries(&id, &ceiling)
+        })
+        .await?,
+        "unknown series",
+    )
 }
 
 /// The whole edition sequence, whatever the materialisation.
 async fn list_series_chapters(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<ChapterDto>>, Failure> {
-    Ok(Json(
-        blocking(move || Repository::new(&state.db).chapters_of_edition(&id)).await?,
-    ))
+) -> Result<Response, Failure> {
+    or_missing::<Vec<ChapterDto>>(
+        blocking(move || {
+            let ceiling = who.ceiling(&state.profiles)?;
+            Repository::new(&state.db).chapters_of_edition(&id, &ceiling)
+        })
+        .await?,
+        "unknown series",
+    )
 }
 
 async fn list_series_arcs(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<ArcDto>>, Failure> {
-    Ok(Json(
-        blocking(move || Repository::new(&state.db).arcs(&id)).await?,
-    ))
+) -> Result<Response, Failure> {
+    or_missing::<Vec<ArcDto>>(
+        blocking(move || {
+            let ceiling = who.ceiling(&state.profiles)?;
+            Repository::new(&state.db).arcs(&id, &ceiling)
+        })
+        .await?,
+        "unknown series",
+    )
 }
 
 async fn get_entry(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, Failure> {
     or_missing(
-        blocking(move || Repository::new(&state.db).entry(&id)).await?,
+        blocking(move || {
+            let ceiling = who.ceiling(&state.profiles)?;
+            Repository::new(&state.db).entry(&id, &ceiling)
+        })
+        .await?,
         "unknown entry",
     )
 }
 
 /// A volume's markers — what no tool can read today.
 async fn list_entry_chapters(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<ChapterDto>>, Failure> {
-    Ok(Json(
-        blocking(move || Repository::new(&state.db).chapters_of_entry(&id)).await?,
-    ))
+) -> Result<Response, Failure> {
+    or_missing::<Vec<ChapterDto>>(
+        blocking(move || {
+            let ceiling = who.ceiling(&state.profiles)?;
+            Repository::new(&state.db).chapters_of_entry(&id, &ceiling)
+        })
+        .await?,
+        "unknown entry",
+    )
 }
 
 /// The pages of an entry.
@@ -751,26 +857,45 @@ async fn list_entry_chapters(
 /// be prepared while the client is still drawing the list. Without it nothing is prepared:
 /// a guessed width is work thrown away.
 async fn list_entry_pages(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path(id): Path<String>,
     query: ListQuery,
-) -> Result<Json<Vec<PageDto>>, Failure> {
+) -> Result<Response, Failure> {
     let width = query.width;
-    Ok(Json(
+    or_missing::<Vec<PageDto>>(
         blocking(move || {
-            state.pages.warm_opening(&id, width);
-            Repository::new(&state.db).pages(&id)
+            let ceiling = who.ceiling(&state.profiles)?;
+            let pages = Repository::new(&state.db).pages(&id, &ceiling)?;
+            // Only for an entry this caller may open: warming one it may not would be work
+            // done for a reader who is about to be told it is not there.
+            if pages.is_some() {
+                state.pages.warm_opening(&id, width);
+            }
+            Ok(pages)
         })
         .await?,
-    ))
+        "unknown entry",
+    )
 }
 
 // -------------------------------------------------------------- maintenance
 
 /// Where the scan is, and what the last one found.
-async fn scan_status(_: Reader, State(state): State<AppState>) -> Json<ScanStatus> {
-    Json(state.runner.status())
+///
+/// Under a ceiling, where it is and nothing of what it found: the findings name folders and
+/// series — « Nuit/Ombre : ageRating » — and a restricted profile reading them would be
+/// reading the shelf it is kept from.
+async fn scan_status(
+    Caller(who): Caller,
+    State(state): State<AppState>,
+) -> Result<Json<ScanStatus>, Failure> {
+    let mut status = state.runner.status();
+    let profiles = Arc::clone(&state.profiles);
+    if blocking(move || who.ceiling(&profiles)).await? != Ceiling::NONE {
+        status.report = None;
+    }
+    Ok(Json(status))
 }
 
 /// Starts a scan.
@@ -807,7 +932,7 @@ async fn start_scan(_: Importer, State(state): State<AppState>) -> Response {
 /// downscaled — never upscaled: asking for 4000 on a 1500-wide scan returns the original
 /// rather than a blurred enlargement.
 async fn get_page(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path((id, number)): Path<(String, String)>,
     query: ListQuery,
@@ -822,15 +947,16 @@ async fn get_page(
     };
     let width = query.width;
     let served = blocking(move || {
-        let served = state.pages.page(&id, number, width);
+        let ceiling = who.ceiling(&state.profiles)?;
+        let served = state.pages.page(&id, number, width, &ceiling)?;
         // Only when a width was asked for: serving the source costs nothing to begin with.
         // And never from a cover or from the warming itself — without that distinction the
         // preparation fed itself, and fetching a grid of covers quietly resized the opening
-        // pages of every volume in the library.
-        if let Some(width) = width {
+        // pages of every volume in the library. Nor for a page this caller was refused.
+        if let (Some(width), Some(_)) = (width, &served) {
             state.pages.warm_ahead(&id, number, width);
         }
-        served
+        Ok(served)
     })
     .await?;
     Ok(image_response(served, &headers))
@@ -838,44 +964,58 @@ async fn get_page(
 
 /// The cover, small by default. A thumbnail is a page asked for narrow.
 async fn entry_cover(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path(id): Path<String>,
     query: ListQuery,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, Failure> {
     let width = query.width;
-    let served = blocking(move || state.pages.cover(&id, width)).await?;
+    let served = blocking(move || {
+        let ceiling = who.ceiling(&state.profiles)?;
+        state.pages.cover(&id, width, &ceiling)
+    })
+    .await?;
     Ok(image_response(served, &headers))
 }
 
 /// The tile of a grid: one request, not one to find the first entry and another for its
 /// cover.
 async fn series_cover(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path(id): Path<String>,
     query: ListQuery,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, Failure> {
     let width = query.width;
-    let served = blocking(move || state.pages.series_cover(&id, width)).await?;
+    let served = blocking(move || {
+        let ceiling = who.ceiling(&state.profiles)?;
+        state.pages.series_cover(&id, width, &ceiling)
+    })
+    .await?;
     Ok(image_response(served, &headers))
 }
 
 /// The original file: this is how a volume comes back down to be retouched.
 async fn download_entry_file(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, Failure> {
     let path = blocking(move || {
+        let ceiling = who.ceiling(&state.profiles)?;
+        // Asked before the stamp, not after: the stamp writes into the file, and a request
+        // for a volume the caller may not see must not touch it.
+        let Some(path) = Repository::new(&state.db).entry_path(&id, &ceiling)? else {
+            return Ok(None);
+        };
         // It leaves stamped — work, edition, number — so it can find its own way home when
         // it comes back. A GET that writes: deliberate,
         // because the stamp has to be in the copy that leaves rather than the one that
         // stays.
         Records::new(&state.db).stamp_entry(&id)?;
-        Repository::new(&state.db).entry_path(&id)
+        Ok(Some(path))
     })
     .await?;
     let Some(path) = path else {
@@ -1030,7 +1170,7 @@ fn image_response(served: Option<ServedImage>, headers: &axum::http::HeaderMap) 
 /// lit chip is a statement about what you are looking at, and a search that ignored it would
 /// hand back series the shelf behind it is hiding.
 async fn search(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     query: ListQuery,
 ) -> Result<Response, Failure> {
@@ -1049,23 +1189,51 @@ async fn search(
 
     if paged {
         let found = blocking(move || {
-            Repository::new(&state.db)
-                .search_page_ordered(&wanted, size, page, &kinds, &filter, order)
+            let ceiling = who.ceiling(&state.profiles)?;
+            Repository::new(&state.db).search_page_ordered(
+                &wanted,
+                size,
+                page,
+                &kinds,
+                &filter,
+                order,
+                who.profile(),
+                &ceiling,
+            )
         })
         .await?;
         Ok(Json(found).into_response())
     } else if order.is_some() {
         let found = blocking(move || {
+            let ceiling = who.ceiling(&state.profiles)?;
             Repository::new(&state.db)
-                .search_page_ordered(&wanted, size, 0, &kinds, &filter, order)
+                .search_page_ordered(
+                    &wanted,
+                    size,
+                    0,
+                    &kinds,
+                    &filter,
+                    order,
+                    who.profile(),
+                    &ceiling,
+                )
                 .map(|page| page.items)
         })
         .await?;
         Ok(Json(found).into_response())
     } else {
-        let found =
-            blocking(move || Repository::new(&state.db).search(&wanted, size, &kinds, &filter))
-                .await?;
+        let found = blocking(move || {
+            let ceiling = who.ceiling(&state.profiles)?;
+            Repository::new(&state.db).search(
+                &wanted,
+                size,
+                &kinds,
+                &filter,
+                who.profile(),
+                &ceiling,
+            )
+        })
+        .await?;
         Ok(Json(found).into_response())
     }
 }
@@ -1082,17 +1250,25 @@ pub(super) fn now_in_millis() -> i64 {
 }
 
 /// Where the reader stands in one entry.
+///
+/// 404 for an entry that is not there, where it used to be the 204 of one never opened: under
+/// a ceiling, « never opened » about a hidden volume would say that it exists.
 async fn entry_progress(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, Failure> {
-    let found = blocking(move || Progress::new(&state.db).of(&id)).await?;
-    Ok(match found {
-        Some(progress) => Json(progress).into_response(),
-        // Never opened. Not an error, and not an empty object either.
-        None => StatusCode::NO_CONTENT.into_response(),
+    let found = blocking(move || {
+        let ceiling = who.ceiling(&state.profiles)?;
+        Progress::new(&state.db).of_entry(&id, who.profile(), &ceiling)
     })
+    .await?;
+    match found {
+        Some(Some(progress)) => Ok(Json(progress).into_response()),
+        // Never opened. Not an error, and not an empty object either.
+        Some(None) => Ok(StatusCode::NO_CONTENT.into_response()),
+        None => Err(Failure::Missing("unknown entry")),
+    }
 }
 
 /// Records a position.
@@ -1108,7 +1284,11 @@ async fn record_progress(
     let now = now_in_millis();
     let profile = who.profile().to_owned();
     or_missing(
-        blocking(move || Progress::new(&state.db).record(&profile, &id, &patch, now)).await?,
+        blocking(move || {
+            let ceiling = who.ceiling(&state.profiles)?;
+            Progress::new(&state.db).record(&profile, &id, &patch, now, &ceiling)
+        })
+        .await?,
         "unknown entry",
     )
 }
@@ -1123,15 +1303,21 @@ async fn forget_progress(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Where the reader stands in every entry of a series.
+/// Where the reader stands in every entry of a series — a 404 for a series that is not
+/// there for this caller, as on every other route of a series.
 async fn series_progress(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<ProgressDto>>, Failure> {
-    Ok(Json(
-        blocking(move || Progress::new(&state.db).of_series(&id)).await?,
-    ))
+) -> Result<Response, Failure> {
+    or_missing::<Vec<ProgressDto>>(
+        blocking(move || {
+            let ceiling = who.ceiling(&state.profiles)?;
+            Progress::new(&state.db).of_series(&id, who.profile(), &ceiling)
+        })
+        .await?,
+        "unknown series",
+    )
 }
 
 /// Marks a whole series read, or unread — one statement rather than one call per volume.
@@ -1145,7 +1331,8 @@ async fn record_series_progress(
     let profile = who.profile().to_owned();
     or_missing(
         blocking(move || {
-            Progress::new(&state.db).record_series(&profile, &id, patch.finished, now)
+            let ceiling = who.ceiling(&state.profiles)?;
+            Progress::new(&state.db).record_series(&profile, &id, patch.finished, now, &ceiling)
         })
         .await?,
         "unknown series",
@@ -1194,13 +1381,17 @@ async fn erase_entry(
 
 /// What to open next: what you are in the middle of, then what follows it.
 async fn up_next(
-    _: Reader,
+    Caller(who): Caller,
     State(state): State<AppState>,
     query: ListQuery,
 ) -> Result<Json<Vec<UpNextDto>>, Failure> {
     let limit = query.limit.unwrap_or(20);
     Ok(Json(
-        blocking(move || Progress::new(&state.db).up_next(limit)).await?,
+        blocking(move || {
+            let ceiling = who.ceiling(&state.profiles)?;
+            Progress::new(&state.db).up_next(limit, who.profile(), &ceiling)
+        })
+        .await?,
     ))
 }
 
@@ -1224,7 +1415,9 @@ async fn patch_series(
             &state,
             Repository::new(&state.db).work_folder_of_series(&id)?,
         );
-        Repository::new(&state.db).one_series(&id)
+        // No ceiling: an importer's own edit read back. A restricted profile carries no
+        // right to edit, which the door of this route is what enforces.
+        Repository::new(&state.db).one_series(&id, DEFAULT_PROFILE, &Ceiling::NONE)
     })
     .await?;
     or_missing(series, "unknown series")
@@ -1246,7 +1439,7 @@ async fn patch_arcs(
             &state,
             Repository::new(&state.db).work_folder_of_series(&id)?,
         );
-        Repository::new(&state.db).arcs(&id).map(Some)
+        Repository::new(&state.db).arcs(&id, &Ceiling::NONE)
     })
     .await?;
     or_missing(arcs, "unknown series")
@@ -1266,7 +1459,7 @@ async fn patch_entry(
             &state,
             Repository::new(&state.db).work_folder_of_entry(&id)?,
         );
-        Repository::new(&state.db).entry(&id)
+        Repository::new(&state.db).entry(&id, &Ceiling::NONE)
     })
     .await?;
     or_missing(entry, "unknown entry")

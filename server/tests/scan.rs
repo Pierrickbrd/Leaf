@@ -11,6 +11,7 @@ mod common;
 use common::writable;
 
 use leaf_server::scan::scanner::Scanner;
+use leaf_server::store::repository::Ceiling;
 use leaf_server::store::Db;
 
 fn jpeg(width: u32, height: u32) -> Vec<u8> {
@@ -440,6 +441,8 @@ fn a_chapter_that_arrived_on_its_own_says_which_volume_it_came_from() {
             leaf_server::api::dto::SeriesSort::Name,
             0,
             0,
+            "default",
+            &Ceiling::NONE,
         )
         .unwrap();
     assert!(
@@ -1552,6 +1555,8 @@ fn an_illustrator_credited_nowhere_else_is_still_searchable() {
             10,
             &[],
             &leaf_server::api::dto::SeriesFilter::default(),
+            "default",
+            &Ceiling::NONE,
         )
         .expect("searching");
     assert!(
