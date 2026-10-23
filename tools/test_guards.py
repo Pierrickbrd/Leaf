@@ -20,6 +20,7 @@ import client_knows_the_contract as contract
 import covers_stay_round
 import nothing_talks_to_the_console as console
 import one_file_owns_it as owns
+import requests_stay_on_http1 as http1
 import taps_stay_where_they_land as taps
 import tests_stay_off_the_bus as bus
 import words_stay_french
@@ -31,6 +32,33 @@ def in_a_file(text: str, suffix: str = ".cpp"):
     handle.write(text)
     handle.close()
     return pathlib.Path(handle.name)
+
+
+class RequestsStayOnHttp1(unittest.TestCase):
+    def made(self, line: str) -> list:
+        path = in_a_file(line)
+        try:
+            return [number for number, _ in http1.made_here(path)]
+        finally:
+            path.unlink()
+
+    def test_every_way_of_making_a_request_is_caught(self):
+        for line in ("QNetworkRequest request(url);", "QNetworkRequest request{url};",
+                     "QNetworkRequest carried = request;", "QNetworkRequest blank;",
+                     "m_network.get(QNetworkRequest(url));", "get(QNetworkRequest{url});"):
+            self.assertEqual(self.made(line), [1], line)
+
+    def test_the_helper_a_parameter_and_an_attribute_go_through(self):
+        for line in ("QNetworkRequest request = Pinning::request(url);",
+                     "QNetworkRequest r = Pinning::request(handed);",
+                     "QNetworkReply *create(const QNetworkRequest &request);",
+                     "reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);",
+                     "// QNetworkRequest request(url); said in a comment"):
+            self.assertEqual(self.made(line), [], line)
+
+    def test_the_client_as_it_stands_has_none(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(http1.main(), 0)
 
 
 class RefusesLatin1(unittest.TestCase):

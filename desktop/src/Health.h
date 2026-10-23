@@ -36,6 +36,12 @@ class Health : public QObject
     /// server answering perfectly over an unmounted disk answers zero.
     Q_PROPERTY(int library READ library NOTIFY changed)
     Q_PROPERTY(bool localDrop READ localDrop NOTIFY changed)
+    /// Whether the library is closed to anyone without a key, as `/health` says.
+    Q_PROPERTY(bool linked READ linked NOTIFY changed)
+    /// Whether « Relier un autre appareil » is offered: only by a library that answers and is
+    /// closed. An open one issues no code — its first device is linked from its terminal — and
+    /// the button would only ever bring back a refusal.
+    Q_PROPERTY(bool linksOthers READ linksOthers NOTIFY changed)
 
     /// The section's words. Carried by the object that owns the subject, the way `Search`
     /// carries the bar's: French lives in `Words`, and a screen never spells it.
@@ -61,6 +67,8 @@ public:
     int format() const { return m_said.format; }
     int library() const { return m_said.library; }
     bool localDrop() const { return m_said.localDrop; }
+    bool linked() const { return m_said.linked; }
+    bool linksOthers() const { return m_reachable && m_said.linked; }
     QString title() const;
     QString answering() const;
     QString connected() const;

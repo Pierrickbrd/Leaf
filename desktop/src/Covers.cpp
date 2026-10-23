@@ -1,5 +1,6 @@
 #include "Covers.h"
 
+#include "Pinning.h"
 #include "Server.h"
 #include "Settings.h"
 
@@ -39,7 +40,11 @@ protected:
     QNetworkReply *createRequest(Operation operation, const QNetworkRequest &request,
                                  QIODevice *outgoing) override
     {
-        QNetworkRequest carried(request);
+        // Here, on this manager's own thread, because `clearConnectionCache` belongs to it.
+        Pinning::renew(*this, m_covers ? m_covers->pin() : QString());
+        // Through `Pinning`, like every request of this client: QML hands in its own, which
+        // would take HTTP/2 when offered.
+        QNetworkRequest carried = Pinning::request(request);
         // Asked of the factory each time rather than held: the address and the key both change
         // — the keyring answers after the run has started, and the settings screen can change
         // them again — and a manager built at the first cover would carry whatever was true
@@ -75,7 +80,22 @@ Covers::Covers(Settings *settings, QObject *parent)
 
 QNetworkAccessManager *Covers::create(QObject *parent)
 {
-    return new Keyed(this, parent);
+    auto *network = new Keyed(this, parent);
+    // The same pin as `Server`'s: a cover carries the key too. Read from the copy `take`
+    // keeps, because this manager answers on whichever thread Qt loads an image on, and
+    // reaching into `Settings` from there is the heap corruption `resolve` describes.
+    // Every https fetch of this manager is held to the pin, the server's or not, on purpose:
+    // what it cannot place is refused rather than trusted — closed, never open.
+    Pinning::guard(*network, [covers = QPointer<Covers>(this)] {
+        return covers ? covers->pin() : QString();
+    });
+    return network;
+}
+
+QString Covers::pin() const
+{
+    const QMutexLocker held(&m_lock);
+    return m_fingerprint;
 }
 
 Settings *Covers::settings() const
@@ -112,6 +132,7 @@ void Covers::take()
     const QMutexLocker held(&m_lock);
     m_address = m_settings ? m_settings->address() : QString();
     m_key = m_settings ? m_settings->key() : QString();
+    m_fingerprint = m_settings ? m_settings->fingerprint() : QString();
 }
 
 bool Covers::carry(const QUrl &url, QByteArray &key) const

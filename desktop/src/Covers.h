@@ -76,10 +76,15 @@ public:
     /// nothing here reads a `QString` while another thread assigns it.
     bool carry(const QUrl &url, QByteArray &key) const;
 
+    /// The fingerprint every cover is held to — see `Pinning`. Callable from any thread, for
+    /// the reason `carry` is.
+    QString pin() const;
+
 private:
     /// Starts following whatever `Settings` was found, and takes a first copy.
     void follow();
-    /// Copies the address and the key out of `Settings`, under the lock. On this thread.
+    /// Copies the address, the key and the pin out of `Settings`, under the lock. On this
+    /// thread.
     void take();
 
     QPointer<QQmlEngine> m_engine;
@@ -87,4 +92,5 @@ private:
     mutable QMutex m_lock;
     QString m_address;
     QString m_key;
+    QString m_fingerprint;
 };

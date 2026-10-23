@@ -170,6 +170,10 @@ struct Health {
     /// server answering perfectly over an unmounted disk answers zero.
     int library = 0;
     bool localDrop = false;
+    /// Whether the library is closed to anyone without a key. Taken for closed when a server
+    /// older than linking does not say: a client that thinks it needs a key asks for one,
+    /// and one that thinks it does not sends nothing to a server that wanted something.
+    bool linked = true;
 };
 
 /// Where the scan is, and what the last one found.
@@ -643,6 +647,41 @@ struct Installed {
     QList<QString> moved;
 };
 
+/// A device, as the server keeps it: what it is called, in the case it was given.
+struct Device {
+    QString id;
+    QString name;
+};
+
+/// What `POST /link` answers: the key this device will carry, and the device it now is.
+///
+/// The key is in this answer and nowhere else, ever — the server keeps only its digest. So
+/// whoever reads this hands it straight to `Settings::remember`, and never to a log.
+struct Linked {
+    QString key;
+    Device device;
+};
+
+/// What `POST /link/codes` answers: a code for another device, shown this once.
+///
+/// `code` is a key-in-waiting for ten minutes — whoever holds it may link a device — so it
+/// goes into the link on screen and nowhere else: never into a log, never into a sentence
+/// about a failure. `id` is what follows it or withdraws it, and is not secret.
+struct IssuedCode {
+    QString id;
+    QString code;
+    /// Milliseconds since the epoch, on the server's clock.
+    qint64 expiresAt = 0;
+};
+
+/// What `GET /link/codes/{id}` answers: still waiting, or used, and by whom.
+struct CodeState {
+    enum class State { Waiting, Served };
+    State state = State::Waiting;
+    /// What the device that used it calls itself; empty while it waits.
+    QString name;
+};
+
 /// What a parse produced, or what stopped it.
 ///
 /// A `QString` and not a bool: "series[3]: name is missing" is something a person can act on,
@@ -683,6 +722,11 @@ Read<Received> received(const QJsonObject &from);
 Read<BadOffset> badOffset(const QJsonObject &from);
 Read<Session> session(const QJsonObject &from);
 Read<Installed> installed(const QJsonObject &from);
+/// What `PATCH /device` answers, and the device inside what `POST /link` does.
+Read<Device> device(const QJsonObject &from);
+Read<Linked> linked(const QJsonObject &from);
+Read<IssuedCode> issuedCode(const QJsonObject &from);
+Read<CodeState> codeState(const QJsonObject &from);
 
 /// The contract's spellings, so that a test can walk them rather than trust a switch.
 Medium medium(const QString &word);

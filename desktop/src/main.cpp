@@ -8,7 +8,9 @@
 // is not a preference.
 
 #include "Boot.h"
+#include "Doorbell.h"
 
+#include <QDBusConnection>
 #include <QIcon>
 #include <iostream>
 #include <QGuiApplication>
@@ -37,8 +39,28 @@ int main(int argc, char *argv[])
     // would fight it every time. Basic gets out of the way.
     QQuickStyle::setStyle(QStringLiteral("Basic"));
 
+    // A click on a `leaf://` link starts this program with the link as its argument. If a
+    // Leaf is already open it is handed the link and this one leaves; otherwise this is the
+    // first, and it opens on the link — and listens for the next.
+    QString link;
+    for (int i = 1; i < argc; ++i) {
+        const QString argument = QString::fromLocal8Bit(argv[i]);
+        if (argument.startsWith(QStringLiteral("leaf:"), Qt::CaseInsensitive)) {
+            link = argument;
+            break;
+        }
+    }
+    if (!link.isEmpty() && Doorbell::ring(link)) {
+        return 0;
+    }
+    Doorbell doorbell;
+    // Not listened to under `--check-startup`: a smoke test must not take over the door of
+    // the Leaf its runner has open.
+    const bool listening = !checkStartup && doorbell.listen();
+
     QQmlApplicationEngine engine;
-    Boot::run(engine, application);
+    Boot::run(engine, application, QDBusConnection::sessionBus(),
+              listening ? &doorbell : nullptr, link);
 
     if (checkStartup) {
         return 0;

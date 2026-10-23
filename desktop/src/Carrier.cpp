@@ -460,7 +460,7 @@ void Carrier::sendMore(int row)
                       if (m_of->m_rows.at(at).stage != Stage::Sending)
                           return;
                       if (!answer.went()) {
-                          retryLater(at);
+                          retryLater(at, answer);
                           return;
                       }
                       m_of->m_rows[at].attempts = 0;
@@ -516,7 +516,7 @@ void Carrier::sendMoreOfFolder(int row)
                           return;
                       }
                       if (!answer.went()) {
-                          retryLater(at);
+                          retryLater(at, answer);
                           return;
                       }
                       chunkLanded(at, went, whole);
@@ -560,7 +560,7 @@ void Carrier::resumeFrom(int row)
                           return;
                       const Api::Read<Api::Session> read = Api::session(answer.body.object());
                       if (!answer.went() || !read.ok()) {
-                          retryLater(at);
+                          retryLater(at, answer);
                           return;
                       }
                       if (const Card &one = m_of->m_rows.at(at);
@@ -658,15 +658,17 @@ void Carrier::confirm(int row)
                    });
 }
 
-void Carrier::retryLater(int row)
+void Carrier::retryLater(int row, const Server::Answer &answer)
 {
     using enum Stage;
     if (row < 0 || row >= m_of->m_rows.size())
         return;
-    // The key lost its right to import, or was refused: that is not this file's fault and
-    // not something waiting will mend. Said once, and the queue stops.
-    if (m_server && m_server->stopped()) {
-        m_of->m_trouble = m_server->whyStopped();
+    // The key was refused, or lacks the right to import: that is not this file's fault and
+    // not something waiting will mend. Said once, and the queue stops. A missing right no
+    // longer stops `Server` — the key still reads — so it is read off the answer itself.
+    const bool stopped = m_server && m_server->stopped();
+    if (stopped || answer.status == 403) {
+        m_of->m_trouble = stopped ? m_server->whyStopped() : answer.trouble;
         for (int at = 0; at < m_of->m_rows.size(); ++at) {
             if (m_of->m_rows.at(at).stage == Sending || m_of->m_rows.at(at).stage == Ready)
                 settle(at, Failed);
@@ -720,8 +722,8 @@ void Carrier::abandon(int row)
             // nothing about whether the rest of the queue can still send, so a refusal
             // comes back as this one failed row rather than a `trouble` that would stop
             // every other one too — `pump()` reads that property and nothing here touches
-            // it. `m_server->stopped()`, in `retryLater`, is the case where the cause
-            // really is shared — a key that lost its right to import, which nothing
+            // it. A refused key or a 403 on a transfer, in `retryLater`, is the case where
+            // the cause really is shared — a key without the right to import, which nothing
             // sending will get past either — and that one still halts the whole queue;
             // this is not that.
             Card back = kept;

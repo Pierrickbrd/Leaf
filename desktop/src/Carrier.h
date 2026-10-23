@@ -133,7 +133,9 @@ private:
 
     void confirm(int row);
 
-    void retryLater(int row);
+    /// A transfer that did not go: waited on and tried again, unless `answer` says waiting
+    /// will not mend it.
+    void retryLater(int row, const Server::Answer &answer);
 
     /// Only `describe`, `described` and `hashedSoFar` use this — the rest of the queue
     /// still finds its row by `path`, matching every request the server itself tracks by

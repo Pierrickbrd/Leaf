@@ -2,28 +2,37 @@
 
 // Where the server is, and how to prove who you are.
 //
-// **Read, never written.** The application is for reading comics; where its server lives is a
-// deployment question, and the server itself is configured the same way — environment
-// variables, no administration screen. A client that grew a connection console would be
-// managing something that is not its subject.
+// **Written once linked, by nothing else.** This used to be read and never written: where a
+// server lives was a deployment question, set by hand like the server's own configuration.
+// What changed it is that the client now links itself — it is handed a `leaf://` link, trades
+// the code in it for a key, and has to keep what it was given. So `remember`, `moveTo`,
+// `rename` and `forget` write; nothing else does, and there is still no screen for typing an
+// address or a key in.
 //
-// Three places, in this order:
+// Three places, read in this order:
 //
 //   1. `LEAF_ADDRESS` and `LEAF_KEY` in the environment. What a launcher, a script or a
-//      `systemd` unit sets, and what wins for one run.
-//   2. The session keyring — GNOME's or KDE's. Put there by hand, by somebody who would
-//      rather their key were not on an unencrypted disk in plain text.
-//   3. `~/.config/Leaf/leaf.conf`, and **refused when anybody but its owner can read it**.
+//      `systemd` unit sets, and what wins for one run. **Never overwritten**: while either is
+//      set, every write is refused and says so — a link written underneath an environment
+//      would be invisible until the day the environment went away.
+//   2. The session keyring — GNOME's or KDE's — for the key. Where `remember` puts it.
+//   3. `~/.config/Leaf/leaf.conf` for the address, the pinned fingerprint, the device's name
+//      and the date it was linked; and for the key only when the keyring refused it — in
+//      which case it wins over the keyring, whose entry can only be older. Written
+//      readable by its owner alone, and **refused when anybody but its owner can read it**.
 //      The server refuses to start open on the network without a key; this is the same rule
 //      from the other end.
-//
-// Nothing here offers to fix any of it. Saying plainly what is missing, and where it goes,
-// is not the same as managing it.
 
+#include <QDateTime>
 #include <QObject>
 #include <QQmlEngine>
 #include <QString>
+#include <QUrl>
 #include <QVariantList>
+
+#include <functional>
+
+class QSettings;
 
 class Settings : public QObject
 {
@@ -38,6 +47,9 @@ class Settings : public QObject
     Q_PROPERTY(bool loaded READ loaded NOTIFY changed)
     Q_PROPERTY(bool configured READ configured NOTIFY changed)
     Q_PROPERTY(Storage storage READ storage NOTIFY changed)
+    Q_PROPERTY(QString fingerprint READ fingerprint NOTIFY changed)
+    Q_PROPERTY(QString deviceName READ deviceName NOTIFY changed)
+    Q_PROPERTY(QDateTime linkedAt READ linkedAt NOTIFY changed)
 
 public:
     /// Where the key came from. Worth showing rather than hiding: somebody told their key
@@ -49,14 +61,23 @@ public:
 
     QString address() const { return m_address; }
     QString key() const { return m_key; }
+    /// The fingerprint of the certificate this device was linked to, or empty when the
+    /// system's authorities vouch for the server instead — see `Pinning`. Always lowercase,
+    /// whatever was handed in or found on disk: `Pinning` compares the whole string.
+    QString fingerprint() const { return m_fingerprint; }
+    /// What the server calls this device, and when it was linked — for the « Bibliothèque »
+    /// settings tab. Empty and invalid when it was configured by hand.
+    QString deviceName() const { return m_deviceName; }
+    QDateTime linkedAt() const { return m_linkedAt; }
     bool loaded() const { return m_loaded; }
     bool configured() const { return !m_address.isEmpty() && !m_key.isEmpty(); }
     Storage storage() const { return m_storage; }
 
-    /// Only for tests and for whatever sets things up before an engine exists. Nothing in
-    /// the interface calls these — see the note at the top.
+    /// In memory only, never written. For tests and for whatever sets things up before an
+    /// engine exists; the interface goes through `remember` and the rest below.
     void setAddress(const QString &address);
     void setKey(const QString &key);
+    void setFingerprint(const QString &fingerprint);
 
     /// What is missing, and where it goes — in words, for the one screen that shows it.
     /// Empty when there is nothing to say.
@@ -73,10 +94,28 @@ public:
     QVariantList sections() const;
     QString missing() const;
 
+    /// Writes everything, then emits `changed`. The key goes to the keyring; if the keyring
+    /// refuses it, to `leaf.conf` (0600), and `storage()` says so. Does nothing but emit
+    /// `trouble` while the environment sets the address or the key.
+    void remember(const QUrl &address, const QString &fingerprint, const QString &key,
+                  const QString &deviceName, const QDateTime &linkedAt);
+    /// Writes the device's new name. Allowed under the environment: the environment never
+    /// names a device, so there is nothing of it to overwrite.
+    void rename(const QString &deviceName);
+    /// Writes a new address and the pin that goes with it — empty when an authority vouches
+    /// for the new address. The key stays where it is. Refused under the environment.
+    void moveTo(const QUrl &address, const QString &fingerprint);
+    /// Erases the key from the keyring and from `leaf.conf`, the address, the pin, the name
+    /// and the date. Refused under the environment.
+    void forget();
+
     /// Where the configuration file lives.
     static QString configurationFile();
 
-
+    /// Makes every keyring write fail, for the one test that has to see the fallback on a
+    /// machine whose keyring accepts everything. Nothing else calls it, and it does nothing
+    /// outside `QStandardPaths` test mode.
+    static void refuseTheKeyringForTests(bool refuse);
 
 signals:
     void changed();
@@ -88,9 +127,27 @@ private:
     void load();
     bool fromEnvironment();
     void fromFile();
+    /// Whether the environment set this run’s address or key — see the note at the top —
+    /// and if so, says through `trouble` that the write was refused.
+    bool refusedByEnvironment();
+    /// Where `remember` goes once the keyring has answered.
+    void keyStored(bool accepted, const QUrl &address, const QString &fingerprint,
+                   const QString &key, const QString &deviceName, const QDateTime &linkedAt);
+    /// Writes `key` back to the keyring, or erases the entry when `key` is empty. Best effort,
+    /// unwaited.
+    static void putBackInTheKeyring(const QString &key);
+    /// Applies `edit` to `leaf.conf`, readable by its owner alone before anything is
+    /// written. Says what went wrong through `trouble`.
+    bool write(const std::function<void(QSettings &)> &edit);
 
     QString m_address;
     QString m_key;
+    QString m_fingerprint;
+    QString m_deviceName;
+    QDateTime m_linkedAt;
+    /// Counts `remember` and `forget`, so that a keyring answering late to one that has
+    /// since been overtaken writes nothing: linking and unlinking at once must end unlinked.
+    quint64 m_generation = 0;
     bool m_loaded = false;
     Storage m_storage = Storage::Unknown;
 };

@@ -210,6 +210,10 @@ ApplicationWindow {
         Keys.onPressed: event => {
             if (!isArrow(event.key) && !isTab(event.key))
                 return
+            // The linking screen is a plain form: Qt's own Tab order through its two fields
+            // and its button, and none of the shelf's order behind it.
+            if (linkScreen.active)
+                return
 
             // Left and Right edit the field. They join global navigation everywhere else,
             // including Up and Down from that same field.
@@ -301,6 +305,26 @@ ApplicationWindow {
                 }
             }
         }
+
+        // Not linked to anything: the linking screen, over the whole window, bar included —
+        // none of the shelf's commands mean anything without a library. A Loader and not a
+        // hidden item, so that it is built when it opens: that is the moment it reads the
+        // clipboard, and the moment it goes away for good once `Settings` holds a key.
+        //
+        // Only once the settings have loaded: the key arrives from the keyring a moment after
+        // the window, and a linked client would otherwise flash this screen at every start.
+        Loader {
+            id: linkScreen
+
+            anchors.fill: parent
+            // Over the bar, which lifts itself above the shelf for its own menus.
+            z: 100
+            active: Settings.loaded && !Settings.configured
+            sourceComponent: LinkView {
+                focus: true
+            }
+            onLoaded: item.forceActiveFocus()
+        }
     }
 
     // Dropped anywhere in the window, not only on the dialog. Letting a volume go over the
@@ -309,6 +333,8 @@ ApplicationWindow {
     DropArea {
         objectName: "window-drop"
         anchors.fill: parent
+        // A volume dropped before there is a library has nowhere to go.
+        enabled: !linkScreen.active
         onDropped: drop => {
             if (Imports.offerUrls(drop.urls) > 0) {
                 importDialog.phase = importDialog.proposing
@@ -365,6 +391,47 @@ ApplicationWindow {
         function onChanged() {
             if (Commands.trouble.length > 0)
                 Toasts.commandRefused(Commands.trouble)
+        }
+    }
+
+    // Linked: the shelf, the counts and the band were asked for before there was a library,
+    // and answered that there was none. Asked again now that there is.
+    Connections {
+        target: Linking
+
+        function onLinked() {
+            window.refreshAll()
+        }
+    }
+
+    // Unlinked, here or on the server: the link screen covers everything, and once a library
+    // is linked again the shelf is what is under it — not the settings the person left from.
+    // Moved: everything on screen was asked of the old address.
+    Connections {
+        target: Bond
+
+        function onUnlinked() {
+            while (Navigation.canGoBack)
+                Navigation.back()
+        }
+
+        function onMoved() {
+            window.refreshAll()
+        }
+    }
+
+    // A clicked link that found a library already linked: the settings, on the tab that holds
+    // the library, which shows the sentence that says why nothing else happened.
+    Connections {
+        target: Linking
+
+        function onRefusedWhileLinked() {
+            if (Navigation.destination !== Navigation.Settings)
+                Navigation.open(Navigation.Settings)
+            Qt.callLater(() => {
+                if (screen.item && screen.item.section !== undefined)
+                    screen.item.section = screen.item.library
+            })
         }
     }
 

@@ -662,6 +662,98 @@ QString keyRefused(const QString &said)
     return u"La clé a été refusée"_s + Nbsp + u": "_s + said;
 }
 
+QString certificateMismatch()
+{
+    return u"Le serveur à cette adresse ne présente pas le certificat attendu. Ne reliez pas "
+           u"cet appareil, et vérifiez le lien."_s;
+}
+
+QString noLibraryLinked()
+{
+    return u"Aucune bibliothèque reliée"_s;
+}
+
+QString linkIntro()
+{
+    return u"Ouvrez le lien de liaison sur cet appareil, ou collez-le ici. Il vient de "
+           u"leaf-server device add, ou d’un appareil déjà relié."_s;
+}
+
+QString linkField()
+{
+    return u"Lien de liaison"_s;
+}
+
+QString linkPlaceholder()
+{
+    return u"leaf://…"_s;
+}
+
+QString deviceNameField()
+{
+    return u"Nom de cet appareil"_s;
+}
+
+QString deviceNameHelp()
+{
+    return u"Pré-rempli avec le nom de la machine. C’est celui que le serveur affichera."_s;
+}
+
+QString linkAction(bool found)
+{
+    return found ? u"Relier à cette bibliothèque"_s : u"Relier"_s;
+}
+
+QString lookingForTheLibrary()
+{
+    return u"Leaf cherche la bibliothèque à cette adresse…"_s;
+}
+
+QString libraryFound(const QString &host)
+{
+    return u"Bibliothèque trouvée"_s + Nbsp + u": %1"_s.arg(host);
+}
+
+QString libraryFoundDetail(bool pinned, int series)
+{
+    const QString holds = libraryHolds(series);
+    return pinned ? u"Certificat conforme au lien · %1"_s.arg(holds) : holds;
+}
+
+QString notALink()
+{
+    return u"Collez le lien donné par leaf-server device add ou par un appareil relié. Il "
+           u"commence par leaf://."_s;
+}
+
+QString noLibraryAnswers()
+{
+    return u"Aucune bibliothèque Leaf ne répond à cette adresse depuis cet appareil. Si le "
+           u"serveur a donné plusieurs liens, essayez un autre."_s;
+}
+
+QString linkNoLongerValid()
+{
+    return u"Ce lien n’est plus valable"_s + Nbsp
+           + u": demandez-en un nouveau avec device add."_s;
+}
+
+QString nameTaken(const QString &name)
+{
+    return u"Un autre appareil s’appelle déjà %1."_s.arg(name);
+}
+
+QString nameNotAccepted()
+{
+    return u"Ce nom ne convient pas"_s + Nbsp
+           + u": de 1 à 40 caractères, sans caractère de contrôle."_s;
+}
+
+QString tooManyTries(const QString &seconds)
+{
+    return u"Trop d’essais ratés depuis cet appareil. Attendez %1 secondes."_s.arg(seconds);
+}
+
 QString tooManyWrongKeys(const QString &seconds)
 {
     return u"Trop de clés fausses ont été essayées. Attendez %1 secondes."_s
@@ -717,6 +809,233 @@ QString readableByOthers(const QString &path)
 {
     return u"%1 est lisible par d’autres que vous, il n’a donc pas été lu "
            u"du tout. Faites-en un chmod 600."_s.arg(path);
+}
+
+QString settingsFromEnvironment()
+{
+    return u"L’adresse et la clé viennent de l’environnement (LEAF_ADDRESS, LEAF_KEY), "
+           u"et Leaf ne les remplace pas. Retirez-les pour qu’il garde ses propres réglages."_s;
+}
+
+QString keyringKeptTheKey()
+{
+    return u"La clé n’a pas pu être retirée du trousseau de la session. Retirez-la à la main, "
+           u"entrée server-key du service Leaf."_s;
+}
+
+QString linkedLibrary()
+{
+    return u"Bibliothèque reliée"_s;
+}
+
+QString thisDevice()
+{
+    return u"Cet appareil"_s;
+}
+
+QString linkedOnLabel()
+{
+    return u"Relié le"_s;
+}
+
+QString linkedOn(const QDateTime &when)
+{
+    if (!when.isValid())
+        return {};
+    return QLocale(QLocale::French).toString(when.toLocalTime().date(), u"d MMMM yyyy"_s);
+}
+
+QString renameDevice()
+{
+    return u"Renommer"_s;
+}
+
+QString changeAddress()
+{
+    return u"Modifier l’adresse"_s;
+}
+
+QString addressPlaceholder()
+{
+    return u"https://…"_s;
+}
+
+QString tryThisAddress()
+{
+    return u"Essayer cette adresse"_s;
+}
+
+QString tryingTheAddress()
+{
+    return u"Leaf essaie la clé de cet appareil à cette adresse…"_s;
+}
+
+QString notAnAddress()
+{
+    return u"Ce n’est pas une adresse de bibliothèque. Elle s’écrit comme "
+           u"https://leaf.exemple.fr ou https://192.168.1.20:8081."_s;
+}
+
+QString httpsElsewhere()
+{
+    return u"Leaf ne se relie qu’en https à une autre machine."_s;
+}
+
+QString keyUnknownThere()
+{
+    return u"La bibliothèque à cette adresse ne connaît pas la clé de cet appareil"_s + Nbsp
+           + u": ce n’est pas la même. L’adresse n’a pas changé."_s;
+}
+
+QString unlinkDevice()
+{
+    return u"Délier cet appareil"_s;
+}
+
+QString unlinkQuestion()
+{
+    return u"Délier cet appareil"_s + Nbsp + u"?"_s;
+}
+
+QString unlinkWhat(const QString &name, const QString &host)
+{
+    return u"Sa clé est retirée du serveur"_s + Nbsp
+           + u": %1 ne pourra plus lire %2. Rien n’est supprimé de la bibliothèque, et la "
+             u"progression reste sur le serveur."_s.arg(name.isEmpty() ? u"cet appareil"_s
+                                                                         : name,
+                                                          host);
+}
+
+QString unlinkComeBack()
+{
+    return u"Pour revenir, il faudra un nouveau code."_s;
+}
+
+/// `name` as one word for a POSIX shell, whatever it holds. The commands below are copied
+/// into a root terminal, and a device names itself: inside double quotes a `$(…)` or a
+/// backtick in that name would run. Inside single quotes nothing is read, and the one
+/// character that ends them is closed, escaped and reopened.
+namespace {
+
+QString forTheShell(const QString &name)
+{
+    const QChar single(u'\'');
+    QString inside = name;
+    inside.replace(single, QString(single) + QChar(u'\\') + single + single);
+    return single + inside + single;
+}
+
+} // namespace
+
+QString unlinkIfSilent(const QString &name)
+{
+    // Configured by hand, the device has no name here: the server's list has it.
+    if (name.isEmpty())
+        return u"Cet appareil oubliera la bibliothèque. Si le serveur ne répond pas, "
+               u"retirez-le aussi avec sudo leaf-server device revoke, sous le nom que donne "
+               u"sudo leaf-server device list."_s;
+    return u"Cet appareil oubliera la bibliothèque. Si le serveur ne répond pas, retirez-le "
+           u"aussi avec sudo leaf-server device revoke %1."_s.arg(forTheShell(name));
+}
+
+QString unlinkedWithoutTheServer(const QString &name)
+{
+    if (name.isEmpty())
+        return u"Cet appareil a oublié la bibliothèque, mais le serveur n’a pas confirmé"_s
+               + Nbsp
+               + u": retirez-le avec sudo leaf-server device revoke, sous le nom que donne "
+                 u"sudo leaf-server device list."_s;
+    return u"Cet appareil a oublié la bibliothèque, mais le serveur n’a pas confirmé"_s + Nbsp
+           + u": retirez-le avec sudo leaf-server device revoke %1."_s.arg(forTheShell(name));
+}
+
+QString unlinkedAnOldKey()
+{
+    // No key in the sentence: it is on a screen, and a screen is photographed and shared.
+    return u"Cet appareil a oublié la bibliothèque. Il y entrait avec une clé de LEAF_KEYS, "
+           u"que le serveur ne peut pas retirer seul"_s
+           + Nbsp + u": enlevez-la de /etc/leaf/server.env, puis redémarrez leaf-server."_s;
+}
+
+QString unlinkGo()
+{
+    return u"Délier"_s;
+}
+
+QString deviceRevoked()
+{
+    return u"Cet appareil a été retiré de la bibliothèque. Reliez-le de nouveau pour la lire."_s;
+}
+
+QString revokedUnderEnvironment()
+{
+    return u"La bibliothèque ne reconnaît plus la clé donnée par LEAF_KEY. Leaf ne touche pas "
+           u"à l’environnement"_s + Nbsp
+           + u": retirez LEAF_ADDRESS et LEAF_KEY pour relier cet appareil."_s;
+}
+
+QString cutShortByANewPin()
+{
+    return u"La demande a été interrompue parce que l’adresse de la bibliothèque a changé. "
+           u"Elle n’est peut-être pas arrivée"_s + Nbsp + u": refaites-la."_s;
+}
+
+QString relayAnother()
+{
+    return u"Relier un autre appareil"_s;
+}
+
+QString relayIntro()
+{
+    // Unbroken between the number and its unit: « 10 » alone at the end of a line reads as
+    // ten of something the next line has to say.
+    return u"Ouvrez ce lien sur l’appareil à relier, ou scannez le QR code. Valable 10"_s
+           + Nbsp + u"minutes, une seule fois."_s;
+}
+
+QString copyTheLink()
+{
+    return u"Copier"_s;
+}
+
+QString linkCopied()
+{
+    return u"Copié"_s;
+}
+
+QString relayTimeLeft(int seconds)
+{
+    const int left = qMax(0, seconds);
+    return u"Valable encore %1:%2 · une seule fois"_s.arg(left / 60).arg(left % 60, 2, 10,
+                                                                          QChar(u'0'));
+}
+
+QString deviceRelayed(const QString &name)
+{
+    return name + u" relié"_s;
+}
+
+QString relayOnlyHere()
+{
+    return u"Ce lien passe par 127.0.0.1"_s + Nbsp
+           + u": il ne marche que sur cette machine, ou à travers un tunnel. Pour un autre "
+             u"appareil, lancez sudo leaf-server device add sur le serveur, avec "
+             u"LEAF_PUBLIC_URL réglée sur son adresse."_s;
+}
+
+QString relayRanOut()
+{
+    return u"Ce lien n’est plus valable. Demandez-en un autre."_s;
+}
+
+QString anotherLink()
+{
+    return u"Un autre lien"_s;
+}
+
+QString closeThePanel()
+{
+    return u"Fermer"_s;
 }
 
 QString importing()
@@ -1623,6 +1942,12 @@ QString scanStopped()
 QString copyKept()
 {
     return u"Copie enregistrée"_s;
+}
+
+QString alreadyLinked()
+{
+    return u"Cet appareil est déjà relié à une bibliothèque"_s + Nbsp
+           + u": déliez-le d’abord pour en changer."_s;
 }
 
 QString commandRefused()

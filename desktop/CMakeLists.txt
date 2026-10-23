@@ -37,6 +37,19 @@ find_package(ZLIB REQUIRED)
 
 qt_standard_project_setup(REQUIRES 6.4)
 
+# The QR code « Relier un autre appareil » draws: Nayuki's QR Code generator, C++ edition,
+# vendored as it was published and never edited — tag v1.8.0 of
+# github.com/nayuki/QR-Code-generator (tag object 7ad95ce, commit 720f62b), MIT, licence
+# beside the files. Vendored rather than found: no distribution packages the C++ edition,
+# and two files of pure computation are cheaper to carry than a dependency to install.
+#
+# Its own library, built without `-Werror`: our warnings are our rules, and an upstream file
+# kept byte for byte is not ours to make obey them. The headers are SYSTEM for the same
+# reason, so that what they say is not counted against the file that includes them.
+add_library(qrcodegen STATIC third_party/qrcodegen/qrcodegen.cpp)
+target_compile_options(qrcodegen PRIVATE -Wno-error)
+target_include_directories(qrcodegen SYSTEM INTERFACE third_party/qrcodegen)
+
 qt_add_executable(leaf-desktop
     src/main.cpp
     src/Boot.h
@@ -45,6 +58,18 @@ qt_add_executable(leaf-desktop
     src/Settings.cpp
     src/Server.h
     src/Server.cpp
+    src/Pinning.h
+    src/Pinning.cpp
+    src/Link.h
+    src/Link.cpp
+    src/Linking.h
+    src/Linking.cpp
+    src/Bond.h
+    src/Bond.cpp
+    src/QrImage.h
+    src/QrImage.cpp
+    src/Doorbell.h
+    src/Doorbell.cpp
     src/Api.h
     src/Api.cpp
     src/Theme.h
@@ -192,6 +217,8 @@ set(LEAF_QML
     qml/Glyph.qml
     qml/RoundedCover.qml
     qml/MiniTile.qml
+    qml/LinkView.qml
+    qml/RelayDialog.qml
 )
 foreach(qml_file IN LISTS LEAF_QML)
     string(REGEX REPLACE "^qml/" "" alias "${qml_file}")
@@ -201,6 +228,7 @@ endforeach()
 set(LEAF_IMAGES
     qml/assets/cover-shadow-light.png
     qml/assets/cover-shadow-dark.png
+    qml/assets/icons/add_link.svg
     qml/assets/icons/arrow_back.svg
     qml/assets/icons/book.svg
     qml/assets/icons/book_2.svg
@@ -211,11 +239,14 @@ set(LEAF_IMAGES
     qml/assets/icons/cloud_done.svg
     qml/assets/icons/cloud_off.svg
     qml/assets/icons/collections_bookmark.svg
+    qml/assets/icons/content_copy.svg
     qml/assets/icons/contrast.svg
     qml/assets/icons/dark_mode.svg
     qml/assets/icons/delete.svg
     qml/assets/icons/done_all.svg
     qml/assets/icons/download.svg
+    qml/assets/icons/dns.svg
+    qml/assets/icons/edit.svg
     qml/assets/icons/expand_more.svg
     qml/assets/icons/grid_view.svg
     qml/assets/icons/error.svg
@@ -294,6 +325,7 @@ target_link_libraries(leaf-desktop PRIVATE
     Qt6::Network
     Qt6::Concurrent
     ZLIB::ZLIB
+    qrcodegen
     ${QTKEYCHAIN_LIBRARIES}
 )
 
@@ -313,7 +345,8 @@ add_test(NAME keeps-the-key COMMAND keeps-the-key)
 
 qt_add_executable(talks-to-the-server
     tests/talks_to_the_server.cpp tests/Pretend.h
-    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Server.h src/Server.cpp)
+    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp)
 target_include_directories(talks-to-the-server PRIVATE src)
 target_link_libraries(talks-to-the-server PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
@@ -379,6 +412,10 @@ qt_add_executable(crosses-the-seam
     src/Cbz.h src/Cbz.cpp src/Manifest.h src/Manifest.cpp
     src/Settings.h src/Settings.cpp
     src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp
+    src/Link.h src/Link.cpp src/Linking.h src/Linking.cpp src/Bond.h src/Bond.cpp
+    src/QrImage.h src/QrImage.cpp
+    src/Doorbell.h src/Doorbell.cpp
     src/Fonts.h src/Fonts.cpp
     src/Theme.h src/Theme.cpp
     src/Words.h src/Words.cpp
@@ -423,7 +460,7 @@ qt_add_resources(crosses-the-seam "leaf-fonts-for-the-seam-test"
     FILES ${LEAF_FONTS})
 target_link_libraries(crosses-the-seam PRIVATE
     Qt6::Core Qt6::Gui Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Qml Qt6::Concurrent
-    Qt6::DBus Qt6::Test ZLIB::ZLIB ${QTKEYCHAIN_LIBRARIES})
+    Qt6::DBus Qt6::Test ZLIB::ZLIB qrcodegen ${QTKEYCHAIN_LIBRARIES})
 add_test(NAME crosses-the-seam COMMAND crosses-the-seam)
 
 # The shelf's model, against the same forty-line server. It holds rows, pages and says why it
@@ -431,6 +468,7 @@ add_test(NAME crosses-the-seam COMMAND crosses-the-seam)
 qt_add_executable(holds-a-shelf
     tests/holds_a_shelf.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp
     src/Api.h src/Api.cpp src/Words.h src/Words.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Rearrange.h src/Rearrange.cpp src/Shelf.h src/Shelf.cpp)
@@ -447,7 +485,8 @@ qt_add_executable(holds-the-imports
     src/Imports.h src/Imports.cpp src/Cbz.h src/Cbz.cpp src/Manifest.h src/Manifest.cpp
     src/Api.h src/Api.cpp src/Words.h src/Words.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
-    src/Server.h src/Server.cpp src/Settings.h src/Settings.cpp)
+    src/Server.h src/Server.cpp src/Settings.h src/Settings.cpp
+    src/Pinning.h src/Pinning.cpp)
 target_include_directories(holds-the-imports PRIVATE src)
 target_link_libraries(holds-the-imports PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Concurrent Qt6::Test ZLIB::ZLIB ${QTKEYCHAIN_LIBRARIES})
@@ -503,6 +542,7 @@ add_test(NAME warns-once COMMAND warns-once)
 qt_add_executable(holds-the-search
     tests/holds_the_search.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp
     src/Api.h src/Api.cpp src/Words.h src/Words.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Rearrange.h src/Rearrange.cpp
@@ -517,6 +557,7 @@ add_test(NAME holds-the-search COMMAND holds-the-search)
 qt_add_executable(holds-the-resume
     tests/holds_the_resume.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp
     src/Api.h src/Api.cpp src/Words.h src/Words.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Resume.h src/Resume.cpp)
@@ -531,6 +572,7 @@ add_test(NAME holds-the-resume COMMAND holds-the-resume)
 qt_add_executable(holds-the-series
     tests/holds_the_series.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp
     src/Api.h src/Api.cpp src/Words.h src/Words.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Series.h src/Series.cpp)
@@ -543,6 +585,7 @@ add_test(NAME holds-the-series COMMAND holds-the-series)
 qt_add_executable(holds-the-volumes
     tests/holds_the_volumes.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp
     src/Api.h src/Api.cpp src/Words.h src/Words.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Entries.h src/Entries.cpp
@@ -560,6 +603,7 @@ add_test(NAME holds-the-volumes COMMAND holds-the-volumes)
 qt_add_executable(holds-elsewhere
     tests/holds_elsewhere.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp
     src/Api.h src/Api.cpp src/Words.h src/Words.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Entries.h src/Entries.cpp src/SeriesCaptions.h src/SeriesCaptions.cpp
@@ -574,6 +618,7 @@ add_test(NAME holds-elsewhere COMMAND holds-elsewhere)
 qt_add_executable(weighs-a-deletion
     tests/weighs_a_deletion.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp
     src/Api.h src/Api.cpp src/Words.h src/Words.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Erasure.h src/Erasure.cpp)
@@ -586,6 +631,7 @@ add_test(NAME weighs-a-deletion COMMAND weighs-a-deletion)
 qt_add_executable(commands-the-library
     tests/commands_the_library.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp
     src/Api.h src/Api.cpp src/Words.h src/Words.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Commands.h src/Commands.cpp)
@@ -608,6 +654,7 @@ add_test(NAME holds-the-order COMMAND holds-the-order)
 qt_add_executable(holds-the-server-state
     tests/holds_the_server_state.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp
     src/Api.h src/Api.cpp src/Words.h src/Words.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Health.h src/Health.cpp src/Scan.h src/Scan.cpp)
@@ -619,6 +666,7 @@ add_test(NAME holds-the-server-state COMMAND holds-the-server-state)
 qt_add_executable(holds-the-filters
     tests/holds_the_filters.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp
     src/Api.h src/Api.cpp src/Words.h src/Words.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Rearrange.h src/Rearrange.cpp src/Shelf.h src/Shelf.cpp
@@ -633,15 +681,74 @@ add_test(NAME holds-the-filters COMMAND holds-the-filters)
 qt_add_executable(puts-the-key-where-it-belongs
     tests/puts_the_key_where_it_belongs.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp
     src/Covers.h src/Covers.cpp)
 target_include_directories(puts-the-key-where-it-belongs PRIVATE src)
 target_link_libraries(puts-the-key-where-it-belongs PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
 add_test(NAME puts-the-key-where-it-belongs COMMAND puts-the-key-where-it-belongs)
 
+# Which certificate is accepted, against a real TLS socket: the refusal happens inside a
+# handshake, and only a server that heard nothing proves the key never left.
+qt_add_executable(pins-a-certificate
+    tests/pins_a_certificate.cpp
+    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp src/Covers.h src/Covers.cpp)
+target_include_directories(pins-a-certificate PRIVATE src)
+target_compile_definitions(pins-a-certificate PRIVATE
+    LEAF_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+target_link_libraries(pins-a-certificate PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME pins-a-certificate COMMAND pins-a-certificate)
+
+# A pasted or clicked link, read into an address, a code and a pin: pure parsing.
+qt_add_executable(reads-a-link tests/reads_a_link.cpp src/Link.h src/Link.cpp)
+target_include_directories(reads-a-link PRIVATE src)
+target_link_libraries(reads-a-link PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME reads-a-link COMMAND reads-a-link)
+
+# Linking from a `leaf://` link, against a real TLS socket on 127.0.0.2 — an address a link
+# reads as another machine, so the check is held to the link's fingerprint as it would be on
+# the network. What the server heard is the proof that nothing left before « Relier ».
+qt_add_executable(links-a-device
+    tests/links_a_device.cpp
+    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Api.h src/Api.cpp
+    src/Pinning.h src/Pinning.cpp src/Link.h src/Link.cpp src/Linking.h src/Linking.cpp)
+target_include_directories(links-a-device PRIVATE src)
+target_compile_definitions(links-a-device PRIVATE
+    LEAF_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+target_link_libraries(links-a-device PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME links-a-device COMMAND links-a-device)
+
+# The tab « Bibliothèque »: renamed, moved, unlinked — and revoked by the server — against
+# real sockets, so that what a server heard is the proof the key went nowhere it should not.
+# And another device relayed in: the link, its code withdrawn, the QR code drawn from it.
+qt_add_executable(keeps-the-bond
+    tests/keeps_the_bond.cpp tests/Pretend.h
+    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp src/Words.h src/Words.cpp
+    src/Api.h src/Api.cpp src/Pinning.h src/Pinning.cpp src/Link.h src/Link.cpp
+    src/Linking.h src/Linking.cpp src/Bond.h src/Bond.cpp src/QrImage.h src/QrImage.cpp)
+target_include_directories(keeps-the-bond PRIVATE src)
+target_compile_definitions(keeps-the-bond PRIVATE
+    LEAF_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+target_link_libraries(keeps-the-bond PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::Network Qt6::Test qrcodegen
+    ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME keeps-the-bond COMMAND keeps-the-bond)
+
+# The second launch handing its link to the first, over a real local socket. Each case names
+# its own socket, so that a Leaf open on the machine running the test is never rung.
+qt_add_executable(answers-the-doorbell
+    tests/answers_the_doorbell.cpp src/Doorbell.h src/Doorbell.cpp)
+target_include_directories(answers-the-doorbell PRIVATE src)
+target_link_libraries(answers-the-doorbell PRIVATE Qt6::Core Qt6::Network Qt6::Test)
+add_test(NAME answers-the-doorbell COMMAND answers-the-doorbell)
+
 qt_add_executable(against-the-real-server EXCLUDE_FROM_ALL
     tests/against_real.cpp
-    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Server.h src/Server.cpp)
+    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp)
 target_include_directories(against-the-real-server PRIVATE src)
 target_link_libraries(against-the-real-server PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
@@ -669,6 +776,9 @@ add_test(NAME tests-stay-off-the-bus
 add_test(NAME one-file-owns-it
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/one_file_owns_it.py)
 
+add_test(NAME requests-stay-on-http1
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/requests_stay_on_http1.py)
+
 add_test(NAME taps-stay-where-they-land
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/taps_stay_where_they_land.py)
 
@@ -676,7 +786,8 @@ add_test(NAME taps-stay-where-they-land
 # independent of a desktop session.
 set_tests_properties(keeps-the-key talks-to-the-server keeps-its-contrast embeds-its-fonts
     holds-a-shelf holds-the-search holds-the-resume holds-the-filters
-    puts-the-key-where-it-belongs
+    puts-the-key-where-it-belongs pins-a-certificate links-a-device answers-the-doorbell
+    keeps-the-bond
     PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # The seam test verifies the rounded shader one pixel at a time. It therefore needs the real

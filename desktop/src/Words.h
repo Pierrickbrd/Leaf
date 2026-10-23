@@ -20,6 +20,7 @@
 #include "Navigation.h"
 #include "Widths.h"
 
+#include <QDateTime>
 #include <QString>
 
 #include <optional>
@@ -413,6 +414,9 @@ QString scanEnded();
 QString scanStopped();
 QString copyKept();
 QString commandRefused();
+/// « Cet appareil est déjà relié à une bibliothèque : déliez-le d’abord pour en changer. » —
+/// what a clicked link is answered when there is already a library, which it never replaces.
+QString alreadyLinked();
 
 /// « Voir », « Réessayer », « Ouvrir le dossier » — the one thing a bubble may offer besides
 /// its cross. Nothing for the ones with nothing to propose: a button that only closes is the
@@ -527,6 +531,50 @@ QString unreadableAnswer();
 /// « La clé a été refusée. », and what the server said after it when it said anything.
 QString keyRefused(const QString &said);
 
+/// « Le serveur à cette adresse ne présente pas le certificat attendu. … » — the spec's own
+/// sentence, word for word. It offers no way past: a certificate that is not the pinned one
+/// is either a server that changed or somebody standing in front of it, and this client
+/// cannot tell which.
+QString certificateMismatch();
+
+// ——— Linking a device: the screen « Aucune bibliothèque reliée » ————————————————————
+//
+// The refusals are the spec's own sentences, word for word, with the typography this file
+// promises: the spec writes them with straight apostrophes and code quotes it cannot carry
+// on a screen.
+
+/// The screen's title, its one paragraph, and the names of its two fields.
+QString noLibraryLinked();
+QString linkIntro();
+QString linkField();
+/// What the empty field shows: the shape of what goes in it.
+QString linkPlaceholder();
+QString deviceNameField();
+QString deviceNameHelp();
+/// « Relier » while there is nothing to link to, « Relier à cette bibliothèque » once found.
+QString linkAction(bool found);
+/// Said while the address in the link is being reached, before anything is known of it.
+QString lookingForTheLibrary();
+/// « Bibliothèque trouvée : 192.168.1.20 », and under it what was checked and what it holds.
+QString libraryFound(const QString &host);
+QString libraryFoundDetail(bool pinned, int series);
+/// « Collez le lien donné par leaf-server device add … » — what is not a link is told what
+/// one looks like.
+QString notALink();
+/// « Aucune bibliothèque Leaf ne répond à cette adresse … » — a server gives one link per
+/// address it listens on, and only some of them are reachable from a given device.
+QString noLibraryAnswers();
+/// « Ce lien n’est plus valable … » — expired, already used, or never issued: the server
+/// gives one answer for the three, and so does this.
+QString linkNoLongerValid();
+/// « Un autre appareil s’appelle déjà Bureau. » — the code is still good.
+QString nameTaken(const QString &name);
+/// The server refused the name itself: empty, too long, or holding a control character.
+QString nameNotAccepted();
+/// Failed codes count against the same throttle as wrong keys, and this is said in terms of
+/// codes rather than of keys — this device has no key yet.
+QString tooManyTries(const QString &seconds);
+
 /// « Trop de clés fausses ont été essayées. Attendez 30 secondes. » — the server's own
 /// `Retry-After`, said rather than counted down, because nothing here ticks.
 QString tooManyWrongKeys(const QString &seconds);
@@ -559,6 +607,80 @@ QString noKey(const QString &file);
 /// anyone can read is a key already given away; Leaf refuses it rather than use it, and
 /// says the one command that fixes it.
 QString readableByOthers(const QString &path);
+
+/// Said when the client is asked to write its settings while `LEAF_ADDRESS` or `LEAF_KEY` is
+/// set. The environment wins for the run; a link written underneath it would stay invisible
+/// until the day the environment went away, so nothing is written and this says why.
+QString settingsFromEnvironment();
+
+/// Said when unlinking could not take the key out of the keyring. Everything else is forgotten
+/// already; this names the one thing left and where it sits, so it can be removed by hand.
+QString keyringKeptTheKey();
+
+// ——— Once linked: the settings tab « Bibliothèque » ——————————————————————————————
+
+/// The card's title, and the names of its two lines.
+QString linkedLibrary();
+QString thisDevice();
+QString linkedOnLabel();
+/// « 22 octobre 2026 » — the day, not the minute: nobody needs the time a device was linked.
+QString linkedOn(const QDateTime &when);
+/// What the pencil beside the name does. Never drawn: a screen reader says it.
+QString renameDevice();
+/// « Modifier l’adresse », the shape of what goes in its field, and the button that tries it.
+QString changeAddress();
+QString addressPlaceholder();
+QString tryThisAddress();
+/// Said while the key is tried at the new address, before anything is known of it.
+QString tryingTheAddress();
+/// What was typed is not an address a library can be at.
+QString notAnAddress();
+/// « Leaf ne se relie qu’en https à une autre machine. » — http only ever on the loopback.
+QString httpsElsewhere();
+/// The new address answered, and did not know this device's key: not the same library, or
+/// not this device's. Nothing is written.
+QString keyUnknownThere();
+/// « Délier cet appareil » and its confirmation: the question, what goes, how to come back,
+/// what to do when the server does not answer, and the button.
+QString unlinkDevice();
+QString unlinkQuestion();
+QString unlinkWhat(const QString &name, const QString &host);
+QString unlinkComeBack();
+QString unlinkIfSilent(const QString &name);
+QString unlinkGo();
+/// The link screen, after an unlinking the server did not confirm — it did not answer, or
+/// the client was holding back and never asked: the key may still work there.
+QString unlinkedWithoutTheServer(const QString &name);
+/// The link screen, after an unlinking the server refused with a 409: this device came in
+/// with a key from `LEAF_KEYS`, which no device command removes — only the file does.
+QString unlinkedAnOldKey();
+/// « Cet appareil a été retiré de la bibliothèque. … » — the link screen, opened because the
+/// server no longer knows this device's key: `device revoke` was run.
+QString deviceRevoked();
+/// The same refusal for a key the environment set, which Leaf does not erase.
+QString revokedUnderEnvironment();
+/// A command cancelled because the pin changed under it, and not by anything the server
+/// said: it may have arrived, and it may not.
+QString cutShortByANewPin();
+/// « Relier un autre appareil » — the button, and the panel it opens: what to do with the
+/// link, how long it lasts, and the one action this client has for it.
+QString relayAnother();
+QString relayIntro();
+QString copyTheLink();
+/// Said in place of « Copier » for a moment, so that a click that worked looks like one.
+QString linkCopied();
+/// « Valable encore 9:42 · une seule fois » — minutes and seconds, the way a timer reads.
+QString relayTimeLeft(int seconds);
+/// « PC du salon relié » — the other device used the code, and the panel can be closed.
+QString deviceRelayed(const QString &name);
+/// The code ran out, or was withdrawn elsewhere, before anybody used it.
+QString relayRanOut();
+/// Under a link built from the loopback: it opens this library on this machine and nowhere
+/// else, so another device is pointed to the server's own `device add`.
+QString relayOnlyHere();
+/// Another code, for a panel whose code ran out.
+QString anotherLink();
+QString closeThePanel();
 
 // ——— L'import ———————————————————————————————————————————————————————————————
 
