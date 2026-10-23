@@ -229,14 +229,22 @@ void Shelf::narrowTo(const QVariantMap &narrowing)
     m_narrowing = asked;
 
     // Emptied, which `reload` is careful never to do: here there is nothing worth keeping.
+    // The total goes before the view hears of the reset: an empty shelf still holding the old
+    // total looked one page short to the grid, which asked for page two of the old criteria.
     beginResetModel();
     m_held.clear();
-    endResetModel();
     m_total = 0;
+    endResetModel();
 
     emit criteriaChanged();
     emit changed();
     reload();
+}
+
+void Shelf::startOver()
+{
+    m_query.clear();
+    narrowTo({});
 }
 
 void Shelf::sortBy(const QString &order)

@@ -60,7 +60,8 @@ QVariantList nature(const Api::Series &one)
         // What the publisher announces, beside the state of the run — the two are one line
         // because « en cours » alone leaves « of how many? » unanswered.
         if (const auto declared = one.publication.declaredVolumes; declared.has_value())
-            said_ += u" · "_s + Words::volumes(*declared, one.medium) + u" annoncés"_s;
+            said_ += u" · "_s + Words::volumes(*declared, one.medium)
+                     + (*declared >= 2 ? u" annoncés"_s : u" annoncé"_s);
         pair(said, Status, said_);
     }
     pair(said, Age, one.ageRating.value_or(QString()));

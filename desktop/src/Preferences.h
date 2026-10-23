@@ -65,6 +65,7 @@ class Preferences : public QObject
     /// no `.qml` writes a word of French.
     Q_PROPERTY(QString warningsTitle READ warningsTitle CONSTANT)
     Q_PROPERTY(QString cornerTitle READ cornerTitle CONSTANT)
+    Q_PROPERTY(QString eventColumn READ eventColumn CONSTANT)
     Q_PROPERTY(QString bubbleColumn READ bubbleColumn CONSTANT)
     Q_PROPERTY(QString desktopColumn READ desktopColumn CONSTANT)
 
@@ -155,12 +156,20 @@ public:
     QVariantList warnings() const;
     QString warningsTitle() const;
     QString cornerTitle() const;
+    QString eventColumn() const;
     QString bubbleColumn() const;
     QString desktopColumn() const;
     /// Whether this family warns at all, and whether it escalates to the desktop. Asked by
-    /// name so that the one place that decides is the one that holds the answer.
+    /// name so that the one place that decides is the one that holds the answer. A family
+    /// that does not concern the profile neither bubbles nor reaches the desktop, whatever
+    /// was switched while another profile read: `Toasts` asks only these two.
     bool bubbles(Warns which) const;
     bool reachesTheDesktop(Warns which) const;
+    /// Which families concern the profile this device reads as; all of them until told. A
+    /// profile that cannot import is not offered a switch for imports — it would be a switch
+    /// wired to nothing it can ever do. `Boot` says it, from `Profiles`, so that this class
+    /// does not depend on the one that knows the rights.
+    void concern(bool imports, bool scans, bool downloads);
     Q_INVOKABLE void showBubble(Warns which, bool wanted);
     Q_INVOKABLE void reachTheDesktop(Warns which, bool wanted);
 
@@ -191,6 +200,11 @@ private:
     /// nobody. It is being pestered that makes somebody open this screen, not silence.
     QHash<Warns, bool> m_bubbles;
     QHash<Warns, bool> m_desktop;
+    /// Failures concern everybody and are not a member.
+    bool m_concernsImports = true;
+    bool m_concernsScans = true;
+    bool m_concernsDownloads = true;
+    bool concerns(Warns which) const;
     /// Where the desktop puts its own, so the place one has already learned to look — and
     /// the middle stays clear, which is where the eye goes on a wall of covers.
     Corner m_corner = Corner::BottomRight;

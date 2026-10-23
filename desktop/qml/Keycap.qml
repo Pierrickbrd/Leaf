@@ -22,16 +22,20 @@ Rectangle {
     property string text: ""
     property string glyph: ""
     property bool wide: false
-    readonly property int face: Widths.scale.icon(28)
-    readonly property int lip: Widths.scale.icon(6)
+    /// The same key a size down, for a list of keys that sits among words (the settings
+    /// screen's) and not on a card of its own: the full key made every line of it taller than
+    /// the words it explains.
+    property bool compact: false
+    readonly property int face: Widths.scale.icon(cap.compact ? 20 : 28)
+    readonly property int lip: Widths.scale.icon(cap.compact ? 4 : 6)
     readonly property real content: cap.glyph.length > 0 ? mark.width : word.implicitWidth
 
-    implicitWidth: Math.max(Widths.scale.icon(32), Math.ceil(cap.content))
-                   + (cap.wide ? Widths.scale.icon(22) : 0)
+    implicitWidth: Math.max(Widths.scale.icon(cap.compact ? 24 : 32), Math.ceil(cap.content))
+                   + (cap.wide ? Widths.scale.icon(cap.compact ? 16 : 22) : 0)
     implicitHeight: cap.face + cap.lip
     width: implicitWidth
     height: implicitHeight
-    radius: Widths.scale.icon(7)
+    radius: Widths.scale.icon(cap.compact ? 5 : 7)
     color: Theme.emeraldLip
     antialiasing: true
 
@@ -57,7 +61,7 @@ Rectangle {
             text: cap.text
             color: Theme.onEmerald
             font.family: Theme.textFamily
-            font.pixelSize: Widths.scale.caption(13)
+            font.pixelSize: Widths.scale.caption(cap.compact ? 11 : 13)
             font.weight: Font.Medium
         }
 
@@ -67,7 +71,7 @@ Rectangle {
             anchors.centerIn: parent
             visible: cap.glyph.length > 0
             source: cap.glyph.length > 0 ? "assets/icons/" + cap.glyph + ".svg" : ""
-            side: Widths.scale.icon(cap.wide ? 20 : 18)
+            side: Widths.scale.icon(cap.compact ? (cap.wide ? 14 : 12) : (cap.wide ? 20 : 18))
             tint: Theme.onEmerald
         }
     }

@@ -390,6 +390,32 @@ private slots:
         QCOMPARE(scan.stateLabel(), Words::scanState(Words::Scanning::Running));
     }
 
+    /// The tabs are what this profile manages, in the design's order. A reader has no devices
+    /// and no library to manage; a restricted profile not even itself. A kind this client was
+    /// not taught gets the narrowest set, and so does the moment before the server has said.
+    void the_tabs_follow_the_profile()
+    {
+        const auto names = [this](const QString &kind) {
+            QStringList out;
+            for (const QVariant &one : m_settings->sections(kind)) {
+                const QVariantMap tab = one.toMap();
+                if (tab.value(u"label"_s).toString().isEmpty())
+                    out << u"(no label)"_s;
+                out << tab.value(u"name"_s).toString();
+            }
+            return out;
+        };
+        QCOMPARE(names(u"principal"_s),
+                 QStringList({u"general"_s, u"profiles"_s, u"devices"_s, u"library"_s,
+                              u"notifications"_s, u"about"_s}));
+        QCOMPARE(names(u"reader"_s), QStringList({u"general"_s, u"profiles"_s,
+                                                  u"notifications"_s, u"about"_s}));
+        const QStringList narrow{u"general"_s, u"notifications"_s, u"about"_s};
+        QCOMPARE(names(u"restricted"_s), narrow);
+        QCOMPARE(names(u"guest"_s), narrow);
+        QCOMPARE(names(QString()), narrow);
+    }
+
     /// One library, one scan. The same work done twice produces a report nobody can
     /// attribute to either run.
     void a_scan_already_running_is_not_started_again()

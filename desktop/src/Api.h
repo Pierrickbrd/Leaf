@@ -745,6 +745,60 @@ struct CodeState {
     QString name;
 };
 
+/// Who a profile is. The server writes three words; a fourth is a server that learnt one
+/// before this client did, and the profile stands as `Other` — which every right below treats
+/// as the narrowest, because a profile this client cannot name must never be handed more than
+/// the least it could be.
+enum class Kind { Principal, Reader, Restricted, Other };
+/// What the library's code is for, never the code itself.
+enum class CodeScope { None, Restricted, Everything };
+
+/// Always the three, for every profile: all true for the principal, all false for a
+/// restricted one. `erase` is the contract's `delete`, which is a keyword here.
+struct ProfileRights {
+    bool import = false;
+    bool edit = false;
+    bool erase = false;
+};
+
+struct Profile {
+    QString id;
+    QString name;
+    /// One of the palette's sixteen, by its unaccented name; the screen owns what it looks like.
+    QString color;
+    Kind kind = Kind::Other;
+    /// Only a restricted profile has one.
+    std::optional<int> maxAge;
+    ProfileRights rights;
+};
+
+/// What `GET /profiles` answers, and `PUT /profiles/active` after a switch: every profile, and
+/// where the calling device sits among them.
+struct Seating {
+    QList<Profile> profiles;
+    /// The id of the profile this device reads as.
+    QString active;
+    /// The device opens on `active` without asking who reads.
+    bool kept = false;
+    /// The profile it sat on was deleted: every route but two answers it 409 until it chooses.
+    bool choosing = false;
+    /// That profile was restricted, so choosing asks the code.
+    bool held = false;
+    CodeScope code = CodeScope::None;
+};
+
+/// One row of the principal's Devices tab: a device, and the profile it sits on.
+struct DeviceSeat {
+    QString id;
+    QString name;
+    /// Milliseconds since the epoch; absent until its first request.
+    std::optional<qint64> seenAt;
+    QString profile;
+    bool kept = false;
+    /// This is the device asking.
+    bool here = false;
+};
+
 /// What a parse produced, or what stopped it.
 ///
 /// A `QString` and not a bool: "series[3]: name is missing" is something a person can act on,
@@ -792,6 +846,20 @@ Read<Device> device(const QJsonObject &from);
 Read<Linked> linked(const QJsonObject &from);
 Read<IssuedCode> issuedCode(const QJsonObject &from);
 Read<CodeState> codeState(const QJsonObject &from);
+Read<ProfileRights> rights(const QJsonObject &from);
+Read<Profile> profile(const QJsonObject &from);
+Read<Seating> seating(const QJsonObject &from);
+Read<DeviceSeat> deviceSeat(const QJsonObject &from);
+Read<QList<DeviceSeat>> deviceSeats(const QJsonObject &from);
+
+/// What `POST /profiles/code/recovery` and `/recover` answer with: the recovery code, in the
+/// clear this once. A body without it is refused, since a window that says « notez-le » over
+/// nothing would lose the one chance there is.
+Read<QString> recoveryCode(const QJsonObject &from);
+/// A word the server wrote for a kind, and `Other` for any this client was not taught.
+Kind kind(const QString &word);
+CodeScope codeScope(const QString &word);
+QString spell(CodeScope value);
 
 /// The contract's spellings, so that a test can walk them rather than trust a switch.
 Medium medium(const QString &word);

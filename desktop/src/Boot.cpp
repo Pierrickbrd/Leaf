@@ -6,6 +6,7 @@
 #include "Linking.h"
 #include "Notifier.h"
 #include "Preferences.h"
+#include "Profiles.h"
 #include "Theme.h"
 #include "Toasts.h"
 
@@ -142,6 +143,26 @@ void run(QQmlApplicationEngine &engine, const QGuiApplication &application,
         qWarning().noquote()
             << u"error resolving the Theme singleton — the interface will stay in its light "
                u"palette"_s;
+
+    // The notification families follow the rights of whoever reads: the principal alone
+    // is told about scans, and a switch for what a profile cannot do is a switch for
+    // nothing. Joined here, where both are known, because `Preferences` is built by tests
+    // that have no profiles.
+    auto *reading = engine.singletonInstance<Profiles *>(qmlTypeId("Leaf", 1, 0, "Profiles"));
+    auto *kept = engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+    if (reading && kept) {
+        const auto follow = [reading, kept] {
+            // Every family until the server has said who reads, so that nothing is hidden
+            // from a profile that is only not known yet.
+            if (reading->active().isEmpty())
+                kept->concern(true, true, true);
+            else
+                kept->concern(reading->canImport(), reading->isPrincipal(),
+                              reading->canExport());
+        };
+        QObject::connect(reading, &Profiles::changed, kept, follow);
+        follow();
+    }
 
     // A clicked link, from the command line or from a launch that found this one already
     // there. Resolved after the load for the reason the `Theme` is: the module does not exist

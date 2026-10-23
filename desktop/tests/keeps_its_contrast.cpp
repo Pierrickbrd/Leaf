@@ -11,6 +11,8 @@
 #include <QGuiApplication>
 #include <QMetaProperty>
 #include <QPalette>
+#include <QSet>
+#include <QSignalSpy>
 #include <QTest>
 
 #include <cmath>
@@ -105,6 +107,69 @@ private slots:
         }
     }
 
+    /// The initial of a profile is written on its tint, so it is measured there and not against
+    /// the paper: thirty-two pairs, sixteen colours in two themes. The ink is the surface tone
+    /// of the theme it is in, and the tints were chosen so that it reads on every one.
+    void the_initial_of_a_profile_reads_on_each_of_its_sixteen_tints()
+    {
+        for (const bool dark : {false, true}) {
+            Theme theme;
+            theme.setDark(dark);
+            QCOMPARE(theme.profileColors().size(), 16);
+            QCOMPARE(theme.profileInk(), QColor::fromRgb(dark ? 0x0C100Eu : 0xF0ECE3u));
+            const QVariantMap tints = theme.profileTints();
+            for (const QString &id : theme.profileColors()) {
+                const double measured =
+                    contrast(theme.profileInk(), tints.value(id).value<QColor>());
+                QVERIFY2(measured >= 4.5,
+                         qPrintable(u"%1 %2 falls to %3:1, under 4,5:1"_s
+                                        .arg(dark ? u"dark"_s : u"light"_s, id)
+                                        .arg(measured, 0, 'f', 2)));
+            }
+        }
+    }
+
+    /// Two colours that drew the same would make a swatch picker lie, and a word the client
+    /// was not taught must still draw something.
+    void sixteen_tints_are_distinct_and_an_unknown_one_is_slate()
+    {
+        for (const bool dark : {false, true}) {
+            Theme theme;
+            theme.setDark(dark);
+            const QVariantMap tints = theme.profileTints();
+            QSet<QRgb> seen;
+            for (const QString &id : theme.profileColors())
+                seen.insert(tints.value(id).value<QColor>().rgb());
+            QCOMPARE(seen.size(), 16);
+            const QColor slate = tints.value(u"ardoise"_s).value<QColor>();
+            QCOMPARE(theme.profileTintIn(tints, u"chartreuse"_s), slate);
+            QCOMPARE(theme.profileTintIn(tints, QString()), slate);
+            QCOMPARE(theme.profileTintIn(tints, u"terre"_s),
+                     tints.value(u"terre"_s).value<QColor>());
+        }
+        Theme theme;
+        QCOMPARE(theme.profileColors().first(), u"emeraude"_s);
+        QCOMPARE(theme.profileColors().last(), u"terre"_s);
+    }
+
+    /// A swatch that was bound to the map must turn with the theme by itself: the map and the
+    /// ink notify, so nothing but the binding has to know.
+    void the_tints_and_the_ink_follow_the_theme()
+    {
+        Theme theme;
+        theme.setDark(false);
+        const QVariantMap pale = theme.profileTints();
+        const QColor paleInk = theme.profileInk();
+        QSignalSpy turned(&theme, &Theme::changed);
+        theme.setDark(true);
+        QCOMPARE(turned.count(), 1);
+        QVERIFY(theme.profileTints() != pale);
+        QVERIFY(theme.profileInk() != paleInk);
+        QCOMPARE(theme.metaObject()->property(
+                     theme.metaObject()->indexOfProperty("profileTints")).notifySignal().name(),
+                 QByteArray("changed"));
+    }
+
     /// A token given a value in one theme and forgotten in the other.
     void every_token_has_a_value_in_both_themes()
     {
@@ -121,7 +186,7 @@ private slots:
         // size catches a token dropped from the class or a `metaType().id()` filter that
         // stopped matching — neither of which the key comparison could ever see.
         QVERIFY(!pale.isEmpty());
-        QCOMPARE(pale.size(), 21);
+        QCOMPARE(pale.size(), 22);
         for (auto it = pale.constBegin(); it != pale.constEnd(); ++it)
             QVERIFY2(it.value() != deep.value(it.key()),
                      qPrintable(u"%1 is the same colour in both themes"_s.arg(it.key())));

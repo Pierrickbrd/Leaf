@@ -418,11 +418,11 @@ private slots:
         waitFor(settings);
         QCOMPARE(settings.storageLabel(), Words::keyStorage(Words::KeyFrom::Environment));
         QCOMPARE(settings.keyTitle(), Words::theKey());
-        // Three: général, notifications, bibliothèque. Counted rather than named, because
+        // Six for the principal, who manages everything. Counted rather than named, because
         // what this test is about is the key — but counted all the same, so that a section
         // added without a word to put on its pill fails here rather than on screen.
-        QCOMPARE(settings.sections().size(), 3);
-        for (const QVariant &one : settings.sections())
+        QCOMPARE(settings.sections(QStringLiteral("principal")).size(), 6);
+        for (const QVariant &one : settings.sections(QStringLiteral("principal")))
             QVERIFY(!one.toMap().value(QStringLiteral("label")).toString().isEmpty());
         QCOMPARE(settings.missing(), Words::noKey(Settings::configurationFile()));
         settings.setAddress({});

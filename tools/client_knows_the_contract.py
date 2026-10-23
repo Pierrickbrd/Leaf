@@ -84,6 +84,13 @@ WATCHED = {
     "Device": ("whole", ["device"]),
     "IssuedCode": ("whole", ["issuedCode"]),
     "CodeState": ("whole", ["codeState"]),
+    # Who reads. `whole`: every field of a profile is shown or decides what a screen offers —
+    # a right the client stopped reading is a button that stays on for someone who may not.
+    "Profile": ("whole", ["profile"]),
+    "ProfileRights": ("whole", ["rights"]),
+    "Profiles": ("whole", ["seating"]),
+    "DeviceEntry": ("whole", ["deviceSeat"]),
+    "Devices": ("whole", ["deviceSeats"]),
     "Entry": ("part", ["upNext", "entry"]),
     "Progress": ("part", ["upNext", "progress"]),
     # `raw` (what the file said) and `position` (order inside the entry) stay unread on

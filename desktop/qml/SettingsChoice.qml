@@ -166,6 +166,9 @@ Item {
                                                      : choice.sized(15)
                     anchors.verticalCenter: parent.verticalCenter
                     text: pill.modelData.label
+                    // Plain, never rich: a name typed on another device — « <b>x</b> » — is shown as
+                    // typed, not drawn as markup.
+                    textFormat: Text.PlainText
                     color: pill.lit ? Theme.emerald : Theme.inkSoft
                     font.family: Theme.textFamily
                     font.pixelSize: choice.scaled ? Widths.scale.body(14) : 14
