@@ -47,6 +47,9 @@ public:
         /// built with a brace list, warnings are errors, and a field added with none would
         /// break the five of them that have nothing to say about it.
         QByteArray file = {};
+        /// The seconds a 429 says to wait, as sent. `trouble` words them for the key, and a
+        /// route that takes the code has its own throttle and its own sentence for it.
+        QString retryAfter = {};
 
         bool went() const { return trouble.isEmpty(); }
     };

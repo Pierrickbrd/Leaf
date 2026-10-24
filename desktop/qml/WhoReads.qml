@@ -18,7 +18,10 @@ FocusScope {
     /// Every route but this screen's is refused until somebody is chosen, so there is no
     /// shelf to go back to.
     readonly property bool mustChoose: Profiles.choosing
-    readonly property bool closable: !locked && !mustChoose
+    /// Opened at launch on a principal this device does not keep, behind the code: anybody
+    /// may be sitting there, so no way out but a profile.
+    readonly property bool unproven: Profiles.unproven
+    readonly property bool closable: !locked && !mustChoose && !unproven
     property bool keep: false
 
     /// The code window (9b): `target` is a profile of `Profiles.list`, or null with `add`.
@@ -28,12 +31,14 @@ FocusScope {
     signal manageAsked()
     signal dismissed()
 
-    /// Whether the table of the design asks the code before reading as `target`.
+    /// Whether the table of the design asks the code before reading as `target`. Only a device
+    /// that retains the principal reaches it freely, as the server rules: one merely left on
+    /// it reopened there for anyone.
     function needsCode(target) {
         if (whoReads.locked)
             return true
         return target.kind === "principal" && Profiles.codeScope === "everything"
-                && !Profiles.isPrincipal
+                && !(Profiles.isPrincipal && Profiles.kept)
     }
 
     /// Only a profile free to leave may be kept: a device that keeps a restricted profile is
@@ -44,8 +49,10 @@ FocusScope {
 
     function choose(target) {
         // The profile already reading: nothing to change, unless it is now to be kept —
-        // which `Profiles` does not count as a switch, so nothing is reloaded for it.
-        if (target.current && !whoReads.mustChoose) {
+        // which `Profiles` does not count as a switch, so nothing is reloaded for it. Not the
+        // principal on a seat that does not retain it: staying there is the code's to allow.
+        const stays = target.kind !== "principal" || !whoReads.needsCode(target)
+        if (target.current && !whoReads.mustChoose && stays) {
             if (whoReads.keeps(target))
                 Profiles.switchTo(target.id, "", true)
             whoReads.dismissed()
@@ -266,7 +273,7 @@ FocusScope {
                 id: addTile
 
                 objectName: "who-reads-add"
-                visible: !whoReads.locked && !whoReads.mustChoose
+                visible: whoReads.closable
                 width: 140
                 spacing: 12
                 activeFocusOnTab: visible
@@ -341,7 +348,7 @@ FocusScope {
         LeafTextAction {
             objectName: "who-reads-manage"
             anchors.horizontalCenter: parent.horizontalCenter
-            visible: !whoReads.locked && !whoReads.mustChoose
+            visible: whoReads.closable
             label: Profiles.words.manageProfiles
             onTriggered: whoReads.manageAsked()
         }

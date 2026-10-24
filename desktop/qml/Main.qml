@@ -103,12 +103,15 @@ ApplicationWindow {
 
     /// The code window, for `target` (a profile of `Profiles.list`) or for adding one
     /// (`mode` « add », no target). Opened here so that « Qui lit ? » and the settings ask it
-    /// the same way; the window itself is the next step's.
+    /// the same way. « Retenir » is read now, as « Qui lit ? » would have sent it.
     function askForCode(target, mode) {
+        codeDialog.ask(target, mode, mode === "switch" && whoReads.keeps(target))
     }
 
     /// The profile window: `mode` « new », « self » or « edit », `profile` the one edited.
-    function openProfileDialog(mode, profile) {
+    /// `principalCode` is the code typed in the code window before adding from another
+    /// profile: the server checks it with the profile it creates, not before.
+    function openProfileDialog(mode, profile, principalCode) {
     }
 
     /// Réglages › Profils; the settings screen picks the tab once it has one.
@@ -556,6 +559,12 @@ ApplicationWindow {
     // rather than on the page: the same modal opens from a shelf tile, and the shelf is not
     // the page.
     EraseDialog { }
+
+    CodeDialog {
+        id: codeDialog
+
+        onCodeTyped: code => window.openProfileDialog("new", null, code)
+    }
 
     ImportDialog {
         id: importDialog

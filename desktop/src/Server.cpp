@@ -358,10 +358,10 @@ Server::Answer Server::read(QNetworkReply *reply, Reading reading) const
     case 403:
         return {status, body,
                 Words::keyRefused(said)};
-    case 429:
-        return {status, body,
-                Words::tooManyWrongKeys(
-                    QString::fromUtf8(reply->rawHeader("Retry-After")))};
+    case 429: {
+        const QString seconds = QString::fromUtf8(reply->rawHeader("Retry-After"));
+        return {status, body, Words::tooManyWrongKeys(seconds), {}, seconds};
+    }
     case 404:
         return {status, body, said.isEmpty() ? Words::noSuchThing() : said};
     default:

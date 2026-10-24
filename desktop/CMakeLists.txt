@@ -159,6 +159,7 @@ set(LEAF_QML
     qml/AppBar.qml
     qml/ProfileSquare.qml
     qml/WhoReads.qml
+    qml/CodeDialog.qml
     qml/FilterChip.qml
     qml/GenrePill.qml
     qml/FilterPills.qml

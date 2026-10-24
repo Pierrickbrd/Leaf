@@ -57,6 +57,12 @@ class Profiles : public QObject
     /// refusal of any route announced it.
     Q_PROPERTY(bool choosing READ choosing NOTIFY changed)
     Q_PROPERTY(bool held READ held NOTIFY changed)
+    /// The launch found this device on the principal without keeping it, while the code guards
+    /// the way back to the principal: nobody has shown yet that the principal is the one
+    /// reading. Until a profile is chosen, « Qui lit ? » cannot be left — no cross, no Escape,
+    /// no adding, no settings — which is what the code, asked of the principal's tile on any
+    /// seat not retained, cannot cover by itself.
+    Q_PROPERTY(bool unproven READ unproven NOTIFY changed)
     /// A request of this model is out.
     Q_PROPERTY(bool busy READ busy NOTIFY changed)
     /// What went wrong last, in words; empty after a request that went.
@@ -86,6 +92,7 @@ public:
     QString codeScope() const { return Api::spell(m_seating.code); }
     bool choosing() const { return m_seating.choosing || m_mustChoose; }
     bool held() const { return m_seating.held; }
+    bool unproven() const { return m_unproven; }
     bool busy() const { return m_out > 0; }
     QString trouble() const { return m_trouble; }
     QVariantList deviceList() const { return m_devices; }
@@ -153,6 +160,10 @@ private:
     /// A refusal of some route said the device must choose; cleared by the next answer to
     /// `GET /profiles`, which says it for itself.
     bool m_mustChoose = false;
+    /// Decided by the first seating heard, and only by it: a principal who unticks « Retenir »
+    /// mid-session has shown who they are, and is not locked out by their own change.
+    bool m_seated = false;
+    bool m_unproven = false;
     int m_out = 0;
     int m_generation = 0;
     QString m_trouble;

@@ -1,5 +1,6 @@
 #include "Theme.h"
 
+#include <QFontDatabase>
 #include <QGuiApplication>
 #include <QPalette>
 
@@ -140,4 +141,9 @@ QStringList Theme::profileColors() const
     for (const Tint &tint : Tints)
         ids << QString::fromUtf8(tint.id);
     return ids;
+}
+
+QString Theme::commandFamily() const
+{
+    return QFontDatabase::systemFont(QFontDatabase::FixedFont).family();
 }

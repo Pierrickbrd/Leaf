@@ -1096,6 +1096,10 @@ QString forgotCode();
 /// What a forgotten code leads to. The command itself follows on the next line; the client cannot reset it.
 QString codeReplacedOnServer();
 
+/// That command, as it is typed on the server: a `sudo` and not a sentence, so it is never
+/// translated, and kept here so that the screen does not spell it either.
+QString resetCodeCommand();
+
 /// Back out of a sheet, without the destination `goBack` and `backTo` would name.
 QString back();
 

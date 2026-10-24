@@ -43,6 +43,7 @@
 #include <QJsonObject>
 #include <QPalette>
 #include <QPointer>
+#include <QSignalSpy>
 #include <QQmlApplicationEngine>
 #include <QQuickItem>
 #include <QQuickStyle>
@@ -347,6 +348,74 @@ seatedAsPrincipal(std::function<QByteArray(const QByteArray &)> rest)
             return seating;
         return rest(request);
     };
+}
+
+/// The principal and a restricted profile, the restricted one reading and the code guarding
+/// the way out: the seat every test of the code window starts from.
+QByteArray aRestrictedSeat(const QString &active = u"l"_s)
+{
+    return aSeating({aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+                     aProfile(u"l"_s, u"Enfant"_s, u"azur"_s, u"restricted"_s, false, 10)},
+                    active, false, u"restricted"_s);
+}
+
+/// Typed as a keyboard would, one character at a time: `QTest::keyClicks` takes a widget,
+/// and `keyClick` on a window takes a Latin-1 `char`, which an « é » is not.
+void typeInto(QQuickWindow *window, const QString &text)
+{
+    for (const QChar one : text)
+        QTest::sendKeyEvent(QTest::Click, window, Qt::Key_unknown, QString(one), Qt::NoModifier);
+}
+
+/// Rows and columns place their children at the next frame, not when one appears: a click
+/// aimed before it lands where the button is about to stop being. Two frames, because the
+/// threaded render loop may swap one it had already taken before the change.
+bool laidOut(QQuickWindow *window)
+{
+    QSignalSpy drawn(window, &QQuickWindow::frameSwapped);
+    for (int frame = 0; frame < 2; ++frame) {
+        window->update();
+        if (!drawn.wait())
+            return false;
+    }
+    return true;
+}
+
+/// A reader, kept on this device, and a principal whose code also guards the way back to it
+/// and the adding of a profile.
+QByteArray aReaderSeatBehindTheCode()
+{
+    return aSeating({aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+                     aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s)},
+                    u"r"_s, true, u"everything"_s);
+}
+
+/// From the bar to the code window: the square, « Qui lit ? », then a tile — the
+/// principal's unless told otherwise.
+/// Returns the window's body, shown — or null, for the caller to refuse.
+void clickOn(QQuickWindow *window, QQuickItem *item);
+QQuickItem *askedForTheCode(QQuickWindow *window, const QString &tile = u"who-reads-square-p"_s)
+{
+    auto *square = window->findChild<QQuickItem *>(u"profile-square"_s);
+    auto *whoReads = window->findChild<QQuickItem *>(u"who-reads"_s);
+    auto *dialog = window->findChild<QQuickItem *>(u"code-dialog-body"_s);
+    if (!square || !whoReads || !dialog)
+        return nullptr;
+    if (!QTest::qWaitFor([&] {
+            return square->isVisible()
+                   && square->mapToScene(QPointF(0, 0)).x() > window->width() / 2;
+        }))
+        return nullptr;
+    clickOn(window, square);
+    if (!QTest::qWaitFor([&] { return whoReads->isVisible(); }))
+        return nullptr;
+    QQuickItem *chosen = itemNamed(whoReads, tile);
+    if (!chosen)
+        return nullptr;
+    clickOn(window, chosen);
+    if (!QTest::qWaitFor([&] { return dialog->isVisible(); }) || !laidOut(window))
+        return nullptr;
+    return dialog;
 }
 
 /// The window `Boot::run` loaded, shown and active — or null, for the caller to refuse.
@@ -4068,6 +4137,467 @@ private slots:
         QVERIFY(hiddenNamed(square, u"profile-square-face-badge"_s));
         QVERIFY(sortButton->isVisible());
         QVERIFY(!importButton->isVisible());
+    }
+
+    /// Eight rounds, always: how many are filled says how much was typed, never how long the
+    /// code is — and nothing past eight is taken, since no code is longer.
+    void the_code_dialog_shows_eight_rounds_whatever_the_length()
+    {
+        const QByteArray before = aRestrictedSeat();
+        const QByteArray after = aRestrictedSeat(u"p"_s);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        auto changed = std::make_shared<bool>(false);
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("PUT /profiles/active")) {
+                *changed = true;
+                return after;
+            }
+            if (request.startsWith("GET /profiles "))
+                return *changed ? after : before;
+            return empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *dialog = askedForTheCode(window);
+        QVERIFY(dialog);
+        QCOMPARE(textNamed(dialog, u"code-title"_s), Words::switchToProfile(u"Principal"_s));
+        QCOMPARE(textNamed(dialog, u"code-sentence"_s), Words::leaveNeedsCode());
+        QVERIFY(shownNamed(dialog, u"code-from"_s));
+        QVERIFY(shownNamed(dialog, u"code-to"_s));
+
+        const auto filled = [dialog] {
+            int count = 0;
+            for (int i = 0; i < 8; ++i) {
+                QQuickItem *round = itemNamed(dialog, u"code-round-%1"_s.arg(i));
+                if (!round)
+                    return -1;
+                count += round->property("filled").toBool() ? 1 : 0;
+            }
+            return itemNamed(dialog, u"code-round-8"_s) ? -1 : count;
+        };
+        QCOMPARE(filled(), 0);
+        typeInto(window, u"ab"_s);
+        QTRY_COMPARE(filled(), 2);
+        typeInto(window, u"cdéfghijk"_s);
+        QTRY_COMPARE(filled(), 8);
+
+        pretend.heard.clear();
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(pretend.heard.contains("PUT /profiles/active"));
+        QVERIFY(pretend.heard.contains(u"\"code\":\"abcdéfgh\""_s.toUtf8()));
+        QTRY_VERIFY(!dialog->isVisible());
+        QTRY_VERIFY(!window->findChild<QQuickItem *>(u"who-reads"_s)->isVisible());
+    }
+
+    /// A wrong code empties the rounds and says so, and the window stays for another try.
+    void a_wrong_code_clears_the_rounds_and_says_so()
+    {
+        const QByteArray seat = aRestrictedSeat();
+        const QByteArray refused =
+            aReply(403, QByteArrayLiteral("application/json"), R"({"error":"code"})");
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("PUT /profiles/active"))
+                return refused;
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *dialog = askedForTheCode(window);
+        QVERIFY(dialog);
+        QVERIFY(hiddenNamed(dialog, u"code-trouble"_s));
+        typeInto(window, u"faux"_s);
+        clickOn(window, itemNamed(dialog, u"code-confirm"_s));
+
+        QTRY_VERIFY(shownNamed(dialog, u"code-trouble"_s));
+        QCOMPARE(textNamed(dialog, u"code-trouble"_s), Words::wrongCode());
+        QCOMPARE(textNamed(dialog, u"code-field"_s), QString());
+        QVERIFY(!itemNamed(dialog, u"code-round-0"_s)->property("filled").toBool());
+        QVERIFY(dialog->isVisible());
+    }
+
+    /// « Code oublié ? » cannot reset anything from here: it says where it is done, as a
+    /// command that can be selected and copied, and « Retour » brings the rounds back.
+    void a_forgotten_code_shows_the_server_command()
+    {
+        const QByteArray seat = aRestrictedSeat();
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *dialog = askedForTheCode(window);
+        QVERIFY(dialog);
+        QVERIFY(hiddenNamed(dialog, u"code-command"_s));
+
+        clickOn(window, itemNamed(dialog, u"code-forgot"_s));
+        QTRY_VERIFY(shownNamed(dialog, u"code-command"_s));
+        QCOMPARE(textNamed(dialog, u"code-command"_s), Words::resetCodeCommand());
+        QCOMPARE(itemNamed(dialog, u"code-command"_s)->property("selectByMouse").toBool(), true);
+        QCOMPARE(textNamed(dialog, u"code-sentence"_s), Words::codeReplacedOnServer());
+        QVERIFY(hiddenNamed(dialog, u"code-rounds"_s));
+        QVERIFY(hiddenNamed(dialog, u"code-confirm"_s));
+
+        QVERIFY(laidOut(window));
+        clickOn(window, itemNamed(dialog, u"code-back"_s));
+        QTRY_VERIFY(shownNamed(dialog, u"code-rounds"_s));
+        QVERIFY(hiddenNamed(dialog, u"code-command"_s));
+    }
+
+    /// Cancelling the code from a restricted profile goes back to « Qui lit ? », still locked:
+    /// the shelf is reached by its own button there, never by backing out of the code.
+    void cancelling_the_code_from_a_restricted_profile_keeps_who_reads_open()
+    {
+        const QByteArray seat = aRestrictedSeat();
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *dialog = askedForTheCode(window);
+        QVERIFY(dialog);
+        typeInto(window, u"abc"_s);
+        pretend.heard.clear();
+        clickOn(window, itemNamed(dialog, u"code-cancel"_s));
+
+        QTRY_VERIFY(!dialog->isVisible());
+        auto *whoReads = window->findChild<QQuickItem *>(u"who-reads"_s);
+        QTest::qWait(100);
+        QVERIFY(whoReads->isVisible());
+        QVERIFY(shownNamed(whoReads, u"who-reads-needs-code"_s));
+        QVERIFY(!pretend.heard.contains("PUT /profiles/active"));
+        // What was typed went with the window.
+        QCOMPARE(textNamed(dialog, u"code-field"_s), QString());
+    }
+
+    /// From a profile free to leave, towards the principal its code protects: nothing is
+    /// being left behind a lock, so the window only asks for the code.
+    void a_reader_going_to_the_protected_principal_is_asked_the_code()
+    {
+        const QByteArray seat = aReaderSeatBehindTheCode();
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *dialog = askedForTheCode(window);
+        QVERIFY(dialog);
+        QCOMPARE(textNamed(dialog, u"code-sentence"_s), Words::enterCode());
+    }
+
+    /// A device whose reader was deleted must choose, and sits on the principal only to hold
+    /// its key. Read as the principal, touching the protected principal's tile sent the switch
+    /// without the code, and the server's refusal had no window to be said in: nothing
+    /// happened at all.
+    void a_device_that_must_choose_reaches_the_protected_principal_through_the_code()
+    {
+        const QByteArray seat = aReply(
+            200, QByteArrayLiteral("application/json"),
+            QJsonDocument(
+                QJsonObject{
+                    {u"profiles"_s,
+                     QJsonArray{aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s,
+                                         u"principal"_s, true),
+                                aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s)}},
+                    {u"active"_s, u"p"_s},
+                    {u"kept"_s, false},
+                    {u"choosing"_s, true},
+                    {u"held"_s, false},
+                    {u"code"_s, u"everything"_s},
+                })
+                .toJson(QJsonDocument::Compact));
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray seated = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s)},
+            u"p"_s, false, u"everything"_s);
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            return request.startsWith("PUT /profiles/active") ? seated : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *whoReads = window->findChild<QQuickItem *>(u"who-reads"_s);
+        auto *popup = window->findChild<QObject *>(u"code-dialog"_s);
+        auto *dialog = window->findChild<QQuickItem *>(u"code-dialog-body"_s);
+        QVERIFY(whoReads);
+        QVERIFY(popup);
+        QVERIFY(dialog);
+        QTRY_VERIFY(whoReads->isVisible());
+        QVERIFY(laidOut(window));
+        pretend.heard.clear();
+        clickOn(window, itemNamed(whoReads, u"who-reads-square-p"_s));
+        QTRY_VERIFY(dialog->isVisible());
+        QCOMPARE(popup->property("mode").toString(), u"switch"_s);
+        QVERIFY(!pretend.heard.contains("PUT /profiles/active"));
+
+        // Adding is the principal's power, and this device is not the principal's: the door
+        // is the code, not the principal's whole form.
+        QVERIFY(laidOut(window));
+        clickOn(window, itemNamed(dialog, u"code-cancel"_s));
+        QTRY_VERIFY(!dialog->isVisible());
+        QMetaObject::invokeMethod(whoReads, "add");
+        QTRY_VERIFY(dialog->isVisible());
+        QCOMPARE(popup->property("mode").toString(), u"add"_s);
+        QVERIFY(!window->findChild<QQuickItem *>(u"profile-dialog-body"_s)->isVisible());
+
+        // And the code, once typed, seats it there: the principal it already sat on is still
+        // a profile chosen, so both windows go.
+        QVERIFY(laidOut(window));
+        clickOn(window, itemNamed(dialog, u"code-cancel"_s));
+        QTRY_VERIFY(!dialog->isVisible());
+        QVERIFY(laidOut(window));
+        clickOn(window, itemNamed(whoReads, u"who-reads-square-p"_s));
+        QTRY_VERIFY(dialog->isVisible());
+        typeInto(window, u"secret"_s);
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(pretend.heard.contains(R"("code":"secret")"));
+        QTRY_VERIFY(!dialog->isVisible());
+        QTRY_VERIFY(!whoReads->isVisible());
+    }
+
+    /// The principal read on the family laptop without « Retenir » and closed Leaf; whoever
+    /// opens it next finds « Qui lit ? » on the principal. With the code guarding the way back,
+    /// the cross, Escape or the principal's own tile left anyone on the principal without it.
+    /// Now nothing leaves but a profile, and the principal's tile asks the code. Later in the
+    /// session the screen closes freely, but the device still does not retain the principal:
+    /// its tile asks the code again, and a reader stays free.
+    void a_principal_left_unkept_behind_the_code_is_asked_it_at_launch()
+    {
+        const QByteArray loose = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s)},
+            u"p"_s, false, u"everything"_s);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") || request.startsWith("PUT /profiles/active")
+                       ? loose
+                       : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *whoReads = window->findChild<QQuickItem *>(u"who-reads"_s);
+        auto *popup = window->findChild<QObject *>(u"code-dialog"_s);
+        auto *dialog = window->findChild<QQuickItem *>(u"code-dialog-body"_s);
+        auto *square = window->findChild<QQuickItem *>(u"profile-square"_s);
+        QVERIFY(whoReads);
+        QVERIFY(popup);
+        QVERIFY(dialog);
+        QVERIFY(square);
+        QTRY_VERIFY(whoReads->isVisible());
+        QVERIFY(hiddenNamed(whoReads, u"who-reads-close"_s));
+        QVERIFY(hiddenNamed(whoReads, u"who-reads-add"_s));
+        QVERIFY(hiddenNamed(whoReads, u"who-reads-manage"_s));
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTest::qWait(50);
+        QVERIFY(whoReads->isVisible());
+
+        QVERIFY(laidOut(window));
+        pretend.heard.clear();
+        clickOn(window, itemNamed(whoReads, u"who-reads-square-p"_s));
+        QTRY_VERIFY(dialog->isVisible());
+        QCOMPARE(popup->property("mode").toString(), u"switch"_s);
+        QVERIFY(!pretend.heard.contains("PUT /profiles/active"));
+        typeInto(window, u"secret"_s);
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(pretend.heard.contains(R"("code":"secret")"));
+        QTRY_VERIFY(!dialog->isVisible());
+        QTRY_VERIFY(!whoReads->isVisible());
+
+        // Opened from the square later, the screen is the principal's to leave.
+        QVERIFY(laidOut(window));
+        clickOn(window, square);
+        QTRY_VERIFY(whoReads->isVisible());
+        QVERIFY(shownNamed(whoReads, u"who-reads-close"_s));
+        QVERIFY(shownNamed(whoReads, u"who-reads-add"_s));
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!whoReads->isVisible());
+
+        // But a seat not retained is not a way round the code: the server asks it to stay.
+        QVERIFY(laidOut(window));
+        clickOn(window, square);
+        QTRY_VERIFY(whoReads->isVisible());
+        QVERIFY(laidOut(window));
+        pretend.heard.clear();
+        clickOn(window, itemNamed(whoReads, u"who-reads-square-p"_s));
+        QTRY_VERIFY(dialog->isVisible());
+        QVERIFY(!pretend.heard.contains("PUT /profiles/active"));
+        QVERIFY(laidOut(window));
+        clickOn(window, itemNamed(dialog, u"code-cancel"_s));
+        QTRY_VERIFY(!dialog->isVisible());
+        QVERIFY(laidOut(window));
+        clickOn(window, itemNamed(whoReads, u"who-reads-square-r"_s));
+        QTRY_VERIFY(pretend.heard.contains("PUT /profiles/active"));
+        QVERIFY(!pretend.heard.contains(R"("code")"));
+        QVERIFY(!dialog->isVisible());
+    }
+
+    /// A device that keeps the principal opens on it, code or no code — the principal chose
+    /// it there — and « Qui lit ? » opened from the square is the principal's to leave.
+    void a_principal_kept_here_opens_on_it_and_leaves_who_reads_freely()
+    {
+        const QByteArray kept = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s)},
+            u"p"_s, true, u"everything"_s);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? kept : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *whoReads = window->findChild<QQuickItem *>(u"who-reads"_s);
+        auto *dialog = window->findChild<QQuickItem *>(u"code-dialog-body"_s);
+        auto *square = window->findChild<QQuickItem *>(u"profile-square"_s);
+        QVERIFY(whoReads);
+        QVERIFY(dialog);
+        QVERIFY(square);
+        QTRY_VERIFY(square->isVisible()
+                    && square->mapToScene(QPointF(0, 0)).x() > window->width() / 2);
+        QTest::qWait(100);
+        QVERIFY(!whoReads->isVisible());
+
+        clickOn(window, square);
+        QTRY_VERIFY(whoReads->isVisible());
+        QVERIFY(shownNamed(whoReads, u"who-reads-close"_s));
+        QVERIFY(laidOut(window));
+        clickOn(window, itemNamed(whoReads, u"who-reads-square-p"_s));
+        QTRY_VERIFY(!whoReads->isVisible());
+        QVERIFY(!dialog->isVisible());
+    }
+
+    /// Ten wrong codes and the server pauses: said as tries from this device, the way the
+    /// link says it, and not as the wrong keys `Server` would word a 429 as.
+    void too_many_wrong_codes_say_how_long_to_wait()
+    {
+        const QByteArray seat = aRestrictedSeat();
+        // `aReply` with the one header it does not write.
+        const QByteArray paused =
+            aReply(429, QByteArrayLiteral("application/json"), R"({"error":"slow down"})")
+                .replace("HTTP/1.1 429 .\r\n", "HTTP/1.1 429 .\r\nRetry-After: 30\r\n");
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("PUT /profiles/active"))
+                return paused;
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *dialog = askedForTheCode(window);
+        QVERIFY(dialog);
+        typeInto(window, u"abcd"_s);
+        QTest::keyClick(window, Qt::Key_Return);
+
+        QTRY_VERIFY(shownNamed(dialog, u"code-trouble"_s));
+        QCOMPARE(textNamed(dialog, u"code-trouble"_s), Words::tooManyTries(u"30"_s));
+        QVERIFY(dialog->isVisible());
+    }
+
+    /// Adding from another profile: the code is only collected here, for the profile window
+    /// to send with the profile it creates — the server is not asked anything yet.
+    void adding_hands_the_code_on_without_asking_the_server()
+    {
+        const QByteArray seat = aReaderSeatBehindTheCode();
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *popup = window->findChild<QObject *>(u"code-dialog"_s);
+        QVERIFY(popup);
+        QSignalSpy typed(popup, SIGNAL(codeTyped(QString)));
+        QQuickItem *dialog = askedForTheCode(window, u"who-reads-add"_s);
+        QVERIFY(dialog);
+        QCOMPARE(textNamed(dialog, u"code-title"_s), Words::addAProfile());
+        QCOMPARE(textNamed(dialog, u"code-sentence"_s), Words::addNeedsCode());
+        QVERIFY(shownNamed(dialog, u"code-from"_s));
+        QVERIFY(hiddenNamed(dialog, u"code-to"_s));
+
+        pretend.heard.clear();
+        typeInto(window, u"secret"_s);
+        QTest::keyClick(window, Qt::Key_Return);
+
+        QTRY_COMPARE(typed.count(), 1);
+        QCOMPARE(typed.first().first().toString(), u"secret"_s);
+        QTRY_VERIFY(!dialog->isVisible());
+        QTest::qWait(200);
+        QVERIFY(!pretend.heard.contains("PUT "));
+        QVERIFY(!pretend.heard.contains("POST "));
     }
 };
 

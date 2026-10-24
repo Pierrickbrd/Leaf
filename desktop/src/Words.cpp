@@ -2157,6 +2157,11 @@ QString codeReplacedOnServer()
     return u"Le code ne se remplace que sur le serveur, avec cette commande"_s + Nbsp + u":"_s;
 }
 
+QString resetCodeCommand()
+{
+    return u"sudo leaf-server profile reset-code"_s;
+}
+
 QString back()
 {
     return u"Retour"_s;

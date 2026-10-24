@@ -198,6 +198,7 @@ QVariantMap Profiles::words() const
             {u"addNeedsCode"_s, Words::addNeedsCode()},
             {u"forgotCode"_s, Words::forgotCode()},
             {u"codeReplacedOnServer"_s, Words::codeReplacedOnServer()},
+            {u"resetCodeCommand"_s, Words::resetCodeCommand()},
             {u"back"_s, Words::back()},
             {u"confirm"_s, Words::confirm()},
             {u"newProfile"_s, Words::newProfile()},
@@ -299,6 +300,11 @@ void Profiles::take(const Api::Seating &seating)
     m_seating = seating;
     // The server's own word on whether this device must choose is the truth again.
     m_mustChoose = false;
+    if (!m_seated) {
+        m_seated = true;
+        m_unproven = asksWhoReads() && isPrincipal()
+                     && m_seating.code == Api::CodeScope::Everything;
+    }
 }
 
 bool Profiles::failed(const Server::Answer &answer)
@@ -314,6 +320,10 @@ bool Profiles::failed(const Server::Answer &answer)
         && answer.body.object().value(u"error"_s).toString() == u"code"_s) {
         m_trouble = Words::wrongCode();
         emit codeRefused();
+    } else if (answer.status == 429) {
+        // The pause after ten wrong codes. `Server` words a 429 as wrong keys, which is not
+        // what was typed here.
+        m_trouble = Words::tooManyTries(answer.retryAfter);
     } else {
         m_trouble = answer.trouble;
     }
@@ -384,7 +394,7 @@ void Profiles::switchTo(const QString &id, const QString &code, bool keep)
     QJsonObject body{{u"id"_s, id}, {u"keep"_s, keep}};
     if (!code.isEmpty())
         body.insert(u"code"_s, code);
-    ask(Verb::Put, u"/profiles/active"_s, body, [this](const Server::Answer &answer) {
+    ask(Verb::Put, u"/profiles/active"_s, body, [this, code](const Server::Answer &answer) {
         const Api::Read<Api::Seating> read = Api::seating(answer.body.object());
         if (!read.ok()) {
             m_trouble = read.trouble;
@@ -395,7 +405,12 @@ void Profiles::switchTo(const QString &id, const QString &code, bool keep)
         // stale, and saying so reloaded the whole shelf for a checkbox. Compared with the
         // profile read as, not the seat: a device that must choose sits on the principal, and
         // choosing the principal from there left the code window and « Qui lit ? » open.
-        const bool another = read.value->active != active().value(u"id"_s).toString();
+        // A switch the code allowed is said even onto the profile already read as: a principal
+        // not retained is asked the code to stay, and the code window and « Qui lit ? » wait
+        // for it to let go.
+        const bool another =
+            read.value->active != active().value(u"id"_s).toString() || !code.isEmpty();
+        m_unproven = false;
         take(*read.value);
         emit changed();
         if (another)

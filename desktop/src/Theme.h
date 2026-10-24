@@ -77,6 +77,9 @@ class Theme : public QObject
 
     Q_PROPERTY(QString displayFamily READ displayFamily CONSTANT)
     Q_PROPERTY(QString textFamily READ textFamily CONSTANT)
+    /// The system's fixed-width family, for a command to be typed as shown: set like a
+    /// terminal, every space and hyphen of it is one character wide and none can be misread.
+    Q_PROPERTY(QString commandFamily READ commandFamily CONSTANT)
 
 public:
     explicit Theme(QObject *parent = nullptr);
@@ -131,6 +134,7 @@ public:
 
     QString displayFamily() const { return Fonts::display(); }
     QString textFamily() const { return Fonts::text(); }
+    QString commandFamily() const;
 
 signals:
     void changed();
