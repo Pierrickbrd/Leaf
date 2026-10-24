@@ -1,6 +1,6 @@
 // The server sends every resized page and every cover as WebP, and Qt reads WebP only through
 // a plugin Ubuntu ships apart from Qt itself (`qt6-image-formats-plugins`). Without it nothing
-// fails to build and nothing fails to link: on the owner's desktop, 22/10/2026, every cover
+// fails to build and nothing fails to link: on the desktop, 22/10/2026, every cover
 // and every page said « Format d'image non supporté », and the plugins folder held gif, ico,
 // jpeg and svg. These two tests are what turns that into a red line instead of a blank shelf.
 

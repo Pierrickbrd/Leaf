@@ -973,7 +973,7 @@ QQuickItem *aReaderAtHand(QQmlApplicationEngine &engine, Reader *&reader)
     return aFrameDrawn(window) ? view : nullptr;
 }
 
-/// The windows the reader is tried in: the owner's 1920 × 1200 and its neighbours, the usual
+/// The windows the reader is tried in: the 1920 × 1200 and its neighbours, the usual
 /// laptops, a short window, and one in the narrow band.
 struct AWindow {
     int width;
@@ -1016,7 +1016,7 @@ void textsUnder(QQuickItem *root, QList<QQuickItem *> &all)
 /// window's growth since 23/10/2026, when a card grown at the full rate round words that no
 /// longer grew was a band of empty paper), but never wider than `share` of
 /// the window nor than the window less `margin`, and inside the window; its words `words` at
-/// what `role` makes of their drawn `size`. In the owner's test of 22/10/2026 on a full-screen
+/// what `role` makes of their drawn `size`. In the test of 22/10/2026 on a full-screen
 /// window of 1920, the dock had grown and the cards beside it had kept their drawn size.
 /// Measured as laid out, open or not: their geometry is bound to the window, not to being shown.
 QString aCardThatDoesNotFollow(QQuickItem *view, const QString &face, const QString &words,
@@ -4615,7 +4615,7 @@ private slots:
         QCOMPARE(view->height(), qreal(window->height()));
         QVERIFY(!window->findChild<QQuickItem *>(u"app-bar"_s)->isVisible());
         // A volume opens with its bars up, and after three seconds without input there is
-        // nothing but the pages (the owner's test of 22/10/2026 found a bare page, and nothing
+        // nothing but the pages (the test of 22/10/2026 found a bare page, and nothing
         // saying the commands were a click away).
         QQuickItem *bar = itemNamed(view, u"reader-bar"_s);
         QQuickItem *dock = itemNamed(view, u"reader-dock"_s);
@@ -5536,7 +5536,7 @@ private slots:
         QVERIFY(dock->x() >= 0 && dock->x() + dock->width() <= view->width());
     }
 
-    /// The owner's screen is 2560 × 1600 at a scale of 1.333, so the window Qt lays out in
+    /// The screen is 2560 × 1600 at a scale of 1.333, so the window Qt lays out in
     /// full screen is 1920 × 1200. In the test of 22/10/2026 the dock was a strip of specks
     /// there at its drawn size, and too large at half as large again: a quarter, now.
     void the_dock_is_a_quarter_larger_at_a_full_screen_of_1920_by_1200()
@@ -5995,7 +5995,7 @@ private slots:
     }
 
     /// The book button lays a card over the right of the pages, which keep their width: it
-    /// took the right half and shrank the pages into the left one until the owner's test of
+    /// took the right half and shrank the pages into the left one until the test of
     /// 22/10/2026. Closing it — the cross, `i`, Escape, a click on the page — and Escape
     /// closes it before the reader.
     void the_book_button_lays_a_card_over_the_pages_and_leaves_their_width_alone()
@@ -6282,7 +6282,7 @@ private slots:
 
     /// The card opens at its top, on what the volume is, with the chapter being read lit far
     /// down a list of forty and not scrolled to — opened on that chapter, it hid the cover and
-    /// the facts it is opened for (owner's test of 22/10/2026). Once open, it follows the
+    /// the facts it is opened for (the test of 22/10/2026). Once open, it follows the
     /// reader into the next chapter; closed and opened again, it is back at its top. A title
     /// that is only the volume's label again is not said twice over it.
     void the_panel_opens_at_its_top_and_follows_the_reader_once_open()
@@ -6390,7 +6390,7 @@ private slots:
     /// An ISBN that adds up is the key the owner chose on 22/10/2026: bars and the number as
     /// the file hyphenated it, the last thing in the sheet after the chapters and scrolled
     /// with them — never over them, as when it stood at the foot of the card and cut the
-    /// seventeenth chapter in half (owner's test of 22/10/2026) — and no line among the facts. A click copies the thirteen digits and a bubble says so;
+    /// seventeenth chapter in half (the test of 22/10/2026) — and no line among the facts. A click copies the thirteen digits and a bubble says so;
     /// Enter does the same from the keyboard.
     void a_volume_with_an_isbn_shows_it_as_a_key_that_copies_it()
     {
@@ -6503,7 +6503,7 @@ private slots:
 
     /// The key follows the window as the rest of the card does: its words at what their role
     /// makes of their drawn size, its bars a whole number of the screen's pixels per module,
-    /// and inside the sheet — at 1280, where it is drawn, and at the owner's 1920.
+    /// and inside the sheet — at 1280, where it is drawn, and at the 1920.
     void the_isbn_key_follows_the_window()
     {
         Pretend pretend;
@@ -6991,7 +6991,7 @@ private slots:
     }
 
     /// « Sur cet appareil » names what each of its rows chooses, under « Pages » and
-    /// « Confort »: the owner's critique of 22/10/2026 was four anonymous rows of pills. The
+    /// « Confort »: the critique of 22/10/2026 was four anonymous rows of pills. The
     /// names stand in one column with every row's pills starting at one edge; the pills are
     /// words alone, the paper's three showing the paper; and on a card too narrow for both
     /// side by side, each name goes above its pills.
@@ -8486,7 +8486,7 @@ private slots:
             QJsonObject{{u"id"_s, u"c100"_s}, {u"label"_s, u"Chap.100"_s}, {u"number"_s, 100},
                         {u"title"_s, u"Ridicule"_s}, {u"kind"_s, u"CHAPTER"_s},
                         {u"entryId"_s, u"e12"_s}, {u"startPage"_s, 150}},
-            // Titled by its label, as the files of the owner's test of 22/10/2026 were.
+            // Titled by its label, as the files of the test of 22/10/2026 were.
             QJsonObject{{u"id"_s, u"c13"_s}, {u"label"_s, u"#13"_s}, {u"number"_s, 101},
                         {u"title"_s, u"#13"_s}, {u"kind"_s, u"CHAPTER"_s},
                         {u"entryId"_s, u"e12"_s}, {u"startPage"_s, 170}}};
@@ -8525,7 +8525,7 @@ private slots:
         QCOMPARE(textNamed(view, u"reader-scrub-title"_s), n + u": Ridicule"_s);
 
         // A title that only repeats its label is said once, on the line and in the bubble the
-        // hand raises over the bar: both read « #13 · #13 » in the owner's test of 22/10/2026.
+        // hand raises over the bar: both read « #13 · #13 » in the test of 22/10/2026.
         reader->goToPage(175);
         QTRY_COMPARE(textNamed(view, u"reader-scrub-chapter"_s), u"#13"_s);
         QCOMPARE(textNamed(view, u"reader-scrub-title"_s), QString());

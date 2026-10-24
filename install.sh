@@ -112,7 +112,7 @@ Options:
 
 Examples:
   ./install.sh server
-  ./install.sh server --host 100.64.0.10
+  ./install.sh server --host 192.0.2.10
   ./install.sh client
   ./install.sh all
   leaf-install update server

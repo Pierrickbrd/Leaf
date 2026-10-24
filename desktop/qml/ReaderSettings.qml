@@ -18,12 +18,12 @@
 // with no end. A fit chosen for books as « Hauteur » is shown as « Largeur », which is what a
 // strip does with it. The paper behind a strip is still the reader's paper.
 //
-// **The backdrop and the motion are the owner's choice of 22/10/2026**: a black paper in a lit
+// **The backdrop and the motion are the choice of 22/10/2026**: a black paper in a lit
 // room tires some eyes, and a slide at every page is too much for some readers. Both are kept
 // on this desk, with the layout.
 //
 // **Each row of « Sur cet appareil » says what it chooses**, beside its pills, under one of
-// two small headings — « Pages » and « Confort ». The owner's critique of 22/10/2026 was four
+// two small headings — « Pages » and « Confort ». The critique of 22/10/2026 was four
 // anonymous rows of pills: nothing said which row was the layout, the fit, the paper or the
 // motion, and a reader learnt it by clicking. The pictos left when the names came: a row
 // named « Fond » needs no moon beside « Noir », and its pills show the paper itself instead.
@@ -32,7 +32,7 @@
 // the name goes above its pills rather than squeezing them onto a second line beside it.
 //
 // **It follows the window as the dock does** (`Widths.scale`): every size below is drawn for a
-// window of 1280 and scaled with it, its words never under their floor. In the owner's test of
+// window of 1280 and scaled with it, its words never under their floor. In the test of
 // 22/10/2026 on a full-screen window of 1920 × 1200, the dock had grown and this card, beside
 // it, had kept its drawn size — words too small to read at arm's length. On a short window its
 // groups scroll under its title.

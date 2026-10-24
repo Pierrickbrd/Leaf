@@ -1,6 +1,6 @@
 // The ISBN of the open volume, as the barcode on the back of the book, on a key that copies it.
 //
-// The owner's choice of 22/10/2026, from four drawn side by side: the one fact of a volume
+// The choice of 22/10/2026, from four drawn side by side: the one fact of a volume
 // that is carried elsewhere — into a bookseller's search, a library's catalogue — had been a
 // line of text among the others, with nothing to say it could be taken. On an emerald key, the
 // last thing in the panel after the chapters (see `ReaderVolumePanel`), it reads as the thing

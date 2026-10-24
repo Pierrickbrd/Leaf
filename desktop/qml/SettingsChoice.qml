@@ -21,7 +21,7 @@ Item {
     required property int chosen
     /// Whether it follows the window (`Widths.scale`). Not in the Settings screen yet; the
     /// reader's card asks for it, or its pills stayed at their drawn size inside a card that
-    /// had grown round them (owner's test of 22/10/2026).
+    /// had grown round them (the test of 22/10/2026).
     property bool scaled: false
     /// A colour per value, drawn as a small square before the word: the reader's backdrops,
     /// where the colour is the answer and a word alone makes the reader picture it. Empty for

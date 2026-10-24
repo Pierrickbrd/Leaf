@@ -218,13 +218,13 @@ private slots:
         {
             Preferences first;
             QCOMPARE(first.lastPlace(), QUrl());
-            first.rememberPlace(QUrl(u"file:///home/pierrick/Documents/Lecture"_s));
+            first.rememberPlace(QUrl(u"file:///home/alice/Documents/Books"_s));
             QCOMPARE(first.lastPlace(),
-                     QUrl(u"file:///home/pierrick/Documents/Lecture"_s));
+                     QUrl(u"file:///home/alice/Documents/Books"_s));
         }
 
         Preferences later;
-        QCOMPARE(later.lastPlace(), QUrl(u"file:///home/pierrick/Documents/Lecture"_s));
+        QCOMPARE(later.lastPlace(), QUrl(u"file:///home/alice/Documents/Books"_s));
     }
 
     /// Nothing is remembered from a picker somebody closed without choosing.
@@ -391,7 +391,7 @@ private slots:
         QCOMPARE(puzzled.fit(), Preferences::Fit::Height);
     }
 
-    /// Black paper and a slide: what the reader was before either was a choice (owner's choice
+    /// Black paper and a slide: what the reader was before either was a choice (the choice
     /// of 22/10/2026). Qt 6.4 does not say whether the desktop asks for less motion, so a
     /// fresh install slides whatever the desktop wants.
     void a_fresh_install_reads_black_and_slides()

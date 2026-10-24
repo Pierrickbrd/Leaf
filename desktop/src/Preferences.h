@@ -78,7 +78,7 @@ class Preferences : public QObject
     Q_PROPERTY(PageLayout pageLayout READ pageLayout NOTIFY changed)
     Q_PROPERTY(Fit fit READ fit NOTIFY changed)
     /// What is behind the pages, and how a page that comes takes the place of the one that
-    /// goes. The owner's choice of 22/10/2026: a dark paper tires some eyes in a lit room, and
+    /// goes. The choice of 22/10/2026: a dark paper tires some eyes in a lit room, and
     /// a slide on every page is too much for some readers, so both are a reader's to say, on
     /// this desk like the layout.
     Q_PROPERTY(Backdrop backdrop READ backdrop NOTIFY changed)
