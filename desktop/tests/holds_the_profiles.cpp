@@ -292,6 +292,28 @@ private slots:
                  Words::profileLine(Api::Kind::Restricted, 12, {}));
     }
 
+    /// Keeping the profile already reading changes where this device opens, not who reads:
+    /// nothing on screen is stale, and a « switched » here reloaded the whole shelf.
+    void keeping_the_same_profile_is_not_a_switch()
+    {
+        serving(seating({principal(), reader()}, u"default"_s));
+        asked();
+        m_pretend->answerFor = [](const QByteArray &request) {
+            return request.startsWith("PUT /profiles/active ")
+                       ? reply(200, asJson(seating({principal(), reader()}, u"default"_s,
+                                                   true, false, false, u"none"_s)))
+                       : QByteArray();
+        };
+
+        QSignalSpy switched(m_profiles, &Profiles::switched);
+        QSignalSpy changed(m_profiles, &Profiles::changed);
+        m_profiles->switchTo(u"default"_s, QString(), true);
+        settle([&] { return !m_profiles->busy() && changed.size() >= 2; });
+
+        QVERIFY(m_pretend->heard.contains(R"("keep":true)"));
+        QCOMPARE(switched.size(), 0);
+    }
+
     void a_switch_is_applied_and_said()
     {
         serving(seating({principal(), reader()}, u"p2"_s));

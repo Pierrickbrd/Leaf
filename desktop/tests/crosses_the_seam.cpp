@@ -23,6 +23,7 @@
 
 #include <QDBusConnection>
 
+#include <functional>
 #include <memory>
 #include "Shelf.h"
 #include "Theme.h"
@@ -300,6 +301,90 @@ QString textNamed(QQuickItem *root, const QString &name)
                : u"<aucun élément nommé "_s + name + u">"_s;
 }
 
+/// One profile as `GET /profiles` lists it.
+QJsonObject aProfile(const QString &id, const QString &name, const QString &color,
+                     const QString &kind, bool import = false, int maxAge = 0)
+{
+    QJsonObject one{
+        {u"id"_s, id},
+        {u"name"_s, name},
+        {u"color"_s, color},
+        {u"kind"_s, kind},
+        {u"rights"_s,
+         QJsonObject{{u"import"_s, import}, {u"edit"_s, false}, {u"delete"_s, false}}},
+    };
+    if (maxAge > 0)
+        one.insert(u"maxAge"_s, maxAge);
+    return one;
+}
+
+/// Who is seated on this device, and among whom.
+QByteArray aSeating(const QJsonArray &profiles, const QString &active, bool kept,
+                    const QString &code = u"none"_s)
+{
+    return aReply(200, QByteArrayLiteral("application/json"),
+                  QJsonDocument(QJsonObject{
+                                    {u"profiles"_s, profiles},
+                                    {u"active"_s, active},
+                                    {u"kept"_s, kept},
+                                    {u"choosing"_s, false},
+                                    {u"held"_s, false},
+                                    {u"code"_s, code},
+                                })
+                      .toJson(QJsonDocument::Compact));
+}
+
+/// The principal alone, free to import: what every test that reaches the import button now
+/// has to be told, since the button waits for the server to say the profile may.
+std::function<QByteArray(const QByteArray &)>
+seatedAsPrincipal(std::function<QByteArray(const QByteArray &)> rest)
+{
+    const QByteArray seating = aSeating(
+        {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true)}, u"p"_s,
+        false);
+    return [seating, rest](const QByteArray &request) {
+        if (request.startsWith("GET /profiles "))
+            return seating;
+        return rest(request);
+    };
+}
+
+/// The window `Boot::run` loaded, shown and active — or null, for the caller to refuse.
+QQuickWindow *shown(QQmlApplicationEngine &engine)
+{
+    Boot::run(engine, *qGuiApp, nowhere());
+    if (engine.rootObjects().size() != 1)
+        return nullptr;
+    auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+    if (!window || !QTest::qWaitForWindowExposed(window))
+        return nullptr;
+    window->requestActivate();
+    return QTest::qWaitForWindowActive(window) ? window : nullptr;
+}
+
+/// A click in the middle of an item, the way a hand makes one.
+void clickOn(QQuickWindow *window, QQuickItem *item)
+{
+    const QPointF middle = item->mapToScene(QPointF(item->width() / 2, item->height() / 2));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, middle.toPoint());
+}
+
+/// Whether the item of that name is there and shown — false, rather than a crash, when it
+/// is not there at all.
+bool shownNamed(QQuickItem *root, const QString &name)
+{
+    QQuickItem *one = itemNamed(root, name);
+    return one && one->isVisible();
+}
+
+/// Whether the item of that name is there and hidden: an item that is missing is not hidden,
+/// it is a test looking at the wrong name.
+bool hiddenNamed(QQuickItem *root, const QString &name)
+{
+    QQuickItem *one = itemNamed(root, name);
+    return one && !one->isVisible();
+}
+
 /// The filter button a hand can reach, and the panel hanging from it.
 ///
 /// There are two rows of pills on the shelf — its own, and the one the search workspace
@@ -445,6 +530,7 @@ private slots:
         pretend.answerFor = [pageReply, coverReply](const QByteArray &request) {
             return request.startsWith("GET /series?") ? pageReply : coverReply;
         };
+        pretend.answerFor = seatedAsPrincipal(pretend.answerFor);
         qputenv("LEAF_ADDRESS",
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
@@ -620,6 +706,9 @@ private slots:
         QTRY_VERIFY(sortButton->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(settingsButton->hasActiveFocus());
+        // Who reads, last in the bar, after the gear.
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(window->findChild<QQuickItem *>(u"profile-square"_s)->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_COMPARE(grid->property("currentIndex").toInt(), 0);
         QTRY_VERIFY(ring->isVisible());
@@ -631,6 +720,7 @@ private slots:
         QCOMPARE(grid->property("currentIndex").toInt(), -1);
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(searchField->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Tab);
         QTest::keyClick(window, Qt::Key_Tab);
         QTest::keyClick(window, Qt::Key_Tab);
         QTest::keyClick(window, Qt::Key_Tab);
@@ -1488,6 +1578,7 @@ private slots:
                 return nextReply;
             return request.startsWith("GET /series?") ? pageReply : coverReply;
         };
+        pretend.answerFor = seatedAsPrincipal(pretend.answerFor);
         qputenv("LEAF_ADDRESS",
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
@@ -1557,6 +1648,9 @@ private slots:
         QTRY_VERIFY(sortButton->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(settingsButton->hasActiveFocus());
+        // Who reads, last in the bar, after the gear.
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(window->findChild<QQuickItem *>(u"profile-square"_s)->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(bandButton() && bandButton()->hasActiveFocus());
         QVERIFY(bandRing() && bandRing()->isVisible());
@@ -1736,6 +1830,7 @@ private slots:
                 return filtersReply;
             return request.startsWith("GET /series?") ? pageReply : coverReply;
         };
+        pretend.answerFor = seatedAsPrincipal(pretend.answerFor);
         qputenv("LEAF_ADDRESS",
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
@@ -1832,6 +1927,9 @@ private slots:
         QTRY_VERIFY(sortButton->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(settingsButton->hasActiveFocus());
+        // Who reads, last in the bar, after the gear.
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(window->findChild<QQuickItem *>(u"profile-square"_s)->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_VERIFY(button->hasActiveFocus());
         // The filter button is the head of this row now, before the pills it produces —
@@ -1857,7 +1955,7 @@ private slots:
         // And the order is a loop, closed at both ends. Above the band is the bar again, by
         // its far end; and backwards from the bar's first stop is the shelf's last cover.
         QTest::keyClick(window, Qt::Key_Up);
-        QTRY_VERIFY(settingsButton->hasActiveFocus());
+        QTRY_VERIFY(window->findChild<QQuickItem *>(u"profile-square"_s)->hasActiveFocus());
 
         searchField->forceActiveFocus(Qt::TabFocusReason);
         QTRY_VERIFY(searchField->hasActiveFocus());
@@ -3396,6 +3494,9 @@ private slots:
         Pretend pretend;
         QVERIFY(pretend.listen(QHostAddress::LocalHost));
         pretend.answers(200, QByteArrayLiteral(R"({"items":[],"total":0})"));
+        // Seated, so that the bar offers the import at all.
+        pretend.answerFor = seatedAsPrincipal(
+            [answer = pretend.answer](const QByteArray &) { return answer; });
         qputenv("LEAF_ADDRESS",
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
@@ -3415,6 +3516,8 @@ private slots:
         QVERIFY(dialog);
         QVERIFY(button);
         QVERIFY(!dialog->property("visible").toBool());
+        // Offered once the server has said who is seated, and laid out in the row after that.
+        QTRY_VERIFY(button->isVisible() && button->width() > 0);
 
         const QPointF at = button->mapToItem(nullptr, QPointF(button->width() / 2,
                                                               button->height() / 2));
@@ -3615,6 +3718,356 @@ private slots:
         auto *theme = engine.singletonInstance<Theme *>(qmlTypeId("Leaf", 1, 0, "Theme"));
         QVERIFY(theme);
         QVERIFY(theme->dark());
+    }
+
+    /// The square is there with a single profile — it is the way to « Ajouter » — and it
+    /// opens « Qui lit ? » over the whole window; the cross puts the shelf back, and the
+    /// keyboard where it was.
+    void the_square_opens_who_reads()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = seatedAsPrincipal([](const QByteArray &) {
+            return aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        });
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+
+        auto *square = window->findChild<QQuickItem *>(u"profile-square"_s);
+        auto *whoReads = window->findChild<QQuickItem *>(u"who-reads"_s);
+        QVERIFY(square);
+        QVERIFY(whoReads);
+        QTRY_VERIFY(square->isVisible());
+        // Laid out at the far right once it appears, not where the row first put it.
+        QTRY_VERIFY(square->mapToScene(QPointF(0, 0)).x() > window->width() / 2);
+        QCOMPARE(textNamed(square, u"profile-square-face-initial"_s), u"P"_s);
+        QVERIFY(shownNamed(square, u"profile-square-face-badge"_s));
+        // One profile: nobody to choose between, so the launch does not ask.
+        QVERIFY(!whoReads->isVisible());
+
+        clickOn(window, square);
+        QTRY_VERIFY(whoReads->isVisible());
+        QCOMPARE(textNamed(whoReads, u"who-reads-title"_s), Words::whoReads());
+        QVERIFY(itemNamed(whoReads, u"who-reads-tile-p"_s));
+        QVERIFY(shownNamed(whoReads, u"who-reads-ring-p"_s));
+        QVERIFY(shownNamed(whoReads, u"who-reads-add"_s));
+
+        QVERIFY(shownNamed(whoReads, u"who-reads-close"_s));
+        clickOn(window, itemNamed(whoReads, u"who-reads-close"_s));
+        QTRY_VERIFY(!whoReads->isVisible());
+        QTRY_VERIFY(square->hasActiveFocus());
+    }
+
+    /// The shelf, its field and its covers are still there under « Qui lit ? »: no key may
+    /// reach them. Tab once walked into the hidden field, and Enter opened a series behind
+    /// the screen.
+    void who_reads_keeps_the_keyboard_to_itself()
+    {
+        const QByteArray seating = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s)},
+            u"p"_s, false);
+        const QByteArray shelf =
+            aReply(200, QByteArrayLiteral("application/json"),
+                   aPage({aSeries(u"aa"_s, u"Derrière"_s, 3, true)}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seating : shelf;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *whoReads = window->findChild<QQuickItem *>(u"who-reads"_s);
+        auto *searchField = window->findChild<QQuickItem *>(u"search-field"_s);
+        QVERIFY(whoReads);
+        QVERIFY(searchField);
+        QTRY_VERIFY(whoReads->isVisible());
+        QTRY_VERIFY(whoReads->hasActiveFocus());
+
+        const auto inside = [whoReads, window] {
+            for (QQuickItem *at = window->activeFocusItem(); at; at = at->parentItem()) {
+                if (at == whoReads)
+                    return true;
+            }
+            return false;
+        };
+        for (int i = 0; i < 12; ++i) {
+            QTest::keyClick(window, Qt::Key_Tab);
+            QVERIFY2(inside(), qPrintable(u"Tab %1 left « Qui lit ? »"_s.arg(i + 1)));
+        }
+        QTest::keyClick(window, Qt::Key_Slash);
+        QTest::qWait(50);
+        QVERIFY(!searchField->hasActiveFocus());
+        QVERIFY(inside());
+    }
+
+    /// Another profile sees another shelf: what the first one was shown — its tiles, their
+    /// covers, its search, the page it had open — goes, and the wall is asked again for the
+    /// second, once.
+    void switching_profile_reloads_the_shelf_and_drops_the_covers()
+    {
+        const QJsonArray both{
+            aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+            aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s),
+        };
+        const QByteArray before = aSeating(both, u"p"_s, true);
+        const QByteArray after = aSeating(both, u"r"_s, false);
+        const QByteArray firstShelf =
+            aReply(200, QByteArrayLiteral("application/json"),
+                   aPage({aSeries(u"aa"_s, u"Pour le principal"_s, 3, true)}));
+        const QByteArray secondShelf =
+            aReply(200, QByteArrayLiteral("application/json"),
+                   aPage({aSeries(u"bb"_s, u"Pour le lecteur"_s, 2, false)}));
+        const QByteArray cover = aReply(200, QByteArrayLiteral("image/png"), aCover());
+        const QByteArray nothing = aReply(200, QByteArrayLiteral("application/json"), "[]");
+        auto changed = std::make_shared<bool>(false);
+
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /profiles "))
+                return *changed ? after : before;
+            if (request.startsWith("PUT /profiles/active")) {
+                *changed = true;
+                return after;
+            }
+            if (request.startsWith("GET /series?"))
+                return *changed ? secondShelf : firstShelf;
+            if (request.contains("/cover"))
+                return cover;
+            return nothing;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        auto *shelf = engine.singletonInstance<Shelf *>(qmlTypeId("Leaf", 1, 0, "Shelf"));
+        QVERIFY(navigation);
+        QVERIFY(shelf);
+
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(grid);
+        QQuickItem *found = nullptr;
+        QTRY_VERIFY((found = itemNamed(grid, u"cover-aa"_s)));
+        const QPointer<QQuickItem> oldCover(found);
+        QTRY_COMPARE(oldCover->property("status").toInt(), 1);
+
+        // A search under way and a series open: the change of profile has to undo both.
+        shelf->searchFor(u"pour"_s);
+        QTRY_VERIFY(pretend.heard.contains("pour"));
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"aa"_s}}));
+        auto *square = window->findChild<QQuickItem *>(u"profile-square"_s);
+        QVERIFY(square);
+        QTRY_VERIFY(square->isVisible());
+        QTRY_VERIFY(square->mapToScene(QPointF(0, 0)).x() > window->width() / 2);
+        clickOn(window, square);
+        auto *whoReads = window->findChild<QQuickItem *>(u"who-reads"_s);
+        QVERIFY(whoReads);
+        QTRY_VERIFY(whoReads->isVisible());
+
+        pretend.heard.clear();
+        QQuickItem *reader = itemNamed(whoReads, u"who-reads-square-r"_s);
+        QVERIFY(reader);
+        clickOn(window, reader);
+
+        QTRY_VERIFY(pretend.heard.contains("PUT /profiles/active"));
+        QVERIFY(!pretend.heard.contains("\"code\""));
+        QTRY_VERIFY(!whoReads->isVisible());
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Shelf);
+        QCOMPARE(navigation->property("canGoBack").toBool(), false);
+        QCOMPARE(shelf->query(), QString());
+        QTRY_VERIFY(itemNamed(grid, u"tile-bb"_s));
+        QVERIFY(!itemNamed(grid, u"tile-aa"_s));
+        // The first profile's cover went with its tile rather than waiting on screen for the
+        // second profile's answer.
+        QVERIFY(oldCover.isNull());
+        // Once: clearing the search and letting go of the wall were two requests, of which
+        // the first was thrown away.
+        QTest::qWait(400);
+        QCOMPARE(pretend.heard.count("GET /series?"), 1);
+        QCOMPARE(textNamed(square, u"profile-square-face-initial"_s), u"L"_s);
+        QTRY_VERIFY(square->hasActiveFocus());
+    }
+
+    /// Ticking « Retenir » and choosing the profile already reading changes where this
+    /// device opens, nothing else: no shelf is asked again.
+    void keeping_your_own_profile_does_not_reload_the_shelf()
+    {
+        const QJsonArray both{
+            aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+            aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s),
+        };
+        const QByteArray loose = aSeating(both, u"p"_s, false);
+        const QByteArray kept = aSeating(both, u"p"_s, true);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return loose;
+            if (request.startsWith("PUT /profiles/active"))
+                return kept;
+            return empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *whoReads = window->findChild<QQuickItem *>(u"who-reads"_s);
+        QVERIFY(whoReads);
+        QTRY_VERIFY(whoReads->isVisible());
+        QQuickItem *keep = itemNamed(whoReads, u"who-reads-keep"_s);
+        QQuickItem *mine = itemNamed(whoReads, u"who-reads-square-p"_s);
+        QVERIFY(keep);
+        QVERIFY(mine);
+        clickOn(window, keep);
+        QTRY_VERIFY(keep->property("checked").toBool());
+
+        QTest::qWait(200);
+        pretend.heard.clear();
+        clickOn(window, mine);
+        QTRY_VERIFY(pretend.heard.contains("PUT /profiles/active"));
+        QVERIFY(pretend.heard.contains(R"("keep":true)"));
+        QTRY_VERIFY(!whoReads->isVisible());
+        QTest::qWait(300);
+        QVERIFY(!pretend.heard.contains("GET /series?"));
+    }
+
+    /// Several profiles and none kept on this device: the launch asks who reads, before the
+    /// shelf is anybody's.
+    void who_reads_opens_at_start_when_several_profiles_and_none_kept()
+    {
+        const QByteArray seating = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s)},
+            u"p"_s, false);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seating : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *whoReads = window->findChild<QQuickItem *>(u"who-reads"_s);
+        QVERIFY(whoReads);
+        QTRY_VERIFY(whoReads->isVisible());
+        QVERIFY(itemNamed(whoReads, u"who-reads-tile-p"_s));
+        QVERIFY(itemNamed(whoReads, u"who-reads-tile-r"_s));
+        QVERIFY(shownNamed(whoReads, u"who-reads-keep"_s));
+        QVERIFY(shownNamed(whoReads, u"who-reads-manage"_s));
+        QVERIFY(shownNamed(whoReads, u"who-reads-close"_s));
+    }
+
+    /// A restricted profile leaves only with the code: no tile that adds, no cross, no
+    /// Escape, no settings — the sentence that says why, and the way back to its shelf.
+    void a_restricted_profile_sees_neither_add_nor_close()
+    {
+        const QByteArray seating = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"l"_s, u"Enfant"_s, u"azur"_s, u"restricted"_s, false, 10)},
+            u"l"_s, false, u"restricted"_s);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seating : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *square = window->findChild<QQuickItem *>(u"profile-square"_s);
+        auto *whoReads = window->findChild<QQuickItem *>(u"who-reads"_s);
+        QVERIFY(square);
+        QVERIFY(whoReads);
+        QTRY_VERIFY(square->isVisible());
+        QTRY_VERIFY(square->mapToScene(QPointF(0, 0)).x() > window->width() / 2);
+        // Not asked at launch: a restricted device opens on its profile, kept or not.
+        QVERIFY(!whoReads->isVisible());
+        QVERIFY(shownNamed(square, u"profile-square-face-badge"_s));
+
+        clickOn(window, square);
+        QTRY_VERIFY(whoReads->isVisible());
+        QVERIFY(hiddenNamed(whoReads, u"who-reads-add"_s));
+        QVERIFY(hiddenNamed(whoReads, u"who-reads-close"_s));
+        QVERIFY(hiddenNamed(whoReads, u"who-reads-manage"_s));
+        QVERIFY(hiddenNamed(whoReads, u"who-reads-keep"_s));
+        QVERIFY(shownNamed(whoReads, u"who-reads-needs-code"_s));
+        QCOMPARE(textNamed(whoReads, u"who-reads-needs-code"_s), Words::switchNeedsCode());
+        QVERIFY(shownNamed(whoReads, u"who-reads-back"_s));
+
+        // Choosing the principal goes to the code, never straight to the server.
+        QQuickItem *principal = itemNamed(whoReads, u"who-reads-square-p"_s);
+        QVERIFY(principal);
+        pretend.heard.clear();
+        clickOn(window, principal);
+        QTest::qWait(200);
+        QVERIFY(!pretend.heard.contains("PUT /profiles/active"));
+
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTest::qWait(50);
+        QVERIFY(whoReads->isVisible());
+
+        clickOn(window, itemNamed(whoReads, u"who-reads-back"_s));
+        QTRY_VERIFY(!whoReads->isVisible());
+    }
+
+    /// Without the right, the bar does not offer the import: the server would refuse it.
+    void a_reader_does_not_see_import()
+    {
+        const QByteArray seating = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s)},
+            u"r"_s, true);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seating : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *square = window->findChild<QQuickItem *>(u"profile-square"_s);
+        auto *importButton = window->findChild<QQuickItem *>(u"import-button"_s);
+        auto *sortButton = window->findChild<QQuickItem *>(u"sort-button"_s);
+        QVERIFY(square);
+        QVERIFY(importButton);
+        QVERIFY(sortButton);
+        QTRY_VERIFY(square->isVisible());
+        QCOMPARE(textNamed(square, u"profile-square-face-initial"_s), u"L"_s);
+        // A reader carries no badge: neither crowned nor locked.
+        QVERIFY(hiddenNamed(square, u"profile-square-face-badge"_s));
+        QVERIFY(sortButton->isVisible());
+        QVERIFY(!importButton->isVisible());
     }
 };
 

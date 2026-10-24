@@ -111,6 +111,9 @@ Item {
         MenuAction {
             objectName: "command-reimport-" + dots.about
             glyph: "library_add"
+            // Importing again is importing: a profile without the right is not offered it.
+            visible: Profiles.canImport
+            height: visible ? implicitHeight : 0
             text: dots.whole ? Commands.words.reimportSeries : Commands.words.reimportEntry
             onTriggered: dots.reimportAsked()
         }

@@ -22,6 +22,8 @@ Item {
     /// The page opens the dialog, not the bar: the queue outlives this row, and a button
     /// that owned the window onto it would take it down when the bar stopped browsing.
     signal importRequested()
+    /// The square was pressed: the page opens « Qui lit ? », over the whole window.
+    signal whoReadsRequested()
 
     readonly property bool searchTakesBar: Widths.band === Widths.Narrow
                                             && searchField.activeFocus
@@ -48,11 +50,17 @@ Item {
     /// the bar drops its commands when a narrow window gives the search the whole width.
     function stops() {
         const all = []
-        for (const one of [searchField, importButton, sortButton, settingsButton]) {
+        for (const one of [searchField, importButton, sortButton, settingsButton,
+                            profileButton]) {
             if (one && one.visible)
                 all.push(one)
         }
         return all
+    }
+
+    function takeFocusOnSquare() {
+        if (profileButton.visible)
+            profileButton.forceActiveFocus(Qt.OtherFocusReason)
     }
 
     function at(all) {
@@ -299,7 +307,8 @@ Item {
             id: importButton
 
             objectName: "import-button"
-            visible: bar.browsing && !bar.searchTakesBar
+            // Not offered to a profile without the right: the server would refuse what it sent.
+            visible: bar.browsing && !bar.searchTakesBar && Profiles.canImport
             source: "assets/icons/upload.svg"
             label: ImportCaptions.title
             // What it says with the dialog shut: a transfer that finished and a question
@@ -386,12 +395,71 @@ Item {
             onTriggered: bar.settingsRequested()
             onPointerEntered: bar.pointerLeftTheShelf()
         }
+
+        // Who reads, at the far right, after the gear: the way to « Qui lit ? », there even
+        // with a single profile, because that screen is also the way to « Ajouter ». No name
+        // beside it — the colour and the initial are the profile's whole signature. Absent
+        // until the server has said who is seated.
+        Item {
+            id: profileButton
+
+            objectName: "profile-square"
+            visible: !bar.searchTakesBar && Profiles.active.id !== undefined
+            Layout.preferredWidth: 34
+            Layout.preferredHeight: 34
+            Layout.leftMargin: 4
+            activeFocusOnTab: false
+
+            Accessible.role: Accessible.Button
+            Accessible.name: Profiles.active.name ?? ""
+            Accessible.focusable: true
+            Accessible.focused: activeFocus
+            Accessible.onPressAction: bar.whoReadsRequested()
+
+            Keys.onPressed: event => {
+                if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                        || event.key === Qt.Key_Enter) {
+                    bar.whoReadsRequested()
+                    event.accepted = true
+                }
+            }
+
+            ProfileSquare {
+                objectName: "profile-square-face"
+                profile: Profiles.active
+            }
+
+            FocusRing {
+                cornerRadius: 10
+            }
+
+            HoverHandler {
+                id: squarePointer
+
+                cursorShape: Qt.PointingHandCursor
+                onHoveredChanged: {
+                    if (hovered)
+                        bar.pointerLeftTheShelf()
+                }
+            }
+
+            TapHandler {
+                gesturePolicy: TapHandler.ReleaseWithinBounds
+                onTapped: bar.whoReadsRequested()
+            }
+
+            LeafToolTip {
+                visible: squarePointer.hovered
+                text: Profiles.active.name ?? ""
+            }
+        }
     }
 
     Shortcut {
         sequence: "/"
         context: Qt.ApplicationShortcut
-        enabled: !searchField.activeFocus
+        // An application shortcut ignores that the bar is disabled under « Qui lit ? ».
+        enabled: !searchField.activeFocus && bar.enabled
         onActivated: {
             searchField.forceActiveFocus(Qt.ShortcutFocusReason)
             searchField.selectAll()

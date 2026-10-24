@@ -138,6 +138,9 @@ public:
     /// library, which is the one thing that reader did not ask to see, and the settling adds
     /// a fifth of a second of it on top. So this one empties and asks at once.
     Q_INVOKABLE void narrowTo(const QVariantMap &narrowing);
+    /// No question, no pill, no tile, and the first page asked once — another profile's
+    /// shelf. Clearing the field and the pills one after the other asked twice.
+    Q_INVOKABLE void startOver();
 
     /// The order, normalised through `Api` on the way in: a word the client does not know
     /// becomes `name`, which is what the server falls back to. Reporting anything else would

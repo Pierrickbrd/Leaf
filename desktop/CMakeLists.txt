@@ -157,6 +157,8 @@ set(LEAF_QML
     qml/LeafMenu.qml
     qml/LeafMenuItem.qml
     qml/AppBar.qml
+    qml/ProfileSquare.qml
+    qml/WhoReads.qml
     qml/FilterChip.qml
     qml/GenrePill.qml
     qml/FilterPills.qml
@@ -230,6 +232,7 @@ endforeach()
 set(LEAF_IMAGES
     qml/assets/cover-shadow-light.png
     qml/assets/cover-shadow-dark.png
+    qml/assets/icons/add.svg
     qml/assets/icons/add_link.svg
     qml/assets/icons/arrow_back.svg
     qml/assets/icons/book.svg
@@ -243,6 +246,7 @@ set(LEAF_IMAGES
     qml/assets/icons/collections_bookmark.svg
     qml/assets/icons/content_copy.svg
     qml/assets/icons/contrast.svg
+    qml/assets/icons/crown.svg
     qml/assets/icons/dark_mode.svg
     qml/assets/icons/delete.svg
     qml/assets/icons/done_all.svg
@@ -254,6 +258,7 @@ set(LEAF_IMAGES
     qml/assets/icons/error.svg
     qml/assets/icons/library_add.svg
     qml/assets/icons/light_mode.svg
+    qml/assets/icons/lock.svg
     qml/assets/icons/more_vert.svg
     qml/assets/icons/public.svg
     qml/assets/icons/refresh.svg

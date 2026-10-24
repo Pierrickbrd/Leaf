@@ -191,6 +191,7 @@ QVariantMap Profiles::words() const
             {u"manageProfiles"_s, Words::manageProfiles()},
             {u"switchNeedsCode"_s, Words::switchNeedsCode()},
             {u"backToShelf"_s, Words::backToShelf()},
+            {u"closeWhoReads"_s, Words::closeWhoReads()},
             {u"leaveNeedsCode"_s, Words::leaveNeedsCode()},
             {u"enterCode"_s, Words::enterCode()},
             {u"addAProfile"_s, Words::addAProfile()},
@@ -390,9 +391,15 @@ void Profiles::switchTo(const QString &id, const QString &code, bool keep)
             emit changed();
             return;
         }
+        // Keeping the profile already reading is not a switch: nothing shown under it is
+        // stale, and saying so reloaded the whole shelf for a checkbox. Compared with the
+        // profile read as, not the seat: a device that must choose sits on the principal, and
+        // choosing the principal from there left the code window and « Qui lit ? » open.
+        const bool another = read.value->active != active().value(u"id"_s).toString();
         take(*read.value);
         emit changed();
-        emit switched();
+        if (another)
+            emit switched();
     });
 }
 

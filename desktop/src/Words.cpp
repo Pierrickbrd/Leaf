@@ -2117,6 +2117,11 @@ QString backToShelf()
     return u"Revenir à l’étagère"_s;
 }
 
+QString closeWhoReads()
+{
+    return u"Fermer"_s;
+}
+
 QString switchToProfile(const QString &name)
 {
     return u"Passer à %1"_s.arg(name);

@@ -1072,6 +1072,9 @@ QString switchNeedsCode();
 /// Leaves « Qui lit ? » without choosing, for a profile that is already current.
 QString backToShelf();
 
+/// The cross of « Qui lit ? », opened from the bar by a profile free to stay where it is.
+QString closeWhoReads();
+
 /// « Passer à Camille » — the name goes in the string, so a screen never concatenates one.
 QString switchToProfile(const QString &name);
 
