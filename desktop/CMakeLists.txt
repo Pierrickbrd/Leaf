@@ -160,6 +160,8 @@ set(LEAF_QML
     qml/ProfileSquare.qml
     qml/WhoReads.qml
     qml/CodeDialog.qml
+    qml/ProfileDialog.qml
+    qml/ProfileRemoval.qml
     qml/FilterChip.qml
     qml/GenrePill.qml
     qml/FilterPills.qml
@@ -263,6 +265,7 @@ set(LEAF_IMAGES
     qml/assets/icons/more_vert.svg
     qml/assets/icons/public.svg
     qml/assets/icons/refresh.svg
+    qml/assets/icons/remove.svg
     qml/assets/icons/remove_done.svg
     qml/assets/icons/search.svg
     qml/assets/icons/settings.svg

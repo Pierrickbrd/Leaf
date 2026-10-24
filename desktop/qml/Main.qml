@@ -112,6 +112,13 @@ ApplicationWindow {
     /// `principalCode` is the code typed in the code window before adding from another
     /// profile: the server checks it with the profile it creates, not before.
     function openProfileDialog(mode, profile, principalCode) {
+        profileDialog.show(mode, profile, principalCode ?? "")
+    }
+
+    /// « Supprimer X ? », for a profile of `Profiles.list` other than the principal and one's
+    /// own — the settings do not offer it for those, and the server refuses them anyway.
+    function removeProfile(profile) {
+        profileRemoval.ask(profile)
     }
 
     /// Réglages › Profils; the settings screen picks the tab once it has one.
@@ -564,6 +571,14 @@ ApplicationWindow {
         id: codeDialog
 
         onCodeTyped: code => window.openProfileDialog("new", null, code)
+    }
+
+    ProfileDialog {
+        id: profileDialog
+    }
+
+    ProfileRemoval {
+        id: profileRemoval
     }
 
     ImportDialog {

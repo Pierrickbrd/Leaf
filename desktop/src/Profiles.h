@@ -107,6 +107,10 @@ public:
     Q_INVOKABLE QString sayRetainedOn(const QString &device) const;
     Q_INVOKABLE QString saySeriesUpToYears(int age) const;
     Q_INVOKABLE QString sayEraseProfile(const QString &name) const;
+    Q_INVOKABLE QString sayEraseProfileButton(const QString &name) const;
+    Q_INVOKABLE QString sayAddProfileButton(const QString &name) const;
+    Q_INVOKABLE QString sayPrincipalManages(const QString &principal) const;
+    Q_INVOKABLE QString sayColourName(const QString &id, const QString &owner) const;
     Q_INVOKABLE QString sayOpensOn(const QString &name) const;
     Q_INVOKABLE QString saySeriesForYou(int count) const;
     /// The line under a profile's name, from the map `profiles` holds for it: its kind, its age,

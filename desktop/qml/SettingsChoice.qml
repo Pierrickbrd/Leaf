@@ -21,9 +21,12 @@ Item {
     implicitHeight: row.height
     height: implicitHeight
 
-    Row {
+    // A Flow, so that two long answers go to a second line rather than out of the card:
+    // « Aussi pour revenir à votre profil » ran past the profile window's edge.
+    Flow {
         id: row
 
+        width: choice.width
         spacing: 8
 
         Repeater {

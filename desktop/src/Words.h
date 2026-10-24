@@ -1208,6 +1208,33 @@ QString eraseProfile(const QString &name);
 /// What deleting a profile costs.
 QString eraseConsequence();
 
+/// And what it does not: the devices it sat on ask again, the volumes stay.
+QString eraseLeavesDevices();
+
+/// The confirmation's button: « Supprimer Inès ». The name again, so that the button that
+/// cannot be undone says on whom.
+QString eraseProfileButton(const QString &name);
+
+/// The form's button when it creates: « Ajouter Inès », or « Ajouter » before a name is typed.
+QString addProfileButton(const QString &name);
+
+/// The form's button when it changes a profile that exists.
+QString saveProfile();
+
+/// Under « Le code, à créer », when the first restricted profile is the reason for the code.
+QString firstCodeHint();
+
+/// The form a reader opens: what the new profile will be able to do, and who decides the rest.
+QString principalManages(const QString &principal);
+
+/// The two halves of the age stepper, for whoever reads the screen aloud.
+QString fewerYears();
+QString moreYears();
+
+/// A swatch, for whoever reads the screen aloud: its palette name from the id `Theme` keeps
+/// (`emeraude` → « Émeraude »), and the profile that wears it when it is taken.
+QString colourName(const QString &id, const QString &owner);
+
 /// Tab of the settings screen.
 QString profilesTab();
 

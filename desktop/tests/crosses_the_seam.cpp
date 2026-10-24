@@ -418,6 +418,75 @@ QQuickItem *askedForTheCode(QQuickWindow *window, const QString &tile = u"who-re
     return dialog;
 }
 
+/// The JSON body of the first request that starts with `line` — `POST /profiles ` — as the
+/// server would read it: by its Content-Length, since `heard` holds every request after it too.
+QJsonObject bodySent(const QByteArray &heard, const QByteArray &line)
+{
+    const qsizetype start = heard.indexOf(line);
+    const qsizetype end = start < 0 ? -1 : heard.indexOf("\r\n\r\n", start);
+    if (end < 0)
+        return {};
+    const QByteArray head = heard.mid(start, end - start).toLower();
+    const qsizetype length = head.indexOf("content-length: ");
+    if (length < 0)
+        return {};
+    const int size = head.mid(length + 16).split('\r').constFirst().toInt();
+    return QJsonDocument::fromJson(heard.mid(end + 4, size)).object();
+}
+
+/// The profile window, opened from « Qui lit ? »'s Add tile — or null, for the caller to
+/// refuse. The principal reaches it directly; a reader behind the code goes through
+/// `askedForTheCode` first.
+QQuickItem *profileDialogFromAdd(QQuickWindow *window)
+{
+    auto *square = window->findChild<QQuickItem *>(u"profile-square"_s);
+    auto *whoReads = window->findChild<QQuickItem *>(u"who-reads"_s);
+    auto *dialog = window->findChild<QQuickItem *>(u"profile-dialog-body"_s);
+    if (!square || !whoReads || !dialog)
+        return nullptr;
+    if (!QTest::qWaitFor([&] {
+            return square->isVisible()
+                   && square->mapToScene(QPointF(0, 0)).x() > window->width() / 2;
+        }))
+        return nullptr;
+    clickOn(window, square);
+    if (!QTest::qWaitFor([&] { return whoReads->isVisible(); }))
+        return nullptr;
+    QQuickItem *add = itemNamed(whoReads, u"who-reads-add"_s);
+    if (!add)
+        return nullptr;
+    clickOn(window, add);
+    if (!QTest::qWaitFor([&] { return dialog->isVisible(); }) || !laidOut(window))
+        return nullptr;
+    return dialog;
+}
+
+/// A profile as `Profiles.list` hands it to a screen, for the window hooks the settings call.
+QVariantMap aListedProfile(const QString &id, const QString &name, const QString &color,
+                           const QString &kind, bool import = false, int maxAge = 0)
+{
+    return {{u"id"_s, id}, {u"name"_s, name}, {u"color"_s, color}, {u"kind"_s, kind},
+            {u"initial"_s, name.left(1)}, {u"maxAge"_s, maxAge},
+            {u"rights"_s, QVariantMap{{u"import"_s, import}, {u"edit"_s, false},
+                                      {u"erase"_s, false}}}};
+}
+
+/// The profile window, opened the way Réglages › Profils opens it — or null, for the caller
+/// to refuse. Waits for the seat first: the window reads who the principal is.
+QQuickItem *profileDialogFor(QQuickWindow *window, const QString &mode, const QVariantMap &profile)
+{
+    auto *square = window->findChild<QQuickItem *>(u"profile-square"_s);
+    auto *dialog = window->findChild<QQuickItem *>(u"profile-dialog-body"_s);
+    if (!square || !dialog || !QTest::qWaitFor([&] { return square->isVisible(); }))
+        return nullptr;
+    if (!QMetaObject::invokeMethod(window, "openProfileDialog", Q_ARG(QVariant, mode),
+                                   Q_ARG(QVariant, profile), Q_ARG(QVariant, QString())))
+        return nullptr;
+    if (!QTest::qWaitFor([&] { return dialog->isVisible(); }) || !laidOut(window))
+        return nullptr;
+    return dialog;
+}
+
 /// The window `Boot::run` loaded, shown and active — or null, for the caller to refuse.
 QQuickWindow *shown(QQmlApplicationEngine &engine)
 {
@@ -4598,6 +4667,555 @@ private slots:
         QTest::qWait(200);
         QVERIFY(!pretend.heard.contains("PUT "));
         QVERIFY(!pretend.heard.contains("POST "));
+    }
+
+    /// The principal's window offers the kind and the rights, none ticked for a new profile,
+    /// and sends what was ticked. A refusal is said in the window, which stays open.
+    void adding_a_reader_from_the_principal_sends_the_checked_rights()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true)}, u"p"_s,
+            true);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        const QByteArray taken = aReply(409, QByteArrayLiteral("application/json"),
+                                        QByteArrayLiteral(R"({"error":"name taken"})"));
+        const QByteArray made = aReply(201, QByteArrayLiteral("application/json"),
+                                       QByteArrayLiteral("{}"));
+        int posts = 0;
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [&](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            if (request.startsWith("POST /profiles "))
+                return ++posts == 1 ? taken : made;
+            return empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *dialog = profileDialogFromAdd(window);
+        QVERIFY(dialog);
+        QCOMPARE(textNamed(dialog, u"profile-title"_s), Words::newProfile());
+        QVERIFY(shownNamed(dialog, u"profile-kind"_s));
+        QVERIFY(shownNamed(dialog, u"profile-may-import"_s));
+        QVERIFY(hiddenNamed(dialog, u"profile-code"_s));
+        for (const QString &right : {u"import"_s, u"edit"_s, u"erase"_s})
+            QVERIFY(!itemNamed(dialog, u"profile-may-"_s + right)->property("checked").toBool());
+        // The principal's colour is taken: the new profile starts on the next one.
+        QVERIFY(!itemNamed(dialog, u"profile-colour-emeraude"_s)->isEnabled());
+
+        typeInto(window, u"Inès"_s);
+        clickOn(window, itemNamed(dialog, u"profile-may-edit"_s));
+        QCOMPARE(textNamed(dialog, u"profile-confirm-text"_s), u"Ajouter Inès"_s);
+        pretend.heard.clear();
+        clickOn(window, itemNamed(dialog, u"profile-confirm"_s));
+        QTRY_VERIFY(shownNamed(dialog, u"profile-trouble"_s));
+        QVERIFY(dialog->isVisible());
+
+        pretend.heard.clear();
+        clickOn(window, itemNamed(dialog, u"profile-confirm"_s));
+        QTRY_VERIFY(!dialog->isVisible());
+        const QJsonObject sent = bodySent(pretend.heard, "POST /profiles ");
+        QCOMPARE(sent.value(u"name"_s).toString(), u"Inès"_s);
+        QCOMPARE(sent.value(u"kind"_s).toString(), u"reader"_s);
+        QCOMPARE(sent.value(u"color"_s).toString(), u"sapin"_s);
+        QCOMPARE(sent.value(u"rights"_s).toObject(),
+                 (QJsonObject{{u"import"_s, false}, {u"edit"_s, true}, {u"delete"_s, false}}));
+        QVERIFY(!sent.contains(u"code"_s));
+        QVERIFY(!sent.contains(u"principalCode"_s));
+        // The lists refresh by themselves: the window asked again once the profile was made.
+        QTRY_VERIFY(pretend.heard.contains("GET /profiles "));
+    }
+
+    /// The first restricted profile makes the code in the same window, typed twice.
+    void adding_a_restricted_profile_with_no_code_sends_code_and_code_again()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true)}, u"p"_s,
+            true);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        const QByteArray made = aReply(201, QByteArrayLiteral("application/json"),
+                                       QByteArrayLiteral("{}"));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            return request.startsWith("POST /profiles ") ? made : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *dialog = profileDialogFromAdd(window);
+        QVERIFY(dialog);
+        typeInto(window, u"Léo"_s);
+        clickOn(window, itemNamed(dialog, u"profile-kind-lock"_s));
+        QTRY_VERIFY(shownNamed(dialog, u"profile-code"_s));
+        QVERIFY(laidOut(window));
+        QVERIFY(hiddenNamed(dialog, u"profile-may-import"_s));
+        QCOMPARE(textNamed(dialog, u"profile-age"_s), Words::yearsOld(10));
+        clickOn(window, itemNamed(dialog, u"profile-age-more"_s));
+        QCOMPARE(textNamed(dialog, u"profile-age"_s), Words::yearsOld(11));
+        // Not ready until the code is typed twice.
+        QVERIFY(!itemNamed(dialog, u"profile-confirm"_s)->property("ready").toBool());
+
+        clickOn(window, itemNamed(dialog, u"profile-code"_s));
+        typeInto(window, u"1234"_s);
+        clickOn(window, itemNamed(dialog, u"profile-code-again"_s));
+        typeInto(window, u"1235"_s);
+        pretend.heard.clear();
+        clickOn(window, itemNamed(dialog, u"profile-confirm"_s));
+        QTRY_VERIFY(!dialog->isVisible());
+        const QJsonObject sent = bodySent(pretend.heard, "POST /profiles ");
+        QCOMPARE(sent.value(u"kind"_s).toString(), u"restricted"_s);
+        QCOMPARE(sent.value(u"maxAge"_s).toInt(), 11);
+        QCOMPARE(sent.value(u"code"_s).toString(), u"1234"_s);
+        QCOMPARE(sent.value(u"codeAgain"_s).toString(), u"1235"_s);
+        QVERIFY(!sent.contains(u"rights"_s));
+        // Nothing typed outlives the window.
+        QCOMPARE(itemNamed(dialog, u"profile-code"_s)->property("text").toString(), QString());
+    }
+
+    /// From a reader, the window is a name and a colour; the code typed before it goes with
+    /// the request, and not one moment longer.
+    void a_readers_new_profile_shows_neither_kind_nor_rights_and_sends_the_principal_code()
+    {
+        const QByteArray seat = aReaderSeatBehindTheCode();
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        const QByteArray made = aReply(201, QByteArrayLiteral("application/json"),
+                                       QByteArrayLiteral("{}"));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            return request.startsWith("POST /profiles ") ? made : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QVERIFY(askedForTheCode(window, u"who-reads-add"_s));
+        typeInto(window, u"secret"_s);
+        QTest::keyClick(window, Qt::Key_Return);
+
+        auto *popup = window->findChild<QObject *>(u"profile-dialog"_s);
+        auto *dialog = window->findChild<QQuickItem *>(u"profile-dialog-body"_s);
+        QVERIFY(popup);
+        QVERIFY(dialog);
+        QTRY_VERIFY(dialog->isVisible());
+        QVERIFY(laidOut(window));
+        QVERIFY(hiddenNamed(dialog, u"profile-kind"_s));
+        QVERIFY(hiddenNamed(dialog, u"profile-may-import"_s));
+        QVERIFY(shownNamed(dialog, u"profile-manages"_s));
+        QCOMPARE(textNamed(dialog, u"profile-manages"_s), Words::principalManages(u"Principal"_s));
+
+        typeInto(window, u"Hugo"_s);
+        pretend.heard.clear();
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(!dialog->isVisible());
+        const QJsonObject sent = bodySent(pretend.heard, "POST /profiles ");
+        QCOMPARE(sent.value(u"name"_s).toString(), u"Hugo"_s);
+        QCOMPARE(sent.value(u"kind"_s).toString(), u"reader"_s);
+        QCOMPARE(sent.value(u"principalCode"_s).toString(), u"secret"_s);
+        QVERIFY(!sent.contains(u"rights"_s));
+        QCOMPARE(popup->property("principalCode").toString(), QString());
+    }
+
+    /// Nobody could leave a restricted profile without the code, so the switch that removes
+    /// it is locked while one exists, and says which.
+    void the_code_switch_is_locked_while_a_restricted_profile_exists()
+    {
+        const QByteArray seat = aRestrictedSeat(u"p"_s);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *square = window->findChild<QQuickItem *>(u"profile-square"_s);
+        QVERIFY(square);
+        QTRY_VERIFY(square->isVisible());
+        const QVariantMap me{{u"id"_s, u"p"_s}, {u"name"_s, u"Principal"_s},
+                             {u"color"_s, u"emeraude"_s}, {u"kind"_s, u"principal"_s},
+                             {u"initial"_s, u"P"_s},
+                             {u"rights"_s, QVariantMap{{u"import"_s, true}, {u"edit"_s, false},
+                                                       {u"erase"_s, false}}}};
+        QVERIFY(QMetaObject::invokeMethod(window, "openProfileDialog",
+                                          Q_ARG(QVariant, u"self"_s), Q_ARG(QVariant, me),
+                                          Q_ARG(QVariant, QString())));
+        auto *dialog = window->findChild<QQuickItem *>(u"profile-dialog-body"_s);
+        QVERIFY(dialog);
+        QTRY_VERIFY(dialog->isVisible());
+        QVERIFY(laidOut(window));
+        QCOMPARE(textNamed(dialog, u"profile-title"_s), Words::yourProfile());
+        QQuickItem *lever = itemNamed(dialog, u"profile-code-switch"_s);
+        QVERIFY(lever);
+        QVERIFY(lever->property("on").toBool());
+        QVERIFY(!lever->isEnabled());
+        QCOMPARE(textNamed(dialog, u"profile-code-hint"_s), Words::codeHintHeld(u"Enfant"_s));
+        QVERIFY(hiddenNamed(dialog, u"profile-kind"_s));
+
+        clickOn(window, lever);
+        QTest::qWait(100);
+        QVERIFY(lever->property("on").toBool());
+    }
+
+    /// Deleting is asked first, says what it erases, and only then goes to the server.
+    void deleting_a_profile_asks_for_confirmation_and_sends_delete()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s)},
+            u"p"_s, true);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        const QByteArray gone = aReply(204, QByteArrayLiteral("application/json"), {});
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            return request.startsWith("DELETE ") ? gone : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        const QVariantMap reader{{u"id"_s, u"r"_s}, {u"name"_s, u"Lecteur"_s}};
+        pretend.heard.clear();
+        QVERIFY(QMetaObject::invokeMethod(window, "removeProfile", Q_ARG(QVariant, reader)));
+        auto *dialog = window->findChild<QQuickItem *>(u"profile-removal-body"_s);
+        QVERIFY(dialog);
+        QTRY_VERIFY(dialog->isVisible());
+        QVERIFY(laidOut(window));
+        QCOMPARE(textNamed(dialog, u"profile-removal-title"_s), Words::eraseProfile(u"Lecteur"_s));
+        QTest::qWait(100);
+        QVERIFY(!pretend.heard.contains("DELETE "));
+
+        clickOn(window, itemNamed(dialog, u"profile-removal-confirm"_s));
+        QTRY_VERIFY(!dialog->isVisible());
+        QVERIFY(pretend.heard.contains("DELETE /profiles/r "));
+    }
+
+    /// The principal changing a reader sends its kind and what goes with it: the rights for a
+    /// reader, the age for a restricted profile — never both.
+    void editing_a_profile_sends_its_kind_and_its_rights_or_its_age()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s)},
+            u"p"_s, true, u"restricted"_s);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        const QVariantMap reader = aListedProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s);
+        QQuickItem *dialog = profileDialogFor(window, u"edit"_s, reader);
+        QVERIFY(dialog);
+        QCOMPARE(textNamed(dialog, u"profile-title"_s), Words::editProfile(u"Lecteur"_s));
+        QCOMPARE(textNamed(dialog, u"profile-confirm-text"_s), Words::saveProfile());
+        // Its own colour stays its own to keep.
+        QVERIFY(itemNamed(dialog, u"profile-colour-corail"_s)->isEnabled());
+        clickOn(window, itemNamed(dialog, u"profile-may-import"_s));
+        pretend.heard.clear();
+        clickOn(window, itemNamed(dialog, u"profile-confirm"_s));
+        QTRY_VERIFY(!dialog->isVisible());
+        QJsonObject sent = bodySent(pretend.heard, "PATCH /profiles/r ");
+        QCOMPARE(sent.value(u"kind"_s).toString(), u"reader"_s);
+        QCOMPARE(sent.value(u"rights"_s).toObject(),
+                 (QJsonObject{{u"import"_s, true}, {u"edit"_s, false}, {u"delete"_s, false}}));
+        QVERIFY(!sent.contains(u"maxAge"_s));
+
+        dialog = profileDialogFor(window, u"edit"_s, reader);
+        QVERIFY(dialog);
+        clickOn(window, itemNamed(dialog, u"profile-kind-lock"_s));
+        QTRY_VERIFY(shownNamed(dialog, u"profile-age-less"_s));
+        QVERIFY(laidOut(window));
+        // A code exists: restricting asks for none.
+        QVERIFY(hiddenNamed(dialog, u"profile-code"_s));
+        clickOn(window, itemNamed(dialog, u"profile-age-less"_s));
+        pretend.heard.clear();
+        clickOn(window, itemNamed(dialog, u"profile-confirm"_s));
+        QTRY_VERIFY(!dialog->isVisible());
+        sent = bodySent(pretend.heard, "PATCH /profiles/r ");
+        QCOMPARE(sent.value(u"kind"_s).toString(), u"restricted"_s);
+        QCOMPARE(sent.value(u"maxAge"_s).toInt(), 9);
+        QVERIFY(!sent.contains(u"rights"_s));
+    }
+
+    /// The code is required from the first restricted profile, made or turned: restricting a
+    /// reader when there is no code makes it in the same window, before the change.
+    void restricting_a_reader_with_no_code_makes_the_code_first()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s)},
+            u"p"_s, true);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        const QByteArray set = aReply(204, QByteArrayLiteral("application/json"), {});
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            return request.startsWith("PUT /profiles/code ") ? set : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *dialog = profileDialogFor(
+            window, u"edit"_s, aListedProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s));
+        QVERIFY(dialog);
+        QVERIFY(hiddenNamed(dialog, u"profile-code"_s));
+        clickOn(window, itemNamed(dialog, u"profile-kind-lock"_s));
+        QTRY_VERIFY(shownNamed(dialog, u"profile-code"_s));
+        QVERIFY(laidOut(window));
+        QQuickItem *confirm = itemNamed(dialog, u"profile-confirm"_s);
+        clickOn(window, itemNamed(dialog, u"profile-code"_s));
+        typeInto(window, u"1234"_s);
+        // Half a code is not a code.
+        QVERIFY(!confirm->property("ready").toBool());
+        clickOn(window, itemNamed(dialog, u"profile-code-again"_s));
+        typeInto(window, u"1234"_s);
+        QVERIFY(confirm->property("ready").toBool());
+        pretend.heard.clear();
+        clickOn(window, confirm);
+        QTRY_VERIFY(!dialog->isVisible());
+        const qsizetype code = pretend.heard.indexOf("PUT /profiles/code ");
+        const qsizetype change = pretend.heard.indexOf("PATCH /profiles/r ");
+        QVERIFY(code >= 0);
+        QVERIFY(change > code);
+        const QJsonObject made = bodySent(pretend.heard, "PUT /profiles/code ");
+        QCOMPARE(made, (QJsonObject{{u"code"_s, u"1234"_s}, {u"codeAgain"_s, u"1234"_s},
+                                    {u"scope"_s, u"restricted"_s}}));
+        QCOMPARE(bodySent(pretend.heard, "PATCH /profiles/r ").value(u"kind"_s).toString(),
+                 u"restricted"_s);
+    }
+
+    /// The principal's own window sends the change of name first, then the code with what it
+    /// is for — one after the other, so that a refusal of the first is not lost.
+    void saving_your_own_profile_sends_the_change_then_the_code()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true)}, u"p"_s,
+            true, u"restricted"_s);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        const QByteArray set = aReply(204, QByteArrayLiteral("application/json"), {});
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            return request.startsWith("PUT /profiles/code ") ? set : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *dialog = profileDialogFor(
+            window, u"self"_s,
+            aListedProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true));
+        QVERIFY(dialog);
+        typeInto(window, u"e"_s);
+        QQuickItem *confirm = itemNamed(dialog, u"profile-confirm"_s);
+        QVERIFY(confirm->property("ready").toBool());
+        // A code typed once, even where none is needed, is half a code.
+        clickOn(window, itemNamed(dialog, u"profile-code"_s));
+        typeInto(window, u"abcd"_s);
+        QVERIFY(!confirm->property("ready").toBool());
+        // Changing what the code is for means typing it again.
+        clickOn(window, itemNamed(dialog, u"profile-code-scope-crown"_s));
+        QTRY_VERIFY(!confirm->property("ready").toBool());
+        clickOn(window, itemNamed(dialog, u"profile-code-again"_s));
+        typeInto(window, u"abcd"_s);
+        QVERIFY(confirm->property("ready").toBool());
+        pretend.heard.clear();
+        clickOn(window, confirm);
+        QTRY_VERIFY(!dialog->isVisible());
+        const qsizetype change = pretend.heard.indexOf("PATCH /profiles/p ");
+        const qsizetype code = pretend.heard.indexOf("PUT /profiles/code ");
+        QVERIFY(change >= 0);
+        QVERIFY(code > change);
+        QCOMPARE(bodySent(pretend.heard, "PATCH /profiles/p ").value(u"name"_s).toString(),
+                 u"Principale"_s);
+        QCOMPARE(bodySent(pretend.heard, "PUT /profiles/code ").value(u"scope"_s).toString(),
+                 u"everything"_s);
+    }
+
+    /// With no restricted profile, the code can go: the switch off sends the removal, and
+    /// nothing else when nothing else changed.
+    void turning_the_code_off_removes_it()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true)}, u"p"_s,
+            true, u"restricted"_s);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        const QByteArray gone = aReply(204, QByteArrayLiteral("application/json"), {});
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            return request.startsWith("DELETE ") ? gone : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *dialog = profileDialogFor(
+            window, u"self"_s,
+            aListedProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true));
+        QVERIFY(dialog);
+        QQuickItem *lever = itemNamed(dialog, u"profile-code-switch"_s);
+        QVERIFY(lever->isEnabled());
+        QCOMPARE(textNamed(dialog, u"profile-code-hint"_s), Words::codeHintFree());
+        clickOn(window, lever);
+        QTRY_VERIFY(!lever->property("on").toBool());
+        QVERIFY(laidOut(window));
+        pretend.heard.clear();
+        clickOn(window, itemNamed(dialog, u"profile-confirm"_s));
+        QTRY_VERIFY(!dialog->isVisible());
+        QVERIFY(pretend.heard.contains("DELETE /profiles/code "));
+        QVERIFY(!pretend.heard.contains("PATCH "));
+    }
+
+    /// A refused deletion says why where it was asked, and the profile stays.
+    void a_refused_deletion_is_said_in_its_window()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s)},
+            u"p"_s, true);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        const QByteArray refused = aReply(409, QByteArrayLiteral("application/json"),
+                                          QByteArrayLiteral(R"({"error":"refused"})"));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            return request.startsWith("DELETE ") ? refused : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QVERIFY(QMetaObject::invokeMethod(
+            window, "removeProfile",
+            Q_ARG(QVariant, aListedProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s))));
+        auto *dialog = window->findChild<QQuickItem *>(u"profile-removal-body"_s);
+        QVERIFY(dialog);
+        QTRY_VERIFY(dialog->isVisible());
+        QVERIFY(laidOut(window));
+        QVERIFY(hiddenNamed(dialog, u"profile-removal-trouble"_s));
+        clickOn(window, itemNamed(dialog, u"profile-removal-confirm"_s));
+        QTRY_VERIFY(shownNamed(dialog, u"profile-removal-trouble"_s));
+        QVERIFY(!textNamed(dialog, u"profile-removal-trouble"_s).isEmpty());
+        QVERIFY(dialog->isVisible());
+    }
+
+    /// The swatches answer the keyboard: Tab reaches the chosen one, the arrows go from one
+    /// free colour to the next over the taken ones, Space or Enter picks. Each is named by its
+    /// palette name, and a taken one by its owner too.
+    void a_colour_is_chosen_from_the_keyboard()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"sauge"_s, u"reader"_s)},
+            u"p"_s, true);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *dialog = profileDialogFromAdd(window);
+        QVERIFY(dialog);
+        auto *popup = window->findChild<QObject *>(u"profile-dialog"_s);
+        QVERIFY(popup);
+        QCOMPARE(popup->property("color").toString(), u"sapin"_s);
+        QQuickItem *sapin = itemNamed(dialog, u"profile-colour-sapin"_s);
+        QQuickItem *olive = itemNamed(dialog, u"profile-colour-olive"_s);
+        QQuickItem *bleu = itemNamed(dialog, u"profile-colour-bleu"_s);
+        QVERIFY(sapin && olive && bleu);
+
+        QAccessibleInterface *named =
+            QAccessible::queryAccessibleInterface(itemNamed(dialog, u"profile-colour-emeraude"_s));
+        QVERIFY(named);
+        QCOMPARE(named->text(QAccessible::Name), Words::colourName(u"emeraude"_s, u"Principal"_s));
+        QCOMPARE(QAccessible::queryAccessibleInterface(sapin)->text(QAccessible::Name),
+                 u"Sapin"_s);
+
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(sapin->hasActiveFocus());
+        QVERIFY(shownNamed(sapin, u"profile-colour-sapin-focus"_s));
+        // Émeraude is taken and first: nowhere to go on the left.
+        QTest::keyClick(window, Qt::Key_Left);
+        QVERIFY(sapin->hasActiveFocus());
+        // Sauge is taken: the right arrow goes over it.
+        QTest::keyClick(window, Qt::Key_Right);
+        QVERIFY(olive->hasActiveFocus());
+        QCOMPARE(popup->property("color").toString(), u"sapin"_s);
+        QTest::keyClick(window, Qt::Key_Space);
+        QCOMPARE(popup->property("color").toString(), u"olive"_s);
+        QTest::keyClick(window, Qt::Key_Down);
+        QVERIFY(itemNamed(dialog, u"profile-colour-indigo"_s)->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Right);
+        QVERIFY(bleu->hasActiveFocus());
+        QTest::keyClick(window, Qt::Key_Return);
+        QCOMPARE(popup->property("color").toString(), u"bleu"_s);
+        QVERIFY(dialog->isVisible());
     }
 };
 

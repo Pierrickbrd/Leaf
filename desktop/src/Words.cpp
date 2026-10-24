@@ -2,6 +2,7 @@
 
 #include <QDateTime>
 #include <QFileInfo>
+#include <QHash>
 #include <QLocale>
 
 #include <QStringList>
@@ -2353,6 +2354,62 @@ QString eraseProfile(const QString &name)
 QString eraseConsequence()
 {
     return u"Les lectures en cours et les préférences de ce profil seront effacées."_s;
+}
+
+QString eraseLeavesDevices()
+{
+    return u"Les appareils qui le retenaient demanderont qui lit. Les tomes de la bibliothèque ne bougent pas."_s;
+}
+
+QString eraseProfileButton(const QString &name)
+{
+    return u"Supprimer %1"_s.arg(name);
+}
+
+QString addProfileButton(const QString &name)
+{
+    return name.isEmpty() ? addOne() : u"Ajouter %1"_s.arg(name);
+}
+
+QString saveProfile()
+{
+    return u"Enregistrer"_s;
+}
+
+QString firstCodeHint()
+{
+    return u"Il n’y a pas encore de code, et un profil restreint en demande un"_s + Nbsp
+           + u": c’est lui qui permet d’en sortir. De 4 à 8 caractères, à saisir deux fois. Dans votre profil, vous choisirez s’il protège aussi le retour vers le vôtre."_s;
+}
+
+QString principalManages(const QString &principal)
+{
+    return u"Ce profil pourra changer son nom et sa couleur, comme vous. Les droits et les profils restreints, c’est le profil principal, %1, qui les gère."_s.arg(principal);
+}
+
+QString fewerYears()
+{
+    return u"Un an de moins"_s;
+}
+
+QString moreYears()
+{
+    return u"Un an de plus"_s;
+}
+
+QString colourName(const QString &id, const QString &owner)
+{
+    static const QHash<QString, QString> names{
+        {u"emeraude"_s, u"Émeraude"_s}, {u"sapin"_s, u"Sapin"_s},
+        {u"sauge"_s, u"Sauge"_s},       {u"olive"_s, u"Olive"_s},
+        {u"ocre"_s, u"Ocre"_s},         {u"ambre"_s, u"Ambre"_s},
+        {u"corail"_s, u"Corail"_s},     {u"framboise"_s, u"Framboise"_s},
+        {u"rose"_s, u"Rose"_s},         {u"prune"_s, u"Prune"_s},
+        {u"violet"_s, u"Violet"_s},     {u"indigo"_s, u"Indigo"_s},
+        {u"bleu"_s, u"Bleu"_s},         {u"azur"_s, u"Azur"_s},
+        {u"ardoise"_s, u"Ardoise"_s},   {u"terre"_s, u"Terre"_s}};
+    const QString name = names.value(id, id);
+    return owner.isEmpty() ? name : u"%1, déjà prise par %2"_s.arg(name, owner);
 }
 
 QString profilesTab()

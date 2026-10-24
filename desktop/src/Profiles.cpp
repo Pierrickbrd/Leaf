@@ -229,6 +229,11 @@ QVariantMap Profiles::words() const
             {u"youMark"_s, Words::youMark()},
             {u"retainedHere"_s, Words::retainedHere()},
             {u"eraseConsequence"_s, Words::eraseConsequence()},
+            {u"eraseLeavesDevices"_s, Words::eraseLeavesDevices()},
+            {u"saveProfile"_s, Words::saveProfile()},
+            {u"firstCodeHint"_s, Words::firstCodeHint()},
+            {u"fewerYears"_s, Words::fewerYears()},
+            {u"moreYears"_s, Words::moreYears()},
             {u"profilesTab"_s, Words::profilesTab()},
             {u"whatEachMayDo"_s, Words::whatEachMayDo()},
             {u"devicesTab"_s, Words::devicesTab()},
@@ -276,6 +281,26 @@ QString Profiles::saySeriesUpToYears(int age) const
 QString Profiles::sayEraseProfile(const QString &name) const
 {
     return Words::eraseProfile(name);
+}
+
+QString Profiles::sayEraseProfileButton(const QString &name) const
+{
+    return Words::eraseProfileButton(name);
+}
+
+QString Profiles::sayAddProfileButton(const QString &name) const
+{
+    return Words::addProfileButton(name);
+}
+
+QString Profiles::sayPrincipalManages(const QString &principal) const
+{
+    return Words::principalManages(principal);
+}
+
+QString Profiles::sayColourName(const QString &id, const QString &owner) const
+{
+    return Words::colourName(id, owner);
 }
 
 QString Profiles::sayOpensOn(const QString &name) const
