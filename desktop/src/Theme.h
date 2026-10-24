@@ -71,7 +71,7 @@ class Theme : public QObject
     /// No longer behind the pages, which take `readerBlack` and its two siblings: what is left
     /// of it is the veil of the reader's shortcuts card, which belongs to the theme.
     Q_PROPERTY(QColor readerPaper READ readerPaper NOTIFY changed)
-    /// The three backdrops a reader may put behind the pages (`Preferences.backdrop`, owner's
+    /// The three backdrops a reader may put behind the pages (`Preferences.backdrop`,
     /// choice of 22/10/2026). They are chosen for the pages and not for the application: black
     /// is black and white is white whichever theme is on, so `readerPaper` — cream in the light
     /// theme — is not one of them. A grey with the palette's lean to green, so it reads as

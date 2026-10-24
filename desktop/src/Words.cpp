@@ -51,7 +51,7 @@ QString line(Api::UpNext::Kind kind, std::optional<double> number_, std::optiona
 }
 
 /// Whether a title says nothing its label has not said: empty once trimmed, or the label
-/// again, whatever its case or the spaces around it. The owner's test of 22/10/2026 read
+/// again, whatever its case or the spaces around it. The test of 22/10/2026 read
 /// « Tome 3 · Tome 3 » over the panel of a volume whose files title it by its number.
 bool saysNothingMore(const QString &title, const QString &label)
 {
@@ -748,7 +748,7 @@ QString readerWhere(const QString &entry, const QString &chapter, const QString 
 QString readerScrubbing(const QString &chapter, const QString &title, int page)
 {
     // `chapterName` keeps the rule the bar follows: « #13 · #13 · page 4 » was still possible
-    // here after the bar's line had learned to say a chapter once (owner's test, 22/10/2026).
+    // here after the bar's line had learned to say a chapter once (the test, 22/10/2026).
     const QString named = chapterName(chapter, title);
     return (named.isEmpty() ? QString() : named + Nbsp + u"· "_s) + u"page "_s
            + QString::number(page);
@@ -757,7 +757,7 @@ QString readerScrubbing(const QString &chapter, const QString &title, int page)
 QString readerBesideLabel(const QString &label, const QString &title)
 {
     // Drawn right after the label, so a title that only repeats it read « #13 · #13 » under
-    // the bar (owner's test, 22/10/2026): it is the label's to say, once. What it does say
+    // the bar (the test, 22/10/2026): it is the label's to say, once. What it does say
     // follows the colon `chapterName` puts everywhere else a chapter is named.
     if (label.trimmed().isEmpty())
         return title.trimmed();

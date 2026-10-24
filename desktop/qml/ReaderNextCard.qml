@@ -17,7 +17,7 @@
 //
 // **It follows the window as the dock does** (`Widths.scale`): every size below, words and
 // cover included, is drawn for a window of 1280 and scaled with it, its words never under
-// their floor, and the card is never wider nor taller than the window leaves. In the owner's
+// their floor, and the card is never wider nor taller than the window leaves. In the
 // test of 22/10/2026 on a full-screen window of 1920, the dock had grown and this card had
 // kept its drawn size beside it.
 //

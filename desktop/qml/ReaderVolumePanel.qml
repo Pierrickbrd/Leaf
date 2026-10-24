@@ -16,19 +16,19 @@
 //
 // **It opens at its top**, on the cover and the facts, and lights the chapter being read
 // without scrolling to it. Opened on the current chapter, it hid what one opens it to see —
-// what the volume is — under a list scrolled half-way (owner's test of 22/10/2026). It
+// what the volume is — under a list scrolled half-way (the test of 22/10/2026). It
 // follows the reader only once open, from one chapter into the next.
 //
 // **It follows the window as the dock does** (`Widths.scale`): every size below, words, cover
 // and rows included, is drawn for a window of 1280 and scaled with it, its words never under
-// their floor. In the owner's test of 22/10/2026 on a full-screen window of 1920, the dock had
+// their floor. In the test of 22/10/2026 on a full-screen window of 1920, the dock had
 // grown and this card had kept its drawn size beside it. Too narrow for the facts beside the
 // cover, it puts the cover above them.
 //
-// **An ISBN that adds up is a key** (`IsbnKey`), the owner's choice of 22/10/2026, and the
+// **An ISBN that adds up is a key** (`IsbnKey`), the choice of 22/10/2026, and the
 // last thing in the sheet, after the chapters, scrolled with them. Anchored at the foot of the
 // card under the sheet, as it first was, it took the bottom of the card from the list: in the
-// owner's test of 22/10/2026 the seventeenth chapter of Erased 3 was cut in half behind it.
+// the test of 22/10/2026 the seventeenth chapter of Erased 3 was cut in half behind it.
 // An ISBN that does not add up stays the plain line it was — a barcode drawn over a typo would
 // certify the typo.
 //

@@ -31,7 +31,7 @@
 // page is zoomed or dragged, nor in a webtoon; and a turn made while one is running ends that
 // one at once, so a run of turns never lags behind the hand.
 //
-// **That is « Glisser », one of three** (`Preferences.motion`, owner's choice of 22/10/2026):
+// **That is « Glisser », one of three** (`Preferences.motion`, the choice of 22/10/2026):
 // « Fondu » fades a turn as it fades a jump, and « Sans effet » moves nothing at all — not
 // the pages, not the bars, the dock or the cards coming and going. « Sans effet » still waits
 // for the images: the screen that comes is hidden, the old one standing, until they are there,
@@ -1326,7 +1326,7 @@ FocusScope {
     Text {
         objectName: "reader-trouble"
         anchors.centerIn: parent
-        // Follows the window as the bar and the cards do (owner's test of 22/10/2026).
+        // Follows the window as the bar and the cards do (the test of 22/10/2026).
         width: Math.min(parent.width - 64, Widths.scale.column(520))
         visible: Reader.trouble.length > 0
         text: Reader.trouble
@@ -1523,7 +1523,7 @@ FocusScope {
     ReaderSettings {
         id: card
 
-        // Follows the window, never wider nor taller than the window leaves: in the owner's test
+        // Follows the window, never wider nor taller than the window leaves: in the test
         // of 22/10/2026 on a window of 1920 it kept its drawn size beside a dock that had grown.
         // At half the dock's rate (`column`): its words no longer grow, and at the full rate
         // the card was a band of empty paper right of its pills.

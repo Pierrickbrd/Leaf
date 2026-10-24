@@ -411,7 +411,7 @@ private slots:
     }
 
     /// A chapter is its label, a non-breaking space, a colon and its title — « Level.01 :
-    /// Nom » — wherever it is named. The owner's request of 23/10/2026: every screen said
+    /// Nom » — wherever it is named. The request of 23/10/2026: every screen said
     /// « #13 », when the data says how a chapter is to be called.
     void a_chapter_is_named_by_its_label_and_its_title()
     {
@@ -1271,7 +1271,7 @@ private slots:
         QCOMPARE(Words::readerVolumeHead(u"Tome 12"_s, u"Coup de sifflet"_s),
                  u"Tome 12\u00A0· Coup de sifflet"_s);
         QCOMPARE(Words::readerVolumeHead(u"Tome 12"_s, QString()), u"Tome 12"_s);
-        // A title that is the label again is said once: « Tome 3 · Tome 3 » in the owner's
+        // A title that is the label again is said once: « Tome 3 · Tome 3 » in the
         // test of 22/10/2026, from files that title a volume by its number.
         QCOMPARE(Words::readerVolumeHead(u"Tome 3"_s, u"Tome 3"_s), u"Tome 3"_s);
         QCOMPARE(Words::readerVolumeHead(u"Tome 3"_s, u" tome 3 "_s), u"Tome 3"_s);
@@ -1310,7 +1310,7 @@ private slots:
         // No label: the title stands in its place, with nothing in front of it.
         QCOMPARE(Words::readerBesideLabel(QString(), u"Épilogue"_s), u"Épilogue"_s);
         QCOMPARE(Words::readerBesideLabel(u"Chap.099"_s, QString()), QString());
-        // A title that is the label again is the label's to say, once (« #13 · #13 », owner's
+        // A title that is the label again is the label's to say, once (« #13 · #13 »,
         // test of 22/10/2026), whatever its case or the spaces around it.
         QCOMPARE(Words::readerBesideLabel(u"#13"_s, u"#13"_s), QString());
         QCOMPARE(Words::readerBesideLabel(u"Chap.13"_s, u" CHAP.13 "_s), QString());

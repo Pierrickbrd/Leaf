@@ -110,7 +110,7 @@ class Widths : public QObject
     /// How much larger or smaller than drawn everything the reader lays over its pages is —
     /// its bar, its dock and its cards — for this window: 0.85 up to 900 pixels, 1 at 1280,
     /// 1.5 from 2560, linear between. A 2560 display scaled by 1.333 is a window of 1920 and
-    /// gets 1.25: in the owner's test of 22/10/2026 there, 1 left the dock a strip of specks
+    /// gets 1.25: in the test of 22/10/2026 there, 1 left the dock a strip of specks
     /// and 1.5 made it too large. What each kind of thing draws makes of it is `Scale`'s:
     /// lengths follow it, words only under 1 (23/10/2026), icons and cards at half its rate.
     Q_PROPERTY(qreal controls READ controls NOTIFY windowChanged)

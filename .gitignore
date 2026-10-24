@@ -33,18 +33,6 @@ desktop/build/
 # part of the tree any more than `desktop/build/` above is.
 desktop/coverage/
 
-# Working documents kept beside the code and never published: planning, the
-# decisions behind it, assistant instructions, deployment notes written for one
-# particular machine. The rule is here before the files are, so that no
-# `git add -A` can ever catch them on their way in.
-/CLAUDE.md
-/AGENTS.md
-/docs/
-/deploy/
-/.codex/
-/.superpowers/
-/notes/
-
 # La note qui dit d'où viennent les icônes reste à côté d'elles et hors du dépôt, par
 # décision du 21/09/2026. Nommée ici plutôt que laissée au hasard : elle a déjà disparu
 # une fois dans un squash, et une suppression silencieuse est ce que cette liste évite.

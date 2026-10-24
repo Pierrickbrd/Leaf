@@ -199,7 +199,7 @@ void run(QQmlApplicationEngine &engine, const QGuiApplication &application,
         QObject::connect(toasts, &Toasts::escalated,
                          new Notifier(std::move(notifications), &engine), &Notifier::show);
         // Covers and pages arrive as WebP, read through a plugin Ubuntu packages apart from
-        // Qt: without it, 22/10/2026, every image on the owner's shelf failed on its own and
+        // Qt: without it, 22/10/2026, every image on the shelf failed on its own and
         // nothing named the one package missing. Said here, once, before anything is drawn.
         toasts->readsImages(QImageReader::supportedImageFormats());
     }

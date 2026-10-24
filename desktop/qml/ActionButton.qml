@@ -45,7 +45,7 @@ Rectangle {
 
     /// Whether it follows the window (`Widths.scale`): only over the reader's pages yet, where
     /// a pill of its drawn size under a title that had grown read as a button from another
-    /// card (owner's test of 22/10/2026).
+    /// card (the test of 22/10/2026).
     property bool scaled: false
 
     function sized(drawn: real): int {

@@ -9,7 +9,7 @@
 // written on emerald. `wide` pads a word longer than a letter, and the backspace glyph.
 //
 // It follows the window as an icon does (`Widths.scale.icon`), at half a length's rate above
-// 1280: a key of its drawn size on a grown card read as a speck (owner's test of 22/10/2026),
+// 1280: a key of its drawn size on a grown card read as a speck (the test of 22/10/2026),
 // and one grown at the full rate stood larger than the words beside it once those stopped
 // growing (23/10/2026).
 

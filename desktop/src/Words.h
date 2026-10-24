@@ -446,7 +446,7 @@ QString alreadyLinked();
 QString isbnCopied();
 /// « Il manque le module d’images WebP de Qt », and what to install. Said at startup when Qt
 /// cannot read WebP: every cover and every resized page is WebP, and without the plugin the
-/// owner's desktop showed a shelf of « Format d'image non supporté » (22/10/2026) — an
+/// desktop showed a shelf of « Format d'image non supporté » (22/10/2026) — an
 /// error on each image and nowhere a word about the one package that was missing.
 QString webpMissing();
 QString webpMissingRemedy();
@@ -647,7 +647,7 @@ QString readerBackdrop(Preferences::Backdrop which);
 /// page being switched off rather than drawn without a motion.
 QString readerMotion(Preferences::Motion which);
 /// The two halves of « Sur cet appareil », each over its rows: « Pages », what the book looks
-/// like, and « Confort », what is around it. The owner's critique of 22/10/2026 was four
+/// like, and « Confort », what is around it. The critique of 22/10/2026 was four
 /// anonymous rows of pills, which a reader had to try to learn what each one was about.
 enum class ReaderDeskGroup { Pages, Comfort };
 QString readerDeskGroup(ReaderDeskGroup which);

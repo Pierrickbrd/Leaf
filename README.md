@@ -246,7 +246,7 @@ network address reachable from the client; anywhere but the loopback Leaf speaks
 https, with a certificate whose fingerprint the link carries:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Pierrickbrd/Leaf/main/install.sh) server --host 100.64.0.10
+bash <(curl -fsSL https://raw.githubusercontent.com/Pierrickbrd/Leaf/main/install.sh) server --host 192.0.2.10
 ```
 
 For a public hostname, put Leaf behind a TLS reverse proxy and give the public URL at the
@@ -399,11 +399,11 @@ The address the asking device uses is never the one in the link: on the server's
 machine it is the loopback, and through an SSH tunnel it is the tunnel's end, which no other
 device can follow. A developer reaching a server through a tunnel, who wants to link a
 second device through it, sets `LEAF_PUBLIC_URL` on the server to the address that device
-types — `http://127.0.0.1:9099` for a tunnel on each machine — and restarts it, or makes
+types — `http://127.0.0.1:9000` for a tunnel on each machine — and restarts it, or makes
 that one link from the server's terminal:
 
 ```bash
-sudo leaf-server device add --address http://127.0.0.1:9099
+sudo leaf-server device add --address http://127.0.0.1:9000
 ```
 
 ```bash

@@ -136,7 +136,7 @@ private slots:
     }
 
     /// Lengths follow the factor; words follow it down within their floors and never up — the
-    /// owner's test of 22/10/2026 asked for words that follow a small window and none
+    /// the test of 22/10/2026 asked for words that follow a small window and none
     /// illegible on it, and the one of 23/10/2026 at 1920 found every word grown with the
     /// window too big.
     void words_shrink_with_the_window_and_never_grow()
