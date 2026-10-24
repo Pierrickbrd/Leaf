@@ -502,6 +502,27 @@ QQuickWindow *shown(QQmlApplicationEngine &engine)
     return QTest::qWaitForWindowActive(window) ? window : nullptr;
 }
 
+/// The settings screen, opened on the tab `section` — or null, for the caller to refuse. Waits
+/// for the seat first: which tabs there are depends on who reads.
+QQuickItem *settingsOn(QQmlApplicationEngine &engine, QQuickWindow *window,
+                       const QString &section)
+{
+    auto *square = window->findChild<QQuickItem *>(u"profile-square"_s);
+    if (!square || !QTest::qWaitFor([&] { return square->isVisible(); }))
+        return nullptr;
+    auto *navigation =
+        engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+    if (!navigation
+        || !navigation->open(Navigation::Destination::Settings, {{u"section"_s, section}}))
+        return nullptr;
+    QQuickItem *view = nullptr;
+    if (!QTest::qWaitFor([&] {
+            return (view = window->findChild<QQuickItem *>(u"settings-view"_s)) != nullptr;
+        }))
+        return nullptr;
+    return laidOut(window) ? view : nullptr;
+}
+
 /// A click in the middle of an item, the way a hand makes one.
 void clickOn(QQuickWindow *window, QQuickItem *item)
 {
@@ -1624,8 +1645,8 @@ private slots:
 
         QQuickItem *screen = nullptr;
         QTRY_VERIFY((screen = itemNamed(window->contentItem(), u"settings-view"_s)));
-        // The section is the second of three, and its two cards are drawn only there.
-        screen->setProperty("section", 1);
+        // Its two cards are drawn only in their own section.
+        screen->setProperty("section", u"notifications"_s);
         QQuickItem *lever = nullptr;
         QTRY_VERIFY((lever = itemNamed(screen, u"warns-scans-bubble"_s)));
         QTRY_VERIFY(itemNamed(screen, u"settings-corner"_s)->isVisible());
@@ -3343,8 +3364,9 @@ private slots:
         // and this slot has to leave the shelf with the panel open.
         const QByteArray filtersReply =
             aReply(200, QByteArrayLiteral("application/json"), someFilters());
-        pretend.answerFor = [pageReply, emptyNext, healthReply, scanReply, filtersReply,
-                             coverReply](const QByteArray &request) {
+        // Seated as the principal, the one profile with a library tab to open.
+        pretend.answerFor = seatedAsPrincipal([pageReply, emptyNext, healthReply, scanReply,
+                                               filtersReply, coverReply](const QByteArray &request) {
             if (request.startsWith("GET /next"))
                 return emptyNext;
             if (request.startsWith("GET /health"))
@@ -3354,7 +3376,7 @@ private slots:
             if (request.startsWith("GET /filters"))
                 return filtersReply;
             return request.startsWith("GET /series?") ? pageReply : coverReply;
-        };
+        });
         qputenv("LEAF_ADDRESS",
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 
@@ -3421,12 +3443,14 @@ private slots:
         QVERIFY2(back->property("label").toString().contains(u"étagère"_s),
                  qPrintable(back->property("label").toString()));
 
-        // The scan lives behind the second pill, and what it counted is said in French
+        // The scan lives behind the library's pill, and what it counted is said in French
         // here rather than arriving as a paragraph the vocabulary file could not reach.
-        auto *libraryTab = itemNamed(page, u"settings-tab-library"_s);
-        QVERIFY(libraryTab);
+        QTRY_VERIFY(itemNamed(page, u"settings-tab-library"_s));
+        QVariant library;
+        QVERIFY(QMetaObject::invokeMethod(view, "sectionIndex", Q_RETURN_ARG(QVariant, library),
+                                          Q_ARG(QVariant, u"library"_s)));
         QVERIFY(QMetaObject::invokeMethod(itemNamed(page, u"settings-tabs"_s), "selected",
-                                          Q_ARG(int, 1)));
+                                          Q_ARG(int, library.toInt())));
         QTRY_COMPARE(textNamed(page, u"settings-scan-counts-label"_s),
                      u"1 univers, 6 séries, 59 tomes, 546 chapitres"_s);
 
@@ -5033,6 +5057,260 @@ private slots:
         clickOn(window, itemNamed(dialog, u"profile-removal-confirm"_s));
         QTRY_VERIFY(!dialog->isVisible());
         QVERIFY(pretend.heard.contains("DELETE /profiles/r "));
+    }
+
+    /// « Cet appareil » left the library tab for the devices tab, whole: the name, the date it
+    /// was linked, linking another device and unlinking. The address stays with the library.
+    void the_device_block_moved_to_devices()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true)}, u"p"_s,
+            false);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *view = settingsOn(engine, window, u"library"_s);
+        QVERIFY(view);
+        QTRY_VERIFY(shownNamed(view, u"bond-address"_s));
+        QVERIFY(shownNamed(view, u"bond-move"_s));
+        for (const QString &moved : {u"bond-name"_s, u"bond-unlink"_s, u"bond-rename-field"_s})
+            QVERIFY2(!shownNamed(view, moved), qPrintable(moved));
+
+        view->setProperty("section", u"devices"_s);
+        QTRY_VERIFY(shownNamed(view, u"bond-name"_s));
+        QVERIFY(shownNamed(view, u"settings-this-device"_s));
+        QVERIFY(!shownNamed(view, u"bond-address"_s));
+    }
+
+    /// A reader manages no one else: their own row, the pencil that opens « Votre profil », and
+    /// who to ask for the rest — never the others' rows, the bins or the rights.
+    void a_reader_sees_only_their_own_profile()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Camille"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s),
+             aProfile(u"l"_s, u"Enfant"_s, u"azur"_s, u"restricted"_s, false, 10)},
+            u"r"_s, true);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *view = settingsOn(engine, window, u"profiles"_s);
+        QVERIFY(view);
+        QTRY_VERIFY(shownNamed(view, u"profile-row-r"_s));
+        QVERIFY(!itemNamed(view, u"profile-row-p"_s));
+        QVERIFY(!itemNamed(view, u"profile-row-l"_s));
+        QVERIFY(!shownNamed(view, u"profile-row-r-remove"_s));
+        QVERIFY(!shownNamed(view, u"profiles-add"_s));
+        QVERIFY(!shownNamed(view, u"settings-rights"_s));
+        QCOMPARE(textNamed(view, u"profiles-managed"_s),
+                 Words::managedByPrincipal(u"Camille"_s));
+        QCOMPARE(textNamed(view, u"profile-row-r-note"_s),
+                 Words::profileLine(Api::Kind::Reader, std::nullopt,
+                                    {Words::youMark(), Words::retainedHere()}));
+        // Nor the tabs of what a reader does not manage.
+        QVERIFY(itemNamed(view, u"settings-tab-profiles"_s));
+        QVERIFY(!itemNamed(view, u"settings-tab-devices"_s));
+        QVERIFY(!itemNamed(view, u"settings-tab-library"_s));
+    }
+
+    /// A right is given the moment its box is ticked, the other two sent as they stand.
+    void a_rights_checkbox_sends_the_right_at_once()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s, false, 0, true)},
+            u"p"_s, true);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *view = settingsOn(engine, window, u"profiles"_s);
+        QVERIFY(view);
+        QQuickItem *box = nullptr;
+        QTRY_VERIFY((box = itemNamed(view, u"rights-r-import"_s)) && box->isVisible());
+        QVERIFY(laidOut(window));
+        pretend.heard.clear();
+        clickOn(window, box);
+        QTRY_VERIFY(pretend.heard.contains("PATCH /profiles/r "));
+        const QJsonObject rights =
+            bodySent(pretend.heard, "PATCH /profiles/r ").value(u"rights"_s).toObject();
+        QCOMPARE(rights.value(u"import"_s).toBool(), true);
+        QCOMPARE(rights.value(u"edit"_s).toBool(), true);
+        QCOMPARE(rights.value(u"delete"_s).toBool(), false);
+    }
+
+    /// Removing a device cuts its key with the answer, so it is asked first.
+    void removing_a_device_asks_then_sends_delete()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true)}, u"p"_s,
+            false);
+        const QByteArray devices = aReply(
+            200, QByteArrayLiteral("application/json"),
+            QJsonDocument(QJsonObject{
+                              {u"devices"_s,
+                               QJsonArray{QJsonObject{{u"id"_s, u"d1"_s},
+                                                      {u"name"_s, u"Ordinateur"_s},
+                                                      {u"profile"_s, u"p"_s},
+                                                      {u"kept"_s, false},
+                                                      {u"here"_s, true}},
+                                          QJsonObject{{u"id"_s, u"d2"_s},
+                                                      {u"name"_s, u"Tablette"_s},
+                                                      {u"profile"_s, u"p"_s},
+                                                      {u"kept"_s, true},
+                                                      {u"here"_s, false}}}}})
+                .toJson(QJsonDocument::Compact));
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        const QByteArray gone = aReply(204, QByteArrayLiteral("application/json"), {});
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            if (request.startsWith("GET /devices "))
+                return devices;
+            return request.startsWith("DELETE ") ? gone : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *view = settingsOn(engine, window, u"devices"_s);
+        QVERIFY(view);
+        QQuickItem *bin = nullptr;
+        QTRY_VERIFY((bin = itemNamed(view, u"device-row-d2-remove"_s)) && bin->isVisible());
+        QCOMPARE(textNamed(view, u"device-row-d2-opens"_s), Words::opensOn(u"Principal"_s));
+        QVERIFY(!itemNamed(view, u"device-row-d1"_s));
+        QVERIFY(laidOut(window));
+        pretend.heard.clear();
+        clickOn(window, bin);
+        auto *dialog = window->findChild<QQuickItem *>(u"device-removal-body"_s);
+        QVERIFY(dialog);
+        QTRY_VERIFY(dialog->isVisible());
+        QVERIFY(laidOut(window));
+        QCOMPARE(textNamed(dialog, u"device-removal-title"_s),
+                 Words::removeDeviceQuestion(u"Tablette"_s));
+        QTest::qWait(100);
+        QVERIFY(!pretend.heard.contains("DELETE "));
+
+        clickOn(window, itemNamed(dialog, u"device-removal-confirm"_s));
+        QTRY_VERIFY(!dialog->isVisible());
+        QTRY_VERIFY(pretend.heard.contains("DELETE /devices/d2 "));
+    }
+
+    /// A name is typed on another device, by anyone with a profile: « <b>x</b> » is shown as
+    /// typed. Qt's default reads anything that looks like markup as markup, so the brackets
+    /// vanished and the name came out bold — and an `<img>` would have been fetched.
+    void a_name_that_looks_like_markup_is_shown_as_typed()
+    {
+        const QString marked = u"<b>x</b>"_s;
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, marked, u"corail"_s, u"reader"_s)},
+            u"p"_s, true);
+        const QByteArray devices = aReply(
+            200, QByteArrayLiteral("application/json"),
+            QJsonDocument(QJsonObject{
+                              {u"devices"_s,
+                               QJsonArray{QJsonObject{{u"id"_s, u"d2"_s},
+                                                      {u"name"_s, u"<i>y</i>"_s},
+                                                      {u"profile"_s, u"r"_s},
+                                                      {u"kept"_s, true},
+                                                      {u"here"_s, false}}}}})
+                .toJson(QJsonDocument::Compact));
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            return request.startsWith("GET /devices ") ? devices : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *view = settingsOn(engine, window, u"profiles"_s);
+        QVERIFY(view);
+        // Asked of the item rather than of its pixels: the default format decides per string,
+        // so only the format set on the item says every name will be read as typed.
+        const auto plain = [](QQuickItem *text) {
+            return text && text->property("textFormat").toInt() == 0 /* Text.PlainText */;
+        };
+        QQuickItem *name = nullptr;
+        QTRY_VERIFY((name = itemNamed(view, u"profile-row-r-name"_s)));
+        QVERIFY(plain(name));
+        QCOMPARE(name->property("text").toString(), marked);
+        QVERIFY(plain(itemNamed(view, u"profile-row-r-note"_s)));
+
+        view->setProperty("section", u"devices"_s);
+        QQuickItem *device = nullptr;
+        QTRY_VERIFY((device = itemNamed(view, u"device-row-d2-name"_s)));
+        QVERIFY(plain(device));
+        QCOMPARE(device->property("text").toString(), u"<i>y</i>"_s);
+        QVERIFY(laidOut(window));
+        clickOn(window, itemNamed(view, u"device-row-d2-remove"_s));
+        auto *dialog = window->findChild<QQuickItem *>(u"device-removal-body"_s);
+        QVERIFY(dialog);
+        QTRY_VERIFY(dialog->isVisible());
+        QVERIFY(plain(itemNamed(dialog, u"device-removal-title"_s)));
+
+        // « Qui lit ? » is the screen every profile sees, a child's included: the name a
+        // reader gave itself must not draw there, nor in any window that says it.
+        auto *whoReads = window->findChild<QQuickItem *>(u"who-reads"_s);
+        QVERIFY(whoReads);
+        QQuickItem *tile = itemNamed(whoReads, u"who-reads-name-r"_s);
+        QVERIFY(plain(tile));
+        QCOMPARE(tile->property("text").toString(), marked);
+        const std::pair<QString, QString> sayings[] = {
+            {u"code-dialog-body"_s, u"code-title"_s},
+            {u"profile-removal-body"_s, u"profile-removal-title"_s},
+            {u"profile-removal-body"_s, u"profile-removal-confirm-text"_s},
+            {u"profile-dialog-body"_s, u"profile-title"_s},
+            {u"profile-dialog-body"_s, u"profile-manages"_s},
+            {u"profile-dialog-body"_s, u"profile-code-hint"_s},
+            {u"profile-dialog-body"_s, u"profile-confirm-text"_s},
+        };
+        for (const auto &[body, name] : sayings) {
+            auto *holder = window->findChild<QQuickItem *>(body);
+            QVERIFY2(holder, qPrintable(body));
+            QVERIFY2(plain(itemNamed(holder, name)), qPrintable(name));
+        }
     }
 
     /// The principal changing a reader sends its kind and what goes with it: the rights for a

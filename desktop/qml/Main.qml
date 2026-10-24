@@ -121,11 +121,13 @@ ApplicationWindow {
         profileRemoval.ask(profile)
     }
 
-    /// Réglages › Profils; the settings screen picks the tab once it has one.
+    /// Réglages › Profils: handed with the destination, or straight to the screen already open.
     function openProfileSettings() {
         window.whoReadsOpen = false
         if (Navigation.destination !== Navigation.Settings)
-            Navigation.open(Navigation.Settings)
+            Navigation.open(Navigation.Settings, { section: "profiles" })
+        else
+            screen.item.section = "profiles"
     }
 
     function belongsTo(owner, item) {
@@ -588,7 +590,10 @@ ApplicationWindow {
     Component {
         id: settingsScreen
 
-        SettingsView { }
+        SettingsView {
+            onProfileDialogAsked: (mode, profile) => window.openProfileDialog(mode, profile)
+            onProfileRemovalAsked: profile => window.removeProfile(profile)
+        }
     }
 
     Component {

@@ -1284,4 +1284,34 @@ QString serverHeading();
 /// should read (`youMark`, `retainedHere`, `retainedOn`).
 QString profileLine(Api::Kind kind, std::optional<int> maxAge, const QStringList &marks);
 
+/// The reader's Profils tab, under their own row: who manages the rest, by name.
+QString managedByPrincipal(const QString &principal);
+
+/// « Ce que chacun peut faire », in place of the boxes, for a restricted profile.
+QString onlyReads(const QString &name);
+
+/// Under the boxes: what « Modifier » covers, and what a new profile starts with.
+QString rightsExplained();
+
+/// Under the other devices: what removing one does, and who decides what a device opens on.
+QString devicesExplained();
+
+/// Under the list of profiles: what deleting one costs, said before anyone reaches the bin.
+QString eraseExplained();
+
+/// Another device that keeps no profile: it asks who reads when it opens.
+QString asksWhoReadsThere();
+
+/// The pencil beside another device: it chooses the profile that device keeps.
+QString chooseItsProfile();
+
+/// The confirmation before a device is removed, and what it costs.
+QString removeDeviceQuestion(const QString &name);
+QString removeDeviceConsequence();
+
+/// The keyboard shortcuts the client defines, `{what, keys}`, in the order the À propos tab
+/// lists them. Written from the `Shortcut` and `Keys` handlers in the QML, and to be changed
+/// with them: a shortcut listed here that the client does not answer is worse than none.
+QList<std::pair<QString, QString>> shortcutList();
+
 } // namespace Words

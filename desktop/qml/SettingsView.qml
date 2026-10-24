@@ -5,12 +5,13 @@
 // and a state you cannot change has no business competing with it. Below the wide band
 // they stack, the actions still first.
 //
-// **What is not here.** The server's version and where the key sits — a reader does not need
-// them, and this is a client for reading comics. They appear under the connection and only
-// when it is broken, which is the one moment they help rather than clutter. The address is
+// **What is not here.** Where the key sits — a reader does not need it, and this is a client
+// for reading comics. It appears under the connection and only when it is broken, which is
+// the one moment it helps rather than clutters; the versions wait on À propos. The address is
 // the exception, on the library tab: it is where this device was linked, and the one thing
-// a person may have to correct there — with the name, the unlinking and the linking of
-// another device beside it.
+// a person may have to correct there. The name of this device, linking another and unlinking
+// are on the devices tab, with the other devices; and every tab is there only for a profile
+// that manages what it holds (`Settings.sections`).
 
 import QtQuick
 import QtQuick.Controls
@@ -19,22 +20,34 @@ import Leaf
 Item {
     id: page
 
-    readonly property int general: 0
-    readonly property int notifications: 1
-    readonly property int library: 2
-    property int section: general
-    /// The name or the address being typed in, in place of the line that shows it.
-    property bool renaming: false
+    /// The tab asked for, by name. Shown only while this profile has it: a switch to a profile
+    /// that does not manage what was open falls back to the first tab rather than to nothing.
+    property string section: "general"
+    readonly property var sections: Settings.sections(Profiles.active.kind ?? "")
+    readonly property string current: sectionIndex(section) >= 0 ? section : "general"
+    /// The address being typed in, in place of the line that shows it.
     property bool moving: false
 
     readonly property bool sideBySide: Widths.band === Widths.Wide
+
+    /// The profile window and the removal question belong to the window, which opens them
+    /// the same way for « Qui lit ? »; this screen only asks.
+    signal profileDialogAsked(string mode, var profile)
+    signal profileRemovalAsked(var profile)
 
     objectName: "settings-view"
     clip: true
 
     Component.onCompleted: {
+        // Réglages › Profils, from « Qui lit ? »: the tab is handed over with the destination.
+        if (Navigation.parameters.section)
+            page.section = Navigation.parameters.section
         Health.ask()
         Scan.ask()
+    }
+
+    function sectionIndex(name) {
+        return page.sections.findIndex(tab => tab.name === name)
     }
 
     // The sentence a clicked link was answered with, kept only while the settings are open:
@@ -62,7 +75,7 @@ Item {
     }
 
     function takeFocus(forward) {
-        const tab = tabs.tabAt(forward ? 0 : Settings.sections.length - 1)
+        const tab = tabs.tabAt(forward ? 0 : page.sections.length - 1)
         if (!tab)
             return false
         tab.forceActiveFocus(forward ? Qt.TabFocusReason : Qt.BacktabFocusReason)
@@ -75,9 +88,9 @@ Item {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        choices: Settings.sections
-        currentIndex: page.section
-        onSelected: index => page.section = index
+        choices: page.sections
+        currentIndex: page.sectionIndex(page.current)
+        onSelected: index => page.section = page.sections[index].name
         onWentBack: Navigation.back()
     }
 
@@ -99,7 +112,10 @@ Item {
             x: page.margin
             y: page.margin
             width: sheet.width - 2 * page.margin
-            height: Math.max(acted.height, observed.height)
+            height: Math.max(acted.height, observed.height,
+                             profilesSection.visible ? profilesSection.height : 0,
+                             devicesSection.visible ? devicesSection.height : 0,
+                             aboutSection.visible ? aboutSection.height : 0)
                     + (page.sideBySide ? 0 : observed.height > 0 ? page.gap : 0)
 
             // Halves, because that is what two columns means. The left one holds what
@@ -107,6 +123,38 @@ Item {
             // the page than the other.
             readonly property real side: page.sideBySide
                                          ? Math.round((width - page.gap) / 2) : width
+
+            ProfilesSection {
+                id: profilesSection
+
+                width: columns.width
+                side: columns.side
+                gap: page.gap
+                sideBySide: page.sideBySide
+                visible: page.current === "profiles"
+                onProfileDialogAsked: (mode, profile) => page.profileDialogAsked(mode, profile)
+                onRemovalAsked: profile => page.profileRemovalAsked(profile)
+            }
+
+            DevicesSection {
+                id: devicesSection
+
+                width: columns.width
+                side: columns.side
+                gap: page.gap
+                sideBySide: page.sideBySide
+                visible: page.current === "devices"
+            }
+
+            AboutSection {
+                id: aboutSection
+
+                width: columns.width
+                side: columns.side
+                gap: page.gap
+                sideBySide: page.sideBySide
+                visible: page.current === "about"
+            }
 
             Column {
                 id: acted
@@ -119,13 +167,13 @@ Item {
                 // person here was answered.
                 SettingsNote {
                     objectName: "settings-already-linked"
-                    visible: page.section === page.library && Linking.notice.length > 0
+                    visible: page.current === "library" && Linking.notice.length > 0
                     text: Linking.notice
                 }
 
                 SettingsCard {
                     objectName: "settings-appearance"
-                    visible: page.section === page.general
+                    visible: page.current === "general"
                     title: Preferences.appearanceTitle
 
                     SettingsChoice {
@@ -142,7 +190,7 @@ Item {
                 // room for a fifth family the day one asks for it.
                 SettingsCard {
                     objectName: "settings-warnings"
-                    visible: page.section === page.notifications
+                    visible: page.current === "notifications"
                     title: Preferences.warningsTitle
 
                     Item {
@@ -210,11 +258,12 @@ Item {
                     }
                 }
 
-                // The link itself, after the design's « 06 — une fois relié »: where, as whom,
-                // since when — and the two things a person may do to it.
+                // Where the library is, and the one thing a person may have to correct about
+                // it. This device — its name, linking another, unlinking — is the Appareils
+                // tab's: what the library is and what this machine is are two questions.
                 SettingsCard {
                     objectName: "settings-bond"
-                    visible: page.section === page.library
+                    visible: page.current === "library"
                     title: Bond.title
 
                     SettingsStatus {
@@ -225,91 +274,6 @@ Item {
                         detail: Health.reachable ? Health.holds
                                                  : (Health.asking ? "" : page.whatIsWrong())
                         alarming: !Health.reachable && !Health.asking
-                    }
-
-                    Item {
-                        objectName: "bond-name"
-                        width: parent.width
-                        height: 30
-                        visible: !page.renaming
-
-                        Text {
-                            anchors.left: parent.left
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: Bond.deviceLabel
-                            color: Theme.ink
-                            font.family: Theme.textFamily
-                            font.pixelSize: 14
-                        }
-
-                        Row {
-                            anchors.right: parent.right
-                            anchors.verticalCenter: parent.verticalCenter
-                            spacing: 6
-
-                            Text {
-                                objectName: "bond-name-value"
-                                anchors.verticalCenter: parent.verticalCenter
-                                text: Bond.deviceName
-                                color: Theme.inkSoft
-                                font.family: Theme.textFamily
-                                font.pixelSize: 14
-                            }
-
-                            IconButton {
-                                objectName: "bond-rename"
-                                anchors.verticalCenter: parent.verticalCenter
-                                glyph: "edit"
-                                label: Bond.renameLabel
-                                side: 16
-                                tint: Theme.emerald
-                                onTriggered: {
-                                    renameField.text = Bond.deviceName
-                                    page.renaming = true
-                                    renameField.forceActiveFocus()
-                                    renameField.selectAll()
-                                }
-                            }
-                        }
-                    }
-
-                    // Enter sends it, Escape leaves the name as it was. What the server
-                    // answers comes back in the sentence below.
-                    LeafField {
-                        id: renameField
-
-                        objectName: "bond-rename-field"
-                        width: parent.width
-                        visible: page.renaming
-                        onAccepted: {
-                            Bond.rename(text)
-                            page.renaming = false
-                        }
-                        Keys.onEscapePressed: page.renaming = false
-                    }
-
-                    SettingsLine {
-                        objectName: "bond-linked"
-                        width: parent.width
-                        visible: Bond.linkedOn.length > 0
-                        label: Bond.linkedLabel
-                        value: Bond.linkedOn
-                    }
-
-                    // Another device, linked from this one: the panel asks for its code. Only
-                    // from a library closed to strangers, the one kind that issues codes, and
-                    // reached by other devices, the one kind with an address to give them.
-                    ActionButton {
-                        objectName: "bond-relay"
-                        visible: Health.linksOthers
-                        label: Bond.relayLabel
-                        onTriggered: relay.open()
-
-                        Glyph {
-                            source: "assets/icons/add_link.svg"
-                            side: 16
-                            tint: Theme.onEmerald
-                        }
                     }
 
                     Item {
@@ -342,15 +306,6 @@ Item {
                         }
                     }
 
-                    // Nobody reaches this library but the machine it runs on: neither relaying
-                    // nor unlinking, and one plain sentence in their place.
-                    SettingsNote {
-                        objectName: "bond-only-here"
-                        width: parent.width
-                        visible: Health.onlyHere.length > 0
-                        text: Health.onlyHere
-                    }
-
                     SettingsNote {
                         objectName: "bond-sentence"
                         width: parent.width
@@ -359,36 +314,24 @@ Item {
                         alarming: !Bond.busy
                     }
 
-                    // Back by the actions' own inset, so their words line up with the
-                    // labels above rather than with the hover behind them.
-                    Row {
+                    // Back by the action's own inset, so its words line up with the labels
+                    // above rather than with the hover behind them.
+                    LeafTextAction {
+                        objectName: "bond-move"
                         x: -8
-                        spacing: 8
-
-                        LeafTextAction {
-                            objectName: "bond-move"
-                            label: Bond.moveLabel
-                            onTriggered: {
-                                moveField.text = Bond.address
-                                page.moving = !page.moving
-                                if (page.moving)
-                                    moveField.forceActiveFocus()
-                            }
-                        }
-
-                        LeafTextAction {
-                            objectName: "bond-unlink"
-                            visible: Health.unlinks
-                            label: Bond.unlinkLabel
-                            alarming: true
-                            onTriggered: unlinking.open()
+                        label: Bond.moveLabel
+                        onTriggered: {
+                            moveField.text = Bond.address
+                            page.moving = !page.moving
+                            if (page.moving)
+                                moveField.forceActiveFocus()
                         }
                     }
                 }
 
                 SettingsCard {
                     objectName: "settings-scan"
-                    visible: page.section === page.library
+                    visible: page.current === "library"
                     title: Scan.title
 
                     SettingsStatus {
@@ -441,7 +384,7 @@ Item {
                 // search sections.
                 SettingsCard {
                     objectName: "settings-corner"
-                    visible: page.section === page.notifications
+                    visible: page.current === "notifications"
                              && Preferences.anythingBubbles
                     title: Preferences.cornerTitle
 
@@ -456,7 +399,7 @@ Item {
 
                 SettingsCard {
                     objectName: "settings-connection"
-                    visible: page.section === page.general
+                    visible: page.current === "general"
                     title: Health.title
 
                     SettingsStatus {
@@ -466,14 +409,18 @@ Item {
                         label: Health.connected
                         // The address and what the setup is missing, and only when it is:
                         // a reader with a working library has no use for either.
-                        detail: Health.reachable ? Health.holds : page.whatIsWrong()
+                        // A restricted profile is told what it can see, not what the library
+                        // holds: the server already counts under its ceiling.
+                        detail: !Health.reachable ? page.whatIsWrong()
+                                : Profiles.isRestricted ? Profiles.saySeriesForYou(Health.library)
+                                : Health.holds
                         alarming: !Health.reachable && !Health.asking
                     }
                 }
 
                 SettingsCard {
                     objectName: "settings-found"
-                    visible: page.section === page.library && Scan.counts.length > 0
+                    visible: page.current === "library" && Scan.counts.length > 0
                     title: Scan.foundTitle
 
                     SettingsLine {
@@ -505,7 +452,7 @@ Item {
                 // reports rather than guesses, and until this screen nothing read what it
                 // said.
                 Repeater {
-                    model: page.section === page.library ? Scan.findings : []
+                    model: page.current === "library" ? Scan.findings : []
 
                     delegate: SettingsCard {
                         required property var modelData
@@ -531,101 +478,6 @@ Item {
                 }
             }
         }
-    }
-
-    // « Délier cet appareil ? », after the design: what goes, how to come back, and what to
-    // do on the server should it not answer — this device forgets either way.
-    Popup {
-        id: unlinking
-
-        objectName: "unlink-dialog"
-        width: Math.min(430, Overlay.overlay ? Overlay.overlay.width - 80 : 430)
-        anchors.centerIn: Overlay.overlay
-        padding: 0
-        modal: true
-        focus: true
-        closePolicy: Popup.CloseOnEscape
-
-        Overlay.modal: Rectangle {
-            color: Qt.rgba(12 / 255, 16 / 255, 14 / 255, 0.74)
-        }
-
-        background: Rectangle {
-            radius: Theme.cardRadius
-            color: Theme.surface
-            border.color: Theme.rule
-            border.width: 1
-            antialiasing: true
-
-            CardLift { level: CardLift.Modal }
-        }
-
-        Column {
-            id: unlinkBody
-
-            x: 17
-            y: 16
-            width: parent.width - 34
-            spacing: 10
-
-            Text {
-                objectName: "unlink-question"
-                width: parent.width
-                text: Bond.unlinkQuestion
-                color: Theme.ink
-                font.family: Theme.displayFamily
-                font.pixelSize: 20
-                font.weight: Font.Bold
-                wrapMode: Text.WordWrap
-            }
-
-            Repeater {
-                model: [Bond.unlinkWhat, Bond.unlinkComeBack, Bond.unlinkIfSilent]
-
-                delegate: Text {
-                    required property string modelData
-
-                    width: unlinkBody.width
-                    text: modelData
-                    color: Theme.inkSoft
-                    font.family: Theme.textFamily
-                    font.pixelSize: 12
-                    lineHeight: 1.4
-                    wrapMode: Text.WordWrap
-                }
-            }
-        }
-
-        Row {
-            anchors.right: unlinkBody.right
-            anchors.top: unlinkBody.bottom
-            anchors.topMargin: 16
-            spacing: 8
-
-            LeafTextAction {
-                objectName: "unlink-cancel"
-                label: Bond.cancelLabel
-                anchors.verticalCenter: parent.verticalCenter
-                onTriggered: unlinking.close()
-            }
-
-            ActionButton {
-                objectName: "unlink-go"
-                label: Bond.unlinkGo
-                danger: true
-                ready: !Bond.busy
-                onTriggered: {
-                    unlinking.close()
-                    Bond.unlink()
-                }
-            }
-        }
-
-        implicitHeight: unlinkBody.implicitHeight + 16 + 16 + 32 + 16
-    }
-
-    RelayDialog {
-        id: relay
     }
 
     /// What to say under a connection that is not one. `Settings` writes the sentence when

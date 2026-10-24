@@ -182,6 +182,9 @@ bool Profiles::asksWhoReads() const
 
 QVariantMap Profiles::words() const
 {
+    QVariantList shortcuts;
+    for (const auto &[what, keys] : Words::shortcutList())
+        shortcuts.append(QVariantMap{{u"what"_s, what}, {u"keys"_s, keys}});
     return {{u"whoReads"_s, Words::whoReads()},
             {u"wrongCode"_s, Words::wrongCode()},
             {u"cancel"_s, Words::cancel()},
@@ -245,12 +248,34 @@ QVariantMap Profiles::words() const
             {u"removeDevice"_s, Words::removeDevice()},
             {u"shortcuts"_s, Words::shortcuts()},
             {u"thisClient"_s, Words::thisClient()},
-            {u"serverHeading"_s, Words::serverHeading()}};
+            {u"serverHeading"_s, Words::serverHeading()},
+            {u"rightsExplained"_s, Words::rightsExplained()},
+            {u"devicesExplained"_s, Words::devicesExplained()},
+            {u"chooseItsProfile"_s, Words::chooseItsProfile()},
+            {u"eraseExplained"_s, Words::eraseExplained()},
+            {u"asksWhoReadsThere"_s, Words::asksWhoReadsThere()},
+            {u"removeDeviceConsequence"_s, Words::removeDeviceConsequence()},
+            {u"shortcutList"_s, shortcuts}};
 }
 
 QString Profiles::saySwitchToProfile(const QString &name) const
 {
     return Words::switchToProfile(name);
+}
+
+QString Profiles::sayManagedByPrincipal(const QString &principal) const
+{
+    return Words::managedByPrincipal(principal);
+}
+
+QString Profiles::sayOnlyReads(const QString &name) const
+{
+    return Words::onlyReads(name);
+}
+
+QString Profiles::sayRemoveDevice(const QString &name) const
+{
+    return Words::removeDeviceQuestion(name);
 }
 
 QString Profiles::sayEditProfile(const QString &name) const
@@ -395,9 +420,16 @@ void Profiles::ask(Verb verb, const QString &path, const QJsonObject &body, cons
 
 void Profiles::ask()
 {
+    reseat(false);
+}
+
+void Profiles::reseat(bool announce)
+{
     ++m_generation;
     const int mine = m_generation;
-    ask(Verb::Get, u"/profiles"_s, {}, [this, mine](const Server::Answer &answer) {
+    const QString before = active().value(u"id"_s).toString();
+    ask(Verb::Get, u"/profiles"_s, {},
+        [this, mine, announce, before](const Server::Answer &answer) {
         // A later question has been asked since: its answer is the newer one.
         if (mine != m_generation) {
             emit changed();
@@ -411,6 +443,8 @@ void Profiles::ask()
         }
         take(*read.value);
         emit changed();
+        if (announce && active().value(u"id"_s).toString() != before)
+            emit switched();
     });
 }
 
@@ -498,7 +532,13 @@ void Profiles::placeDevice(const QString &id, const QString &profile, bool kept)
 {
     ask(Verb::Patch, at(u"/devices/"_s, id),
         {{u"profile"_s, profile}, {u"kept"_s, kept}},
-        [this](const Server::Answer &) { devices(); });
+        [this](const Server::Answer &answer) {
+            devices();
+            // Seating this device is a switch made from the settings: the server reads as the
+            // new profile from its answer on, and what is on screen was asked as the old one.
+            if (answer.body.object().value(u"here"_s).toBool())
+                reseat(true);
+        });
 }
 
 void Profiles::removeDevice(const QString &id)

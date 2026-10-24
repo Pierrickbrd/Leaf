@@ -45,6 +45,8 @@ class Profiles : public QObject
     Q_PROPERTY(bool canErase READ canErase NOTIFY changed)
     /// Taking a volume out of the library is not a right of its own: whoever is not restricted.
     Q_PROPERTY(bool canExport READ canExport NOTIFY changed)
+    /// Whether this device opens on the profile it reads as.
+    Q_PROPERTY(bool kept READ kept NOTIFY changed)
     /// At least two profiles: with one there is nobody to choose between.
     Q_PROPERTY(bool several READ several NOTIFY changed)
     /// Whether the launch asks « Qui lit ? ». A device that must choose or is held always
@@ -87,6 +89,7 @@ public:
     bool canEdit() const;
     bool canErase() const;
     bool canExport() const;
+    bool kept() const { return m_seating.kept; }
     bool several() const { return m_seating.profiles.size() >= 2; }
     bool asksWhoReads() const;
     QString codeScope() const { return Api::spell(m_seating.code); }
@@ -113,6 +116,9 @@ public:
     Q_INVOKABLE QString sayColourName(const QString &id, const QString &owner) const;
     Q_INVOKABLE QString sayOpensOn(const QString &name) const;
     Q_INVOKABLE QString saySeriesForYou(int count) const;
+    Q_INVOKABLE QString sayManagedByPrincipal(const QString &principal) const;
+    Q_INVOKABLE QString sayOnlyReads(const QString &name) const;
+    Q_INVOKABLE QString sayRemoveDevice(const QString &name) const;
     /// The line under a profile's name, from the map `profiles` holds for it: its kind, its age,
     /// and the marks the screen knows (`you`, a device it is kept on).
     Q_INVOKABLE QString sayProfileLine(const QVariantMap &profile, const QStringList &marks) const;
@@ -156,6 +162,8 @@ private:
     enum class Verb { Get, Post, Patch, Put, Delete };
     void ask(Verb verb, const QString &path, const QJsonObject &body, const Then &ok);
     bool failed(const Server::Answer &answer);
+    /// `GET /profiles`; `announce` says `switched` when the profile read as has changed.
+    void reseat(bool announce);
     const Api::Profile *current() const;
     void take(const Api::Seating &seating);
 

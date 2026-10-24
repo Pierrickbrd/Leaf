@@ -173,6 +173,9 @@ set(LEAF_QML
     qml/SeriesTile.qml
     qml/ShelfSkeleton.qml
     qml/SettingsView.qml
+    qml/ProfilesSection.qml
+    qml/DevicesSection.qml
+    qml/AboutSection.qml
     qml/SettingsTabs.qml
     qml/SettingsCard.qml
     qml/SettingsChoice.qml

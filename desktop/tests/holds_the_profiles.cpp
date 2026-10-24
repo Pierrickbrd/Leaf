@@ -521,6 +521,46 @@ private slots:
         QVERIFY(m_pretend->heard.contains(R"("kept":true)"));
     }
 
+    /// The principal seating *this* device on another profile is a switch: the server reads
+    /// as that profile from the answer on, and a shelf drawn for the old one would show what
+    /// the new one may not see. Another device seated elsewhere changes nothing here.
+    void seating_this_device_on_another_profile_reads_as_it_now()
+    {
+        serving(seating({principal(), child()}, u"default"_s));
+        asked();
+        const auto device = [](const QString &id, const QString &profile, bool here) {
+            return QJsonObject{{u"id"_s, id}, {u"name"_s, u"Ordinateur"_s},
+                               {u"profile"_s, profile}, {u"kept"_s, true}, {u"here"_s, here}};
+        };
+        QString seat = u"default"_s;
+        m_pretend->answerFor = [&](const QByteArray &request) {
+            if (request.startsWith("PATCH /devices/d2 "))
+                return reply(200, asJson(device(u"d2"_s, u"p3"_s, false)));
+            if (request.startsWith("PATCH /devices/d1 ")) {
+                seat = u"p3"_s;
+                return reply(200, asJson(device(u"d1"_s, u"p3"_s, true)));
+            }
+            if (request.startsWith("GET /devices "))
+                return reply(200, asJson(QJsonObject{{u"devices"_s, QJsonArray{}}}));
+            if (request.startsWith("GET /profiles "))
+                return reply(200, asJson(seating({principal(), child()}, seat)));
+            return QByteArray();
+        };
+        QSignalSpy switched(m_profiles, &Profiles::switched);
+
+        m_pretend->heard.clear();
+        m_profiles->placeDevice(u"d2"_s, u"p3"_s, true);
+        settle([&] { return m_pretend->heard.contains("GET /devices "); });
+        QTest::qWait(100);
+        QVERIFY(!m_pretend->heard.contains("GET /profiles "));
+        QCOMPARE(switched.size(), 0);
+
+        m_profiles->placeDevice(u"d1"_s, u"p3"_s, true);
+        settle([&] { return !switched.isEmpty(); });
+        QCOMPARE(switched.size(), 1);
+        QVERIFY(m_profiles->isRestricted());
+    }
+
     void keeps_the_reading_preferences_as_they_were_sent()
     {
         serving(seating({principal()}, u"default"_s));

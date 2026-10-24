@@ -24,6 +24,9 @@ MenuItem {
         leftPadding: option.checkable && option.indicator
                      ? option.indicator.width + option.spacing : 0
         text: option.text
+        // Plain, never rich: a name typed on another device — « <b>x</b> » — is shown as
+        // typed, not drawn as markup.
+        textFormat: Text.PlainText
         color: !option.enabled ? Theme.inkFaint
                               : (option.checked ? Theme.emerald : Theme.ink)
         font: option.font

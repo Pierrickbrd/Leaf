@@ -2506,4 +2506,64 @@ QString profileLine(Api::Kind kind, std::optional<int> maxAge, const QStringList
     return parts.join(u" · "_s);
 }
 
+QString managedByPrincipal(const QString &principal)
+{
+    return u"Gérer les autres profils et leurs droits"_s + Nbsp
+           + u": c’est le rôle du profil principal, %1."_s.arg(principal);
+}
+
+QString onlyReads(const QString &name)
+{
+    return u"Le profil de %1, restreint, ne fait que lire, quoi qu’il arrive."_s.arg(name);
+}
+
+QString rightsExplained()
+{
+    return u"Modifier, c’est changer les informations d’une série ou d’un tome. Vous, profil principal, pouvez tout faire"_s
+           + Nbsp + u"; un nouveau profil ne fait que lire tant que rien n’est coché."_s;
+}
+
+QString devicesExplained()
+{
+    return u"Retirer un appareil coupe sa clé tout de suite"_s + Nbsp
+           + u": une tablette perdue ne lit plus rien. Chacun peut faire retenir son propre profil depuis « Qui lit"_s
+           + Nbsp + u"? »"_s + Nbsp
+           + u"; qu’un appareil s’ouvre sur un profil restreint, vous seul le décidez, ici."_s;
+}
+
+QString eraseExplained()
+{
+    return u"Supprimer un profil efface ses lectures en cours et ses préférences"_s + Nbsp
+           + u"; les appareils qui le retenaient demanderont qui lit."_s;
+}
+
+QString asksWhoReadsThere()
+{
+    return u"Demande qui lit à l’ouverture"_s;
+}
+
+QString chooseItsProfile()
+{
+    return u"Choisir son profil"_s;
+}
+
+QString removeDeviceQuestion(const QString &name)
+{
+    return u"Retirer %1"_s.arg(name) + Nbsp + u"?"_s;
+}
+
+QString removeDeviceConsequence()
+{
+    return u"Sa clé cesse de fonctionner tout de suite. Pour qu’il lise de nouveau, il faudra le relier."_s;
+}
+
+QList<std::pair<QString, QString>> shortcutList()
+{
+    return {{u"Chercher"_s, u"/"_s},
+            {u"Revenir en arrière"_s, u"Échap"_s},
+            {u"Aller d’un élément à l’autre"_s, u"← ↑ → ↓ ou Tab"_s},
+            {u"Ouvrir, activer"_s, u"Entrée"_s},
+            {u"Le menu d’une série"_s, u"Menu ou Maj + F10"_s}};
+}
+
 } // namespace Words
