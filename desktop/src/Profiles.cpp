@@ -294,6 +294,7 @@ QVariantMap Profiles::words() const
             {u"otherDevices"_s, Words::otherDevices()},
             {u"removeDevice"_s, Words::removeDevice()},
             {u"shortcuts"_s, Words::shortcuts()},
+            {u"shortcutsScope"_s, Words::appShortcutsScope()},
             {u"thisClient"_s, Words::thisClient()},
             {u"serverHeading"_s, Words::serverHeading()},
             {u"rightsExplained"_s, Words::rightsExplained()},
@@ -417,7 +418,9 @@ bool Profiles::failed(const Server::Answer &answer)
     // `Server` words a 403 as the key's refusal, which is a different sentence about a
     // different thing.
     const bool recovering = std::exchange(m_recovering, false);
-    if (std::exchange(m_drawing, false)) {
+    const bool drawing = std::exchange(m_drawing, false);
+    const bool afterNewCode = std::exchange(m_afterNewCode, false);
+    if (drawing && afterNewCode) {
         emit recoveryFailed(Words::recoveryNotDrawn(answer.trouble));
         return true;
     }
@@ -432,6 +435,8 @@ bool Profiles::failed(const Server::Answer &answer)
     } else {
         m_trouble = answer.trouble;
     }
+    if (drawing)
+        emit recoveryRefused(m_trouble);
     return true;
 }
 
@@ -540,10 +545,11 @@ void Profiles::add(const QVariantMap &profile)
     // A profile made with the household's first code, the window that asks for it: the same
     // moment as `setCode`, and the same way back owed.
     const bool first = codeScope() == u"none"_s && !profile.value(u"code"_s).toString().isEmpty();
-    ask(Verb::Post, u"/profiles"_s, bodyOf(profile), [this, first](const Server::Answer &) {
+    const QString typed = profile.value(u"code"_s).toString();
+    ask(Verb::Post, u"/profiles"_s, bodyOf(profile), [this, first, typed](const Server::Answer &) {
         ask();
         if (first)
-            drawRecovery();
+            drawRecoveryAfterNewCode(typed);
     });
 }
 
@@ -567,22 +573,32 @@ void Profiles::setCode(const QString &code, const QString &again, const QString 
     QJsonObject body{{u"code"_s, code}, {u"codeAgain"_s, again}, {u"scope"_s, scope}};
     if (!current.isEmpty())
         body.insert(u"currentCode"_s, current);
-    ask(Verb::Put, u"/profiles/code"_s, body, [this, first](const Server::Answer &) {
+    ask(Verb::Put, u"/profiles/code"_s, body, [this, first, code](const Server::Answer &) {
         ask();
         if (first)
-            drawRecovery();
+            drawRecoveryAfterNewCode(code);
     });
 }
 
-void Profiles::drawRecovery()
+void Profiles::drawRecoveryAfterNewCode(const QString &current)
+{
+    m_afterNewCode = true;
+    drawRecovery(current);
+}
+
+void Profiles::drawRecovery(const QString &current)
 {
     m_drawing = true;
-    ask(Verb::Post, u"/profiles/code/recovery"_s, {}, [this](const Server::Answer &answer) {
+    ask(Verb::Post, u"/profiles/code/recovery"_s, {{u"currentCode"_s, current}}, [this](const Server::Answer &answer) {
         m_drawing = false;
+        const bool afterNewCode = std::exchange(m_afterNewCode, false);
         const Api::Read<QString> read = Api::recoveryCode(answer.body.object());
         if (!read.ok()) {
             emit changed();
-            emit recoveryFailed(Words::recoveryNotDrawn(read.trouble));
+            if (afterNewCode)
+                emit recoveryFailed(Words::recoveryNotDrawn(read.trouble));
+            else
+                emit recoveryRefused(read.trouble);
             return;
         }
         // `changed` after it: a window waiting on the request that made the code is waiting on

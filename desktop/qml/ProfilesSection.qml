@@ -128,7 +128,7 @@ Item {
 
                             // One's own row is « Votre profil », the principal's included: the
                             // name, the colour and, for the principal, the code.
-                            IconButton {
+                            IconStop {
                                 objectName: row.objectName + "-edit"
                                 glyph: "edit"
                                 label: Profiles.sayEditProfile(row.modelData.name)
@@ -140,7 +140,7 @@ Item {
                             // Never the principal, whom nothing replaces, and never one's own:
                             // the server refuses both, and a bin that is refused is a bin that
                             // lies.
-                            IconButton {
+                            IconStop {
                                 objectName: row.objectName + "-remove"
                                 visible: Profiles.isPrincipal && row.modelData.kind !== "principal"
                                          && !row.modelData.current
@@ -160,6 +160,7 @@ Item {
                     LeafTextAction {
                         objectName: "profiles-add"
                         x: -8
+                        activeFocusOnTab: true
                         anchors.verticalCenter: parent.verticalCenter
                         label: Profiles.words.addAProfile
                         onTriggered: section.profileDialogAsked("new", null)
@@ -199,11 +200,55 @@ Item {
                     muted: true
                 }
 
+                LeafField {
+                    id: redrawCurrent
+
+                    objectName: "recovery-current"
+                    width: parent.width
+                    echoMode: TextInput.Password
+                    maximumLength: 8
+                    placeholderText: Profiles.words.currentCode
+                    Accessible.name: Profiles.words.currentCode
+                    onAccepted: redrawAction.triggered()
+                }
+
                 LeafTextAction {
+                    id: redrawAction
+
                     objectName: "recovery-redraw"
                     x: -8
+                    activeFocusOnTab: true
+                    // Four is the shortest a code can be: fewer is not it.
+                    enabled: redrawCurrent.length >= 4
+                    opacity: enabled ? 1 : 0.45
                     label: Profiles.words.recoveryRedraw
-                    onTriggered: Profiles.drawRecovery()
+                    onTriggered: {
+                        if (!redrawAction.enabled)
+                            return
+                        redrawTrouble.text = ""
+                        Profiles.drawRecovery(redrawCurrent.text)
+                        redrawCurrent.clear()
+                    }
+                }
+
+                Text {
+                    id: redrawTrouble
+
+                    objectName: "recovery-trouble"
+                    width: parent.width
+                    visible: text.length > 0
+                    color: Theme.alert
+                    font.family: Theme.textFamily
+                    font.pixelSize: 13
+                    wrapMode: Text.Wrap
+
+                    Connections {
+                        target: Profiles
+
+                        function onRecoveryRefused(sentence) {
+                            redrawTrouble.text = sentence
+                        }
+                    }
                 }
 
                 SettingsNote {
@@ -280,6 +325,7 @@ Item {
                                     objectName: "rights-" + entry.modelData.id + "-"
                                                 + modelData.right
                                     width: 110
+                                    activeFocusOnTab: true
                                     label: modelData.label
                                     checked: entry.rights[modelData.right]
                                     enabled: !Profiles.busy

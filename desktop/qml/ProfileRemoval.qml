@@ -62,7 +62,7 @@ Popup {
         CardLift { level: CardLift.Modal }
     }
 
-    contentItem: Item {
+    contentItem: DialogBody {
         objectName: "profile-removal-body"
         implicitHeight: form.height + 34 + actions.height + 18
 
@@ -120,6 +120,10 @@ Popup {
             LeafTextAction {
                 objectName: "profile-removal-cancel"
                 anchors.verticalCenter: parent.verticalCenter
+                // On the way that loses nothing: an Enter pressed out of habit keeps the
+                // profile.
+                focus: true
+                activeFocusOnTab: true
                 label: Profiles.words.cancel
                 enabled: !removal.waiting
                 onTriggered: removal.close()

@@ -154,6 +154,7 @@ qt_add_executable(leaf-desktop
 set(LEAF_QML
     qml/Main.qml
     qml/NavigationCursor.qml
+    qml/KeyWalk.qml
     qml/CardAction.qml
     qml/FocusRing.qml
     qml/Pill.qml
@@ -171,6 +172,7 @@ set(LEAF_QML
     qml/CodeDialog.qml
     qml/ProfileDialog.qml
     qml/ProfileRemoval.qml
+    qml/DialogBody.qml
     qml/FilterChip.qml
     qml/GenrePill.qml
     qml/FilterPills.qml
@@ -231,6 +233,7 @@ set(LEAF_QML
     qml/ToastStack.qml
     qml/EditionSwitch.qml
     qml/IconButton.qml
+    qml/IconStop.qml
     qml/CardLift.qml
     qml/CoverSkin.qml
     qml/Glyph.qml

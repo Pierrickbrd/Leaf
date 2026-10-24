@@ -27,6 +27,22 @@ Rectangle {
     Accessible.checked: row.lit
     Accessible.onPressAction: row.triggered()
 
+    /// A stop of the panel's walk — see `KeyWalk`.
+    readonly property bool keyStop: true
+
+    Keys.onPressed: event => {
+        if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                || event.key === Qt.Key_Enter) {
+            row.triggered()
+            event.accepted = true
+        }
+    }
+
+    FocusRing {
+        objectName: row.objectName + "-focus"
+        cornerRadius: row.radius
+    }
+
     HoverHandler {
         id: pointer
 

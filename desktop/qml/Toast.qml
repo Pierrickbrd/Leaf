@@ -30,6 +30,9 @@ Rectangle {
     signal held(bool on)
 
     objectName: "toast-" + index
+    // Its time stops while the keys are on it, as it does under the pointer: a bubble that
+    // went while its cross was being reached took the focus with it.
+    onActiveFocusChanged: bubble.held(activeFocus)
     width: 420
     implicitHeight: Math.max(52, words.implicitHeight + 22)
     height: implicitHeight

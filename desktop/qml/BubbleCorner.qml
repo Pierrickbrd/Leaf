@@ -159,8 +159,24 @@ Item {
                     readonly property bool atTop: zone.index < 3
                     readonly property bool atBottom: zone.index >= 3
 
+                    objectName: "bubble-corner-zone-" + zone.index
                     width: frame.width / 3
                     height: frame.height / 2
+                    // A stop each, chosen with Enter or Space: the picture was the one
+                    // setting of the tab the keyboard could not change.
+                    activeFocusOnTab: true
+
+                    Keys.onPressed: event => {
+                        if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                                || event.key === Qt.Key_Enter) {
+                            screen.picked(zone.index)
+                            event.accepted = true
+                        }
+                    }
+
+                    FocusRing {
+                        cornerRadius: 4
+                    }
 
                     TapHandler {
                         gesturePolicy: TapHandler.ReleaseWithinBounds

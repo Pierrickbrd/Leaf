@@ -31,6 +31,53 @@ Item {
     /// Asked for a re-import, of this edition or of one of its files. It travels to the
     /// window, because the import dialog belongs there and not to a row.
     signal reimportAsked(string entryId)
+    /// The keys walked past the last stop of this page, or before its first: the shell
+    /// carries the focus round to the bar, as it does from the shelf.
+    signal navigationBoundary(bool forward)
+
+    /// Takes the focus by this page's first stop going forward, its last coming back. The
+    /// shell calls it from the bar. This page had none, and the bar's last stop handed the
+    /// focus straight back to its first: no key reached a volume, a tab or the way back.
+    function takeFocus(forward) {
+        return walk.take(forward)
+    }
+
+    /// The menu of the series, from anywhere on the page: the Menu key, or Shift+F10, said
+    /// to the page rather than to a row of it.
+    function showCommands() {
+        view.reveal(header)
+        header.showCommands()
+    }
+
+    /// The stop the keys reached, brought into the scroll. The page scrolls, not the rows,
+    /// so a focus given to the twentieth volume was a ring drawn below the window.
+    function reveal(stop) {
+        const top = stop.mapToItem(scroll.contentItem, 0, 0).y
+        const room = 12
+        if (top - room < scroll.contentY)
+            scroll.contentY = Math.max(0, top - room)
+        else if (top + stop.height + room > scroll.contentY + scroll.height)
+            scroll.contentY = Math.min(Math.max(0, scroll.contentHeight - scroll.height),
+                                       top + stop.height + room - scroll.height)
+    }
+
+    KeyWalk {
+        id: walk
+
+        region: view
+        onWentPast: forward => view.navigationBoundary(forward)
+        onReached: stop => view.reveal(stop)
+    }
+
+    Keys.onPressed: event => {
+        if (event.key === Qt.Key_Menu
+                || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
+            view.showCommands()
+            event.accepted = true
+            return
+        }
+        event.accepted = walk.step(event)
+    }
 
     /// Changing edition is not a navigation: the page and its list are re-pointed under the
     /// same header. Here and not in two places, because the switcher in the header and the
@@ -130,6 +177,8 @@ Item {
             }
 
             SeriesHeader {
+                id: header
+
                 width: parent.width
                 visible: view.page.available
                 universe: view.page.universe

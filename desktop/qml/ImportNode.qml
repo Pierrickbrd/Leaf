@@ -41,6 +41,21 @@ Item {
     Accessible.role: Accessible.TreeItem
     Accessible.name: line.node.name
 
+    // Opened and closed from the keyboard as by a click: a folder of twenty volumes was a
+    // line the keys went past.
+    activeFocusOnTab: line.node.expandable === true
+    Keys.onPressed: event => {
+        if (line.node.expandable === true && (event.key === Qt.Key_Space
+                || event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) {
+            line.folded()
+            event.accepted = true
+        }
+    }
+
+    FocusRing {
+        cornerRadius: 6
+    }
+
     TapHandler {
         gesturePolicy: TapHandler.ReleaseWithinBounds
         enabled: line.node.expandable === true
@@ -161,6 +176,7 @@ Item {
         // argument the boxes under `moves` already make, one line at a time.
         LeafCheck {
             objectName: line.objectName + "-replace"
+            activeFocusOnTab: true
             visible: line.node.replaceable === true
             width: parent.width
             label: line.node.present === undefined ? "" : line.node.present
@@ -174,6 +190,7 @@ Item {
         // have every volume already in place and still disagree about what it is called.
         LeafCheck {
             objectName: line.objectName + "-declare"
+            activeFocusOnTab: true
             visible: line.node.redeclarable === true
             width: parent.width
             label: line.node.present === undefined ? "" : line.node.present

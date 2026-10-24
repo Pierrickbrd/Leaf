@@ -52,6 +52,21 @@ Item {
     Accessible.name: tile.number + " " + tile.title
     Accessible.description: tile.missing ? tile.title : tile.pages
 
+    /// A stop of the page's walk — see `KeyWalk` — unless it is a hole, which opens nothing.
+    readonly property bool keyStop: !tile.missing
+
+    Keys.onPressed: event => {
+        if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                || event.key === Qt.Key_Enter) {
+            tile.opened()
+            event.accepted = true
+        } else if (event.key === Qt.Key_Menu
+                   || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
+            commands.show()
+            event.accepted = true
+        }
+    }
+
     HoverHandler {
         id: pointer
 
@@ -132,6 +147,12 @@ Item {
 
         CoverSkin { visible: !tile.missing }
 
+        // Around the cover, which is what the eye goes to, and lit by the tile's focus.
+        FocusRing {
+            objectName: tile.objectName + "-focus"
+            focused: tile.activeFocus
+        }
+
         ReadCheck {
             key: tile.entryId
             finished: tile.finished
@@ -142,6 +163,8 @@ Item {
         // not cover what it commands. On its own dark veil, because an illustration can be
         // pale and grey dots laid straight on one are invisible one time in three.
         CommandMenu {
+            id: commands
+
             objectName: "commands-tile-" + tile.entryId
             anchors.right: parent.right
             anchors.rightMargin: 4

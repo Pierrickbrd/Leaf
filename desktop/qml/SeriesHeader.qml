@@ -29,6 +29,16 @@ Item {
     signal editionChosen(string seriesId)
     signal reimportAsked()
 
+    /// The menu at the end of the title, opened without the pointer — from its own button,
+    /// which takes the focus first: a popup gives the focus back to where it hangs, and
+    /// opened from a tab or a volume it gave it to nothing, so the next key reached no stop.
+    function showCommands() {
+        if (!commands.visible)
+            return
+        commands.forceActiveFocus(Qt.OtherFocusReason)
+        commands.show()
+    }
+
     objectName: "series-header"
     // Sized for the header with the most to say. A series with less leaves room below rather
     // than pulling the tab bar up to meet it.
@@ -88,6 +98,22 @@ Item {
                 Accessible.role: Accessible.Link
                 Accessible.name: header.universe
                 Accessible.onPressAction: header.universeAsked()
+
+                /// A stop of the page's walk — see `KeyWalk`.
+                readonly property bool keyStop: true
+
+                Keys.onPressed: event => {
+                    if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                            || event.key === Qt.Key_Enter) {
+                        header.universeAsked()
+                        event.accepted = true
+                    }
+                }
+
+                FocusRing {
+                    objectName: "series-universe-focus"
+                    cornerRadius: 4
+                }
 
                 LevelMark {
                     id: mark

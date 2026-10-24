@@ -468,6 +468,45 @@ private slots:
         QCOMPARE(drawn.constFirst().constFirst().toString(), u"K7QM-2XWD-HP9T-C4VN"_s);
         QVERIFY(m_pretend->heard.contains(R"("codeAgain":"abcd")"));
         QVERIFY(m_pretend->heard.contains(R"("scope":"everything")"));
+        // And proves it holds the code it was just given: drawing is asked the code like a change.
+        QVERIFY(m_pretend->heard.contains(R"("currentCode":"abcd")"));
+    }
+
+    /// A wrong code typed on the card is said on the card, in the words of a wrong code: nothing
+    /// was saved, so the window that says « the code is saved, its recovery code is not » is the
+    /// wrong place for it.
+    void a_wrong_code_on_the_card_is_refused_in_the_cards_words()
+    {
+        serving(seating({principal()}, u"default"_s, true, false, false, u"everything"_s));
+        asked();
+        m_pretend->answerFor = [](const QByteArray &request) {
+            if (request.startsWith("POST /profiles/code/recovery "))
+                return reply(403, R"({"error":"code"})");
+            return QByteArray();
+        };
+        QSignalSpy refused(m_profiles, &Profiles::recoveryRefused);
+        QSignalSpy failed(m_profiles, &Profiles::recoveryFailed);
+        m_profiles->drawRecovery(u"mauvais"_s);
+        settle([&] { return !refused.isEmpty(); });
+        QCOMPARE(refused.constFirst().constFirst().toString(), Words::wrongCode());
+        QCOMPARE(failed.size(), 0);
+    }
+
+    /// A recovery code drawn later, from the settings card, carries the code typed there.
+    void drawing_again_sends_the_current_code()
+    {
+        serving(seating({principal()}, u"default"_s, true, false, false, u"everything"_s));
+        asked();
+        m_pretend->heard.clear();
+        m_pretend->answerFor = [](const QByteArray &request) {
+            if (request.startsWith("POST /profiles/code/recovery "))
+                return reply(200, R"({"recoveryCode":"K7QM-2XWD-HP9T-C4VN"})");
+            return QByteArray();
+        };
+        QSignalSpy drawn(m_profiles, &Profiles::recoveryDrawn);
+        m_profiles->drawRecovery(u"vieux"_s);
+        settle([&] { return !drawn.isEmpty(); });
+        QVERIFY(m_pretend->heard.contains(R"("currentCode":"vieux")"));
     }
 
     /// Changing a code that already exists draws nothing: the recovery code stands for the one

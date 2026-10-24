@@ -18,6 +18,7 @@
 #include "Reader.h"
 #include "Toasts.h"
 #include "Entries.h"
+#include "Erasure.h"
 #include "Filters.h"
 #include "Navigation.h"
 #include "Series.h"
@@ -575,6 +576,35 @@ bool hiddenNamed(QQuickItem *root, const QString &name)
     return one && !one->isVisible();
 }
 
+/// The name of what has the keys — empty when nothing named does.
+QString focusedName(QQuickWindow *window)
+{
+    QQuickItem *one = window->activeFocusItem();
+    return one ? one->objectName() : QString();
+}
+
+/// Whether the keys are somewhere inside `root`.
+bool keysWithin(QQuickWindow *window, QQuickItem *root)
+{
+    for (QQuickItem *at = window->activeFocusItem(); at; at = at->parentItem()) {
+        if (at == root)
+            return true;
+    }
+    return false;
+}
+
+/// Presses `key` until the item named `name` has the keys — false if it never does within
+/// `presses`, which is the test's way of saying the keys cannot reach it.
+bool pressUntil(QQuickWindow *window, Qt::Key key, const QString &name, int presses = 40)
+{
+    for (int i = 0; i < presses; ++i) {
+        if (focusedName(window) == name)
+            return true;
+        QTest::keyClick(window, key);
+    }
+    return focusedName(window) == name;
+}
+
 /// The filter button a hand can reach, and the panel hanging from it.
 ///
 /// There are two rows of pills on the shelf — its own, and the one the search workspace
@@ -1085,6 +1115,82 @@ QQuickItem *pageUnder(QQuickItem *view, Reader *reader, QPointF scene, QPointF &
         }
     }
     return nullptr;
+}
+
+/// The answers behind one series page: « Elfes », in its « Albums » edition, two volumes of
+/// which the first is read, two genres and a universe named — and, with `editions`, a second
+/// edition of the same work, which is what draws the switch in the header. Everything the
+/// page does not ask for by name is the list of those editions, the shelf included.
+std::function<QByteArray(const QByteArray &)> anElfesPage(bool editions)
+{
+    const auto aWork = [](const QString &id, const QString &edition) {
+        return QJsonObject{{u"id"_s, id},
+                           {u"workId"_s, u"elfes"_s},
+                           {u"name"_s, u"Terres d'Arran · Elfes"_s},
+                           {u"universe"_s, u"Terres d'Arran"_s},
+                           {u"work"_s, u"Elfes"_s},
+                           {u"edition"_s, edition},
+                           {u"medium"_s, u"bd"_s},
+                           {u"ownedVolumes"_s, 2},
+                           {u"entryCount"_s, 2},
+                           {u"chapterCount"_s, 0},
+                           {u"arcCount"_s, 0},
+                           {u"genres"_s, QJsonArray{u"Fantasy"_s, u"Heroic Fantasy"_s}}};
+    };
+    const QByteArray one =
+        QJsonDocument(aWork(u"albums"_s, u"Albums"_s)).toJson(QJsonDocument::Compact);
+    QJsonArray rows;
+    if (editions)
+        rows = {aWork(u"albums"_s, u"Albums"_s), aWork(u"integrale"_s, u"Intégrale"_s)};
+    const QByteArray list = aPage(rows);
+    const QByteArray files = QJsonDocument(QJsonArray{
+        QJsonObject{{u"id"_s, u"v1"_s}, {u"type"_s, u"VOLUME"_s}, {u"number"_s, 1},
+                    {u"title"_s, u"Le Crystal"_s}, {u"pageCount"_s, 54},
+                    {u"chapterCount"_s, 0}, {u"file"_s, u"T1.cbz"_s}, {u"size"_s, 1}},
+        QJsonObject{{u"id"_s, u"v2"_s}, {u"type"_s, u"VOLUME"_s}, {u"number"_s, 2},
+                    {u"title"_s, u"L'Honneur"_s}, {u"pageCount"_s, 54},
+                    {u"chapterCount"_s, 0}, {u"file"_s, u"T2.cbz"_s}, {u"size"_s, 1}},
+    }).toJson(QJsonDocument::Compact);
+    const QByteArray states = QJsonDocument(QJsonArray{
+        QJsonObject{{u"entryId"_s, u"v1"_s}, {u"page"_s, 53}, {u"pageCount"_s, 54},
+                    {u"finished"_s, true}},
+    }).toJson(QJsonDocument::Compact);
+    const QByteArray json = "application/json";
+    return [=](const QByteArray &request) -> QByteArray {
+        if (request.startsWith("GET /next") || request.contains("/cover")
+            || request.startsWith("GET /filters"))
+            return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+        if (request.contains("/entries "))
+            return aReply(200, json, files);
+        if (request.contains("/progress "))
+            return aReply(200, json, states);
+        if (request.startsWith("GET /series/"))
+            return aReply(200, json, one);
+        return aReply(200, json, list);
+    };
+}
+
+/// The name of what holds the keyboard: the focused item's, or that of the nearest named
+/// item around it — a field inside a control is the control.
+QString holderName(QQuickWindow *window)
+{
+    for (QQuickItem *item = window->activeFocusItem(); item; item = item->parentItem()) {
+        if (!item->objectName().isEmpty())
+            return item->objectName();
+    }
+    return u"<nothing>"_s;
+}
+
+/// `key` pressed until the item called `name` holds the keyboard, at most `most` times.
+bool pressedUntil(QQuickWindow *window, const QString &name, Qt::Key key = Qt::Key_Tab,
+                  Qt::KeyboardModifiers modifiers = Qt::NoModifier, int most = 30)
+{
+    for (int i = 0; i < most; ++i) {
+        if (holderName(window) == name)
+            return true;
+        QTest::keyClick(window, key, modifiers);
+    }
+    return holderName(window) == name;
 }
 } // namespace
 
@@ -2898,18 +3004,15 @@ private slots:
         QVERIFY(!unreadRing->isVisible());
         QVERIFY(unread->hasActiveFocus());
 
-        // Enter chooses nothing it cannot be seen choosing: it hands the emphasis back to the
-        // keyboard, where it was left. The next Enter is the chip's.
+        // Enter acts on what holds the focus — the chip, not the cover under the pointer —
+        // and hands the emphasis back to the keyboard as it does, so the ring shows where it
+        // acted. It used to act on nothing the first time, which read as Enter not working.
         QTest::mouseMove(window, centreOf(first), 20);
         QTRY_VERIFY(firstRing->isVisible());
         QTest::keyClick(window, Qt::Key_Return);
         QTRY_VERIFY(unreadRing->isVisible());
         QTRY_VERIFY(!firstRing->isVisible());
         QVERIFY(unread->hasActiveFocus());
-        QTest::qWait(200);
-        QVERIFY(!pretend.heard.contains("read=UNREAD"));
-
-        QTest::keyClick(window, Qt::Key_Return);
         QTRY_VERIFY(pretend.heard.contains("read=UNREAD"));
 
         // And a key that moves brings the ring back by moving it: hovered, left, then Right —
@@ -10403,6 +10506,16 @@ private slots:
                                     {u"scope"_s, u"restricted"_s}}));
         QCOMPARE(bodySent(pretend.heard, "PATCH /profiles/r ").value(u"kind"_s).toString(),
                  u"restricted"_s);
+
+        // The recovery code comes up as the window closes, and keeps the keys on its one
+        // button: the window closing under it must not hand them back to what opened it.
+        auto *recoveryBody = window->findChild<QQuickItem *>(u"recovery-dialog-body"_s);
+        QVERIFY(recoveryBody);
+        QTRY_VERIFY(recoveryBody->isVisible());
+        QTest::qWait(100);
+        QCOMPARE(focusedName(window), u"recovery-noted"_s);
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(!recoveryBody->isVisible());
     }
 
     /// The principal's own window sends the change of name first, then the code with what it
@@ -10448,7 +10561,10 @@ private slots:
         QVERIFY(!confirm->property("ready").toBool());
         QVERIFY(laidOut(window));
         clickOn(window, itemNamed(dialog, u"profile-code-current"_s));
-        typeInto(window, u"vieux"_s);
+        // Under four characters it cannot be a code, and nothing is sent for it.
+        typeInto(window, u"vie"_s);
+        QVERIFY(!confirm->property("ready").toBool());
+        typeInto(window, u"ux"_s);
         QTRY_VERIFY(confirm->property("ready").toBool());
         pretend.heard.clear();
         clickOn(window, confirm);
@@ -10549,6 +10665,581 @@ private slots:
         QVERIFY(dialog->isVisible());
     }
 
+    /// Every control of the settings is a stop for Tab and for the arrows, and past either end
+    /// the keys go to the bar and come back. None was: from the first tab, Tab and Down stayed
+    /// on it, and nothing under the tabs — a pencil, a box, the way to add a profile — could
+    /// be reached without the mouse.
+    void the_keys_reach_every_control_of_the_settings_and_go_round_through_the_bar()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"sauge"_s, u"reader"_s)},
+            u"p"_s, true);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *view = settingsOn(engine, window, u"profiles"_s);
+        QVERIFY(view);
+        QTRY_VERIFY(shownNamed(view, u"rights-r-erase"_s));
+        QVariant took;
+        QVERIFY(QMetaObject::invokeMethod(view, "takeFocus", Q_RETURN_ARG(QVariant, took),
+                                          Q_ARG(QVariant, true)));
+        QCOMPARE(focusedName(window), u"back-button"_s);
+
+        QStringList walked;
+        for (int i = 0; i < 40 && keysWithin(window, view); ++i) {
+            walked << focusedName(window);
+            QTest::keyClick(window, Qt::Key_Tab);
+        }
+        for (const QString &stop :
+             {u"settings-tab-general"_s, u"settings-tab-profiles"_s, u"settings-tab-devices"_s,
+              u"settings-tab-about"_s, u"profile-row-p-edit"_s, u"profile-row-r-edit"_s,
+              u"profile-row-r-remove"_s, u"profiles-add"_s, u"rights-r-import"_s,
+              u"rights-r-edit"_s, u"rights-r-erase"_s})
+            QVERIFY2(walked.contains(stop), qPrintable(walked.join(u" → "_s)));
+        // Out of the screen and into the bar, which hands the keys back.
+        QVERIFY2(!keysWithin(window, view), qPrintable(walked.join(u" → "_s)));
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"back-button"_s, 10));
+
+        // The arrows walk the same chain, and Up before the first stop leaves for the bar.
+        QTest::keyClick(window, Qt::Key_Down);
+        QCOMPARE(focusedName(window), u"settings-tab-general"_s);
+        QTest::keyClick(window, Qt::Key_Up);
+        QCOMPARE(focusedName(window), u"back-button"_s);
+        QTest::keyClick(window, Qt::Key_Up);
+        QVERIFY(!keysWithin(window, view));
+
+        // Enter shows the tab it is on, and the list of keys there says where they stop.
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"settings-tab-about"_s));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(shownNamed(view, u"shortcuts-scope"_s));
+        QCOMPARE(textNamed(view, u"shortcuts-scope"_s), Words::appShortcutsScope());
+    }
+
+    /// The pencil of a profile, pressed from the keyboard, opens its window on the name; every
+    /// control of it is walked by Tab and the arrows without leaving it, « / » types nothing
+    /// behind it, and Escape puts the keys back on the pencil. They went to the page instead,
+    /// and « / » on a button of the window put them in the search field behind it, where
+    /// Escape could no longer close the window.
+    void a_pencil_pressed_from_the_keyboard_opens_the_window_and_escape_comes_back_to_it()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"sauge"_s, u"reader"_s)},
+            u"p"_s, true);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *view = settingsOn(engine, window, u"profiles"_s);
+        QVERIFY(view);
+        auto *dialog = window->findChild<QQuickItem *>(u"profile-dialog-body"_s);
+        auto *searchField = window->findChild<QQuickItem *>(u"search-field"_s);
+        QVERIFY(dialog);
+        QVERIFY(searchField);
+        QTRY_VERIFY(shownNamed(view, u"profile-row-r-edit"_s));
+        QVariant took;
+        QVERIFY(QMetaObject::invokeMethod(view, "takeFocus", Q_RETURN_ARG(QVariant, took),
+                                          Q_ARG(QVariant, true)));
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"profile-row-r-edit"_s));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(dialog->isVisible());
+        QTRY_COMPARE(focusedName(window), u"profile-name"_s);
+
+        QStringList walked;
+        for (int i = 0; i < 14; ++i) {
+            QTest::keyClick(window, Qt::Key_Tab);
+            QVERIFY2(keysWithin(window, dialog), qPrintable(walked.join(u" → "_s)));
+            walked << focusedName(window);
+        }
+        for (const QString &stop :
+             {u"profile-colour-sauge"_s, u"profile-kind-book"_s, u"profile-kind-lock"_s,
+              u"profile-may-import"_s, u"profile-may-edit"_s, u"profile-may-erase"_s,
+              u"profile-cancel"_s, u"profile-confirm"_s, u"profile-name"_s})
+            QVERIFY2(walked.contains(stop), qPrintable(walked.join(u" → "_s)));
+
+        // Down goes on as Tab does, past the colours and out of them.
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"profile-colour-sauge"_s));
+        QTest::keyClick(window, Qt::Key_Down);
+        QTest::keyClick(window, Qt::Key_Down);
+        QTest::keyClick(window, Qt::Key_Down);
+        QCOMPARE(focusedName(window), u"profile-kind-lock"_s);
+        QTest::keyClick(window, Qt::Key_Up);
+        QCOMPARE(focusedName(window), u"profile-kind-book"_s);
+
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"profile-cancel"_s));
+        QTest::keyClick(window, Qt::Key_Slash);
+        QTest::qWait(50);
+        QVERIFY(!searchField->hasActiveFocus());
+        QCOMPARE(focusedName(window), u"profile-cancel"_s);
+
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!dialog->isVisible());
+        QTRY_COMPARE(focusedName(window), u"profile-row-r-edit"_s);
+        QVERIFY(window->findChild<QQuickItem *>(u"settings-view"_s));
+    }
+
+    /// Your own profile, with the code: switched off from the keyboard, the window asks for the
+    /// current code, Tab reaches its field, and Enter there does nothing until it is typed.
+    void taking_the_code_off_waits_in_the_window_for_the_current_one()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"sauge"_s, u"reader"_s)},
+            u"p"_s, true, u"everything"_s);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        const QByteArray gone = aReply(204, QByteArrayLiteral("application/json"), {});
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            return request.startsWith("DELETE ") ? gone : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *dialog = profileDialogFor(
+            window, u"self"_s,
+            aListedProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true));
+        QVERIFY(dialog);
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"profile-code-switch"_s));
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY(shownNamed(dialog, u"profile-code-current"_s));
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"profile-code-current"_s));
+
+        pretend.heard.clear();
+        QTest::keyClick(window, Qt::Key_Return);
+        QTest::qWait(100);
+        QVERIFY(dialog->isVisible());
+        QVERIFY(!pretend.heard.contains("DELETE "));
+
+        typeInto(window, u"1234"_s);
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(pretend.heard.contains("DELETE /profiles/code "));
+        QCOMPARE(bodySent(pretend.heard, "DELETE /profiles/code ")
+                     .value(u"currentCode"_s).toString(),
+                 u"1234"_s);
+    }
+
+    /// « Code oublié ? » pressed from the keyboard puts the keys on the recovery code. It hid
+    /// itself with the focus on it, and the focus went nowhere: the first thing typed was lost.
+    void a_forgotten_code_asked_from_the_keyboard_lands_on_the_recovery_code()
+    {
+        const QByteArray seat = aRestrictedSeat();
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *whoReads = window->findChild<QQuickItem *>(u"who-reads"_s);
+        auto *square = window->findChild<QQuickItem *>(u"profile-square"_s);
+        QVERIFY(whoReads);
+        QVERIFY(square);
+        QTRY_VERIFY(square->isVisible()
+                    && square->mapToScene(QPointF(0, 0)).x() > window->width() / 2);
+        clickOn(window, square);
+        QTRY_VERIFY(whoReads->isVisible());
+        QVERIFY(laidOut(window));
+        // To the principal's tile from the keyboard, and the code asked there.
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"who-reads-tile-p"_s));
+        QTest::keyClick(window, Qt::Key_Return);
+        auto *dialog = window->findChild<QQuickItem *>(u"code-dialog-body"_s);
+        QVERIFY(dialog);
+        QTRY_VERIFY(dialog->isVisible());
+        QCOMPARE(focusedName(window), u"code-field"_s);
+
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"code-forgot"_s));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(focusedName(window), u"code-recovery-field"_s);
+        QStringList walked;
+        for (int i = 0; i < 5; ++i) {
+            QTest::keyClick(window, Qt::Key_Tab);
+            QVERIFY(keysWithin(window, dialog));
+            walked << focusedName(window);
+        }
+        QCOMPARE(walked, QStringList({u"code-new-field"_s, u"code-new-again-field"_s,
+                                      u"code-back"_s, u"code-replace"_s,
+                                      u"code-recovery-field"_s}));
+
+        // Escape closes the window and leaves the profile where it was, its tile in hand.
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!dialog->isVisible());
+        QVERIFY(whoReads->isVisible());
+        QTRY_COMPARE(focusedName(window), u"who-reads-tile-p"_s);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTest::qWait(50);
+        QVERIFY(whoReads->isVisible());
+    }
+
+    /// The recovery code is shown once, and its window opens on the one button that closes it:
+    /// with the focus nowhere, Enter did nothing, and Escape rightly does nothing either.
+    void the_recovery_code_window_opens_on_the_button_that_closes_it()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = seatedAsPrincipal([](const QByteArray &) {
+            return aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        });
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *recovery = window->findChild<QObject *>(u"recovery-dialog"_s);
+        auto *body = window->findChild<QQuickItem *>(u"recovery-dialog-body"_s);
+        QVERIFY(recovery);
+        QVERIFY(body);
+        QVERIFY(QMetaObject::invokeMethod(recovery, "show", Q_ARG(QVariant, u"ABCD-EFGH"_s)));
+        QTRY_VERIFY(body->isVisible());
+        QTRY_COMPARE(focusedName(window), u"recovery-noted"_s);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTest::qWait(50);
+        QVERIFY(body->isVisible());
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(!body->isVisible());
+    }
+
+    /// Removing a profile or a device, unlinking, linking another: each window opens on the
+    /// way that loses nothing, which Tab reaches — « Annuler » was out of the keys' reach
+    /// altogether, and the window opened on nothing. Enter there cancels and sends nothing.
+    void the_confirmations_open_on_the_way_that_loses_nothing()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"sauge"_s, u"reader"_s)},
+            u"p"_s, true);
+        const QByteArray devices = aReply(
+            200, QByteArrayLiteral("application/json"),
+            QJsonDocument(QJsonObject{
+                              {u"devices"_s,
+                               QJsonArray{QJsonObject{{u"id"_s, u"d1"_s},
+                                                      {u"name"_s, u"Ordinateur"_s},
+                                                      {u"profile"_s, u"p"_s},
+                                                      {u"kept"_s, true},
+                                                      {u"here"_s, true}},
+                                          QJsonObject{{u"id"_s, u"d2"_s},
+                                                      {u"name"_s, u"Tablette"_s},
+                                                      {u"profile"_s, u"p"_s},
+                                                      {u"kept"_s, true},
+                                                      {u"here"_s, false}}}}})
+                .toJson(QJsonDocument::Compact));
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            return request.startsWith("GET /devices ") ? devices : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QVariant took;
+
+        // A profile, by its bin.
+        QQuickItem *view = settingsOn(engine, window, u"profiles"_s);
+        QVERIFY(view);
+        QTRY_VERIFY(shownNamed(view, u"profile-row-r-remove"_s));
+        QVERIFY(QMetaObject::invokeMethod(view, "takeFocus", Q_RETURN_ARG(QVariant, took),
+                                          Q_ARG(QVariant, true)));
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"profile-row-r-remove"_s));
+        QTest::keyClick(window, Qt::Key_Return);
+        auto *removal = window->findChild<QQuickItem *>(u"profile-removal-body"_s);
+        QVERIFY(removal);
+        QTRY_VERIFY(removal->isVisible());
+        QTRY_COMPARE(focusedName(window), u"profile-removal-cancel"_s);
+        QTest::keyClick(window, Qt::Key_Tab);
+        QCOMPARE(focusedName(window), u"profile-removal-confirm"_s);
+        QTest::keyClick(window, Qt::Key_Tab);
+        QCOMPARE(focusedName(window), u"profile-removal-cancel"_s);
+        pretend.heard.clear();
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(!removal->isVisible());
+        QTRY_COMPARE(focusedName(window), u"profile-row-r-remove"_s);
+        QVERIFY(!pretend.heard.contains("DELETE "));
+
+        // A device, by its bin, from the tab the keys reach.
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"settings-tab-devices"_s));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(shownNamed(view, u"device-row-d2-remove"_s));
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"opening-refresh"_s));
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"device-row-d2-choose"_s));
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"device-row-d2-remove"_s));
+        QTest::keyClick(window, Qt::Key_Return);
+        auto *device = window->findChild<QQuickItem *>(u"device-removal-body"_s);
+        QVERIFY(device);
+        QTRY_VERIFY(device->isVisible());
+        QTRY_COMPARE(focusedName(window), u"device-removal-cancel"_s);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!device->isVisible());
+        QTRY_COMPARE(focusedName(window), u"device-row-d2-remove"_s);
+
+        // Unlinking and linking another, whichever button opened them.
+        for (const auto &[popup, first] :
+             {std::pair{u"unlink-dialog"_s, u"unlink-cancel"_s},
+              std::pair{u"relay-dialog"_s, u"relay-close"_s}}) {
+            auto *one = window->findChild<QObject *>(popup);
+            QVERIFY2(one, qPrintable(popup));
+            QVERIFY(QMetaObject::invokeMethod(one, "open"));
+            QTRY_VERIFY(one->property("opened").toBool());
+            QTRY_COMPARE(focusedName(window), first);
+            QTest::keyClick(window, Qt::Key_Escape);
+            QTRY_VERIFY(!one->property("visible").toBool());
+        }
+        QVERIFY(!pretend.heard.contains("DELETE "));
+    }
+
+    /// The name of this device, changed from the keyboard: Enter on the pencil opens the field,
+    /// Left stays in it, and Escape leaves the name as it was — and leaves nothing else. It
+    /// left the settings, the window's « back » taking the key before the field could.
+    void escape_in_a_field_of_the_settings_puts_the_field_away_and_stays()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true)}, u"p"_s,
+            true);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *view = settingsOn(engine, window, u"devices"_s);
+        QVERIFY(view);
+        QVariant took;
+        QVERIFY(QMetaObject::invokeMethod(view, "takeFocus", Q_RETURN_ARG(QVariant, took),
+                                          Q_ARG(QVariant, true)));
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"bond-rename"_s));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(focusedName(window), u"bond-rename-field"_s);
+        typeInto(window, u"x"_s);
+        QTest::keyClick(window, Qt::Key_Home);
+        QTest::keyClick(window, Qt::Key_Left);
+        QCOMPARE(focusedName(window), u"bond-rename-field"_s);
+
+        pretend.heard.clear();
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(hiddenNamed(view, u"bond-rename-field"_s));
+        QCOMPARE(window->findChild<QQuickItem *>(u"settings-view"_s), view);
+        QCOMPARE(focusedName(window), u"bond-rename"_s);
+        QTest::qWait(100);
+        QVERIFY(!pretend.heard.contains("PATCH /device "));
+    }
+
+    /// The corner the bubbles come out of, chosen with the keys: the picture was the one
+    /// setting of its tab that Tab went past.
+    void the_corner_of_the_bubbles_is_chosen_from_the_keyboard()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = seatedAsPrincipal([](const QByteArray &) {
+            return aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        });
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        QQuickItem *view = settingsOn(engine, window, u"notifications"_s);
+        QVERIFY(view);
+        QTRY_VERIFY(shownNamed(view, u"bubble-corner-zone-0"_s));
+        QVariant took;
+        QVERIFY(QMetaObject::invokeMethod(view, "takeFocus", Q_RETURN_ARG(QVariant, took),
+                                          Q_ARG(QVariant, true)));
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"bubble-corner-zone-0"_s));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(preferences->property("corner").toInt(), 0);
+        QTest::keyClick(window, Qt::Key_Right);
+        QCOMPARE(focusedName(window), u"bubble-corner-zone-1"_s);
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_COMPARE(preferences->property("corner").toInt(), 1);
+    }
+
+    /// « Qui lit ? » opens on the profile reading now, and the arrows go from tile to tile as
+    /// Tab does. It opened on nothing, and the arrows did nothing at all there.
+    void who_reads_opens_on_the_profile_reading_and_the_arrows_walk_its_tiles()
+    {
+        const QByteArray seating = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s)},
+            u"p"_s, false);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seating : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *whoReads = window->findChild<QQuickItem *>(u"who-reads"_s);
+        QVERIFY(whoReads);
+        QTRY_VERIFY(whoReads->isVisible());
+        QTRY_COMPARE(focusedName(window), u"who-reads-tile-p"_s);
+        QTest::keyClick(window, Qt::Key_Right);
+        QCOMPARE(focusedName(window), u"who-reads-tile-r"_s);
+        QTest::keyClick(window, Qt::Key_Left);
+        QCOMPARE(focusedName(window), u"who-reads-tile-p"_s);
+        QTest::keyClick(window, Qt::Key_Down);
+        QCOMPARE(focusedName(window), u"who-reads-tile-r"_s);
+
+        pretend.heard.clear();
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(pretend.heard.contains("PUT /profiles/active"));
+    }
+
+    /// The import window opens on its first way in, Tab walks every control of it without
+    /// leaving it, and Escape puts the keys back where they were. The pickers, the box and
+    /// the cross were out of reach, and the window opened on nothing.
+    void the_import_window_opens_on_its_first_way_in_and_tab_walks_it()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = seatedAsPrincipal([](const QByteArray &) {
+            return aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        });
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *popup = window->findChild<QObject *>(u"import-dialog"_s);
+        QVERIFY(popup);
+        QVERIFY(QMetaObject::invokeMethod(popup, "show"));
+        QTRY_VERIFY(popup->property("opened").toBool());
+        QTRY_COMPARE(focusedName(window), u"import-choose-files"_s);
+        auto *body = qvariant_cast<QQuickItem *>(popup->property("contentItem"));
+        QVERIFY(body);
+
+        QStringList walked;
+        for (int i = 0; i < 6; ++i) {
+            QTest::keyClick(window, Qt::Key_Tab);
+            QVERIFY2(keysWithin(window, body), qPrintable(walked.join(u" → "_s)));
+            walked << focusedName(window);
+        }
+        for (const QString &stop : {u"import-choose-folder"_s, u"import-verify"_s,
+                                    u"import-back"_s, u"import-close"_s})
+            QVERIFY2(walked.contains(stop), qPrintable(walked.join(u" → "_s)));
+
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!popup->property("visible").toBool());
+        QVERIFY(!keysWithin(window, body));
+    }
+
+    /// A whole edition is erased by typing its name: the window opens on the field, and Enter
+    /// there erases only once the name is right. One volume opens on « Annuler ».
+    void erasing_from_the_keyboard_opens_on_the_name_or_on_the_way_back()
+    {
+        const QByteArray one = QJsonDocument(QJsonObject{
+            {u"id"_s, u"albums"_s}, {u"workId"_s, u"elfes"_s},
+            {u"name"_s, u"Terres d'Arran · Elfes"_s}, {u"work"_s, u"Elfes"_s},
+            {u"edition"_s, u"Albums"_s}, {u"medium"_s, u"bd"_s}, {u"ownedVolumes"_s, 1},
+            {u"entryCount"_s, 1}, {u"chapterCount"_s, 0}, {u"arcCount"_s, 0},
+        }).toJson(QJsonDocument::Compact);
+        const QByteArray files = QJsonDocument(QJsonArray{QJsonObject{
+            {u"id"_s, u"v1"_s}, {u"type"_s, u"VOLUME"_s}, {u"number"_s, 1},
+            {u"title"_s, u"Un"_s}, {u"pageCount"_s, 54}, {u"chapterCount"_s, 0},
+            {u"file"_s, u"Tome 1.cbz"_s}, {u"size"_s, 48000000}}}).toJson(QJsonDocument::Compact);
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true, 0, true,
+                      true)},
+            u"p"_s, false);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            if (request.startsWith("GET /series/albums/entries "))
+                return aReply(200, QByteArrayLiteral("application/json"), files);
+            if (request.startsWith("GET /series/albums "))
+                return aReply(200, QByteArrayLiteral("application/json"), one);
+            return empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *erasure = engine.singletonInstance<Erasure *>(qmlTypeId("Leaf", 1, 0, "Erasure"));
+        auto *popup = window->findChild<QObject *>(u"erase-dialog"_s);
+        QVERIFY(erasure);
+        QVERIFY(popup);
+
+        erasure->aboutSeries(u"albums"_s);
+        QTRY_VERIFY(popup->property("opened").toBool());
+        QTRY_COMPARE(focusedName(window), u"erase-confirm"_s);
+        pretend.heard.clear();
+        QTest::keyClick(window, Qt::Key_Return);
+        QTest::qWait(100);
+        QVERIFY(popup->property("visible").toBool());
+        QVERIFY(!pretend.heard.contains("DELETE "));
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"erase-cancel"_s, 4));
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!popup->property("visible").toBool());
+
+        erasure->aboutEntry(u"v1"_s, u"albums"_s);
+        QTRY_VERIFY(popup->property("opened").toBool());
+        QTRY_COMPARE(focusedName(window), u"erase-cancel"_s);
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(!popup->property("visible").toBool());
+        QVERIFY(!pretend.heard.contains("DELETE "));
+    }
+
     /// The swatches answer the keyboard: Tab reaches the chosen one, the arrows go from one
     /// free colour to the next over the taken ones, Space or Enter picks. Each is named by its
     /// palette name, and a taken one by its owner too.
@@ -10607,6 +11298,679 @@ private slots:
         QTest::keyClick(window, Qt::Key_Return);
         QCOMPARE(popup->property("color").toString(), u"bleu"_s);
         QVERIFY(dialog->isVisible());
+    }
+
+    /// The keys reached every cover of the shelf and opened none: Enter on a cover went
+    /// past the tile, the grid and the page, and nothing heard it. The Menu key, beside it,
+    /// always worked — which is how the tile came to hold the focus in the first place.
+    void enter_on_a_cover_the_keys_reached_opens_its_series()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"s0"_s, u"Série 0"_s, 3, false),
+                   aSeries(u"s1"_s, u"Série 1"_s, 3, false)}));
+        pretend.answerFor = [pageReply](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /series?"))
+                return pageReply;
+            return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(navigation);
+        QVERIFY(grid);
+        QTRY_COMPARE(grid->property("count").toInt(), 2);
+
+        QVERIFY2(pressedUntil(window, u"tile-s0"_s), qPrintable(holderName(window)));
+        // The menu answers the key, and Escape puts it away without leaving the shelf.
+        QQuickItem *commands = itemNamed(grid, u"commands-s0"_s);
+        QVERIFY(commands);
+        QTest::keyClick(window, Qt::Key_Menu);
+        QTRY_VERIFY(commands->property("opened").toBool());
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!commands->property("opened").toBool());
+        QCOMPARE(navigation->destination(), Navigation::Destination::Shelf);
+
+        QTRY_COMPARE(holderName(window), u"tile-s0"_s);
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Series);
+        QCOMPARE(navigation->parameters().value(u"series"_s).toString(), u"s0"_s);
+
+        // And the keys go on from there, into the page that opened rather than through the
+        // shelf hidden under it; Escape, and they find the shelf again.
+        QTRY_VERIFY(itemNamed(window->contentItem(), u"series-view"_s));
+        QVERIFY2(pressedUntil(window, u"series-back"_s), qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Shelf);
+        QVERIFY2(pressedUntil(window, u"tile-s1"_s), qPrintable(holderName(window)));
+    }
+
+    /// Enter after a click did nothing: once the pointer had been used, the first Enter was
+    /// taken from the focused item to show its ring again, and only the second one acted. A
+    /// key that does nothing the first time is a key a reader concludes does not work. It
+    /// acts now, on what holds the focus, and the ring comes back with it.
+    void enter_after_a_click_acts_on_what_holds_the_focus()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(200, QByteArrayLiteral("application/json"),
+                                            aPage({aSeries(u"s0"_s, u"Série 0"_s, 3, false)}));
+        const QByteArray filtersReply =
+            aReply(200, QByteArrayLiteral("application/json"), someFilters());
+        pretend.answerFor = [pageReply, filtersReply](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /filters"))
+                return filtersReply;
+            if (request.startsWith("GET /series?"))
+                return pageReply;
+            return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *pills = window->findChild<QQuickItem *>(u"filter-pills"_s);
+        QVERIFY(pills);
+        QTRY_VERIFY(pills->isVisible());
+        QQuickItem *chip = nullptr;
+        QTRY_VERIFY((chip = itemNamed(pills, u"chip-UNREAD"_s)));
+        QQuickItem *ring = itemNamed(pills, u"chip-UNREAD-focus"_s);
+        QVERIFY(ring);
+
+        QVERIFY2(pressedUntil(window, u"chip-UNREAD"_s), qPrintable(holderName(window)));
+        QTRY_VERIFY(ring->isVisible());
+        clickOn(window, chip);
+        QTRY_VERIFY(chip->property("lit").toBool());
+        QTRY_VERIFY(!ring->isVisible());
+
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(!chip->property("lit").toBool());
+        QVERIFY(ring->isVisible());
+        QCOMPARE(holderName(window), u"chip-UNREAD"_s);
+    }
+
+    /// A series page had no stop the keys could reach. Its shell asked it for its first stop
+    /// and it had no way to say, so the bar's last button handed the focus back to its first:
+    /// Tab went round the gear and the square forever, and no volume, tab or way back was
+    /// ever reached. It is walked now in the order it is drawn, and round to the bar.
+    void the_keys_walk_a_series_page_in_the_order_it_is_drawn_and_round_to_the_bar()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = anElfesPage(false);
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QTRY_VERIFY(shownNamed(page, u"volume-v2"_s));
+        QTRY_VERIFY(shownNamed(page, u"genre-Heroic Fantasy"_s));
+
+        QVERIFY2(pressedUntil(window, u"series-back"_s), qPrintable(holderName(window)));
+        const QStringList drawn{u"series-back"_s,  u"series-universe"_s,
+                                u"commands-albums"_s, u"genre-Fantasy"_s,
+                                u"genre-Heroic Fantasy"_s, u"series-tab-0"_s,
+                                u"series-tab-1"_s, u"volume-search"_s,
+                                u"volume-view"_s, u"volume-v1"_s,
+                                u"volume-v2"_s, u"settings-button"_s};
+        QStringList walked{holderName(window)};
+        for (qsizetype i = 1; i < drawn.size(); ++i) {
+            QTest::keyClick(window, Qt::Key_Tab);
+            walked << holderName(window);
+        }
+        QCOMPARE(walked, drawn);
+
+        // And back the same way, Shift+Tab and Up alike, from the bar into the last volume.
+        // Backtab, which is what a keyboard sends for Shift+Tab.
+        QTest::keyClick(window, Qt::Key_Backtab, Qt::ShiftModifier);
+        QCOMPARE(holderName(window), u"volume-v2"_s);
+        QTest::keyClick(window, Qt::Key_Up);
+        QCOMPARE(holderName(window), u"volume-v1"_s);
+        QQuickItem *ring = itemNamed(page, u"volume-v1-focus"_s);
+        QVERIFY(ring);
+        QVERIFY(ring->isVisible());
+    }
+
+    /// What the keys reach on a series page, they act on: a tab, a genre, a volume, and the
+    /// two menus — the series' and a volume's — opened by the Menu key or Shift+F10.
+    void enter_and_the_menu_key_act_on_what_the_keys_reached_on_a_series_page()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = anElfesPage(false);
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        // The list and not the covers, whatever a run before this one left — and left so
+        // afterwards: the choice is kept on disk, and a test that ends on the covers hands
+        // them to every series page drawn after it.
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->showVolumesAsGrid(false);
+        const auto asAList = qScopeGuard([preferences] { preferences->showVolumesAsGrid(false); });
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QTRY_VERIFY(shownNamed(page, u"volume-v2"_s));
+
+        // A tab, chosen by Enter, and the first one again.
+        QVERIFY2(pressedUntil(window, u"series-tab-1"_s), qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(shownNamed(page, u"series-description"_s));
+        QTest::keyClick(window, Qt::Key_Left);
+        QCOMPARE(holderName(window), u"series-tab-0"_s);
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY(shownNamed(page, u"volume-v1"_s));
+
+        // The series' menu, from a stop that has none of its own.
+        QQuickItem *series = itemNamed(page, u"commands-albums"_s);
+        QVERIFY(series);
+        QTest::keyClick(window, Qt::Key_Menu);
+        QTRY_VERIFY(series->property("opened").toBool());
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!series->property("opened").toBool());
+        QCOMPARE(navigation->destination(), Navigation::Destination::Series);
+        // Shut, it leaves the keys on its button rather than on nothing.
+        QTRY_COMPARE(holderName(window), u"commands-albums"_s);
+
+        // A volume's own, from the volume — Escape shuts it and the page stays.
+        QVERIFY2(pressedUntil(window, u"volume-v1"_s), qPrintable(holderName(window)));
+        QQuickItem *volume = itemNamed(page, u"commands-v1"_s);
+        QVERIFY(volume);
+        QTest::keyClick(window, Qt::Key_F10, Qt::ShiftModifier);
+        QTRY_VERIFY(volume->property("opened").toBool());
+        QVERIFY(!series->property("opened").toBool());
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!volume->property("opened").toBool());
+        QCOMPARE(navigation->destination(), Navigation::Destination::Series);
+        // The focus came back where the menu was opened from, so the next key goes on.
+        QTRY_COMPARE(holderName(window), u"volume-v1"_s);
+
+        // The same volumes as covers: the switch is a stop, and so is each cover.
+        QVERIFY2(pressedUntil(window, u"volume-view"_s, Qt::Key_Backtab, Qt::ShiftModifier),
+                 qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(shownNamed(page, u"tile-volume-v2"_s));
+        QVERIFY2(pressedUntil(window, u"tile-volume-v2"_s), qPrintable(holderName(window)));
+        QQuickItem *cover = itemNamed(page, u"commands-tile-v2"_s);
+        QVERIFY(cover);
+        QTest::keyClick(window, Qt::Key_Menu);
+        QTRY_VERIFY(cover->property("opened").toBool());
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!cover->property("opened").toBool());
+        QTRY_COMPARE(holderName(window), u"tile-volume-v2"_s);
+        QVERIFY2(pressedUntil(window, u"volume-view"_s, Qt::Key_Backtab, Qt::ShiftModifier),
+                 qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(shownNamed(page, u"volume-v1"_s));
+        QVERIFY2(pressedUntil(window, u"volume-v1"_s), qPrintable(holderName(window)));
+
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Reader);
+        QCOMPARE(navigation->parameters().value(u"entry"_s).toString(), u"v1"_s);
+    }
+
+    /// A genre reached by the keys is pressed by Enter: the shelf, narrowed to it.
+    void enter_on_a_genre_the_keys_reached_narrows_the_shelf_to_it()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = anElfesPage(false);
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        auto *shelf = engine.singletonInstance<Shelf *>(qmlTypeId("Leaf", 1, 0, "Shelf"));
+        QVERIFY(navigation);
+        QVERIFY(shelf);
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QTRY_VERIFY(shownNamed(page, u"genre-Fantasy"_s));
+
+        QVERIFY2(pressedUntil(window, u"genre-Fantasy"_s), qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Shelf);
+        QCOMPARE(shelf->narrowing().value(u"genre"_s).toStringList(), QStringList{u"Fantasy"_s});
+    }
+
+    /// The edition switch is a stop like the rest: Enter opens its list, the arrows move in
+    /// it, Enter takes the edition they are on, and Escape shuts it without leaving.
+    void the_edition_switch_is_opened_walked_and_chosen_from_the_keys()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = anElfesPage(true);
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        auto *series = engine.singletonInstance<Series *>(qmlTypeId("Leaf", 1, 0, "Series"));
+        QVERIFY(navigation);
+        QVERIFY(series);
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QQuickItem *switcher = nullptr;
+        QTRY_VERIFY((switcher = itemNamed(page, u"edition-switch"_s)) && switcher->isVisible()
+                    && switcher->opacity() == 1.0);
+        auto *menu = switcher->findChild<QObject *>(u"editions-menu"_s);
+        QVERIFY(menu);
+
+        QVERIFY2(pressedUntil(window, u"edition-switch"_s), qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!menu->property("opened").toBool());
+        QCOMPARE(navigation->destination(), Navigation::Destination::Series);
+        QTRY_COMPARE(holderName(window), u"edition-switch"_s);
+
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QTest::keyClick(window, Qt::Key_Down);
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(!menu->property("opened").toBool());
+        QTRY_COMPARE(series->identifier(), u"integrale"_s);
+
+        // The other edition is also a tile of the last tab, which the keys reach and open.
+        QVERIFY2(pressedUntil(window, u"series-tab-2"_s), qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(shownNamed(page, u"elsewhere-tab"_s));
+        QVERIFY2(pressedUntil(window, u"tile-albums"_s), qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(series->identifier(), u"albums"_s);
+    }
+
+    /// Escape on a series opened from the results of a search emptied that search — the
+    /// shelf's question, which nobody on this page could see — and stayed. It goes back to
+    /// the results now, the question still in the field.
+    void escape_on_a_series_opened_from_a_search_goes_back_to_the_search()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = anElfesPage(false);
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        auto *shelf = engine.singletonInstance<Shelf *>(qmlTypeId("Leaf", 1, 0, "Shelf"));
+        QVERIFY(navigation);
+        QVERIFY(shelf);
+        shelf->searchFor(u"elf"_s);
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QTRY_VERIFY(itemNamed(window->contentItem(), u"series-view"_s));
+
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Shelf);
+        QCOMPARE(shelf->query(), u"elf"_s);
+    }
+
+    /// The volumes narrowed by the page's own field are a layer of the page: Escape empties
+    /// the field first, and leaves the page only once it is empty — as on the shelf.
+    void escape_empties_the_volume_search_before_it_leaves_the_series()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = anElfesPage(false);
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        auto *volumes = engine.singletonInstance<Entries *>(qmlTypeId("Leaf", 1, 0, "Entries"));
+        QVERIFY(navigation);
+        QVERIFY(volumes);
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QTRY_VERIFY(shownNamed(page, u"volume-v2"_s));
+
+        QVERIFY2(pressedUntil(window, u"volume-search"_s), qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_C);
+        QTRY_COMPARE(volumes->query(), u"c"_s);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_COMPARE(volumes->query(), QString());
+        QCOMPARE(navigation->destination(), Navigation::Destination::Series);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Shelf);
+    }
+
+    /// « / » on a page that is not the shelf gave the focus to the shelf's field, hidden on
+    /// that page: what was typed next went nowhere. It brings the shelf back with its field
+    /// ready, and Escape returns to the page it was pressed on.
+    void slash_away_from_the_shelf_brings_its_search_back()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = anElfesPage(false);
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QTRY_VERIFY(itemNamed(window->contentItem(), u"series-view"_s));
+        auto *field = window->findChild<QQuickItem *>(u"search-field"_s);
+        QVERIFY(field);
+        QVERIFY(!field->isVisible());
+
+        QTest::keyClick(window, Qt::Key_Slash);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Shelf);
+        QTRY_VERIFY(field->hasActiveFocus());
+        QVERIFY(field->isVisible());
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Series);
+    }
+
+    /// The filter panel opened from the keys took the focus and gave it to none of its rows:
+    /// Tab and the arrows reached nothing in it. They walk it now, round and round, Enter
+    /// lights a value, and Escape shuts the panel alone and leaves the keys on its button.
+    void the_filter_panel_is_walked_by_the_keys_and_escape_shuts_it_alone()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(200, QByteArrayLiteral("application/json"),
+                                            aPage({aSeries(u"s0"_s, u"Série 0"_s, 3, false)}));
+        const QByteArray filtersReply =
+            aReply(200, QByteArrayLiteral("application/json"), someFilters());
+        pretend.answerFor = [pageReply, filtersReply](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /filters"))
+                return filtersReply;
+            if (request.startsWith("GET /series?"))
+                return pageReply;
+            return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        QQuickItem *button = nullptr;
+        QTRY_VERIFY((button = reachableFilterButton(window)));
+        auto *panel = button->findChild<QObject *>(u"filter-panel"_s);
+        QVERIFY(panel);
+
+        QVERIFY2(pressedUntil(window, u"filter-button"_s), qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(panel->property("opened").toBool());
+
+        pretend.heard.clear();
+        QVERIFY2(pressedUntil(window, u"filter-value-Horreur"_s), qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(pretend.heard.contains("genre=Horreur"));
+        QVERIFY(panel->property("opened").toBool());
+
+        // The longest axis is folded: Enter on its heading unfolds it, and the walk goes on
+        // through all fourteen of its values, built one after another as they are reached.
+        QVERIFY2(pressedUntil(window, u"filter-axis-head-author"_s),
+                 qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_Return);
+        QVERIFY2(pressedUntil(window, u"filter-value-Auteur 14"_s, Qt::Key_Down),
+                 qPrintable(holderName(window)));
+
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!panel->property("opened").toBool());
+        QCOMPARE(navigation->destination(), Navigation::Destination::Shelf);
+        QTRY_COMPARE(holderName(window), u"filter-button"_s);
+    }
+
+    /// The order's menu, opened and chosen from the keys, and shut by Escape alone. It always
+    /// was — a `Menu` walks itself — and is held here beside the panel that was not.
+    void the_order_menu_is_opened_and_chosen_from_the_keys()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(200, QByteArrayLiteral("application/json"),
+                                            aPage({aSeries(u"s0"_s, u"Série 0"_s, 3, false)}));
+        pretend.answerFor = [pageReply](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /series?"))
+                return pageReply;
+            return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        auto *shelf = engine.singletonInstance<Shelf *>(qmlTypeId("Leaf", 1, 0, "Shelf"));
+        auto *menu = window->findChild<QObject *>(u"sort-menu"_s);
+        QVERIFY(navigation);
+        QVERIFY(shelf);
+        QVERIFY(menu);
+
+        QVERIFY2(pressedUntil(window, u"sort-button"_s), qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!menu->property("opened").toBool());
+        QCOMPARE(navigation->destination(), Navigation::Destination::Shelf);
+        QTRY_COMPARE(holderName(window), u"sort-button"_s);
+
+        const QString before = shelf->sort();
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QTest::keyClick(window, Qt::Key_Down);
+        QTest::keyClick(window, Qt::Key_Down);
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(!menu->property("opened").toBool());
+        QTRY_VERIFY(shelf->sort() != before);
+    }
+
+    /// « / » in the reader gave the focus to the shelf's field, under a bar the reader does
+    /// not show: the reader's own keys then went to that field, and the arrows turned nothing.
+    void slash_in_the_reader_leaves_its_keys_to_it()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"LEFT_TO_RIGHT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        auto *field = window->findChild<QQuickItem *>(u"search-field"_s);
+        QVERIFY(field);
+
+        QTest::keyClick(window, Qt::Key_Slash);
+        QTest::qWait(100);
+        QVERIFY(!field->hasActiveFocus());
+        QVERIFY(view->hasActiveFocus());
+        const int before = reader->display();
+        QTest::keyClick(window, Qt::Key_Right);
+        QTRY_VERIFY(reader->display() > before);
+    }
+
+    /// « / » under a confirmation took the focus out of it, for a field behind its veil: the
+    /// shortcut was the application's, and an application's shortcut is not stopped by a
+    /// modal. What is typed belongs to the window in front.
+    void slash_under_a_confirmation_leaves_the_focus_in_it()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(200, QByteArrayLiteral("application/json"),
+                                            aPage({aSeries(u"s0"_s, u"Série 0"_s, 3, false)}));
+        pretend.answerFor = [pageReply](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /series?"))
+                return pageReply;
+            return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *field = window->findChild<QQuickItem *>(u"search-field"_s);
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(field);
+        QVERIFY(grid);
+        QTRY_COMPARE(grid->property("count").toInt(), 1);
+        auto *erasure = engine.singletonInstance<Erasure *>(qmlTypeId("Leaf", 1, 0, "Erasure"));
+        QVERIFY(erasure);
+        erasure->aboutSeries(u"s0"_s);
+        auto *dialog = window->findChild<QObject *>(u"erase-dialog"_s);
+        QVERIFY(dialog);
+        QTRY_VERIFY(dialog->property("opened").toBool());
+
+        QTest::keyClick(window, Qt::Key_Slash);
+        QTest::qWait(100);
+        QVERIFY(!field->hasActiveFocus());
+        QVERIFY(dialog->property("opened").toBool());
+    }
+
+    /// A bubble's action and its cross were for the pointer only: the keys went from the
+    /// last cover round to the bar and never through the bubble standing over the shelf.
+    /// They pass through it now, both ways, and Enter on the cross closes it.
+    void the_keys_reach_a_bubble_between_the_screen_and_the_bar()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(200, QByteArrayLiteral("application/json"),
+                                            aPage({aSeries(u"s0"_s, u"Série 0"_s, 3, false)}));
+        pretend.answerFor = [pageReply](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /series?"))
+                return pageReply;
+            return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        auto *bubbles = engine.singletonInstance<Toasts *>(qmlTypeId("Leaf", 1, 0, "Toasts"));
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(grid);
+        QVERIFY(bubbles);
+        QVERIFY(preferences);
+        QTRY_COMPARE(grid->property("count").toInt(), 1);
+        preferences->showBubble(Preferences::Warns::Downloads, true);
+        bubbles->copySaved(u"/tmp/T1.cbz"_s);
+        QTRY_VERIFY(shownNamed(window->contentItem(), u"toast-0-action"_s));
+
+        QVERIFY2(pressedUntil(window, u"tile-s0"_s), qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_Tab);
+        QCOMPARE(holderName(window), u"toast-0-action"_s);
+        QTest::keyClick(window, Qt::Key_Tab);
+        QCOMPARE(holderName(window), u"toast-0-close"_s);
+        QTest::keyClick(window, Qt::Key_Tab);
+        QCOMPARE(holderName(window), u"search-field"_s);
+        QTest::keyClick(window, Qt::Key_Backtab, Qt::ShiftModifier);
+        QCOMPARE(holderName(window), u"toast-0-close"_s);
+
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(bubbles->count(), 0);
+    }
+
+    /// What a search found is opened by Enter: a series on its page, a file in the reader.
+    /// Neither was — a file line only took the selection, from the days before the reader.
+    void enter_opens_a_series_or_a_file_a_search_found()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply =
+            aReply(200, QByteArrayLiteral("application/json"),
+                   aPage({aSeries(u"pd"_s, u"Parasite · Édition Deluxe"_s, 8, false)}));
+        QJsonArray hits;
+        for (int number = 1; number <= 2; ++number) {
+            hits << QJsonObject{{u"kind"_s, u"ENTRY"_s},
+                                {u"id"_s, u"pd-v%1"_s.arg(number)},
+                                {u"label"_s, u"Tome %1"_s.arg(number)},
+                                {u"seriesId"_s, u"pd"_s},
+                                {u"seriesName"_s, u"Parasite · Édition Deluxe"_s},
+                                {u"entryId"_s, u"pd-v%1"_s.arg(number)},
+                                {u"entryKind"_s, u"VOLUME"_s},
+                                {u"entryNumber"_s, double(number)},
+                                {u"entryPageCount"_s, 190}};
+        }
+        const QByteArray hitsReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            QJsonDocument(QJsonObject{{u"items"_s, hits},
+                                      {u"total"_s, 2},
+                                      {u"fileTotal"_s, 2},
+                                      {u"page"_s, 0},
+                                      {u"size"_s, 50}})
+                .toJson(QJsonDocument::Compact));
+        pretend.answerFor = [pageReply, hitsReply](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /search"))
+                return hitsReply;
+            if (request.startsWith("GET /series?"))
+                return pageReply;
+            return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        auto *field = window->findChild<QQuickItem *>(u"search-field"_s);
+        QVERIFY(field);
+        field->forceActiveFocus(Qt::OtherFocusReason);
+        QTest::keyClick(window, Qt::Key_P);
+        QQuickItem *files = nullptr;
+        QTRY_VERIFY((files = window->findChild<QQuickItem *>(u"search-overview-files"_s))
+                    && files->isVisible() && files->property("count").toInt() == 2);
+
+        QVERIFY2(pressedUntil(window, u"search-result-pd-v1"_s, Qt::Key_Down),
+                 qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Reader);
+        QCOMPARE(navigation->parameters().value(u"entry"_s).toString(), u"pd-v1"_s);
+
+        navigation->back();
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Shelf);
+        field->forceActiveFocus(Qt::OtherFocusReason);
+        QVERIFY2(pressedUntil(window, u"tile-pd"_s, Qt::Key_Down),
+                 qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Series);
+        QCOMPARE(navigation->parameters().value(u"series"_s).toString(), u"pd"_s);
     }
 };
 

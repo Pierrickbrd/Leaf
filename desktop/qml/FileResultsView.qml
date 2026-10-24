@@ -94,7 +94,16 @@ ListView {
         navigationCursor.clear(list)
     }
 
-    Keys.onPressed: event => event.accepted = move(event.key, event.modifiers)
+    Keys.onPressed: event => {
+        // The line the keys are on, opened: the row holds no focus of its own to hear it.
+        if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter
+             || event.key === Qt.Key_Space) && currentItem && currentIndex < navigableCount) {
+            currentItem.activated()
+            event.accepted = true
+            return
+        }
+        event.accepted = move(event.key, event.modifiers)
+    }
 
     Connections {
         target: list.navigationCursor
@@ -131,9 +140,10 @@ ListView {
                   && list.navigationCursor.index === index
         onPointerEntered: list.pointAt(index)
         onPointerExited: list.stopPointingAt(index)
-        // A click is one of the two things that may leave the search field. It selects the
-        // line now; opening the reader will be attached here when that screen is wired.
-        onActivated: list.enter(index, Qt.MouseFocusReason)
+        // A file found is a file to read: a click opens it in the reader, at the page where
+        // reading stopped, as a line of a series page does. It only selected the line — the
+        // reader did not exist yet — and Enter on it did nothing at all.
+        onActivated: Navigation.open(Navigation.Reader, { "series": seriesId, "entry": entryId })
     }
 
     footer: Item {

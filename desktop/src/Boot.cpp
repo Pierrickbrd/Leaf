@@ -14,6 +14,8 @@
 #include <QDebug>
 #include <QGuiApplication>
 #include <QImageReader>
+#include <QKeyEvent>
+#include <QQuickItem>
 #include <QQuickWindow>
 #include <QUrl>
 #include <utility>
@@ -41,6 +43,16 @@ protected:
             m_cursor->setProperty("pointerDown", true);
             m_cursor->setProperty("pointerTookOver", true);
             break;
+        case QEvent::KeyPress:
+            // Enter goes to what has the focus, after a click as after a key. It used to be
+            // taken from it once the pointer had been used — a click anywhere, a cover hovered
+            // — to bring the hidden ring back and do nothing else, so the first Enter after a
+            // click did nothing at all, which a reader reads as Enter not working. The ring
+            // comes back here, on the way, and the key goes on to the focused item.
+            if (activates(static_cast<QKeyEvent *>(event), watched)
+                && m_cursor->property("pointerTookOver").toBool())
+                QMetaObject::invokeMethod(m_cursor, "resumeKeyboard");
+            break;
         case QEvent::MouseButtonRelease:
         case QEvent::TouchEnd:
             // After the release has been delivered and not before: a control that takes the
@@ -56,6 +68,20 @@ protected:
     }
 
 private:
+    /// Enter, or Space outside a field, where Space is typing.
+    static bool activates(const QKeyEvent *key, QObject *watched)
+    {
+        if (key->isAutoRepeat())
+            return false;
+        if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter)
+            return true;
+        if (key->key() != Qt::Key_Space)
+            return false;
+        const auto *window = qobject_cast<QQuickWindow *>(watched);
+        const QQuickItem *focused = window ? window->activeFocusItem() : nullptr;
+        return !focused || !focused->property("cursorPosition").isValid();
+    }
+
     QObject *m_cursor;
 };
 

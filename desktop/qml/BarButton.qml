@@ -38,6 +38,8 @@ Rectangle {
     /// bar into the screen below and back round. That order follows what the eye reads, which
     /// the item tree cannot express — see AppBar and ShelfView.
     activeFocusOnTab: false
+    /// A stop of a screen that walks its stops with `KeyWalk` — the way back of a series page.
+    readonly property bool keyStop: true
 
     Accessible.role: Accessible.Button
     Accessible.name: label

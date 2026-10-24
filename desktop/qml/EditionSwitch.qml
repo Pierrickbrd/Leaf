@@ -36,6 +36,24 @@ Item {
     implicitHeight: 24
     visible: opacity > 0
 
+    /// A stop of the page's walk — see `KeyWalk`. Enter opens the list, the arrows move in it
+    /// and Enter again takes the edition they are on.
+    readonly property bool keyStop: true
+
+    Keys.onPressed: event => {
+        if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                || event.key === Qt.Key_Enter) {
+            menu.open()
+            event.accepted = true
+        }
+    }
+
+    FocusRing {
+        objectName: "edition-switch-focus"
+        anchors.fill: pill
+        cornerRadius: pill.radius
+    }
+
     // The editions of a work are a second question, and it cannot be asked before the first
     // is answered — the work is what that answer names. So the pill cannot land with the
     // rest of the header, and what it can do is arrive rather than appear. The same thing
@@ -102,6 +120,19 @@ Item {
         width: 264
         padding: 4
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
+        // Taken, so that the arrows reach the list and Escape closes it before the page.
+        focus: true
+
+        /// The edition the keys are on, starting on the one being read.
+        property int pointed: -1
+
+        onOpened: {
+            menu.pointed = 0
+            for (let i = 0; i < switcher.editions.length; ++i) {
+                if (switcher.editions[i].here)
+                    menu.pointed = i
+            }
+        }
 
         background: Rectangle {
             radius: 12
@@ -114,6 +145,25 @@ Item {
 
         contentItem: Column {
             spacing: 2
+            focus: true
+
+            Keys.onPressed: event => {
+                const last = switcher.editions.length - 1
+                if (event.key === Qt.Key_Down || event.key === Qt.Key_Right
+                        || (event.key === Qt.Key_Tab && !(event.modifiers & Qt.ShiftModifier))) {
+                    menu.pointed = Math.min(last, menu.pointed + 1)
+                    event.accepted = true
+                } else if (event.key === Qt.Key_Up || event.key === Qt.Key_Left
+                           || event.key === Qt.Key_Backtab || event.key === Qt.Key_Tab) {
+                    menu.pointed = Math.max(0, menu.pointed - 1)
+                    event.accepted = true
+                } else if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                           || event.key === Qt.Key_Enter) {
+                    if (menu.pointed >= 0 && menu.pointed <= last)
+                        switcher.take(switcher.editions[menu.pointed].seriesId)
+                    event.accepted = true
+                }
+            }
 
             Repeater {
                 model: switcher.editions
@@ -122,12 +172,19 @@ Item {
                     id: option
 
                     required property var modelData
+                    required property int index
 
                     objectName: "edition-" + modelData.seriesId
                     width: 256
                     height: 48
                     radius: 9
                     color: modelData.here || hover.hovered ? Theme.onPaper : "transparent"
+
+                    FocusRing {
+                        objectName: option.objectName + "-focus"
+                        cornerRadius: option.radius
+                        focused: menu.pointed === option.index
+                    }
 
                     HoverHandler {
                         id: hover

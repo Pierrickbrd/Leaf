@@ -1581,6 +1581,10 @@ QString removeDeviceConsequence();
 enum class AppShortcut { Search, Back, Move, Activate, SeriesMenu, ReaderKeys };
 QString appShortcut(AppShortcut which);
 
+/// Above that list: where its keys hold. Not in the reader, whose keys are others — Space and
+/// the arrows turn pages there — and whose own list is the last line of this one.
+QString appShortcutsScope();
+
 /// What the À propos tab says of this client and of the server it talks to. One label each,
 /// and the values are the screen's: a version, an address, a count.
 enum class AboutFact { Version, Device, Qt, System, State, Access, Api, Format };

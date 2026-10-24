@@ -10,7 +10,8 @@ QtObject {
     signal navigationKeyRequested(Item owner, int key, int modifiers)
     signal resetRequested(Item owner)
     /// The pointer's emphasis is dropped and the keyboard's is to be shown again, where it
-    /// stood: unlike a reset, the region keeps its position. See Main's activation shortcut.
+    /// stood: unlike a reset, the region keeps its position. Asked by Enter on its way to
+    /// the focused item — see `Boot`.
     signal resumeRequested(Item owner)
 
     readonly property int inactiveMode: 0

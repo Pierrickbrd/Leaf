@@ -29,4 +29,20 @@ Pill {
     Accessible.role: Accessible.Link
     Accessible.name: modelData
     Accessible.onPressAction: genre.asked(genre.modelData)
+
+    /// A stop of the page's walk — see `KeyWalk`.
+    readonly property bool keyStop: true
+
+    Keys.onPressed: event => {
+        if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                || event.key === Qt.Key_Enter) {
+            genre.asked(genre.modelData)
+            event.accepted = true
+        }
+    }
+
+    FocusRing {
+        objectName: genre.objectName + "-focus"
+        cornerRadius: genre.height / 2
+    }
 }

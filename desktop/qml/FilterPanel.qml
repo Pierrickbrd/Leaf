@@ -142,6 +142,30 @@ Popup {
         id: sheet
 
         implicitHeight: heading.height + axesColumn.height
+        // The panel's keys, walked here: opened from its button, it took the focus and
+        // gave it to nothing, so Tab and the arrows reached none of its rows — and went
+        // round the shelf behind it instead. The walk goes round the panel, not out of it:
+        // Escape is the way out, back to the button.
+        focus: true
+
+        KeyWalk {
+            id: walk
+
+            region: sheet
+            onWentPast: forward => walk.take(forward)
+            onReached: stop => {
+                const top = stop.mapToItem(list.contentItem, 0, 0).y
+                if (top < 0 || top > list.contentHeight)
+                    return
+                if (top < list.contentY)
+                    list.contentY = top
+                else if (top + stop.height > list.contentY + list.height)
+                    list.contentY = Math.min(list.contentHeight - list.height,
+                                             top + stop.height - list.height)
+            }
+        }
+
+        Keys.onPressed: event => event.accepted = walk.step(event)
 
         Item {
             id: heading

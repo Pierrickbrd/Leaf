@@ -196,10 +196,22 @@ ApplicationWindow {
     }
 
     /// And back out of it, wrapping: past the last cover is the bar's first stop, before the
-    /// band is the bar's last.
+    /// band is the bar's last — with the bubbles, when there are any, between the end of the
+    /// screen and the bar.
     function leaveScreen(forward) {
         appNavigationCursor.beginKeyboard(forward)
+        if (forward && toastWalk.take(true))
+            return
         appBar.takeFocus(forward)
+    }
+
+    /// Out of the bar: into the screen going forward; coming back, into the bubbles first.
+    function leaveBar(forward) {
+        if (!forward && toastWalk.take(false)) {
+            appNavigationCursor.beginKeyboard(false)
+            return
+        }
+        moveIntoScreen(forward)
     }
 
     function returnFocusToPage() {
@@ -271,9 +283,14 @@ ApplicationWindow {
                 return
             }
             // On the shelf Escape first clears the transient question. Only an already-empty
-            // field means "leave this destination".
-            if (Shelf.query.length > 0)
+            // field means "leave this destination". On the shelf only: a series opened from
+            // the results still has the question behind it, and Escape there emptied the
+            // search nobody could see instead of going back to it.
+            if (Navigation.destination === Navigation.Shelf && Shelf.query.length > 0)
                 Shelf.searchFor("")
+            // The same on a series page, for the volumes narrowed by its own field.
+            else if (Navigation.destination === Navigation.Series && Entries.query.length > 0)
+                Entries.searchFor("")
             else
                 Navigation.back()
         }
@@ -286,23 +303,6 @@ ApplicationWindow {
         id: appNavigationCursor
 
         objectName: "navigation-cursor"
-    }
-
-    // Once the pointer has emphasised a cover, the keyboard's ring is hidden (`FocusRing`), and
-    // Enter used to open what it had been left on anyway: the chip or the cover nobody could
-    // see was chosen. Activating hands the emphasis back to the keyboard instead, and acts on
-    // nothing — the ring reappears where the keys stood, and the next Enter is a choice made
-    // in sight. A shortcut because it is offered the key before the focused item is; not in a
-    // field, where Enter and Space are typing.
-    Shortcut {
-        objectName: "activation-returns-to-the-keyboard"
-        // Not in the reader, where Space turns the page and nothing is being navigated.
-        enabled: appNavigationCursor.pointerTookOver
-                 && Navigation.destination !== Navigation.Reader
-                 && !(window.activeFocusItem
-                      && window.activeFocusItem.cursorPosition !== undefined)
-        sequences: ["Return", "Enter", "Space"]
-        onActivated: appNavigationCursor.resumeKeyboard()
     }
 
     FocusScope {
@@ -343,6 +343,17 @@ ApplicationWindow {
         }
 
         Keys.onPressed: event => {
+            // The Menu key, or Shift+F10, that nothing focused answered: on a series page it
+            // is the series' menu, wherever the focus stands — the bar included.
+            if (event.key === Qt.Key_Menu
+                    || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
+                const view = window.showing
+                if (!linkScreen.active && !whoReads.visible && view && view.showCommands) {
+                    view.showCommands()
+                    event.accepted = true
+                }
+                return
+            }
             if (!isArrow(event.key) && !isTab(event.key))
                 return
             // The linking screen is a plain form: Qt's own Tab order through its two fields
@@ -401,7 +412,7 @@ ApplicationWindow {
             // Out of the bar and into the screen below — or round the other way, the screen
             // being the only other thing on the page. This is the whole of the order the eye
             // reads: bar, band, chips, covers, and back to the bar.
-            onWentPast: forward => window.moveIntoScreen(forward)
+            onWentPast: forward => window.leaveBar(forward)
             onSettingsRequested: Navigation.open(Navigation.Settings)
             onImportRequested: importDialog.show()
             onWhoReadsRequested: window.whoReadsOpen = true
@@ -507,7 +518,27 @@ ApplicationWindow {
 
     // Over everything and taking no room from it: a bubble is a layer, and the screen under
     // it must not move when one appears.
-    ToastStack { }
+    // Its action and its cross are reached by the keys too: a bubble offering « Réessayer »
+    // could only be answered with the pointer. After the screen and before the bar, which is
+    // where a bubble stands to the eye — over the page, apart from it.
+    ToastStack {
+        id: toasts
+
+        Keys.onPressed: event => event.accepted = toastWalk.step(event)
+    }
+
+    KeyWalk {
+        id: toastWalk
+
+        region: toasts
+        onWentPast: forward => {
+            appNavigationCursor.beginKeyboard(forward)
+            if (forward)
+                appBar.takeFocus(true)
+            else
+                window.moveIntoScreen(false)
+        }
+    }
 
     // What warns, connected to what happens. Every sentence is written in C++ — a `.qml` that
     // composed one would be a `.qml` writing French, and the next one would write it
@@ -670,6 +701,7 @@ ApplicationWindow {
             // The import belongs to the window, not to a row: a dialog opened from inside a
             // list would go with the list the moment its model answers again.
             onReimportAsked: importDialog.show()
+            onNavigationBoundary: forward => window.leaveScreen(forward)
         }
     }
 

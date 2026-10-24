@@ -27,6 +27,9 @@ Item {
     /// where the colour is the answer and a word alone makes the reader picture it. Empty for
     /// every other choice.
     property var swatches: ({})
+    /// Whether each pill is a stop for Tab and the arrows. The settings and their windows walk
+    /// every control with the keys; the reader's card does not, its keys turning pages.
+    property bool tabStops: false
     /// How wide its pills are on one line, wrapping aside: what a row beside a name needs to
     /// stand without wrapping, so that the card can decide when to put the name above instead.
     readonly property real lineWidth: {
@@ -96,7 +99,7 @@ Item {
                 border.color: lit ? Theme.emerald : Theme.rule
                 border.width: 1
                 antialiasing: true
-                activeFocusOnTab: false
+                activeFocusOnTab: choice.tabStops
 
                 Accessible.role: Accessible.RadioButton
                 Accessible.name: modelData.label

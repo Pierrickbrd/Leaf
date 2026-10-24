@@ -1444,6 +1444,17 @@ private slots:
         QCOMPARE(Words::profileLine(Other, 12, {}), u"Profil restreint"_s);
     }
 
+    /// The keys listed on À propos are the application's, and the list says so before them: in
+    /// the reader Escape, Space and the arrows do other things, and a list that did not say
+    /// where it stops read as true there too. Its last line is the way to the reader's own.
+    void the_shortcut_list_says_the_reader_has_its_own_keys()
+    {
+        QCOMPARE(Words::appShortcutsScope(),
+                 u"Ces touches valent partout, sauf dans le lecteur, qui a les siennes."_s);
+        QCOMPARE(Words::appShortcut(Words::AppShortcut::ReaderKeys),
+                 u"Les raccourcis du lecteur, quand un tome est ouvert"_s);
+    }
+
     /// The profile texts all read as French: no straight apostrophe, no hole left open.
     void the_profile_texts_carry_no_straight_apostrophe()
     {
@@ -1467,7 +1478,8 @@ private slots:
             Words::recoveryRedrawNote(), Words::recoverExplained(), Words::recoveryField(),
             Words::newCodeField(), Words::replaceCode(), Words::currentCode(),
             Words::currentCodeAsked(), Words::wrongRecovery(),
-            Words::eventColumn(), Words::bubbleColumn(), Words::desktopColumn()};
+            Words::eventColumn(), Words::bubbleColumn(), Words::desktopColumn(),
+            Words::appShortcutsScope()};
         for (const QString &one : said) {
             QVERIFY(!one.isEmpty());
             QVERIFY2(!one.contains(u'\''), qPrintable(one));

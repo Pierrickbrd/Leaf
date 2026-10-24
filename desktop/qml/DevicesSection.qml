@@ -74,7 +74,9 @@ Item {
                         font.pixelSize: 14
                     }
 
-                    IconButton {
+                    IconStop {
+                        id: renameButton
+
                         objectName: "bond-rename"
                         anchors.verticalCenter: parent.verticalCenter
                         glyph: "edit"
@@ -99,11 +101,19 @@ Item {
                 objectName: "bond-rename-field"
                 width: parent.width
                 visible: section.renaming
+                activeFocusOnTab: true
                 onAccepted: {
                     Bond.rename(text)
                     section.renaming = false
+                    renameButton.forceActiveFocus()
                 }
-                Keys.onEscapePressed: section.renaming = false
+                // Escape is the window's « back » before it is a key: taken here first, or it
+                // left the settings with the name half typed.
+                Keys.onShortcutOverride: event => event.accepted = event.key === Qt.Key_Escape
+                Keys.onEscapePressed: {
+                    section.renaming = false
+                    renameButton.forceActiveFocus()
+                }
             }
 
             SettingsLine {
@@ -152,6 +162,7 @@ Item {
             LeafTextAction {
                 objectName: "bond-unlink"
                 x: -8
+                activeFocusOnTab: true
                 visible: Health.unlinks
                 label: Bond.unlinkLabel
                 alarming: true
@@ -179,6 +190,7 @@ Item {
             SettingsChoice {
                 objectName: "opening"
                 width: parent.width
+                tabStops: true
                 options: [{ value: 0, label: Profiles.words.askWhoReads, icon: "refresh" }]
                          .concat(Profiles.list.map((one, index) => ({
                              value: index + 1,
@@ -266,7 +278,7 @@ Item {
 
                             // The pencil chooses what that device opens on; only the device
                             // one is sitting at is renamed.
-                            IconButton {
+                            IconStop {
                                 id: choose
 
                                 objectName: device.objectName + "-choose"
@@ -313,7 +325,7 @@ Item {
                                 }
                             }
 
-                            IconButton {
+                            IconStop {
                                 objectName: device.objectName + "-remove"
                                 glyph: "delete"
                                 label: Profiles.words.removeDevice
@@ -359,63 +371,67 @@ Item {
             CardLift { level: CardLift.Modal }
         }
 
-        Column {
-            id: unlinkBody
+        contentItem: DialogBody {
+            Column {
+                id: unlinkBody
 
-            x: 17
-            y: 16
-            width: parent.width - 34
-            spacing: 10
+                x: 17
+                y: 16
+                width: parent.width - 34
+                spacing: 10
 
-            Text {
-                objectName: "unlink-question"
-                width: parent.width
-                text: Bond.unlinkQuestion
-                color: Theme.ink
-                font.family: Theme.displayFamily
-                font.pixelSize: 20
-                font.weight: Font.Bold
-                wrapMode: Text.WordWrap
-            }
-
-            Repeater {
-                model: [Bond.unlinkWhat, Bond.unlinkComeBack, Bond.unlinkIfSilent]
-
-                delegate: Text {
-                    required property string modelData
-
-                    width: unlinkBody.width
-                    text: modelData
-                    color: Theme.inkSoft
-                    font.family: Theme.textFamily
-                    font.pixelSize: 12
-                    lineHeight: 1.4
+                Text {
+                    objectName: "unlink-question"
+                    width: parent.width
+                    text: Bond.unlinkQuestion
+                    color: Theme.ink
+                    font.family: Theme.displayFamily
+                    font.pixelSize: 20
+                    font.weight: Font.Bold
                     wrapMode: Text.WordWrap
                 }
+
+                Repeater {
+                    model: [Bond.unlinkWhat, Bond.unlinkComeBack, Bond.unlinkIfSilent]
+
+                    delegate: Text {
+                        required property string modelData
+
+                        width: unlinkBody.width
+                        text: modelData
+                        color: Theme.inkSoft
+                        font.family: Theme.textFamily
+                        font.pixelSize: 12
+                        lineHeight: 1.4
+                        wrapMode: Text.WordWrap
+                    }
+                }
             }
-        }
 
-        Row {
-            anchors.right: unlinkBody.right
-            anchors.top: unlinkBody.bottom
-            anchors.topMargin: 16
-            spacing: 8
+            Row {
+                anchors.right: unlinkBody.right
+                anchors.top: unlinkBody.bottom
+                anchors.topMargin: 16
+                spacing: 8
 
-            LeafTextAction {
-                objectName: "unlink-cancel"
-                label: Bond.cancelLabel
-                anchors.verticalCenter: parent.verticalCenter
-                onTriggered: unlinking.close()
-            }
+                LeafTextAction {
+                    objectName: "unlink-cancel"
+                    label: Bond.cancelLabel
+                    focus: true
+                    activeFocusOnTab: true
+                    anchors.verticalCenter: parent.verticalCenter
+                    onTriggered: unlinking.close()
+                }
 
-            ActionButton {
-                objectName: "unlink-go"
-                label: Bond.unlinkGo
-                danger: true
-                ready: !Bond.busy
-                onTriggered: {
-                    unlinking.close()
-                    Bond.unlink()
+                ActionButton {
+                    objectName: "unlink-go"
+                    label: Bond.unlinkGo
+                    danger: true
+                    ready: !Bond.busy
+                    onTriggered: {
+                        unlinking.close()
+                        Bond.unlink()
+                    }
                 }
             }
         }
@@ -461,7 +477,7 @@ Item {
             CardLift { level: CardLift.Modal }
         }
 
-        contentItem: Item {
+        contentItem: DialogBody {
             objectName: "device-removal-body"
             implicitHeight: removalText.height + 34 + removalActions.height + 18
 
@@ -507,6 +523,8 @@ Item {
                 LeafTextAction {
                     objectName: "device-removal-cancel"
                     anchors.verticalCenter: parent.verticalCenter
+                    focus: true
+                    activeFocusOnTab: true
                     label: Profiles.words.cancel
                     onTriggered: removal.close()
                 }

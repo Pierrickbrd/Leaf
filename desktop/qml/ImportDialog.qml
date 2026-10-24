@@ -71,7 +71,7 @@ Popup {
         }
     }
 
-    contentItem: Item {
+    contentItem: DialogBody {
         // ——— The heading, and the way out ———————————————————————————————————
 
         Item {
@@ -96,6 +96,7 @@ Popup {
 
             BarButton {
                 objectName: "import-close"
+                activeFocusOnTab: true
                 anchors.right: parent.right
                 anchors.rightMargin: 12
                 anchors.verticalCenter: parent.verticalCenter
@@ -235,6 +236,9 @@ Popup {
                     LeafTextAction {
                         objectName: "import-choose-files"
                         anchors.verticalCenter: parent.verticalCenter
+                        // The window opens on the first way in when nothing is chosen yet.
+                        focus: dialog.phase === dialog.choosing
+                        activeFocusOnTab: true
                         label: ImportCaptions.chooseFilesLabel
                         onTriggered: {
                             if (Preferences.lastPlace != "")
@@ -246,6 +250,7 @@ Popup {
                     LeafTextAction {
                         objectName: "import-choose-folder"
                         anchors.verticalCenter: parent.verticalCenter
+                        activeFocusOnTab: true
                         label: ImportCaptions.chooseFolderLabel
                         onTriggered: {
                             if (Preferences.lastPlace != "")
@@ -271,6 +276,7 @@ Popup {
             id: verify
 
             objectName: "import-verify"
+            activeFocusOnTab: true
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: commands.top
@@ -406,6 +412,8 @@ Popup {
                 CardAction {
                     objectName: "import-back"
                     anchors.verticalCenter: parent.verticalCenter
+                    // And on its way back once something is: the pickers are gone.
+                    focus: dialog.phase !== dialog.choosing
                     label: dialog.phase === dialog.choosing ? ImportCaptions.cancelLabel
                            : dialog.phase === dialog.watching ? ImportCaptions.dropSomethingElseLabel
                                                               : ImportCaptions.backLabel
