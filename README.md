@@ -333,9 +333,9 @@ back up the library.
 **A key per device, made by linking.** No accounts, no passwords, no sign-in screen: a
 device is linked once, receives a random key of its own, and the server keeps only a digest
 of it, compared in constant time. The key belongs in the application's keychain, never
-compiled into it and never printed. Every linked device has every right — rights chosen
-device by device are not offered yet. The keys of `LEAF_KEYS` keep working, with the rights
-they were given.
+compiled into it and never printed. What a device may do is decided by the profile
+it sits on (see *Profiles*, below), not by its key. The keys of `LEAF_KEYS` keep working,
+with the rights they were given, and read as the principal profile.
 
 **Wrong keys are throttled.** Ten failures from one address and it is refused for fifteen
 minutes, with `Retry-After` saying how long. Failures age out, so a device that gets it wrong
@@ -373,9 +373,10 @@ uses when Leaf sits behind a proxy or a tunnel, where its own addresses are not 
 devices type. For a server on the loopback, `leaf://` to a loopback address means plain http,
 which is how a tunnel is linked.
 
-Once linked, a device can link another: **Bond**, then « Relier un autre appareil », draws a
-link and its QR code. The same tab renames the device, moves it to another server, or
-unlinks it.
+Once linked, a device on the principal profile can link another: **Bond**, then « Relier un
+autre appareil », draws a link and its QR code. The same tab renames the device, moves it to
+another server, or unlinks it. Any other profile gets `403` from `POST /link/codes`,
+`PATCH /device` and `DELETE /device`.
 
 **The link a device relays is the server's.** `POST /link/codes` answers it whole, built the
 way `device add` builds it, from the one address the server knows another device can reach:
@@ -491,6 +492,13 @@ GET    /health                        answers without a key, and says what it is
 POST   /link                          answers without a key: a code becomes a device's key
 POST   /link/codes  ·  GET/DELETE /link/codes/{id}   make, follow or withdraw a code
 PATCH  /device  ·  DELETE /device     the calling device renames itself, or leaves
+GET    /profiles  ·  POST             who reads, and where this device sits; add a profile
+PUT    /profiles/active               read as another profile on this device
+PUT    /profiles/code  ·  DELETE      make, change or remove the one code
+PATCH  /profiles/{id}  ·  DELETE      change a profile, or delete it and its progress
+GET    /profile/reading  ·  PUT       this profile's reading preferences, kept for the client
+GET    /devices                       every linked device and the profile it sits on
+PATCH  /devices/{id}  ·  DELETE       seat a device on a profile, or remove it
 GET    /series                        a "series" is an edition
 GET    /series?author=&genre=&medium=&status=&universe=&language=&publisher=&read=
                                       repeat a parameter to widen, add another to narrow
@@ -562,7 +570,69 @@ server renames it into the library. Nine gigabytes already on the disk are not w
 second time, and nothing crosses the loopback. The folder has to sit inside the same mount as
 the library, or the rename becomes a copy and the point is lost.
 
+### Profiles
+
+A profile is « who reads », not an account: no identifier, no password per person, no sign-in
+screen. Each device sits on one, which the server keeps, and each profile has its own reading
+progress and its own reading preferences. There are three kinds:
+
+| | Principal | Reader | Restricted |
+|---|---|---|---|
+| How many | exactly one, `default` | any | any |
+| Series seen | all | all | rated up to its age |
+| Import, edit, delete | yes | the rights the principal ticked, none at first | no |
+| Whole file of a volume (`/entries/{id}/file`) | yes | yes | no, pages one by one only |
+| Switch to a reader or restricted profile | free | free | the code |
+| Switch to the principal | free | the code, if it guards everything | the code |
+| Add a reader | yes | yes, with the code if it guards everything; no rights | no |
+| Add a restricted profile, restrict a reader, fix an age | yes | no | no |
+| Rename itself, change its colour | yes | yes | no, the principal does it |
+| Change or delete another profile, tick rights, make or change the code | yes | no | no |
+| Link a device, see and seat the devices | yes | no | no |
+
+The principal is the first profile, the one that existed before profiles did: the reading
+progress already there stays with it. A scan, and the library's address, are the principal's
+alone, whatever rights a reader has been given. The server enforces all of it; a client only
+declines to show what it would refuse.
+
+**There is one code in the whole of Leaf, the principal's.** Four to eight characters, any
+kind, typed twice, kept as a slow digest. It is optional until a profile is restricted, and
+cannot be removed while one is (`409`). `PUT /profiles/code` also says what it is for:
+`restricted`, to leave a restricted profile, or `everything`, which also guards the way back
+to the principal and the addition of a profile by a reader. A wrong code counts against a
+brake of its own, per device and apart from the one on keys: ten in five minutes, and every
+route that takes the code answers `429` for fifteen. A device that keeps the principal opens
+on it without the code; that is the principal's choice. One merely left on the principal,
+without « Retenir », asks the code to stay there like any other device.
+
+A forgotten code cannot be recovered from the network, since whoever forgot it cannot pass
+the check that would let them change it. On the server's terminal:
+
+```bash
+sudo leaf-server profile reset-code    # asks twice, shows nothing, keeps what the code is for
+```
+
+It replaces the code rather than erasing it, because erasing it would let every restricted
+profile out. A mismatch or a length outside 4 to 8 changes nothing and exits non-zero.
+
 ## Behaviour worth knowing before it surprises you
+
+**A series above a restricted profile's age is a `404`, not a `403`.** « Forbidden » would say
+that it exists. The same goes for its cover, its pages, its entries, its progress and its
+search hits: they are not there. The age is read from `ageRating` at the scan, as its first
+number (« Mature 17+ » is 17) or one of the usual words (`Teen`, `T`, `Tout public`), and a
+series with no rating, or one that is not recognised, is hidden rather than guessed. A
+restricted profile's age changes what it sees from its next request.
+
+**A device that must choose a profile gets `409` with `choose a profile`, on every route.**
+That is what a device sees when the profile it sat on was deleted. Only `/health`,
+`GET /profiles` and `PUT /profiles/active` answer it. Reading as the principal in the
+meantime would open the whole library on a child's tablet whose profile was just deleted. If
+the deleted profile was a restricted one, the device stays held on it: leaving that seat asks
+the code.
+
+**`GET /entries/{id}/file` is refused to a restricted profile** (`403`), and its pages still
+served one by one: a file that leaves Leaf escapes the age and the code.
 
 **`?width=` is the width you want per page.** A landscape image is a double-page spread and
 gets twice the requested width. Without the parameter the original bytes are served
