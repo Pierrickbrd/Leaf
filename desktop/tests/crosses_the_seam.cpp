@@ -14,6 +14,7 @@
 #include "ImportCaptions.h"
 #include "Imports.h"
 #include "Preferences.h"
+#include "Profiles.h"
 #include "Toasts.h"
 #include "Entries.h"
 #include "Filters.h"
@@ -304,7 +305,8 @@ QString textNamed(QQuickItem *root, const QString &name)
 
 /// One profile as `GET /profiles` lists it.
 QJsonObject aProfile(const QString &id, const QString &name, const QString &color,
-                     const QString &kind, bool import = false, int maxAge = 0)
+                     const QString &kind, bool import = false, int maxAge = 0,
+                     bool edit = false, bool erase = false)
 {
     QJsonObject one{
         {u"id"_s, id},
@@ -312,7 +314,7 @@ QJsonObject aProfile(const QString &id, const QString &name, const QString &colo
         {u"color"_s, color},
         {u"kind"_s, kind},
         {u"rights"_s,
-         QJsonObject{{u"import"_s, import}, {u"edit"_s, false}, {u"delete"_s, false}}},
+         QJsonObject{{u"import"_s, import}, {u"edit"_s, edit}, {u"delete"_s, erase}}},
     };
     if (maxAge > 0)
         one.insert(u"maxAge"_s, maxAge);
@@ -1356,6 +1358,100 @@ private slots:
         QTRY_COMPARE(marked(), 1);
     }
 
+    void a_menu_offers_only_what_the_profile_may_do_data()
+    {
+        QTest::addColumn<QString>("kind");
+        QTest::addColumn<bool>("import");
+        QTest::addColumn<bool>("edit");
+        QTest::addColumn<bool>("erase");
+        QTest::addColumn<QStringList>("offered");
+
+        const QStringList all{u"read"_s, u"unread"_s, u"reimport"_s, u"copy"_s, u"erase"_s};
+        QTest::newRow("the principal gets everything")
+            << u"principal"_s << true << true << true << all;
+        // A copy is not a right of its own: whoever is not restricted may take a file out.
+        QTest::newRow("a reader without rights gets what reads and what copies")
+            << u"reader"_s << false << false << false
+            << QStringList{u"read"_s, u"unread"_s, u"copy"_s};
+        QTest::newRow("a reader who may import and edit is still not offered erasing")
+            << u"reader"_s << true << true << false
+            << QStringList{u"read"_s, u"unread"_s, u"reimport"_s, u"copy"_s};
+        QTest::newRow("a restricted profile gets only what reads")
+            << u"restricted"_s << true << true << true
+            << QStringList{u"read"_s, u"unread"_s};
+    }
+
+    /// The entries of a volume's menu are built in one place, and each answers to one right.
+    /// There is no entry yet for « Modifier » or « Réorganiser », so `edit` is in the table
+    /// to show that it adds nothing here, not because anything hangs on it.
+    void a_menu_offers_only_what_the_profile_may_do()
+    {
+        QFETCH(QString, kind);
+        QFETCH(bool, import);
+        QFETCH(bool, edit);
+        QFETCH(bool, erase);
+        QFETCH(QStringList, offered);
+
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const auto reply = [](const QByteArray &body) {
+            return "HTTP/1.1 200 .\r\nContent-Type: application/json\r\nContent-Length: "
+                   + QByteArray::number(body.size()) + "\r\n\r\n" + body;
+        };
+        const QByteArray one = QJsonDocument(QJsonObject{
+            {u"id"_s, u"albums"_s}, {u"workId"_s, u"elfes"_s}, {u"name"_s, u"Elfes"_s},
+            {u"work"_s, u"Elfes"_s}, {u"edition"_s, u"Albums"_s}, {u"medium"_s, u"bd"_s},
+            {u"ownedVolumes"_s, 1}, {u"entryCount"_s, 1}, {u"chapterCount"_s, 0},
+            {u"arcCount"_s, 0},
+        }).toJson(QJsonDocument::Compact);
+        const QByteArray files = QJsonDocument(QJsonArray{QJsonObject{
+            {u"id"_s, u"v23"_s}, {u"type"_s, u"VOLUME"_s}, {u"number"_s, 23},
+            {u"title"_s, u"La Nuit des Sylvains"_s}, {u"pageCount"_s, 54},
+            {u"chapterCount"_s, 0}, {u"file"_s, u"Tome 23.cbz"_s}, {u"size"_s, 48000000},
+        }}).toJson(QJsonDocument::Compact);
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Profil"_s, u"emeraude"_s, kind, import, 0, edit, erase)},
+            u"p"_s, false);
+        pretend.answerFor = [=](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            if (request.contains("/entries "))
+                return reply(files);
+            if (request.contains("/progress "))
+                return reply(QByteArrayLiteral("[]"));
+            if (request.contains("/cover"))
+                return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+            if (request.startsWith("GET /series/"))
+                return reply(one);
+            return reply(QByteArrayLiteral(R"({"items":[],"total":0,"page":0,"size":0})"));
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *profiles = engine.singletonInstance<Profiles *>(qmlTypeId("Leaf", 1, 0, "Profiles"));
+        QVERIFY(profiles);
+        QTRY_VERIFY(profiles->isPrincipal() || profiles->isRestricted() || profiles->canExport());
+
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QQuickItem *dots = nullptr;
+        QTRY_VERIFY((dots = itemNamed(page, u"commands-v23"_s)));
+        QVERIFY(QMetaObject::invokeMethod(dots, "show"));
+
+        for (const QString &entry :
+             {u"read"_s, u"unread"_s, u"reimport"_s, u"copy"_s, u"erase"_s}) {
+            const QString name = u"command-"_s + entry + u"-v23"_s;
+            QTRY_VERIFY2(itemNamed(window->contentItem(), name), qPrintable(name));
+            QCOMPARE_EQ(shownNamed(window->contentItem(), name), offered.contains(entry));
+        }
+    }
+
     /// The list becomes a wall of covers, and the three dots reach the one confirmation in
     /// this client that unmakes a file. Both are gestures, so both are made here: a menu that
     /// opens and commands nothing, and a toggle that changes an icon and nothing else, are
@@ -1396,7 +1492,15 @@ private slots:
             return "HTTP/1.1 200 .\r\nContent-Type: application/json\r\nContent-Length: "
                    + QByteArray::number(body.size()) + "\r\n\r\n" + body;
         };
+        // Seated as a principal who may erase: the menu no longer offers « Supprimer » to
+        // a profile the server has not said may.
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true, 0, true,
+                      true)},
+            u"p"_s, false);
         pretend.answerFor = [=](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /profiles "))
+                return seat;
             if (request.contains("/entries "))
                 return reply(files);
             if (request.contains("/progress "))
@@ -1453,10 +1557,16 @@ private slots:
         // Opened the way a keyboard opens it. A synthetic pointer move does not make a row
         // believe it is hovered, and what is worth settling here is that the menu is built
         // and that what it commands reaches the model — not how a real mouse behaves.
+        // The menu is built before the server has said who is seated, and offers nothing
+        // that needs a right until it has.
+        auto *seated = engine.singletonInstance<Profiles *>(qmlTypeId("Leaf", 1, 0, "Profiles"));
+        QVERIFY(seated);
+        QTRY_VERIFY(seated->canErase());
         QVERIFY(QMetaObject::invokeMethod(dots, "show"));
 
         QQuickItem *erase = nullptr;
         QTRY_VERIFY((erase = itemNamed(window->contentItem(), u"command-erase-v23"_s)));
+        QVERIFY(laidOut(window));
         QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
                           erase->mapToItem(window->contentItem(),
                                            QPointF(erase->width() / 2.0,
@@ -1484,7 +1594,13 @@ private slots:
     {
         Pretend pretend;
         QVERIFY(pretend.listen(QHostAddress::LocalHost));
-        pretend.answers(200, QByteArrayLiteral(R"({"items":[],"total":0,"page":0,"size":0})"));
+        // Seated as the principal, who is told about every family: a profile that cannot
+        // import is not offered a switch for it.
+        pretend.answerFor = seatedAsPrincipal([](const QByteArray &) {
+            const QByteArray body = R"({"items":[],"total":0,"page":0,"size":0})";
+            return "HTTP/1.1 200 .\r\nContent-Type: application/json\r\nContent-Length: "
+                   + QByteArray::number(body.size()) + "\r\n\r\n" + body;
+        });
         qputenv("LEAF_ADDRESS",
                 u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
 

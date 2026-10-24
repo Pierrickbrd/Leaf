@@ -130,6 +130,8 @@ QVariantList Preferences::warnings() const
     using enum Warns;
     QVariantList said;
     for (const Warns which : {Imports, Scans, Downloads, Failures}) {
+        if (!concerns(which))
+            continue;
         said.append(QVariantMap{{u"name"_s, spell(which)},
                                 {u"value"_s, std::to_underlying(which)},
                                 {u"label"_s, Words::warns(which)},
@@ -162,12 +164,35 @@ QString Preferences::desktopColumn() const
 
 bool Preferences::bubbles(Warns which) const
 {
-    return m_bubbles.value(which, true);
+    return concerns(which) && m_bubbles.value(which, true);
 }
 
 bool Preferences::reachesTheDesktop(Warns which) const
 {
-    return m_desktop.value(which, true);
+    return concerns(which) && m_desktop.value(which, true);
+}
+
+bool Preferences::concerns(Warns which) const
+{
+    using enum Warns;
+    switch (which) {
+    case Imports: return m_concernsImports;
+    case Scans: return m_concernsScans;
+    case Downloads: return m_concernsDownloads;
+    case Failures: break;
+    }
+    return true;
+}
+
+void Preferences::concern(bool imports, bool scans, bool downloads)
+{
+    if (imports == m_concernsImports && scans == m_concernsScans
+        && downloads == m_concernsDownloads)
+        return;
+    m_concernsImports = imports;
+    m_concernsScans = scans;
+    m_concernsDownloads = downloads;
+    emit changed();
 }
 
 bool Preferences::anythingBubbles() const
@@ -179,7 +204,7 @@ bool Preferences::anythingBubbles() const
 
 void Preferences::showBubble(Warns which, bool wanted)
 {
-    if (bubbles(which) == wanted)
+    if (m_bubbles.value(which, true) == wanted)
         return;
     m_bubbles.insert(which, wanted);
     m_file.setValue(u"bubbles/"_s + spell(which), wanted);
@@ -189,7 +214,7 @@ void Preferences::showBubble(Warns which, bool wanted)
 
 void Preferences::reachTheDesktop(Warns which, bool wanted)
 {
-    if (reachesTheDesktop(which) == wanted)
+    if (m_desktop.value(which, true) == wanted)
         return;
     m_desktop.insert(which, wanted);
     m_file.setValue(u"desktop/"_s + spell(which), wanted);

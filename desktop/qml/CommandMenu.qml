@@ -122,7 +122,8 @@ Item {
         MenuAction {
             objectName: "command-copy-" + dots.about
             glyph: "download"
-            visible: !dots.whole
+            // And a profile that may not take a volume out of the library is not offered one.
+            visible: !dots.whole && Profiles.canExport
             height: visible ? implicitHeight : 0
             text: Commands.words.saveACopy
             onTriggered: where.open()
@@ -132,6 +133,10 @@ Item {
             objectName: "command-erase-" + dots.about
             glyph: "delete"
             dangerous: true
+            // Erasing is a right of its own: the server refuses it without, and a menu that
+            // offers what is refused is a menu that lies.
+            visible: Profiles.canErase
+            height: visible ? implicitHeight : 0
             text: dots.whole ? Commands.words.eraseSeries : Commands.words.eraseEntry
             onTriggered: dots.whole ? Erasure.aboutSeries(dots.seriesId)
                                     : Erasure.aboutEntry(dots.entryId, dots.seriesId)

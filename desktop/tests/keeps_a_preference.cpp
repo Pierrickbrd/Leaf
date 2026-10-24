@@ -48,6 +48,46 @@ private slots:
         }
     }
 
+    /// A profile that cannot import has no use for a switch about imports, and only the
+    /// principal is told about scans; a failure concerns everybody. Until it is told who
+    /// reads, every family shows, so a Preferences built alone behaves as it always did.
+    void warnings_name_only_what_concerns_the_profile()
+    {
+        const auto names = [](const Preferences &of) {
+            QStringList said;
+            for (const QVariant &one : of.warnings())
+                said.append(one.toMap().value(u"name"_s).toString());
+            return said;
+        };
+        Preferences chosen;
+        QSignalSpy moved(&chosen, &Preferences::changed);
+        QCOMPARE(names(chosen).size(), 4);
+
+        chosen.concern(true, true, true);
+        QCOMPARE(moved.count(), 0);
+
+        chosen.concern(true, false, true);
+        QCOMPARE(moved.count(), 1);
+        QVERIFY(!names(chosen).contains(u"scans"_s));
+        QCOMPARE(names(chosen).size(), 3);
+
+        chosen.concern(false, false, false);
+        QCOMPARE(names(chosen), QStringList{u"failures"_s});
+        QVERIFY(!chosen.bubbles(Preferences::Warns::Imports));
+        QVERIFY(!chosen.reachesTheDesktop(Preferences::Warns::Imports));
+        QVERIFY(chosen.reachesTheDesktop(Preferences::Warns::Failures));
+
+        // What was switched survives: the concern comes back and so does the answer.
+        chosen.concern(true, true, true);
+        QVERIFY(chosen.bubbles(Preferences::Warns::Imports));
+        chosen.concern(false, false, false);
+
+        // With nothing but failures left, a bubble is still wanted: they are never silenced.
+        QVERIFY(chosen.anythingBubbles());
+        chosen.showBubble(Preferences::Warns::Failures, false);
+        QVERIFY(!chosen.anythingBubbles());
+    }
+
     /// Written under its own name and read back. A file holding `warns/2=false` is a file
     /// nobody can read, and the order of an enum is not a promise made to a settings file.
     void what_warns_is_written_under_a_word_and_read_back()
