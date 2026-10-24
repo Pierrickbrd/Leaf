@@ -38,6 +38,23 @@ Rectangle {
     Accessible.name: label
     Accessible.onPressAction: button.press()
 
+    /// A stop of a screen that walks its stops with `KeyWalk` — the list or grid switch of a
+    /// series page. Inside the three dots it is never one: the dots are the stop.
+    readonly property bool keyStop: true
+
+    Keys.onPressed: event => {
+        if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                || event.key === Qt.Key_Enter) {
+            button.press()
+            event.accepted = true
+        }
+    }
+
+    FocusRing {
+        objectName: button.objectName + "-focus"
+        cornerRadius: button.radius
+    }
+
     function press(open) {
         if (popup) {
             const up = open === undefined ? popup.opened : open

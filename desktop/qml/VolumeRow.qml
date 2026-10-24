@@ -50,6 +50,27 @@ Item {
     Accessible.name: row.number + " " + row.title
     Accessible.description: row.missing ? row.title : row.pages
 
+    /// A stop of the page's walk — see `KeyWalk` — unless it is a hole, which opens nothing.
+    readonly property bool keyStop: !row.missing
+
+    Keys.onPressed: event => {
+        if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                || event.key === Qt.Key_Enter) {
+            row.opened()
+            event.accepted = true
+        } else if (event.key === Qt.Key_Menu
+                   || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
+            commands.show()
+            event.accepted = true
+        }
+    }
+
+    FocusRing {
+        objectName: row.objectName + "-focus"
+        cornerRadius: 8
+        thickness: 2
+    }
+
     // Not a file, so there is nothing to open and nothing to command. A hole in a collection
     // is drawn and left alone.
     HoverHandler {

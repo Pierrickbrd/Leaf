@@ -20,7 +20,13 @@ Popup {
     focus: true
     closePolicy: Popup.CloseOnEscape
     visible: Erasure.asking
-    onClosed: Erasure.dismiss()
+    // Closed by Escape, the question is withdrawn here. Closed because it was withdrawn —
+    // « Annuler » — it is not withdrawn a second time from inside the binding that is closing
+    // it: that was a binding loop on `visible` at every cancel.
+    onClosed: {
+        if (Erasure.asking)
+            Erasure.dismiss()
+    }
 
     // Dimmed and not hidden: what is about to go is on the screen behind this.
     // The design's own veil, and the same one the import dialog is laid under: what is about
@@ -42,142 +48,154 @@ Popup {
         CardLift { level: CardLift.Modal }
     }
 
-    Column {
-        id: body
-
-        x: 17
-        y: 16
-        width: parent.width - 34
-        spacing: 10
-
-        Text {
-            objectName: "erase-question"
-            width: parent.width
-            text: Erasure.said.question ?? ""
-            color: Theme.ink
-            font.family: Theme.displayFamily
-            font.pixelSize: 20
-            font.weight: Font.Bold
-            wrapMode: Text.WordWrap
-        }
-
-        // What goes and which file it is are one paragraph in two lines, not two blocks: they
-        // are one fact about one thing.
+    contentItem: DialogBody {
         Column {
-            width: parent.width
-            spacing: 1
+            id: body
+
+            x: 17
+            y: 16
+            width: parent.width - 34
+            spacing: 10
 
             Text {
+                objectName: "erase-question"
                 width: parent.width
-                text: Erasure.said.what ?? ""
-                visible: text.length > 0
+                text: Erasure.said.question ?? ""
                 color: Theme.ink
+                font.family: Theme.displayFamily
+                font.pixelSize: 20
+                font.weight: Font.Bold
+                wrapMode: Text.WordWrap
+            }
+
+            // What goes and which file it is are one paragraph in two lines, not two blocks: they
+            // are one fact about one thing.
+            Column {
+                width: parent.width
+                spacing: 1
+
+                Text {
+                    width: parent.width
+                    text: Erasure.said.what ?? ""
+                    visible: text.length > 0
+                    color: Theme.ink
+                    font.family: Theme.textFamily
+                    font.pixelSize: 12
+                    wrapMode: Text.WordWrap
+                }
+
+                Text {
+                    width: parent.width
+                    text: Erasure.said.file ?? ""
+                    visible: text.length > 0
+                    color: Theme.inkSoft
+                    font.family: Theme.textFamily
+                    font.pixelSize: 12
+                    elide: Text.ElideMiddle
+                }
+            }
+
+            Text {
+                objectName: "erase-leaves"
+                width: parent.width
+                text: Erasure.said.leaves ?? ""
+                visible: text.length > 0
+                color: Theme.inkSoft
                 font.family: Theme.textFamily
                 font.pixelSize: 12
+                lineHeight: 1.4
+                wrapMode: Text.WordWrap
+            }
+
+            // Said plainly, in the colour of the two paragraphs above it. The design puts the
+            // garnet on the button and nowhere else: a modal where the prose shouts as loudly as
+            // the button is a modal where neither is read.
+            Text {
+                objectName: "erase-warning"
+                width: parent.width
+                text: Erasure.said.warning ?? ""
+                visible: text.length > 0
+                color: Theme.inkSoft
+                font.family: Theme.textFamily
+                font.pixelSize: 12
+                lineHeight: 1.4
                 wrapMode: Text.WordWrap
             }
 
             Text {
                 width: parent.width
-                text: Erasure.said.file ?? ""
+                text: Erasure.said.untouched ?? ""
                 visible: text.length > 0
                 color: Theme.inkSoft
                 font.family: Theme.textFamily
                 font.pixelSize: 12
-                elide: Text.ElideMiddle
+                wrapMode: Text.WordWrap
             }
-        }
 
-        Text {
-            objectName: "erase-leaves"
-            width: parent.width
-            text: Erasure.said.leaves ?? ""
-            visible: text.length > 0
-            color: Theme.inkSoft
-            font.family: Theme.textFamily
-            font.pixelSize: 12
-            lineHeight: 1.4
-            wrapMode: Text.WordWrap
-        }
+            // Only for a whole edition. Thirty files and nothing to come back to is worth the
+            // weight; the same weight on one volume would be ceremony.
+            Column {
+                width: parent.width
+                spacing: 6
+                visible: Erasure.whole
 
-        // Said plainly, in the colour of the two paragraphs above it. The design puts the
-        // garnet on the button and nowhere else: a modal where the prose shouts as loudly as
-        // the button is a modal where neither is read.
-        Text {
-            objectName: "erase-warning"
-            width: parent.width
-            text: Erasure.said.warning ?? ""
-            visible: text.length > 0
-            color: Theme.inkSoft
-            font.family: Theme.textFamily
-            font.pixelSize: 12
-            lineHeight: 1.4
-            wrapMode: Text.WordWrap
-        }
+                Text {
+                    text: Erasure.said.confirm ?? ""
+                    color: Theme.inkSoft
+                    font.family: Theme.textFamily
+                    font.pixelSize: 12
+                }
 
-        Text {
-            width: parent.width
-            text: Erasure.said.untouched ?? ""
-            visible: text.length > 0
-            color: Theme.inkSoft
-            font.family: Theme.textFamily
-            font.pixelSize: 12
-            wrapMode: Text.WordWrap
-        }
-
-        // Only for a whole edition. Thirty files and nothing to come back to is worth the
-        // weight; the same weight on one volume would be ceremony.
-        Column {
-            width: parent.width
-            spacing: 6
-            visible: Erasure.whole
+                LeafField {
+                    objectName: "erase-confirm"
+                    width: parent.width
+                    // The window opens on the name to type, when there is one.
+                    focus: Erasure.whole
+                    activeFocusOnTab: true
+                    onTextEdited: Erasure.typed(text)
+                    onAccepted: {
+                        if (Erasure.ready)
+                            Erasure.go()
+                    }
+                }
+            }
 
             Text {
-                text: Erasure.said.confirm ?? ""
-                color: Theme.inkSoft
+                objectName: "erase-trouble"
+                width: parent.width
+                text: Erasure.trouble
+                visible: text.length > 0
+                color: Theme.alert
                 font.family: Theme.textFamily
                 font.pixelSize: 12
-            }
-
-            LeafField {
-                objectName: "erase-confirm"
-                width: parent.width
-                onTextEdited: Erasure.typed(text)
+                wrapMode: Text.WordWrap
             }
         }
 
-        Text {
-            objectName: "erase-trouble"
-            width: parent.width
-            text: Erasure.trouble
-            visible: text.length > 0
-            color: Theme.alert
-            font.family: Theme.textFamily
-            font.pixelSize: 12
-            wrapMode: Text.WordWrap
-        }
-    }
+        Row {
+            anchors.right: body.right
+            anchors.top: body.bottom
+            anchors.topMargin: 16
+            anchors.bottomMargin: 16
+            spacing: 8
 
-    Row {
-        anchors.right: body.right
-        anchors.top: body.bottom
-        anchors.topMargin: 16
-        anchors.bottomMargin: 16
-        spacing: 8
+            LeafTextAction {
+                objectName: "erase-cancel"
+                label: Erasure.cancelLabel
+                // Otherwise on the way that erases nothing.
+                focus: !Erasure.whole
+                activeFocusOnTab: true
+                anchors.verticalCenter: parent.verticalCenter
+                onTriggered: Erasure.dismiss()
+            }
 
-        LeafTextAction {
-            objectName: "erase-cancel"
-            label: Erasure.cancelLabel
-            anchors.verticalCenter: parent.verticalCenter
-            onTriggered: Erasure.dismiss()
-        }
-
-        ActionButton {
-            objectName: "erase-go"
-            label: Erasure.eraseLabel
-            danger: true
-            ready: Erasure.ready
-            onTriggered: Erasure.go()
+            ActionButton {
+                objectName: "erase-go"
+                label: Erasure.eraseLabel
+                danger: true
+                ready: Erasure.ready
+                onTriggered: Erasure.go()
+            }
         }
     }
 

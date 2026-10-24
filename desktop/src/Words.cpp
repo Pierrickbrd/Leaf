@@ -3205,6 +3205,11 @@ QString appShortcut(AppShortcut which)
     return {};
 }
 
+QString appShortcutsScope()
+{
+    return u"Ces touches valent partout, sauf dans le lecteur, qui a les siennes."_s;
+}
+
 QString aboutFact(AboutFact which)
 {
     switch (which) {

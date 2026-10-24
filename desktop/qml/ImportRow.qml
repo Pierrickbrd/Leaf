@@ -245,6 +245,7 @@ Item {
                     required property var modelData
 
                     objectName: line.objectName + "-choose-" + modelData.seriesId
+                    activeFocusOnTab: true
                     label: modelData.name
                     onTriggered: line.answered(modelData.seriesId)
                 }
@@ -301,6 +302,7 @@ Item {
                 required property var modelData
 
                 objectName: line.objectName + "-file-" + modelData.workId
+                activeFocusOnTab: true
                 visible: !line.moving && !line.done
                 width: body.width
                 label: CardCaptions.alreadyElsewhereLabel(modelData.name, modelData.from)

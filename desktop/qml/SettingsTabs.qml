@@ -26,6 +26,11 @@ Item {
         return tabRepeater.itemAt(position)
     }
 
+    /// Where the screen begins for the keys: the way back when there is one, else the first tab.
+    function firstStop() {
+        return back.visible ? back : tabRepeater.itemAt(0)
+    }
+
     Rectangle {
         anchors.fill: parent
         color: Theme.paper
@@ -38,6 +43,7 @@ Item {
         x: Widths.shelfMargin
         anchors.verticalCenter: parent.verticalCenter
         visible: Navigation.canGoBack
+        activeFocusOnTab: visible
         source: "assets/icons/arrow_back.svg"
         label: Navigation.backLabel
         onTriggered: tabs.wentBack()
@@ -71,7 +77,9 @@ Item {
                               : (hovered || activeFocus ? Theme.onPaper : "transparent")
                 border.color: chosen ? Theme.emerald : "transparent"
                 border.width: 1
-                activeFocusOnTab: false
+                // Stops, each of them: none was, and the keys could reach no tab but the first
+                // and nothing under it.
+                activeFocusOnTab: true
 
                 Accessible.role: Accessible.PageTab
                 Accessible.name: modelData.label

@@ -66,6 +66,22 @@ Item {
         radius: 8
         color: pointer.hovered ? Theme.onPaper : "transparent"
 
+        /// A stop of the panel's walk — see `KeyWalk`. Enter folds and unfolds it.
+        readonly property bool keyStop: true
+
+        Keys.onPressed: event => {
+            if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                    || event.key === Qt.Key_Enter) {
+                axisItem.open = !axisItem.open
+                event.accepted = true
+            }
+        }
+
+        FocusRing {
+            objectName: head.objectName + "-focus"
+            cornerRadius: head.radius
+        }
+
         HoverHandler {
             id: pointer
 
@@ -176,6 +192,13 @@ Item {
                 label: modelData.label
                 lit: axisItem.lit(modelData.value)
                 onTriggered: axisItem.picked(modelData.value)
+                // Scrolled to when the keys reach it, which also builds the row after it:
+                // this view makes only the rows it draws, and the walk only finds what is
+                // made — a key past the last row drawn went on to the next axis.
+                onActiveFocusChanged: {
+                    if (activeFocus)
+                        rows.positionViewAtIndex(index, ListView.Contain)
+                }
             }
         }
 

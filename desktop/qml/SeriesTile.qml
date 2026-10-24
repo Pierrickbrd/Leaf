@@ -49,9 +49,15 @@ Item {
     height: cellHeight
 
     // The keyboard reaches what the pointer reaches. A tile takes the focus from the grid,
-    // so the menu of the tile under it opens where a desktop reader expects it to.
+    // so the menu of the tile under it opens where a desktop reader expects it to — and so
+    // does Enter, which went past the tile, then the grid, then the page, and opened nothing:
+    // the keys could reach every cover and open none of them.
     Keys.onPressed: event => {
-        if (event.key === Qt.Key_Menu
+        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter
+                || event.key === Qt.Key_Space) {
+            tile.opened()
+            event.accepted = true
+        } else if (event.key === Qt.Key_Menu
                 || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
             commands.show()
             event.accepted = true

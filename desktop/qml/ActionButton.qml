@@ -61,6 +61,8 @@ Rectangle {
     color: !ready ? Theme.onPaper : (danger ? Theme.alert : Theme.emerald)
     opacity: ready ? 1.0 : 0.7
     activeFocusOnTab: visible
+    /// A stop of a screen that walks its stops with `KeyWalk` — the band of a series page.
+    readonly property bool keyStop: true
 
     // Six per cent: enough to be felt under the pointer, small enough that a button beside a
     // cover does not appear to jump when the pointer crosses it.

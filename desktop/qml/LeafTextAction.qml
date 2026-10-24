@@ -33,6 +33,8 @@ Item {
     width: implicitWidth
     height: implicitHeight
     activeFocusOnTab: false
+    /// A stop of a region walked with `KeyWalk` — the filter panel's « clear ».
+    readonly property bool keyStop: true
 
     Accessible.role: Accessible.Button
     Accessible.name: action.label

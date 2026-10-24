@@ -45,6 +45,27 @@ Item {
     readonly property string about: whole ? seriesId : entryId
 
     objectName: "commands-" + about
+    /// A stop where the keys walk on their own — the header of a series page. On a row or a
+    /// tile the row is the stop, and the Menu key on it opens this.
+    readonly property bool keyStop: true
+
+    // What it is, said by the button inside it and not again here: a second accessible
+    // button around the first, and the window drew no more frames once its menu was open —
+    // every run of `crosses-the-seam`, at the click on « Supprimer ».
+    Keys.onPressed: event => {
+        if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                || event.key === Qt.Key_Enter || event.key === Qt.Key_Menu
+                || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
+            dots.show()
+            event.accepted = true
+        }
+    }
+
+    FocusRing {
+        objectName: dots.objectName + "-focus"
+        cornerRadius: dots.width / 2
+    }
+
     // Round, and the size the design draws it: a button the height of a bar button stamped
     // a square the size of a postage stamp on every cover.
     implicitWidth: side

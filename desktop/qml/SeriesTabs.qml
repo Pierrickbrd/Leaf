@@ -39,9 +39,27 @@ Item {
                 required property int index
                 required property string modelData
 
+                id: tab
+
                 objectName: "series-tab-" + index
                 width: word.implicitWidth + 28
                 height: 38
+
+                /// A stop of the page's walk — see `KeyWalk`.
+                readonly property bool keyStop: true
+
+                Keys.onPressed: event => {
+                    if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                            || event.key === Qt.Key_Enter) {
+                        bar.chosen(tab.index)
+                        event.accepted = true
+                    }
+                }
+
+                FocusRing {
+                    objectName: tab.objectName + "-focus"
+                    cornerRadius: 8
+                }
 
                 TapHandler {
                     gesturePolicy: TapHandler.ReleaseWithinBounds

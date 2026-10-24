@@ -17,6 +17,9 @@ LeafField {
 
     signal asked(string text)
 
+    /// A stop of a screen that walks its stops with `KeyWalk` — the volumes of a series page.
+    readonly property bool keyStop: true
+
     placeholderText: Captions.searchWithin(placeholder)
 
     onTextEdited: line.asked(text)

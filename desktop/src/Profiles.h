@@ -142,7 +142,12 @@ public:
     Q_INVOKABLE void clearCode(const QString &current);
     /// Draws the recovery code, the way back from a forgotten code, and says it with
     /// `recoveryDrawn`: the only time the server ever sends it. Drawing another revokes it.
-    Q_INVOKABLE void drawRecovery();
+    /// `current` is the code the household has now: a recovery code is a code replaced without
+    /// the old one, so the server asks for it as it does for a change.
+    Q_INVOKABLE void drawRecovery(const QString &current);
+    /// The same, made right after the household's first code: a refusal then is said in the
+    /// recovery window (« the code is saved, its recovery code is not »), not in the card.
+    void drawRecoveryAfterNewCode(const QString &current);
     /// A new code with the recovery code in place of the old one, from any device. Said with
     /// `codeRecovered`, carrying the recovery code that replaces the one just spent.
     Q_INVOKABLE void recover(const QString &recoveryCode, const QString &code,
@@ -161,6 +166,9 @@ signals:
     void recoveryDrawn(const QString &code);
     /// The recovery code could not be drawn, in a sentence that says the code itself is kept.
     void recoveryFailed(const QString &sentence);
+    /// A recovery code asked for from the settings card was refused, in the card's own words
+    /// (wrong code, too many tries): nothing was saved or lost, there is no window to open.
+    void recoveryRefused(const QString &sentence);
     /// The code was replaced by the recovery code; this is the next one, once.
     void codeRecovered(const QString &next);
     /// A code was asked for and was wrong. Said apart from `trouble` so that the field can
@@ -183,6 +191,8 @@ private:
     /// Set for the request that draws a recovery code: its refusal is not the profile window's
     /// trouble — the window that made the code has done its job — but the recovery window's.
     bool m_drawing = false;
+    /// Whether the draw in flight follows the first code, which decides where a refusal is said.
+    bool m_afterNewCode = false;
     void ask(Verb verb, const QString &path, const QJsonObject &body, const Then &ok);
     bool failed(const Server::Answer &answer);
     /// `GET /profiles`; `announce` says `switched` when the profile read as has changed.

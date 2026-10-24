@@ -83,7 +83,8 @@ Popup {
     readonly property bool ready: dialog.name.trim().length > 0 && dialog.color.length > 0
                                   && !dialog.waiting && !dialog.halfTyped
                                   && (!dialog.codeNeeded || (code.length > 0 && again.length > 0))
-                                  && (!dialog.asksCurrent || current.length > 0)
+                                  // Four is the shortest a code can be: fewer is not it.
+                                  && (!dialog.asksCurrent || current.length >= 4)
 
     /// Opens the window for `how` on `target`; `typed` is the code from the code window.
     function show(how, target, typed) {
@@ -229,7 +230,7 @@ Popup {
         CardLift { level: CardLift.Modal }
     }
 
-    contentItem: Item {
+    contentItem: DialogBody {
         objectName: "profile-dialog-body"
         implicitHeight: form.height + 34 + actions.height + 18
 
@@ -290,6 +291,7 @@ Popup {
                         objectName: "profile-name"
                         width: parent.width
                         focus: true
+                        activeFocusOnTab: true
                         text: dialog.name
                         Accessible.name: Profiles.words.profileName
                         onTextEdited: dialog.name = text
@@ -314,14 +316,15 @@ Popup {
                         model: Theme.profileColors
 
                         /// The next free swatch from `from`, `step` at a time; `from` itself
-                        /// when there is none — a taken colour is not a stop.
+                        /// when there is none — a taken colour is not a stop. Whether it moved.
                         function moveFocus(from, step) {
                             for (let at = from + step; at >= 0 && at < count; at += step) {
                                 if (itemAt(at).enabled) {
                                     itemAt(at).forceActiveFocus()
-                                    return
+                                    return true
                                 }
                             }
+                            return false
                         }
 
                         delegate: Item {
@@ -382,10 +385,13 @@ Popup {
                                     swatches.moveFocus(swatch.index, -1)
                                 } else if (event.key === Qt.Key_Right) {
                                     swatches.moveFocus(swatch.index, 1)
-                                } else if (event.key === Qt.Key_Up) {
-                                    swatches.moveFocus(swatch.index, -8)
-                                } else if (event.key === Qt.Key_Down) {
-                                    swatches.moveFocus(swatch.index, 8)
+                                } else if (event.key === Qt.Key_Up || event.key === Qt.Key_Down) {
+                                    // Past the first or the last row, on to the control above
+                                    // or below: held here, Down stopped at the last row for
+                                    // good and the rest of the window was out of its reach.
+                                    if (!swatches.moveFocus(swatch.index,
+                                                            event.key === Qt.Key_Up ? -8 : 8))
+                                        return
                                 } else {
                                     return
                                 }
@@ -420,6 +426,7 @@ Popup {
                 SettingsChoice {
                     objectName: "profile-kind"
                     width: parent.width
+                    tabStops: true
                     options: [{ value: 0, label: Profiles.words.readerRole, icon: "book" },
                               { value: 1, label: Profiles.words.restrictedRole, icon: "lock" }]
                     chosen: dialog.kind === "restricted" ? 1 : 0
@@ -444,6 +451,7 @@ Popup {
                     LeafCheck {
                         objectName: "profile-may-import"
                         width: 130
+                        activeFocusOnTab: true
                         label: Profiles.words.mayImport
                         checked: dialog.mayImport
                         onToggled: wanted => dialog.mayImport = wanted
@@ -451,6 +459,7 @@ Popup {
                     LeafCheck {
                         objectName: "profile-may-edit"
                         width: 130
+                        activeFocusOnTab: true
                         label: Profiles.words.mayEdit
                         checked: dialog.mayEdit
                         onToggled: wanted => dialog.mayEdit = wanted
@@ -458,6 +467,7 @@ Popup {
                     LeafCheck {
                         objectName: "profile-may-erase"
                         width: 130
+                        activeFocusOnTab: true
                         label: Profiles.words.mayErase
                         checked: dialog.mayErase
                         onToggled: wanted => dialog.mayErase = wanted
@@ -482,7 +492,7 @@ Popup {
                         radius: 6
                         color: Theme.onBar
 
-                        IconButton {
+                        IconStop {
                             objectName: "profile-age-less"
                             x: 4
                             anchors.verticalCenter: parent.verticalCenter
@@ -502,7 +512,7 @@ Popup {
                             font.pixelSize: 14
                         }
 
-                        IconButton {
+                        IconStop {
                             objectName: "profile-age-more"
                             anchors.right: parent.right
                             anchors.rightMargin: 4
@@ -580,6 +590,7 @@ Popup {
                 SettingsChoice {
                     objectName: "profile-code-scope"
                     width: parent.width
+                    tabStops: true
                     visible: dialog.codeOn
                     options: [{ value: 0, label: Profiles.words.toLeaveRestricted, icon: "lock" },
                               { value: 1, label: Profiles.words.alsoToComeBack, icon: "crown" }]
@@ -592,6 +603,7 @@ Popup {
 
                     objectName: "profile-code-current"
                     width: parent.width
+                    activeFocusOnTab: true
                     visible: dialog.asksCurrent
                     echoMode: TextInput.Password
                     maximumLength: 8
@@ -654,6 +666,7 @@ Popup {
 
                     objectName: "profile-code"
                     width: dialog.makesTheCode ? parent.width : (parent.width - 10) / 2
+                    activeFocusOnTab: true
                     echoMode: TextInput.Password
                     maximumLength: 8
                     placeholderText: Profiles.words.codeFirst
@@ -667,6 +680,7 @@ Popup {
 
                     objectName: "profile-code-again"
                     width: code.width
+                    activeFocusOnTab: true
                     echoMode: TextInput.Password
                     maximumLength: 8
                     placeholderText: Profiles.words.codeAgain
@@ -687,6 +701,7 @@ Popup {
             LeafTextAction {
                 objectName: "profile-cancel"
                 anchors.verticalCenter: parent.verticalCenter
+                activeFocusOnTab: true
                 label: Profiles.words.cancel
                 enabled: !dialog.waiting
                 onTriggered: dialog.close()

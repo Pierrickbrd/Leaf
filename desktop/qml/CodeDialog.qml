@@ -120,7 +120,7 @@ Popup {
         CardLift { level: CardLift.Modal }
     }
 
-    contentItem: Item {
+    contentItem: DialogBody {
         objectName: "code-dialog-body"
         implicitHeight: form.height + 44
 
@@ -205,6 +205,7 @@ Popup {
 
                     objectName: "code-recovery-field"
                     width: parent.width
+                    activeFocusOnTab: true
                     placeholderText: Profiles.words.recoveryField
                     inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText
                     Accessible.name: Profiles.words.recoveryField
@@ -221,6 +222,7 @@ Popup {
 
                         objectName: "code-new-field"
                         width: (parent.width - 10) / 2
+                        activeFocusOnTab: true
                         echoMode: TextInput.Password
                         maximumLength: 8
                         placeholderText: Profiles.words.newCodeField
@@ -234,6 +236,7 @@ Popup {
 
                         objectName: "code-new-again-field"
                         width: newCode.width
+                        activeFocusOnTab: true
                         echoMode: TextInput.Password
                         maximumLength: 8
                         placeholderText: Profiles.words.codeAgain
@@ -299,6 +302,8 @@ Popup {
                     // Held from the moment the window takes the focus, not from `opened`: that
                     // comes after the fade, and the first character typed before it was lost.
                     focus: true
+                    // Back to it by Tab from the buttons below.
+                    activeFocusOnTab: true
                     opacity: 0
                     maximumLength: 8
                     echoMode: TextInput.NoEcho
@@ -353,14 +358,21 @@ Popup {
                     objectName: "code-forgot"
                     anchors.verticalCenter: parent.verticalCenter
                     visible: !dialog.forgot
+                    activeFocusOnTab: true
                     label: Profiles.words.forgotCode
-                    onTriggered: dialog.forgot = true
+                    // To the recovery code: pressed from the keyboard, the action hid itself
+                    // with the focus on it, and the focus went nowhere.
+                    onTriggered: {
+                        dialog.forgot = true
+                        recoveryField.forceActiveFocus()
+                    }
                 }
 
                 LeafTextAction {
                     objectName: "code-cancel"
                     anchors.verticalCenter: parent.verticalCenter
                     visible: !dialog.forgot
+                    activeFocusOnTab: true
                     label: Profiles.words.cancel
                     enabled: !dialog.waiting
                     onTriggered: dialog.close()
@@ -370,6 +382,7 @@ Popup {
                     objectName: "code-back"
                     anchors.verticalCenter: parent.verticalCenter
                     visible: dialog.forgot
+                    activeFocusOnTab: true
                     label: Profiles.words.back
                     enabled: !dialog.waiting
                     onTriggered: {

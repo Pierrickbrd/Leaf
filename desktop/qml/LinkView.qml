@@ -168,6 +168,9 @@ FocusScope {
                         text: Linking.typed
                         placeholderText: Linking.linkPlaceholder
                         onTextEdited: Linking.offer(text)
+                        // Enter links, as it does from the name below: a link pasted and
+                        // checked is a link ready to use, and Enter here did nothing.
+                        onAccepted: Linking.link()
                     }
                 }
 

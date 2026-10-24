@@ -115,6 +115,14 @@ Item {
             objectName: "settings-shortcuts"
             title: Profiles.words.shortcuts
 
+            // Said before the keys: « Échap » and the arrows are not what they do here once a
+            // book is open, and a list that did not say so read as true in the reader too.
+            SettingsNote {
+                objectName: "shortcuts-scope"
+                width: parent.width
+                text: Profiles.words.shortcutsScope
+            }
+
             Repeater {
                 model: Profiles.words.shortcutList
 

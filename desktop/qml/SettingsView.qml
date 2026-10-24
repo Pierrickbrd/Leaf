@@ -74,12 +74,36 @@ Item {
         }
     }
 
+    /// From the bar: the first stop going forward, the last control coming back.
     function takeFocus(forward) {
-        const tab = tabs.tabAt(forward ? 0 : page.sections.length - 1)
-        if (!tab)
+        const target = forward ? tabs.firstStop() : after.nextItemInFocusChain(false)
+        if (!target || target === before)
             return false
-        tab.forceActiveFocus(forward ? Qt.TabFocusReason : Qt.BacktabFocusReason)
+        target.forceActiveFocus(forward ? Qt.TabFocusReason : Qt.BacktabFocusReason)
         return true
+    }
+
+    // Left and Right belong to a field, even at its ends: the window would otherwise take
+    // them past its first or last letter to the next control.
+    Keys.onPressed: event => {
+        const from = page.Window.activeFocusItem
+        if ((event.key === Qt.Key_Left || event.key === Qt.Key_Right)
+                && from && from.cursorPosition !== undefined)
+            event.accepted = true
+    }
+
+    // The two ends of the screen for the keys. Every control is a stop of Qt's own chain, and
+    // the bar has none: past the last control Tab came round to the first tab, and the bar was
+    // never reached again. Reached, either end hands the keys to the bar — the window's
+    // order, bar then screen then bar.
+    Item {
+        id: before
+
+        activeFocusOnTab: true
+        onActiveFocusChanged: {
+            if (activeFocus && page.Window.window.leaveScreen)
+                page.Window.window.leaveScreen(false)
+        }
     }
 
     SettingsTabs {
@@ -179,6 +203,7 @@ Item {
                     SettingsChoice {
                         objectName: "appearance"
                         width: parent.width
+                        tabStops: true
                         options: Preferences.appearances
                         chosen: Preferences.appearance
                         onPicked: value => Preferences.chooseAppearance(value)
@@ -302,10 +327,18 @@ Item {
                             anchors.left: parent.left
                             anchors.right: tryIt.left
                             anchors.rightMargin: 10
+                            activeFocusOnTab: true
                             placeholderText: Bond.movePlaceholder
                             enabled: !Bond.busy
                             onAccepted: Bond.move(text)
-                            Keys.onEscapePressed: page.moving = false
+                            // Escape is the window's « back » before it is a key: taken here
+                            // first, or it left the settings with the address half typed.
+                            Keys.onShortcutOverride: event =>
+                                event.accepted = event.key === Qt.Key_Escape
+                            Keys.onEscapePressed: {
+                                page.moving = false
+                                moveAction.forceActiveFocus()
+                            }
                         }
 
                         ActionButton {
@@ -331,8 +364,11 @@ Item {
                     // Back by the action's own inset, so its words line up with the labels
                     // above rather than with the hover behind them.
                     LeafTextAction {
+                        id: moveAction
+
                         objectName: "bond-move"
                         x: -8
+                        activeFocusOnTab: true
                         label: Bond.moveLabel
                         onTriggered: {
                             moveField.text = Bond.address
@@ -358,6 +394,7 @@ Item {
 
                     LeafTextAction {
                         objectName: "settings-scan-start"
+                        activeFocusOnTab: true
                         label: Scan.startLabel
                         // While one runs there is nothing to ask for: the state says so, and
                         // a second scan over one library is the same work done twice.
@@ -491,6 +528,16 @@ Item {
                     }
                 }
             }
+        }
+    }
+
+    Item {
+        id: after
+
+        activeFocusOnTab: true
+        onActiveFocusChanged: {
+            if (activeFocus && page.Window.window.leaveScreen)
+                page.Window.window.leaveScreen(true)
         }
     }
 

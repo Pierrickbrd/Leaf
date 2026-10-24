@@ -74,7 +74,7 @@ Popup {
         CardLift { level: CardLift.Modal }
     }
 
-    contentItem: Item {
+    contentItem: DialogBody {
         objectName: "recovery-dialog-body"
         implicitHeight: form.height + 44
 
@@ -160,6 +160,9 @@ Popup {
             ActionButton {
                 objectName: "recovery-noted"
                 anchors.horizontalCenter: parent.horizontalCenter
+                // The one thing to do here, and Escape does not do it: without the focus,
+                // Enter did nothing either.
+                focus: true
                 label: Profiles.words.recoveryNoted
                 onTriggered: dialog.close()
             }

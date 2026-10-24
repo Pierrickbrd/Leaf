@@ -57,7 +57,25 @@ Column {
             visible: tab.block.orders.length > 0
 
             Text {
+                id: chosen
+
                 objectName: "chosen-way"
+                /// A stop of the page's walk — see `KeyWalk`.
+                readonly property bool keyStop: true
+
+                Keys.onPressed: event => {
+                    if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                            || event.key === Qt.Key_Enter) {
+                        ways.unfolded = !ways.unfolded
+                        event.accepted = true
+                    }
+                }
+
+                FocusRing {
+                    objectName: "chosen-way-focus"
+                    cornerRadius: 4
+                }
+
                 text: tab.block.chosenName
                 color: Theme.ink
                 font.family: Theme.textFamily
@@ -75,7 +93,16 @@ Column {
                 model: ways.unfolded ? tab.block.orders : []
 
                 Rectangle {
+                    id: way
+
                     required property var modelData
+
+                    /// Chosen, and folded away again: the walk goes back to the way's name.
+                    function choose() {
+                        tab.block.chooseOrder(way.modelData.identifier)
+                        ways.unfolded = false
+                        chosen.forceActiveFocus(Qt.OtherFocusReason)
+                    }
 
                     objectName: "way-" + modelData.identifier
                     width: ways.width
@@ -83,12 +110,25 @@ Column {
                     radius: Theme.cardRadius
                     color: modelData.chosen ? Theme.emeraldWash : Theme.surface
 
+                    /// A stop of the page's walk — see `KeyWalk`.
+                    readonly property bool keyStop: true
+
+                    Keys.onPressed: event => {
+                        if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                                || event.key === Qt.Key_Enter) {
+                            way.choose()
+                            event.accepted = true
+                        }
+                    }
+
+                    FocusRing {
+                        objectName: way.objectName + "-focus"
+                        cornerRadius: way.radius
+                    }
+
                     TapHandler {
                         gesturePolicy: TapHandler.ReleaseWithinBounds
-                        onTapped: {
-                            tab.block.chooseOrder(parent.modelData.identifier)
-                            ways.unfolded = false
-                        }
+                        onTapped: way.choose()
                     }
 
                     Text {

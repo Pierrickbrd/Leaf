@@ -459,10 +459,20 @@ Item {
 
     Shortcut {
         sequence: "/"
-        context: Qt.ApplicationShortcut
-        // An application shortcut ignores that the bar is disabled under « Qui lit ? ».
+        // The window's, which a modal stops: as the application's it fired under a
+        // confirmation and took the focus out of it, for a field behind its veil.
+        context: Qt.WindowShortcut
+        // A shortcut ignores that the bar is disabled under « Qui lit ? ». Not in the reader
+        // either, which has keys of its own and no bar on screen: the focus went to a field
+        // nobody could see, and the reader's keys with it.
         enabled: !searchField.activeFocus && bar.enabled
+                 && Navigation.destination !== Navigation.Reader
         onActivated: {
+            // The search is the shelf's. Pressed on another page, it focused the field that
+            // page hides, and typing then went nowhere; it brings the shelf back instead —
+            // pushed, so that Escape returns to the page it was pressed on.
+            if (!bar.browsing)
+                Navigation.open(Navigation.Shelf, {})
             searchField.forceActiveFocus(Qt.ShortcutFocusReason)
             searchField.selectAll()
         }

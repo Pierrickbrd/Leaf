@@ -32,6 +32,17 @@ Item {
     Accessible.name: name
     Accessible.description: detail
 
+    /// A stop of the page's walk — see `KeyWalk`.
+    readonly property bool keyStop: true
+
+    Keys.onPressed: event => {
+        if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                || event.key === Qt.Key_Enter) {
+            tile.opened()
+            event.accepted = true
+        }
+    }
+
     HoverHandler {
         id: pointer
 
@@ -68,6 +79,12 @@ Item {
         }
 
         CoverSkin { radius: 7 }
+
+        FocusRing {
+            objectName: tile.objectName + "-focus"
+            cornerRadius: 7
+            focused: tile.activeFocus
+        }
 
         // Held off the cover rather than drawn on it: laid on the edge it read as part of
         // the illustration, and half the covers in a library have a border of their own.
