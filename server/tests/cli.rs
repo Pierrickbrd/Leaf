@@ -240,3 +240,124 @@ fn a_key_that_cannot_be_written_takes_its_device_back_with_it() {
     assert_eq!(String::from_utf8(out).unwrap().trim_end().len(), 43);
     assert_eq!(1, devices.list(0).unwrap().0.len());
 }
+
+fn an_index() -> (tempfile::TempDir, std::sync::Arc<leaf_server::store::Db>) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(
+        leaf_server::store::Db::open(&dir.path().join("index.sqlite")).unwrap(),
+    );
+    (dir, db)
+}
+
+/// What a person types, one answer per prompt, and the prompts it saw.
+fn typing<'a>(
+    answers: &'a [&'a str],
+    seen: &'a std::cell::RefCell<Vec<String>>,
+) -> impl FnMut(&str) -> std::io::Result<String> + 'a {
+    let mut answers = answers.iter();
+    move |prompt| {
+        seen.borrow_mut().push(prompt.to_string());
+        Ok(answers
+            .next()
+            .expect("asked more than expected")
+            .to_string())
+    }
+}
+
+#[test]
+fn resetting_the_code_asks_twice_and_keeps_the_scope() {
+    use leaf_server::store::profiles::{CodeScope, Profiles};
+    let (_dir, db) = an_index();
+    let profiles = Profiles::new(db.clone());
+    profiles
+        .set_code("old1", CodeScope::Everything)
+        .unwrap()
+        .unwrap();
+
+    let seen = Default::default();
+    leaf_server::cli::profile::reset_code(db.clone(), typing(&["fresh9", "fresh9"], &seen))
+        .unwrap();
+
+    assert_eq!(seen.borrow().len(), 2, "{:?}", seen.borrow());
+    assert_eq!(profiles.code().unwrap(), Some(CodeScope::Everything));
+    assert!(profiles.check_code("fresh9").unwrap());
+    assert!(!profiles.check_code("old1").unwrap());
+}
+
+#[test]
+fn resetting_with_no_code_yet_makes_a_restricted_one() {
+    use leaf_server::store::profiles::{CodeScope, Profiles};
+    let (_dir, db) = an_index();
+    let seen = Default::default();
+    leaf_server::cli::profile::reset_code(db.clone(), typing(&["abcd", "abcd"], &seen)).unwrap();
+    assert_eq!(
+        Profiles::new(db).code().unwrap(),
+        Some(CodeScope::Restricted)
+    );
+}
+
+#[test]
+fn two_different_codes_change_nothing() {
+    use leaf_server::store::profiles::{CodeScope, Profiles};
+    let (_dir, db) = an_index();
+    let profiles = Profiles::new(db.clone());
+    profiles
+        .set_code("old1", CodeScope::Everything)
+        .unwrap()
+        .unwrap();
+
+    let seen = Default::default();
+    let refused = leaf_server::cli::profile::reset_code(db, typing(&["fresh9", "fresh8"], &seen))
+        .unwrap_err();
+    assert!(refused.to_string().contains("identiques"), "{refused}");
+    assert!(profiles.check_code("old1").unwrap());
+    assert!(!profiles.check_code("fresh9").unwrap());
+}
+
+#[test]
+fn a_code_outside_four_to_eight_characters_changes_nothing() {
+    use leaf_server::store::profiles::{CodeScope, Profiles};
+    let (_dir, db) = an_index();
+    let profiles = Profiles::new(db.clone());
+    profiles
+        .set_code("old1", CodeScope::Restricted)
+        .unwrap()
+        .unwrap();
+
+    for typed in ["abc", "123456789", ""] {
+        let seen = Default::default();
+        let refused =
+            leaf_server::cli::profile::reset_code(db.clone(), typing(&[typed, typed], &seen))
+                .unwrap_err();
+        assert!(refused.to_string().contains("4 à 8"), "{typed}: {refused}");
+    }
+    assert!(profiles.check_code("old1").unwrap());
+}
+
+#[test]
+fn a_read_that_fails_changes_nothing_and_says_so() {
+    let (_dir, db) = an_index();
+    let refused =
+        leaf_server::cli::profile::reset_code(
+            db,
+            |_| Err(std::io::ErrorKind::UnexpectedEof.into()),
+        )
+        .unwrap_err();
+    assert!(refused.to_string().contains("lecture"), "{refused}");
+}
+
+/// What this covers, and no more: the account `profile reset-code` would take is the one
+/// `account_for` decides (root becomes the folder's owner, anyone else stays as they are),
+/// the same function `device` uses. That `run` calls `become_owner` before it opens the index
+/// is not tested: it needs root, and a test is not root.
+#[test]
+fn the_command_runs_as_the_database_owner() {
+    assert_eq!(
+        account_for(0, Path::new("/var/lib/leaf"), (998, 997)).unwrap(),
+        Account::Become { uid: 998, gid: 997 }
+    );
+    assert_eq!(
+        account_for(1000, Path::new("/home/me/leaf"), (1000, 1000)).unwrap(),
+        Account::AsItIs
+    );
+}

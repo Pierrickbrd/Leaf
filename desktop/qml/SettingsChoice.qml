@@ -21,9 +21,12 @@ Item {
     implicitHeight: row.height
     height: implicitHeight
 
-    Row {
+    // A Flow, so that two long answers go to a second line rather than out of the card:
+    // « Aussi pour revenir à votre profil » ran past the profile window's edge.
+    Flow {
         id: row
 
+        width: choice.width
         spacing: 8
 
         Repeater {
@@ -96,6 +99,9 @@ Item {
                     anchors.leftMargin: 8
                     anchors.verticalCenter: parent.verticalCenter
                     text: pill.modelData.label
+                    // Plain, never rich: a name typed on another device — « <b>x</b> » — is shown as
+                    // typed, not drawn as markup.
+                    textFormat: Text.PlainText
                     color: pill.lit ? Theme.emerald : Theme.inkSoft
                     font.family: Theme.textFamily
                     font.pixelSize: 14

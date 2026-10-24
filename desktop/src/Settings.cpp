@@ -343,14 +343,26 @@ QString Settings::keyTitle() const
     return Words::theKey();
 }
 
-QVariantList Settings::sections() const
+QVariantList Settings::sections(const QString &kind) const
 {
-    return {QVariantMap{{QStringLiteral("name"), QStringLiteral("general")},
-                        {QStringLiteral("label"), Words::generalSettings()}},
-            QVariantMap{{QStringLiteral("name"), QStringLiteral("notifications")},
-                        {QStringLiteral("label"), Words::notificationSettings()}},
-            QVariantMap{{QStringLiteral("name"), QStringLiteral("library")},
-                        {QStringLiteral("label"), Words::librarySettings()}}};
+    const auto tab = [](const QString &name, const QString &label) {
+        return QVariantMap{{QStringLiteral("name"), name}, {QStringLiteral("label"), label}};
+    };
+    // A kind this client was not taught reads as restricted, like everywhere else: the
+    // narrowest reading is the safe one for a profile that is not understood. The words are
+    // compared here rather than through `Api::kind`, which would drag the whole contract into
+    // every program that only wants to know where the key is.
+    const bool principal = kind == QStringLiteral("principal");
+    const bool reader = principal || kind == QStringLiteral("reader");
+    QVariantList out{tab(QStringLiteral("general"), Words::generalSettings())};
+    if (reader)
+        out << tab(QStringLiteral("profiles"), Words::profilesTab());
+    if (principal)
+        out << tab(QStringLiteral("devices"), Words::devicesTab())
+            << tab(QStringLiteral("library"), Words::librarySettings());
+    out << tab(QStringLiteral("notifications"), Words::notificationSettings())
+        << tab(QStringLiteral("about"), Words::aboutTab());
+    return out;
 }
 
 QString Settings::storageLabel() const

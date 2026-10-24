@@ -22,6 +22,7 @@
 
 #include <QDateTime>
 #include <QString>
+#include <QStringList>
 
 #include <optional>
 
@@ -1033,5 +1034,284 @@ QString stageAnd(const QString &stage, const QString &howFar);
 /// « · une page manquante » — one concern of an archive, marked as one of a list. The dot
 /// belongs to the sentence, not to the delegate that draws it.
 QString concern(const QString &said);
+
+// ——— Profiles: who reads ———————————————————————————————————————————————————————————
+//
+// Neutral, and in the second person of politeness: « profil », never a gendered noun for the
+// person, and no sentence that says what somebody is. The full set of words the screens use
+// is theirs to add; these are the few the model itself has to say.
+
+/// « Qui lit ? » — the question, and the name of the screen that asks it.
+QString whoReads();
+/// « Ce code n’est pas le bon. » — said by every route that takes the code, and not the
+/// server's own « code », which `keyRefused` would turn into a sentence about the key.
+QString wrongCode();
+/// What stands under a profile's name in a list: « Principal » for the first, nothing for a
+/// reader, « Jusqu’à 12 ans » for a restricted profile, and a plain « Restreint » when that
+/// profile is of a kind this client was not taught or has no age.
+QString profileNote(Api::Kind kind, std::optional<int> maxAge);
+
+// ——— Profiles: the screens ————————————————————————————————————————————————————————
+//
+// One function per text of the mock-ups, second person of politeness, neutral. A text that
+// carries a name or a number takes it as an argument: a `.qml` file that joins « Passer à » to
+// a name is a `.qml` file writing French.
+
+/// The button that adds a profile from the « Qui lit ? » screen.
+QString addOne();
+
+/// The switch that makes a choice outlast the session: this device opens on that profile next time.
+QString keepOnThisDevice();
+
+/// The way from « Qui lit ? » to the screen that edits the profiles.
+QString manageProfiles();
+
+/// Under the profile list when a restricted profile is current: leaving it is guarded.
+QString switchNeedsCode();
+
+/// Leaves « Qui lit ? » without choosing, for a profile that is already current.
+QString backToShelf();
+
+/// The cross of « Qui lit ? », opened from the bar by a profile free to stay where it is.
+QString closeWhoReads();
+
+/// « Passer à Camille » — the name goes in the string, so a screen never concatenates one.
+QString switchToProfile(const QString &name);
+
+/// Said when the current profile is restricted and another is picked.
+QString leaveNeedsCode();
+
+/// Asks for the code, on every screen that takes it.
+QString enterCode();
+
+/// Title of the sheet that creates a profile, and its button.
+QString addAProfile();
+
+/// Why the code is asked before the form that adds a profile.
+QString addNeedsCode();
+
+/// The link under the code field.
+QString forgotCode();
+
+/// What a forgotten code leads to. The command itself follows on the next line; the client cannot reset it.
+QString codeReplacedOnServer();
+
+/// That command, as it is typed on the server: a `sudo` and not a sentence, so it is never
+/// translated, and kept here so that the screen does not spell it either.
+QString resetCodeCommand();
+
+/// Back out of a sheet, without the destination `goBack` and `backTo` would name.
+QString back();
+
+/// Confirms a sheet that asks for the code.
+QString confirm();
+
+/// Title of the form, as opposed to the sheet that guards it.
+QString newProfile();
+
+/// Title of the form when the profile being edited is the current one.
+QString yourProfile();
+
+/// Title of the form for another profile: « Modifier Camille ».
+QString editProfile(const QString &name);
+
+/// Label of the name field.
+QString profileName();
+
+/// Label of the colour field.
+QString profileColour();
+
+/// Explains the initial drawn on a taken swatch.
+QString takenColourNote();
+
+/// Heading of the rights block.
+QString whatItMayDo();
+
+/// The first of the two roles a profile can be given.
+QString readerRole();
+
+/// The second role.
+QString restrictedRole();
+
+/// Right to import.
+QString mayImport();
+
+/// Right to edit.
+QString mayEdit();
+
+/// Right to delete.
+QString mayErase();
+
+/// Under the « Lecteur » role.
+QString readerExplained();
+
+/// Under the « Restreint » role.
+QString restrictedExplained();
+
+/// Label of the age picker.
+QString seriesUpTo();
+
+/// One age of the picker.
+QString yearsOld(int age);
+
+/// Heading of the block that sets the code.
+QString codeToCreate();
+
+/// Label of the confirmation field.
+QString codeAgain();
+
+/// Label of the first field.
+QString aCode();
+
+/// Heading of the list of moments the code is asked.
+QString whenCodeAsked();
+
+/// First of those moments.
+QString toLeaveRestricted();
+
+/// Second of those moments.
+QString alsoToComeBack();
+
+/// Shown on the principal profile's form, where there are no rights to tick.
+QString principalExplained();
+
+/// Under the code block while no profile is restricted.
+QString codeHintFree();
+
+/// Under the code block once one is: it names that profile.
+QString codeHintHeld(const QString &name);
+
+/// Kind line of the principal.
+QString principalKind();
+
+/// Kind line of a reader.
+QString readerKind();
+
+/// Kind line of a restricted profile.
+QString restrictedKind();
+
+/// The mark on the profile that is current here.
+QString youMark();
+
+/// This device opens on this profile.
+QString retainedHere();
+
+/// Another device opens on it.
+QString retainedOn(const QString &device);
+
+/// What a restricted profile sees, as a part of its line.
+QString seriesUpToYears(int age);
+
+/// « Supprimer Camille ? » — the confirmation's title.
+QString eraseProfile(const QString &name);
+
+/// What deleting a profile costs.
+QString eraseConsequence();
+
+/// And what it does not: the devices it sat on ask again, the volumes stay.
+QString eraseLeavesDevices();
+
+/// The confirmation's button: « Supprimer Inès ». The name again, so that the button that
+/// cannot be undone says on whom.
+QString eraseProfileButton(const QString &name);
+
+/// The form's button when it creates: « Ajouter Inès », or « Ajouter » before a name is typed.
+QString addProfileButton(const QString &name);
+
+/// The form's button when it changes a profile that exists.
+QString saveProfile();
+
+/// Under « Le code, à créer », when the first restricted profile is the reason for the code.
+QString firstCodeHint();
+
+/// The form a reader opens: what the new profile will be able to do, and who decides the rest.
+QString principalManages(const QString &principal);
+
+/// The two halves of the age stepper, for whoever reads the screen aloud.
+QString fewerYears();
+QString moreYears();
+
+/// A swatch, for whoever reads the screen aloud: its palette name from the id `Theme` keeps
+/// (`emeraude` → « Émeraude »), and the profile that wears it when it is taken.
+QString colourName(const QString &id, const QString &owner);
+
+/// Tab of the settings screen.
+QString profilesTab();
+
+/// Heading of the rights summary.
+QString whatEachMayDo();
+
+/// Tab.
+QString devicesTab();
+
+/// Tab.
+QString aboutTab();
+
+/// Heading of what the application opens on.
+QString atOpening();
+
+/// Lead-in of the choice that follows it.
+QString opensOnThisComputer();
+
+/// The choice that makes « Qui lit ? » come first.
+QString askWhoReads();
+
+/// Heading of the list of the other devices.
+QString otherDevices();
+
+/// What one of them opens on.
+QString opensOn(const QString &name);
+
+/// Unlinks it.
+QString removeDevice();
+
+/// How many series a profile sees.
+QString seriesForYou(int count);
+
+/// Heading of the shortcuts list.
+QString shortcuts();
+
+/// About: the application.
+QString thisClient();
+
+/// About: the server. `theServer` is the reader's name for it, in a sentence about whether it answers.
+QString serverHeading();
+
+/// What stands under a profile's name on the screens that list them: « Profil principal · vous »,
+/// « Profil lecteur · retenu sur cet ordinateur », « Profil restreint · séries jusqu’à 10 ans ».
+/// Built from the parts above, joined by one separator, and the parts that are empty are dropped
+/// — a line that ends on « · » reads as broken. `marks` are the optional ones, in the order they
+/// should read (`youMark`, `retainedHere`, `retainedOn`).
+QString profileLine(Api::Kind kind, std::optional<int> maxAge, const QStringList &marks);
+
+/// The reader's Profils tab, under their own row: who manages the rest, by name.
+QString managedByPrincipal(const QString &principal);
+
+/// « Ce que chacun peut faire », in place of the boxes, for a restricted profile.
+QString onlyReads(const QString &name);
+
+/// Under the boxes: what « Modifier » covers, and what a new profile starts with.
+QString rightsExplained();
+
+/// Under the other devices: what removing one does, and who decides what a device opens on.
+QString devicesExplained();
+
+/// Under the list of profiles: what deleting one costs, said before anyone reaches the bin.
+QString eraseExplained();
+
+/// Another device that keeps no profile: it asks who reads when it opens.
+QString asksWhoReadsThere();
+
+/// The pencil beside another device: it chooses the profile that device keeps.
+QString chooseItsProfile();
+
+/// The confirmation before a device is removed, and what it costs.
+QString removeDeviceQuestion(const QString &name);
+QString removeDeviceConsequence();
+
+/// The keyboard shortcuts the client defines, `{what, keys}`, in the order the À propos tab
+/// lists them. Written from the `Shortcut` and `Keys` handlers in the QML, and to be changed
+/// with them: a shortcut listed here that the client does not answer is worse than none.
+QList<std::pair<QString, QString>> shortcutList();
 
 } // namespace Words

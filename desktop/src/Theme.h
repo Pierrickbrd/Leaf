@@ -27,6 +27,8 @@
 #include <QObject>
 #include <QQmlEngine>
 #include <QString>
+#include <QVariantMap>
+#include <QStringList>
 #include <QWindow>
 
 class Theme : public QObject
@@ -67,8 +69,17 @@ class Theme : public QObject
     /// The two families, reached from QML through Theme rather than a second singleton:
     /// `Fonts` is a C++ namespace, not a QML type, and a family is a token like a colour —
     /// it describes how the interface is painted.
+    /// The sixteen colours a profile can wear, by the id the server stores — no accent, palette
+    /// order. A swatch picker iterates this and reads `profileTints` for each.
+    Q_PROPERTY(QStringList profileColors READ profileColors CONSTANT)
+    Q_PROPERTY(QVariantMap profileTints READ profileTints NOTIFY changed)
+    Q_PROPERTY(QColor profileInk READ profileInk NOTIFY changed)
+
     Q_PROPERTY(QString displayFamily READ displayFamily CONSTANT)
     Q_PROPERTY(QString textFamily READ textFamily CONSTANT)
+    /// The system's fixed-width family, for a command to be typed as shown: set like a
+    /// terminal, every space and hyphen of it is one character wide and none can be misread.
+    Q_PROPERTY(QString commandFamily READ commandFamily CONSTANT)
 
 public:
     explicit Theme(QObject *parent = nullptr);
@@ -88,6 +99,18 @@ public:
     /// two disagree — 2 for the screen against 1.33 for the window that is on it, in the
     /// harness the shelf tests run in — and it is the window that draws.
     Q_INVOKABLE qreal hairOf(QWindow *window) const;
+
+    /// Each profile colour in the current theme, by id, and what is written on them. Properties
+    /// that notify, like every other token: a swatch bound to them turns with the theme without
+    /// the screen having to know that it should.
+    QVariantMap profileTints() const;
+    QColor profileInk() const;
+    /// One tint out of `profileTints`, with the neutral for an id this client was not taught —
+    /// the server may learn a colour before the client does. The map is an argument and not
+    /// read in here so that a binding calling this one depends on it and re-evaluates; a
+    /// lookup inside would be invisible to the binding and stay stale after a theme change.
+    Q_INVOKABLE QColor profileTintIn(const QVariantMap &tints, const QString &color) const;
+    QStringList profileColors() const;
 
     QColor paper() const;
     QColor surface() const;
@@ -111,6 +134,7 @@ public:
 
     QString displayFamily() const { return Fonts::display(); }
     QString textFamily() const { return Fonts::text(); }
+    QString commandFamily() const;
 
 signals:
     void changed();

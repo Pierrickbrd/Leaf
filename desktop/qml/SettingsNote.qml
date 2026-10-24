@@ -27,4 +27,7 @@ Text {
     lineHeight: 1.35
     wrapMode: Text.Wrap
     topPadding: 2
+    // Plain, never rich: a name typed on another device — « <b>x</b> » — is shown as
+    // typed, not drawn as markup.
+    textFormat: Text.PlainText
 }

@@ -75,13 +75,14 @@ fn a_code_links_one_device_and_hands_its_key_over_once() {
     assert_eq!(linked.device.name, "PC du salon");
     assert_eq!(linked.device.profile_id, "default");
 
-    let known = fx
+    let (known, profile) = fx
         .devices
         .recognise(&linked.key, NOW)
         .unwrap()
         .expect("recognised");
     assert_eq!(known.id, linked.device.id);
     assert_eq!(known.name, "PC du salon");
+    assert_eq!(profile.id, "default", "and the profile it reads as");
     assert!(fx.devices.recognise("not a key", NOW).unwrap().is_none());
     assert!(fx.devices.recognise("", NOW).unwrap().is_none());
 }
@@ -426,7 +427,7 @@ fn enrolling_follows_the_same_name_rule_as_linking() {
         fx.devices
             .recognise(&enrolled.key, NOW)
             .unwrap()
-            .map(|d| d.id),
+            .map(|(d, _)| d.id),
         Some(enrolled.device.id)
     );
 }
@@ -535,6 +536,7 @@ fn a_device_is_marked_seen_at_most_once_a_minute() {
             .recognise(&linked.key, at)
             .unwrap()
             .unwrap()
+            .0
             .seen_at
     };
     assert_eq!(seen(NOW), Some(NOW));

@@ -19,6 +19,34 @@ ApplicationWindow {
     /// fact about the library: it is a fact about what is drawn over it.
     property bool shelfIsStale: false
     property bool countsAreStale: false
+    /// « Qui lit ? » is over the window.
+    property bool whoReadsOpen: false
+    // Back where it was opened from, so that a keyboard reader is not left on nothing.
+    onWhoReadsOpenChanged: {
+        if (!whoReadsOpen)
+            appBar.takeFocusOnSquare()
+    }
+    /// The launch, and any moment after it, asking who reads: a device whose profile was
+    /// deleted elsewhere learns it from whichever request met the refusal first, and the
+    /// screen opens there rather than at the next start.
+    readonly property bool mustAskWhoReads: Profiles.asksWhoReads
+    onMustAskWhoReadsChanged: {
+        if (mustAskWhoReads)
+            window.whoReadsOpen = true
+    }
+    /// Watched apart: a device already asked at launch is not asked again by `asksWhoReads`,
+    /// which stays true — and that is exactly the device whose profile can be deleted next.
+    readonly property bool mustChooseWhoReads: Profiles.choosing
+    onMustChooseWhoReadsChanged: {
+        if (mustChooseWhoReads)
+            window.whoReadsOpen = true
+    }
+    /// Who reads is asked once there is a library to ask it of: before, there is no server.
+    readonly property bool linked: Settings.loaded && Settings.configured
+    onLinkedChanged: {
+        if (linked)
+            Profiles.ask()
+    }
 
     /// **What an action changed is asked for, and nothing else.** A mark or a deletion names
     /// its series, and `Library` asks for that one series and hands it to every model drawing
@@ -53,6 +81,53 @@ ApplicationWindow {
             Series.reload()
             Entries.reload()
         }
+    }
+
+    /// Another profile reads now, and everything on screen was listed for the one before: the
+    /// server shows each profile only what it may see, so a wall, a page, a search or a band
+    /// kept across the change would show the next profile what was never listed to it. Back
+    /// to the shelf, and every model asked again by the paths that already ask it.
+    function readAsAnotherProfile() {
+        window.whoReadsOpen = false
+        // The series page forgets what it held on its way out (`Navigation.onChanged`).
+        while (Navigation.canGoBack)
+            Navigation.back()
+        // The question typed and the pills lit belonged to the other profile's shelf, and so
+        // did the tiles kept until an answer — covers and all.
+        Shelf.startOver()
+        Filters.reload()
+        Resume.reload()
+        window.shelfIsStale = false
+        window.countsAreStale = false
+    }
+
+    /// The code window, for `target` (a profile of `Profiles.list`) or for adding one
+    /// (`mode` « add », no target). Opened here so that « Qui lit ? » and the settings ask it
+    /// the same way. « Retenir » is read now, as « Qui lit ? » would have sent it.
+    function askForCode(target, mode) {
+        codeDialog.ask(target, mode, mode === "switch" && whoReads.keeps(target))
+    }
+
+    /// The profile window: `mode` « new », « self » or « edit », `profile` the one edited.
+    /// `principalCode` is the code typed in the code window before adding from another
+    /// profile: the server checks it with the profile it creates, not before.
+    function openProfileDialog(mode, profile, principalCode) {
+        profileDialog.show(mode, profile, principalCode ?? "")
+    }
+
+    /// « Supprimer X ? », for a profile of `Profiles.list` other than the principal and one's
+    /// own — the settings do not offer it for those, and the server refuses them anyway.
+    function removeProfile(profile) {
+        profileRemoval.ask(profile)
+    }
+
+    /// Réglages › Profils: handed with the destination, or straight to the screen already open.
+    function openProfileSettings() {
+        window.whoReadsOpen = false
+        if (Navigation.destination !== Navigation.Settings)
+            Navigation.open(Navigation.Settings, { section: "profiles" })
+        else
+            screen.item.section = "profiles"
     }
 
     function belongsTo(owner, item) {
@@ -125,7 +200,11 @@ ApplicationWindow {
     // The three widths are declared once, in Widths, and fed from here — the one place that
     // knows how wide the window is.
     onWidthChanged: Widths.window = window.width
-    Component.onCompleted: Widths.window = window.width
+    Component.onCompleted: {
+        Widths.window = window.width
+        if (window.linked)
+            Profiles.ask()
+    }
 
     // Escape comes back. It is here rather than on each screen so that a screen written later
     // cannot forget it.
@@ -137,6 +216,13 @@ ApplicationWindow {
         sequences: [StandardKey.Cancel]
         // qmllint enable unqualified
         onActivated: {
+            // « Qui lit ? » first, when there is somewhere to go back to — and nothing at all
+            // when there is not: Escape must not be the way out of a restricted profile.
+            if (window.whoReadsOpen) {
+                if (whoReads.closable)
+                    window.whoReadsOpen = false
+                return
+            }
             // On the shelf Escape first clears the transient question. Only an already-empty
             // field means "leave this destination".
             if (Shelf.query.length > 0)
@@ -212,7 +298,7 @@ ApplicationWindow {
                 return
             // The linking screen is a plain form: Qt's own Tab order through its two fields
             // and its button, and none of the shelf's order behind it.
-            if (linkScreen.active)
+            if (linkScreen.active || whoReads.visible)
                 return
 
             // Left and Right edit the field. They join global navigation everywhere else,
@@ -254,6 +340,9 @@ ApplicationWindow {
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top
+            // Nothing under « Qui lit ? » takes a key or a click: Tab walked into the hidden
+            // field, and Enter opened a series behind the screen.
+            enabled: !window.whoReadsOpen
             // The highlight goes, the focus stays. Returning the focus to the page here is
             // what emptied the field of its focus when a pointer merely crossed a button.
             onPointerLeftTheShelf: window.clearNavigation()
@@ -263,6 +352,7 @@ ApplicationWindow {
             onWentPast: forward => window.moveIntoScreen(forward)
             onSettingsRequested: Navigation.open(Navigation.Settings)
             onImportRequested: importDialog.show()
+            onWhoReadsRequested: window.whoReadsOpen = true
         }
 
         // Built once and hidden, never destroyed. Inside the Loader it was torn down on the
@@ -278,6 +368,7 @@ ApplicationWindow {
             anchors.top: appBar.bottom
             anchors.bottom: parent.bottom
             visible: Navigation.destination === Navigation.Shelf
+            enabled: !window.whoReadsOpen
             navigationCursor: window.navigationCursor
             onNavigationBoundary: (origin, forward) => window.leaveScreen(forward)
             onPointerNavigationCancelled: window.returnFocusToPage()
@@ -290,6 +381,7 @@ ApplicationWindow {
             anchors.right: parent.right
             anchors.top: appBar.bottom
             anchors.bottom: parent.bottom
+            enabled: !window.whoReadsOpen
             // Every destination that is not the shelf, drawn over it. It was pinned to the
             // shelf, which is why the settings button had to be left unwired: opening a
             // destination nothing draws changed the stack, showed the same page, and spent
@@ -304,6 +396,20 @@ ApplicationWindow {
                     return null
                 }
             }
+        }
+
+        // Over the shelf and the bar, under the linking screen and every window: the code and
+        // the profile windows open from here and stand in front of it.
+        WhoReads {
+            id: whoReads
+
+            anchors.fill: parent
+            z: 95
+            visible: window.whoReadsOpen && !linkScreen.active
+            onDismissed: window.whoReadsOpen = false
+            onCodeNeeded: (target, mode) => window.askForCode(target, mode)
+            onProfileDialogAsked: (mode, profile) => window.openProfileDialog(mode, profile)
+            onManageAsked: window.openProfileSettings()
         }
 
         // Not linked to anything: the linking screen, over the whole window, bar included —
@@ -333,8 +439,9 @@ ApplicationWindow {
     DropArea {
         objectName: "window-drop"
         anchors.fill: parent
-        // A volume dropped before there is a library has nowhere to go.
-        enabled: !linkScreen.active
+        // A volume dropped before there is a library has nowhere to go, and one dropped by a
+        // profile that may not import would only meet the server's refusal.
+        enabled: !linkScreen.active && Profiles.canImport
         onDropped: drop => {
             if (Imports.offerUrls(drop.urls) > 0) {
                 importDialog.phase = importDialog.proposing
@@ -417,6 +524,8 @@ ApplicationWindow {
 
         function onMoved() {
             window.refreshAll()
+            // Another server, other profiles.
+            Profiles.ask()
         }
     }
 
@@ -460,6 +569,20 @@ ApplicationWindow {
     // the page.
     EraseDialog { }
 
+    CodeDialog {
+        id: codeDialog
+
+        onCodeTyped: code => window.openProfileDialog("new", null, code)
+    }
+
+    ProfileDialog {
+        id: profileDialog
+    }
+
+    ProfileRemoval {
+        id: profileRemoval
+    }
+
     ImportDialog {
         id: importDialog
     }
@@ -467,7 +590,10 @@ ApplicationWindow {
     Component {
         id: settingsScreen
 
-        SettingsView { }
+        SettingsView {
+            onProfileDialogAsked: (mode, profile) => window.openProfileDialog(mode, profile)
+            onProfileRemovalAsked: profile => window.removeProfile(profile)
+        }
     }
 
     Component {
@@ -477,6 +603,14 @@ ApplicationWindow {
             // The import belongs to the window, not to a row: a dialog opened from inside a
             // list would go with the list the moment its model answers again.
             onReimportAsked: importDialog.show()
+        }
+    }
+
+    Connections {
+        target: Profiles
+
+        function onSwitched() {
+            window.readAsAnotherProfile()
         }
     }
 

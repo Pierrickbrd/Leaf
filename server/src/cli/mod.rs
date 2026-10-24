@@ -6,6 +6,7 @@
 
 pub mod device;
 pub mod env_file;
+pub mod profile;
 
 use std::collections::BTreeMap;
 use std::path::Path;

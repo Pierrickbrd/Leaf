@@ -89,6 +89,8 @@ qt_add_executable(leaf-desktop
     src/Preferences.cpp
     src/Health.h
     src/Health.cpp
+    src/Profiles.h
+    src/Profiles.cpp
     src/Scan.h
     src/Scan.cpp
     src/Shelf.cpp
@@ -155,6 +157,11 @@ set(LEAF_QML
     qml/LeafMenu.qml
     qml/LeafMenuItem.qml
     qml/AppBar.qml
+    qml/ProfileSquare.qml
+    qml/WhoReads.qml
+    qml/CodeDialog.qml
+    qml/ProfileDialog.qml
+    qml/ProfileRemoval.qml
     qml/FilterChip.qml
     qml/GenrePill.qml
     qml/FilterPills.qml
@@ -166,6 +173,9 @@ set(LEAF_QML
     qml/SeriesTile.qml
     qml/ShelfSkeleton.qml
     qml/SettingsView.qml
+    qml/ProfilesSection.qml
+    qml/DevicesSection.qml
+    qml/AboutSection.qml
     qml/SettingsTabs.qml
     qml/SettingsCard.qml
     qml/SettingsChoice.qml
@@ -228,6 +238,7 @@ endforeach()
 set(LEAF_IMAGES
     qml/assets/cover-shadow-light.png
     qml/assets/cover-shadow-dark.png
+    qml/assets/icons/add.svg
     qml/assets/icons/add_link.svg
     qml/assets/icons/arrow_back.svg
     qml/assets/icons/book.svg
@@ -241,6 +252,7 @@ set(LEAF_IMAGES
     qml/assets/icons/collections_bookmark.svg
     qml/assets/icons/content_copy.svg
     qml/assets/icons/contrast.svg
+    qml/assets/icons/crown.svg
     qml/assets/icons/dark_mode.svg
     qml/assets/icons/delete.svg
     qml/assets/icons/done_all.svg
@@ -252,9 +264,11 @@ set(LEAF_IMAGES
     qml/assets/icons/error.svg
     qml/assets/icons/library_add.svg
     qml/assets/icons/light_mode.svg
+    qml/assets/icons/lock.svg
     qml/assets/icons/more_vert.svg
     qml/assets/icons/public.svg
     qml/assets/icons/refresh.svg
+    qml/assets/icons/remove.svg
     qml/assets/icons/remove_done.svg
     qml/assets/icons/search.svg
     qml/assets/icons/settings.svg
@@ -428,6 +442,7 @@ qt_add_executable(crosses-the-seam
     src/Captions.h src/Captions.cpp
     src/Filters.h src/Filters.cpp
     src/Health.h src/Health.cpp
+    src/Profiles.h src/Profiles.cpp
     src/Scan.h src/Scan.cpp
     src/Preferences.h src/Preferences.cpp
     src/Resume.h src/Resume.cpp
@@ -662,6 +677,19 @@ target_include_directories(holds-the-server-state PRIVATE src)
 target_link_libraries(holds-the-server-state PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
 add_test(NAME holds-the-server-state COMMAND holds-the-server-state)
+
+# Who reads. A refusal can arrive while any screen is on show, so the model is headless.
+qt_add_executable(holds-the-profiles
+    tests/holds_the_profiles.cpp tests/Pretend.h
+    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
+    src/Profiles.h src/Profiles.cpp)
+target_include_directories(holds-the-profiles PRIVATE src)
+target_link_libraries(holds-the-profiles PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME holds-the-profiles COMMAND holds-the-profiles)
 
 qt_add_executable(holds-the-filters
     tests/holds_the_filters.cpp tests/Pretend.h

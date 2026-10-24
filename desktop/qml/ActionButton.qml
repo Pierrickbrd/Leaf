@@ -113,6 +113,8 @@ Rectangle {
         anchors.leftMargin: 8
         anchors.verticalCenter: parent.verticalCenter
         text: pill.label
+        // « Supprimer X » carries a profile's name, which is shown as typed, never as markup.
+        textFormat: Text.PlainText
         // The word of a button that cannot fire is faint, not the dark that sits on emerald:
         // on the sunk hollow of a disabled pill that dark was one shade off invisible.
         color: pill.ready ? Theme.onEmerald : Theme.inkFaint

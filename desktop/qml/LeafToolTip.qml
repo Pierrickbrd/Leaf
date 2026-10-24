@@ -27,6 +27,9 @@ ToolTip {
     contentItem: Text {
         objectName: tip.objectName.length > 0 ? tip.objectName + "-text" : ""
         text: tip.text
+        // Plain, never rich: a name typed on another device — « <b>x</b> » — is shown as
+        // typed, not drawn as markup.
+        textFormat: Text.PlainText
         color: Theme.ink
         font: tip.font
         wrapMode: Text.Wrap

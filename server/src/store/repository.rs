@@ -35,27 +35,55 @@ use crate::store::{Cx, Db};
 /// un-happens it. The per-volume mark keeps using `finished`, since a volume being re-read
 /// *is* in progress: a series can be read while one of its files is not, and that is the
 /// answer both were trying to give with one column.
-const READ_STATUS: &str = "CASE
+///
+/// **One profile's progress, never the table's.** Read across every profile, a volume a
+/// parent had finished showed as read on the child's shelf, and the « Non lues » filter
+/// hid it from the child — one reader's history passing for another's.
+fn read_status(profile: &str) -> String {
+    let profile = literal(profile);
+    format!(
+        "CASE
     WHEN (SELECT COUNT(*) FROM progress p
-          WHERE p.edition_id = e.id AND (p.times_finished > 0 OR p.page > 0)) = 0
+          WHERE p.edition_id = e.id AND p.profile_id = {profile}
+            AND (p.times_finished > 0 OR p.page > 0)) = 0
          THEN 'UNREAD'
     WHEN (SELECT COUNT(*) FROM progress p
-          WHERE p.edition_id = e.id AND p.times_finished > 0)
+          WHERE p.edition_id = e.id AND p.profile_id = {profile} AND p.times_finished > 0)
          >= (SELECT COUNT(*) FROM entry x WHERE x.edition_id = e.id) THEN 'READ'
     ELSE 'IN_PROGRESS'
-  END";
+  END"
+    )
+}
 
-/// The status of one file. `READ_STATUS` above answers for a whole edition — every volume
+/// The status of one file. `read_status` above answers for a whole edition — every volume
 /// finished — which is not a question that can be asked of a single volume. A chapter takes
 /// the status of the entry it lives in: opening a volume is opening the chapters in it.
-const FILE_READ_STATUS: &str = "CASE
+fn file_read_status(profile: &str) -> String {
+    let profile = literal(profile);
+    format!(
+        "CASE
     WHEN (SELECT COUNT(*) FROM progress p
-          WHERE p.entry_id = search.entry_id AND (p.finished = 1 OR p.page > 0)) = 0
+          WHERE p.entry_id = search.entry_id AND p.profile_id = {profile}
+            AND (p.finished = 1 OR p.page > 0)) = 0
          THEN 'UNREAD'
     WHEN (SELECT COUNT(*) FROM progress p
-          WHERE p.entry_id = search.entry_id AND p.finished = 1) > 0 THEN 'READ'
+          WHERE p.entry_id = search.entry_id AND p.profile_id = {profile}
+            AND p.finished = 1) > 0 THEN 'READ'
     ELSE 'IN_PROGRESS'
-  END";
+  END"
+    )
+}
+
+/// A profile's id as an SQL string literal, its quotes doubled — SQLite has no other escape
+/// inside one, so nothing in it can end the string early.
+///
+/// Written in rather than bound for the reason [`Ceiling`] is: these fragments are spliced
+/// into statements whose positional parameters come from filters of varying length, some of
+/// them several times over. An id is sixteen hex digits or `default`, drawn by this server;
+/// the doubling is there so that safety does not depend on it staying so.
+fn literal(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
 
 fn read_facet(r: &Row) -> rusqlite::Result<FacetDto> {
     Ok(FacetDto {
@@ -66,6 +94,80 @@ fn read_facet(r: &Row) -> rusqlite::Result<FacetDto> {
 
 /// Well under SQLite's parameter ceiling, and above any page the API hands out.
 const CHUNK: usize = 400;
+
+/// The oldest a series may be rated for the caller to see it: `None` for no limit, `Some(n)`
+/// for a restricted profile of `n`, who sees only the works whose `age` is known **and** at
+/// most `n`. A work nobody rated has no age, and is hidden — the mistake this exists to
+/// prevent is a child opening something no adult ever looked at.
+///
+/// Every function here that lists or reads a series, a work, an entry, a chapter, an arc or
+/// a universe takes one, and the condition goes **into its query**. Filtered in Rust after
+/// the fact, a page of a hundred would come back with eighty, `total` would count what the
+/// page then hid, and a facet would still offer the author only hidden series carry.
+///
+/// The number is written into the SQL rather than bound. It is a `u8` read from the
+/// profile, never text from the wire, so nothing can be injected through it; and binding it
+/// would shift every positional parameter of the queries it is added to, which are built
+/// from filters of varying length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Ceiling(pub Option<u8>);
+
+impl Ceiling {
+    /// No limit: the principal, an old key, an open library — and the scanner and the write
+    /// paths, which read the index for themselves and show nothing to anyone.
+    pub const NONE: Ceiling = Ceiling(None);
+
+    /// The condition on a query that already joins `work` under `work`, or nothing.
+    fn on_work(&self, work: &str) -> Option<String> {
+        self.0
+            .map(|age| format!("{work}.age IS NOT NULL AND {work}.age <= {age}"))
+    }
+
+    /// `AND` the condition, for a query that joins `work` under `work`.
+    pub(crate) fn and_work(&self, work: &str) -> String {
+        self.on_work(work)
+            .map(|c| format!(" AND {c}"))
+            .unwrap_or_default()
+    }
+
+    /// `AND` the condition, for a query that knows only an edition's id — an entry, a
+    /// chapter, a page, a row of the search index. A correlated `EXISTS` rather than a join,
+    /// so the query keeps the shape and the rows it had without a ceiling.
+    pub(crate) fn and_edition(&self, edition: &str) -> String {
+        match self.on_work("ceiling_w") {
+            None => String::new(),
+            Some(condition) => format!(
+                " AND EXISTS (SELECT 1 FROM edition ceiling_e
+                              JOIN work ceiling_w ON ceiling_w.id = ceiling_e.work_id
+                              WHERE ceiling_e.id = {edition} AND {condition})"
+            ),
+        }
+    }
+}
+
+/// The rows of a LEFT JOIN from the thing asked for onto what it holds: no row at all when
+/// the thing is not there — or not there for this caller — and one row of nothing when it is
+/// there and empty. Which is how "is it there?" and "what does it hold?" are one question:
+/// asked as two, each of these routes would pay a second statement on every call for the
+/// rare one that answers 404.
+fn held<T>(rows: Vec<Option<T>>) -> Option<Vec<T>> {
+    if rows.is_empty() {
+        return None;
+    }
+    Some(rows.into_iter().flatten().collect())
+}
+
+/// One row of such a join: `None` when the joined side is empty, which its first column
+/// being NULL says.
+fn joined<T>(
+    r: &Row<'_>,
+    map: impl Fn(&Row<'_>) -> rusqlite::Result<T>,
+) -> rusqlite::Result<Option<T>> {
+    if r.get_ref(0)? == rusqlite::types::ValueRef::Null {
+        return Ok(None);
+    }
+    map(r).map(Some)
+}
 
 pub struct Repository<'a> {
     db: &'a Db,
@@ -83,7 +185,7 @@ impl<'a> Repository<'a> {
         Repository { db }
     }
 
-    fn build_where(filter: &SeriesFilter) -> Where {
+    fn build_where(filter: &SeriesFilter, profile: &str, ceiling: &Ceiling) -> Where {
         let mut clauses: Vec<String> = Vec::new();
         let mut args: Vec<Value> = Vec::new();
 
@@ -105,7 +207,7 @@ impl<'a> Repository<'a> {
         keep("COALESCE(e.medium, w.medium)", &filter.media);
         keep("COALESCE(e.status, w.status)", &filter.statuses);
         keep("e.language", &filter.languages);
-        keep(READ_STATUS, &filter.read_statuses);
+        keep(&read_status(profile), &filter.read_statuses);
         keep("e.publisher", &filter.publishers);
 
         if !filter.genres.is_empty() {
@@ -126,6 +228,7 @@ impl<'a> Repository<'a> {
             ));
             args.extend(filter.authors.iter().map(|a| Value::Text(search_key(a))));
         }
+        clauses.extend(ceiling.on_work("w"));
 
         Where {
             sql: if clauses.is_empty() {
@@ -140,8 +243,13 @@ impl<'a> Repository<'a> {
     /// How many series a filter matches, without building a single one of them.
     ///
     /// What lets a client show a page and still know what it has not asked for yet.
-    pub fn count_series(&self, filter: &SeriesFilter) -> Result<i64> {
-        let w = Self::build_where(filter);
+    pub fn count_series(
+        &self,
+        filter: &SeriesFilter,
+        profile: &str,
+        ceiling: &Ceiling,
+    ) -> Result<i64> {
+        let w = Self::build_where(filter, profile, ceiling);
         let sql = format!(
             "SELECT COUNT(*) FROM edition e
              JOIN work w ON w.id = e.work_id
@@ -171,10 +279,23 @@ impl<'a> Repository<'a> {
         sort: SeriesSort,
         limit: i64,
         offset: i64,
+        profile: &str,
+        ceiling: &Ceiling,
     ) -> Result<Vec<SeriesDto>> {
-        self.series_ordered(filter, sort, sort.natural_direction(), limit, offset)
+        self.series_ordered(
+            filter,
+            sort,
+            sort.natural_direction(),
+            limit,
+            offset,
+            profile,
+            ceiling,
+        )
     }
 
+    /// Eight arguments since the profile and the ceiling joined the page: the shelf is now
+    /// somebody's. Each is read off the request or the caller and passed through as it is.
+    #[allow(clippy::too_many_arguments)]
     pub fn series_ordered(
         &self,
         filter: &SeriesFilter,
@@ -182,8 +303,12 @@ impl<'a> Repository<'a> {
         direction: SortDirection,
         limit: i64,
         offset: i64,
+        profile: &str,
+        ceiling: &Ceiling,
     ) -> Result<Vec<SeriesDto>> {
-        let w = Self::build_where(filter);
+        let w = Self::build_where(filter, profile, ceiling);
+        let read_status = read_status(profile);
+        let mine = literal(profile);
         let mut args = w.args;
         let window = if limit <= 0 {
             String::new()
@@ -201,7 +326,7 @@ impl<'a> Repository<'a> {
                     COALESCE(e.medium, w.medium) AS medium,
                     COALESCE(e.reading_direction, w.reading_direction) AS reading_direction,
                     u.id AS universe_id, u.name AS universe,
-                    {READ_STATUS} AS read_status,
+                    {read_status} AS read_status,
                     (SELECT COUNT(*) FROM entry   x WHERE x.edition_id = e.id) AS entry_count,
                     -- A whole book, and the file to open. Guarded on holding exactly one
                     -- entry as well as on the declaration: an archive that says it is a
@@ -217,7 +342,8 @@ impl<'a> Repository<'a> {
                     -- for one number, which is the shape `store/db.rs` counts statements to
                     -- make visible.
                     (SELECT COUNT(*) FROM progress p
-                     WHERE p.edition_id = e.id AND p.finished = 1) AS read_entries,
+                     WHERE p.edition_id = e.id AND p.profile_id = {mine}
+                       AND p.finished = 1) AS read_entries,
                     -- Summed and not taken from the latest: a reader who left volume three
                     -- at its middle and went on to volume four is somewhere past four
                     -- volumes, and reading only the last position would put them at one.
@@ -229,13 +355,13 @@ impl<'a> Repository<'a> {
                               THEN MIN(1.0, p.page * 1.0 / x.page_count)
                               ELSE 0 END), 0)
                      FROM progress p JOIN entry x ON x.id = p.entry_id
-                     WHERE p.edition_id = e.id) AS part_read,
+                     WHERE p.edition_id = e.id AND p.profile_id = {mine}) AS part_read,
                     (SELECT COUNT(*) FROM chapter c WHERE c.edition_id = e.id) AS chapter_count,
                     (SELECT COUNT(*) FROM arc     a WHERE a.edition_id = e.id) AS arc_count,
                     (SELECT MIN(x.added_at) FROM entry x WHERE x.edition_id = e.id) AS added_at,
                     (SELECT MAX(x.added_at) FROM entry x WHERE x.edition_id = e.id) AS last_added_at,
-                    (SELECT MAX(p.updated_at) FROM progress p WHERE p.edition_id = e.id)
-                        AS last_read_at
+                    (SELECT MAX(p.updated_at) FROM progress p
+                     WHERE p.edition_id = e.id AND p.profile_id = {mine}) AS last_read_at
              FROM edition e
              JOIN work w ON w.id = e.work_id
              LEFT JOIN universe u ON u.id = w.universe_id
@@ -343,16 +469,33 @@ impl<'a> Repository<'a> {
     /// Reached through the filter rather than by building every series and throwing all but
     /// one away — which is what this used to do, so opening a single series cost exactly as
     /// much as listing the whole library.
-    pub fn one_series(&self, id: &str) -> Result<Option<SeriesDto>> {
+    pub fn one_series(
+        &self,
+        id: &str,
+        profile: &str,
+        ceiling: &Ceiling,
+    ) -> Result<Option<SeriesDto>> {
         Ok(self
-            .series(&SeriesFilter::of(id), SeriesSort::Name, 0, 0)?
+            .series(
+                &SeriesFilter::of(id),
+                SeriesSort::Name,
+                0,
+                0,
+                profile,
+                ceiling,
+            )?
             .into_iter()
             .next())
     }
 
     /// The editions a filter admits — the set a search is then confined to.
-    pub fn editions_matching(&self, filter: &SeriesFilter) -> Result<Vec<String>> {
-        let w = Self::build_where(filter);
+    pub fn editions_matching(
+        &self,
+        filter: &SeriesFilter,
+        profile: &str,
+        ceiling: &Ceiling,
+    ) -> Result<Vec<String>> {
+        let w = Self::build_where(filter, profile, ceiling);
         let sql = format!(
             "SELECT e.id FROM edition e
              JOIN work w ON w.id = e.work_id
@@ -527,23 +670,29 @@ impl<'a> Repository<'a> {
     /// The expressions are the ones [`Repository::series`] filters on, COALESCE included, so
     /// a value can never be offered that the filter would then fail to match.
     /// Every universe, with the number of ways through it it declares.
-    pub fn universes(&self) -> Result<Vec<UniverseDto>> {
+    ///
+    /// Under a ceiling, a universe is there only if one of its works can be seen, and an
+    /// order counts only if one of its steps can: « Nuit » holding nothing but a series for
+    /// adults is not a shelf to show a child empty, it is a name that says what is behind it.
+    pub fn universes(&self, ceiling: &Ceiling) -> Result<Vec<UniverseDto>> {
+        let sql = format!(
+            "SELECT u.id, u.name,
+                    (SELECT COUNT(*) FROM reading_order o
+                     WHERE o.universe_id = u.id{orders}) AS order_count
+             FROM universe u
+             {universes}
+             ORDER BY u.name COLLATE LEAF ASC, u.id ASC",
+            orders = Self::visible_order(ceiling),
+            universes = Self::visible_universe(ceiling, "WHERE"),
+        );
         self.db.read(|cx| {
-            cx.query(
-                "SELECT u.id, u.name,
-                        (SELECT COUNT(*) FROM reading_order o WHERE o.universe_id = u.id)
-                          AS order_count
-                 FROM universe u
-                 ORDER BY u.name COLLATE LEAF ASC, u.id ASC",
-                [],
-                |r| {
-                    Ok(UniverseDto {
-                        id: r.get("id")?,
-                        name: r.get("name")?,
-                        order_count: r.get("order_count")?,
-                    })
-                },
-            )
+            cx.query(&sql, [], |r| {
+                Ok(UniverseDto {
+                    id: r.get("id")?,
+                    name: r.get("name")?,
+                    order_count: r.get("order_count")?,
+                })
+            })
         })
     }
 
@@ -552,13 +701,27 @@ impl<'a> Repository<'a> {
     /// Two queries whatever the answer holds, and never one per order: a universe with eight
     /// ways through it is the case this exists for, and asking per order is how a list that
     /// works on one becomes a list that crawls on eight.
-    pub fn orders_of_universe(&self, universe_id: &str) -> Result<Vec<ReadingOrderDto>> {
-        let orders: Vec<(String, ReadingOrderDto)> = self.db.read(|cx| {
-            cx.query(
-                "SELECT id, declared_id, name, is_default FROM reading_order
-                 WHERE universe_id = ?1 ORDER BY position",
-                [universe_id],
-                |r| {
+    ///
+    /// `None` for a universe that is not there, or that holds nothing the caller may see —
+    /// the same answer, so a 404 says nothing about which. A universe that is there and
+    /// declares no order is `Some` of nothing: the ordinary case, and true.
+    pub fn orders_of_universe(
+        &self,
+        universe_id: &str,
+        ceiling: &Ceiling,
+    ) -> Result<Option<Vec<ReadingOrderDto>>> {
+        let sql = format!(
+            "SELECT o.id, o.declared_id, o.name, o.is_default
+             FROM universe u
+             LEFT JOIN reading_order o ON o.universe_id = u.id{orders}
+             WHERE u.id = ?1{universe}
+             ORDER BY o.position",
+            orders = Self::visible_order(ceiling),
+            universe = Self::visible_universe(ceiling, "AND"),
+        );
+        let orders = self.db.read(|cx| {
+            cx.query(&sql, [universe_id], |r| {
+                joined(r, |r| {
                     Ok((
                         r.get::<_, String>("id")?,
                         ReadingOrderDto {
@@ -568,72 +731,104 @@ impl<'a> Repository<'a> {
                             steps: Vec::new(),
                         },
                     ))
-                },
-            )
+                })
+            })
         })?;
+        let Some(orders) = held(orders) else {
+            return Ok(None);
+        };
         if orders.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Some(Vec::new()));
         }
 
+        let sql = format!(
+            "SELECT s.order_id, s.work_id, w.name AS work, s.unit,
+                    s.edition_id, e.name AS edition, e.id AS series_id,
+                    s.from_number, s.to_number
+             FROM reading_order_step s
+             JOIN reading_order o ON o.id = s.order_id
+             JOIN work w ON w.id = s.work_id
+             LEFT JOIN edition e ON e.id = s.edition_id
+             WHERE o.universe_id = ?1{}
+             ORDER BY s.order_id, s.position",
+            ceiling.and_work("w")
+        );
         let steps: Vec<(String, ReadingStepDto)> = self.db.read(|cx| {
-            cx.query(
-                "SELECT s.order_id, s.work_id, w.name AS work, s.unit,
-                        s.edition_id, e.name AS edition, e.id AS series_id,
-                        s.from_number, s.to_number
-                 FROM reading_order_step s
-                 JOIN reading_order o ON o.id = s.order_id
-                 JOIN work w ON w.id = s.work_id
-                 LEFT JOIN edition e ON e.id = s.edition_id
-                 WHERE o.universe_id = ?1
-                 ORDER BY s.order_id, s.position",
-                [universe_id],
-                |r| {
-                    let edition: Option<String> = r.get("edition")?;
-                    Ok((
-                        r.get::<_, String>("order_id")?,
-                        ReadingStepDto {
-                            work_id: r.get("work_id")?,
-                            work: r.get("work")?,
-                            unit: r.get("unit")?,
-                            series_id: r.get("series_id")?,
-                            // An implicit edition carries no name of its own, so the work's
-                            // is what a reader would call it.
-                            series: match (r.get::<_, Option<String>>("series_id")?, edition) {
-                                (Some(_), Some(name)) => Some(name),
-                                (Some(_), None) => Some(r.get("work")?),
-                                (None, _) => None,
-                            },
-                            from: r.get("from_number")?,
-                            to: r.get("to_number")?,
+            cx.query(&sql, [universe_id], |r| {
+                let edition: Option<String> = r.get("edition")?;
+                Ok((
+                    r.get::<_, String>("order_id")?,
+                    ReadingStepDto {
+                        work_id: r.get("work_id")?,
+                        work: r.get("work")?,
+                        unit: r.get("unit")?,
+                        series_id: r.get("series_id")?,
+                        // An implicit edition carries no name of its own, so the work's
+                        // is what a reader would call it.
+                        series: match (r.get::<_, Option<String>>("series_id")?, edition) {
+                            (Some(_), Some(name)) => Some(name),
+                            (Some(_), None) => Some(r.get("work")?),
+                            (None, _) => None,
                         },
-                    ))
-                },
-            )
+                        from: r.get("from_number")?,
+                        to: r.get("to_number")?,
+                    },
+                ))
+            })
         })?;
 
         let mut by_order: HashMap<String, Vec<ReadingStepDto>> = HashMap::new();
         for (order_id, step) in steps {
             by_order.entry(order_id).or_default().push(step);
         }
-        Ok(orders
-            .into_iter()
-            .map(|(row_id, mut order)| {
-                order.steps = by_order.remove(&row_id).unwrap_or_default();
-                order
-            })
-            .collect())
+        Ok(Some(
+            orders
+                .into_iter()
+                .map(|(row_id, mut order)| {
+                    order.steps = by_order.remove(&row_id).unwrap_or_default();
+                    order
+                })
+                .collect(),
+        ))
     }
 
-    pub fn facets(&self) -> Result<FacetsDto> {
+    /// `AND` an order holding at least one step the caller may see, for a query naming the
+    /// order `o` — or nothing, without a ceiling, where an order counts as it always did.
+    fn visible_order(ceiling: &Ceiling) -> String {
+        match ceiling.on_work("ow") {
+            None => String::new(),
+            Some(condition) => format!(
+                " AND EXISTS (SELECT 1 FROM reading_order_step os
+                              JOIN work ow ON ow.id = os.work_id
+                              WHERE os.order_id = o.id AND {condition})"
+            ),
+        }
+    }
+
+    /// The universe `u` holding at least one work the caller may see, after `joiner`.
+    fn visible_universe(ceiling: &Ceiling, joiner: &str) -> String {
+        match ceiling.on_work("uw") {
+            None => String::new(),
+            Some(condition) => format!(
+                " {joiner} EXISTS (SELECT 1 FROM work uw
+                                   WHERE uw.universe_id = u.id AND {condition})"
+            ),
+        }
+    }
+
+    /// Under a ceiling, counted over what the caller may see: a value only hidden series
+    /// carry is not offered, since offering « Bastien » to a child is saying that the
+    /// library holds something by him.
+    pub fn facets(&self, profile: &str, ceiling: &Ceiling) -> Result<FacetsDto> {
         Ok(FacetsDto {
-            read_statuses: self.facet(READ_STATUS)?,
-            universes: self.facet("u.name")?,
-            authors: self.author_facet()?,
-            genres: self.genre_facet()?,
-            media: self.facet("COALESCE(e.medium, w.medium)")?,
-            statuses: self.facet("COALESCE(e.status, w.status)")?,
-            languages: self.facet("e.language")?,
-            publishers: self.facet("e.publisher")?,
+            read_statuses: self.facet(&read_status(profile), ceiling)?,
+            universes: self.facet("u.name", ceiling)?,
+            authors: self.name_facet("work_author", ceiling)?,
+            genres: self.name_facet("work_genre", ceiling)?,
+            media: self.facet("COALESCE(e.medium, w.medium)", ceiling)?,
+            statuses: self.facet("COALESCE(e.status, w.status)", ceiling)?,
+            languages: self.facet("e.language", ceiling)?,
+            publishers: self.facet("e.publisher", ceiling)?,
         })
     }
 
@@ -647,32 +842,39 @@ impl<'a> Repository<'a> {
     /// Every axis, so that a panel offering eight of them can be opened in the files scope
     /// and show the same word with the same number as the row above it. Counting only two
     /// here made « Non lues » read 5 in one place and 59 in the other, on one screen.
-    pub fn file_facets(&self, query: &str) -> Result<FacetsDto> {
+    pub fn file_facets(&self, query: &str, profile: &str, ceiling: &Ceiling) -> Result<FacetsDto> {
         const UNIVERSE: &str = "LEFT JOIN universe u ON u.id = w.universe_id";
+        let c = ceiling;
         Ok(FacetsDto {
-            read_statuses: self.file_facet(FILE_READ_STATUS, "", query)?,
-            media: self.file_facet("COALESCE(e.medium, w.medium)", "", query)?,
-            universes: self.file_facet("u.name", UNIVERSE, query)?,
-            statuses: self.file_facet("COALESCE(e.status, w.status)", "", query)?,
-            languages: self.file_facet("e.language", "", query)?,
-            publishers: self.file_facet("e.publisher", "", query)?,
-            authors: self.file_name_facet("work_author", query)?,
-            genres: self.file_name_facet("work_genre", query)?,
+            read_statuses: self.file_facet(&file_read_status(profile), "", query, c)?,
+            media: self.file_facet("COALESCE(e.medium, w.medium)", "", query, c)?,
+            universes: self.file_facet("u.name", UNIVERSE, query, c)?,
+            statuses: self.file_facet("COALESCE(e.status, w.status)", "", query, c)?,
+            languages: self.file_facet("e.language", "", query, c)?,
+            publishers: self.file_facet("e.publisher", "", query, c)?,
+            authors: self.file_name_facet("work_author", query, c)?,
+            genres: self.file_name_facet("work_genre", query, c)?,
         })
     }
 
     /// Authors and genres live one row per name, so they are counted through their own table
     /// and grouped on the folded key — « Shônen » and « shonen » are one genre. Shown under
     /// the spelling the files use, which is what `MIN(name)` picks.
-    fn file_name_facet(&self, table: &str, query: &str) -> Result<Vec<FacetDto>> {
+    fn file_name_facet(
+        &self,
+        table: &str,
+        query: &str,
+        ceiling: &Ceiling,
+    ) -> Result<Vec<FacetDto>> {
         let (narrowed, wanted) = Self::file_narrowing(query);
+        let visible = ceiling.and_work("w");
         let sql = format!(
             "SELECT MIN(t.name) AS value, COUNT(*) AS n
              FROM search
              JOIN edition e ON e.id = search.edition_id
              JOIN work w ON w.id = e.work_id
              JOIN {table} t ON t.work_id = w.id
-             WHERE search.kind IN ('ENTRY', 'CHAPTER') {narrowed}
+             WHERE search.kind IN ('ENTRY', 'CHAPTER') {narrowed}{visible}
              GROUP BY t.key
              ORDER BY n DESC, LOWER(value)"
         );
@@ -699,18 +901,25 @@ impl<'a> Repository<'a> {
         (narrowed, wanted)
     }
 
-    fn file_facet(&self, expression: &str, join: &str, query: &str) -> Result<Vec<FacetDto>> {
+    fn file_facet(
+        &self,
+        expression: &str,
+        join: &str,
+        query: &str,
+        ceiling: &Ceiling,
+    ) -> Result<Vec<FacetDto>> {
         // A file is an ENTRY or a CHAPTER; an EDITION hit is the series itself and is
         // counted by the other row. Both kinds carry the entry they live in, which is what
         // makes a chapter's read status the status of the volume holding it.
         let (narrowed, wanted) = Self::file_narrowing(query);
+        let visible = ceiling.and_work("w");
         let sql = format!(
             "SELECT {expression} AS value, COUNT(*) AS n
              FROM search
              JOIN edition e ON e.id = search.edition_id
              JOIN work w ON w.id = e.work_id
              {join}
-             WHERE search.kind IN ('ENTRY', 'CHAPTER') {narrowed}
+             WHERE search.kind IN ('ENTRY', 'CHAPTER') {narrowed}{visible}
                AND TRIM(COALESCE({expression}, '')) <> ''
              GROUP BY value
              ORDER BY n DESC, LOWER(value)"
@@ -724,13 +933,14 @@ impl<'a> Repository<'a> {
         })
     }
 
-    fn facet(&self, expression: &str) -> Result<Vec<FacetDto>> {
+    fn facet(&self, expression: &str, ceiling: &Ceiling) -> Result<Vec<FacetDto>> {
+        let visible = ceiling.and_work("w");
         let sql = format!(
             "SELECT {expression} AS value, COUNT(*) AS n
              FROM edition e
              JOIN work w ON w.id = e.work_id
              LEFT JOIN universe u ON u.id = w.universe_id
-             WHERE TRIM(COALESCE({expression}, '')) <> ''
+             WHERE TRIM(COALESCE({expression}, '')) <> ''{visible}
              GROUP BY value
              ORDER BY n DESC, LOWER(value)"
         );
@@ -744,101 +954,110 @@ impl<'a> Repository<'a> {
         })
     }
 
-    /// Grouped on the folded key, shown under the spelling the files use.
-    fn genre_facet(&self) -> Result<Vec<FacetDto>> {
-        self.db.read(|cx| {
-            cx.query(
-                "SELECT MIN(g.name) AS value, COUNT(*) AS n
-                 FROM work_genre g
-                 JOIN edition e ON e.work_id = g.work_id
-                 GROUP BY g.key
-                 ORDER BY n DESC, LOWER(value)",
-                [],
-                |r| {
-                    Ok(FacetDto {
-                        value: r.get::<_, String>(0)?.trim().to_string(),
-                        count: r.get(1)?,
-                    })
-                },
-            )
-        })
-    }
-
-    /// The same grouping as [`Self::genre_facet`], over the table that replaced the single
-    /// `work.author` column.
-    fn author_facet(&self) -> Result<Vec<FacetDto>> {
-        self.db.read(|cx| {
-            cx.query(
-                "SELECT MIN(a.name) AS value, COUNT(*) AS n
-                 FROM work_author a
-                 JOIN edition e ON e.work_id = a.work_id
-                 GROUP BY a.key
-                 ORDER BY n DESC, LOWER(value)",
-                [],
-                |r| {
-                    Ok(FacetDto {
-                        value: r.get::<_, String>(0)?.trim().to_string(),
-                        count: r.get(1)?,
-                    })
-                },
-            )
-        })
+    /// Authors and genres, grouped on the folded key and shown under the spelling the files
+    /// use. One function for both tables: they were two copies of the same statement, and
+    /// the ceiling would have had to be remembered in each.
+    fn name_facet(&self, table: &str, ceiling: &Ceiling) -> Result<Vec<FacetDto>> {
+        let visible = ceiling.and_work("w");
+        let sql = format!(
+            "SELECT MIN(t.name) AS value, COUNT(*) AS n
+             FROM {table} t
+             JOIN edition e ON e.work_id = t.work_id
+             JOIN work w ON w.id = t.work_id
+             WHERE 1 = 1{visible}
+             GROUP BY t.key
+             ORDER BY n DESC, LOWER(value)"
+        );
+        self.db.read(|cx| cx.query(&sql, [], read_facet))
     }
 
     // ----------------------------------------------------------------- entries
 
     /// Ordered by sort key: the first chapter's number, otherwise the volume number.
-    pub fn entries(&self, edition_id: &str) -> Result<Vec<EntryDto>> {
-        self.db.read(|cx| {
-            cx.query(
-                "SELECT e.*, (SELECT COUNT(*) FROM chapter c WHERE c.entry_id = e.id) AS chapter_count
-                 FROM entry e WHERE e.edition_id = ?1
-                 ORDER BY e.sort_key, e.file",
-                [edition_id],
-                to_entry,
-            )
-        })
+    ///
+    /// `None` when the series is not there for this caller, `Some` of nothing when it is and
+    /// holds nothing yet. The same split runs through every reader below: a hidden series
+    /// answers what an absent one does, a 404, and an empty one answers `[]`.
+    pub fn entries(&self, edition_id: &str, ceiling: &Ceiling) -> Result<Option<Vec<EntryDto>>> {
+        let sql = format!(
+            "SELECT x.id AS present, x.*,
+                    (SELECT COUNT(*) FROM chapter c WHERE c.entry_id = x.id) AS chapter_count
+             FROM edition ed
+             JOIN work w ON w.id = ed.work_id
+             LEFT JOIN entry x ON x.edition_id = ed.id
+             WHERE ed.id = ?1{}
+             ORDER BY x.sort_key, x.file",
+            ceiling.and_work("w")
+        );
+        let rows = self
+            .db
+            .read(|cx| cx.query(&sql, [edition_id], |r| joined(r, to_entry)))?;
+        Ok(held(rows))
     }
 
-    pub fn entry(&self, id: &str) -> Result<Option<EntryDto>> {
-        self.db.read(|cx| {
-            cx.query_one(
-                "SELECT e.*, (SELECT COUNT(*) FROM chapter c WHERE c.entry_id = e.id) AS chapter_count
-                 FROM entry e WHERE e.id = ?1",
-                [id],
-                to_entry,
-            )
-        })
+    pub fn entry(&self, id: &str, ceiling: &Ceiling) -> Result<Option<EntryDto>> {
+        let sql = format!(
+            "SELECT e.*, (SELECT COUNT(*) FROM chapter c WHERE c.entry_id = e.id) AS chapter_count
+             FROM entry e WHERE e.id = ?1{}",
+            ceiling.and_edition("e.edition_id")
+        );
+        self.db.read(|cx| cx.query_one(&sql, [id], to_entry))
     }
 
     /// A volume's markers, in reading order.
-    pub fn chapters_of_entry(&self, entry_id: &str) -> Result<Vec<ChapterDto>> {
-        self.db.read(|cx| {
-            cx.query(
-                "SELECT * FROM chapter WHERE entry_id = ?1 ORDER BY position",
-                [entry_id],
-                to_chapter,
-            )
-        })
+    pub fn chapters_of_entry(
+        &self,
+        entry_id: &str,
+        ceiling: &Ceiling,
+    ) -> Result<Option<Vec<ChapterDto>>> {
+        let sql = format!(
+            "SELECT c.id AS present, c.*
+             FROM entry x
+             LEFT JOIN chapter c ON c.entry_id = x.id
+             WHERE x.id = ?1{}
+             ORDER BY c.position",
+            ceiling.and_edition("x.edition_id")
+        );
+        let rows = self
+            .db
+            .read(|cx| cx.query(&sql, [entry_id], |r| joined(r, to_chapter)))?;
+        Ok(held(rows))
     }
 
     /// The whole edition sequence, volumes and standalone chapters alike.
-    pub fn chapters_of_edition(&self, edition_id: &str) -> Result<Vec<ChapterDto>> {
-        self.db.read(|cx| {
-            cx.query(
-                "SELECT * FROM chapter WHERE edition_id = ?1 ORDER BY position",
-                [edition_id],
-                to_chapter,
-            )
-        })
+    pub fn chapters_of_edition(
+        &self,
+        edition_id: &str,
+        ceiling: &Ceiling,
+    ) -> Result<Option<Vec<ChapterDto>>> {
+        let sql = format!(
+            "SELECT c.id AS present, c.*
+             FROM edition ed
+             JOIN work w ON w.id = ed.work_id
+             LEFT JOIN chapter c ON c.edition_id = ed.id
+             WHERE ed.id = ?1{}
+             ORDER BY c.position",
+            ceiling.and_work("w")
+        );
+        let rows = self
+            .db
+            .read(|cx| cx.query(&sql, [edition_id], |r| joined(r, to_chapter)))?;
+        Ok(held(rows))
     }
 
-    pub fn arcs(&self, edition_id: &str) -> Result<Vec<ArcDto>> {
-        self.db.read(|cx| {
-            cx.query(
-                "SELECT * FROM arc WHERE edition_id = ?1 ORDER BY position",
-                [edition_id],
-                |r| {
+    pub fn arcs(&self, edition_id: &str, ceiling: &Ceiling) -> Result<Option<Vec<ArcDto>>> {
+        let sql = format!(
+            "SELECT a.id AS present, a.*
+             FROM edition ed
+             JOIN work w ON w.id = ed.work_id
+             LEFT JOIN arc a ON a.edition_id = ed.id
+             WHERE ed.id = ?1{}
+             ORDER BY a.position",
+            ceiling.and_work("w")
+        );
+        let rows = self.db.read(|cx| {
+            cx.query(&sql, [edition_id], |r| {
+                joined(r, |r| {
                     Ok(ArcDto {
                         id: r.get("id")?,
                         parent_id: r.get("parent_id")?,
@@ -848,17 +1067,24 @@ impl<'a> Repository<'a> {
                         to: r.get("to_number")?,
                         position: r.get("position")?,
                     })
-                },
-            )
-        })
+                })
+            })
+        })?;
+        Ok(held(rows))
     }
 
-    pub fn pages(&self, entry_id: &str) -> Result<Vec<PageDto>> {
-        self.db.read(|cx| {
-            cx.query(
-                "SELECT * FROM page WHERE entry_id = ?1 ORDER BY number",
-                [entry_id],
-                |r| {
+    pub fn pages(&self, entry_id: &str, ceiling: &Ceiling) -> Result<Option<Vec<PageDto>>> {
+        let sql = format!(
+            "SELECT p.number AS present, p.*
+             FROM entry x
+             LEFT JOIN page p ON p.entry_id = x.id
+             WHERE x.id = ?1{}
+             ORDER BY p.number",
+            ceiling.and_edition("x.edition_id")
+        );
+        let rows = self.db.read(|cx| {
+            cx.query(&sql, [entry_id], |r| {
+                joined(r, |r| {
                     let width: Option<i64> = r.get("width")?;
                     let height: Option<i64> = r.get("height")?;
                     Ok(PageDto {
@@ -870,9 +1096,10 @@ impl<'a> Repository<'a> {
                         size: r.get("size")?,
                         spread: matches!((width, height), (Some(w), Some(h)) if w > h),
                     })
-                },
-            )
-        })
+                })
+            })
+        })?;
+        Ok(held(rows))
     }
 
     /// The work folder a series belongs to, so a rescan can be aimed at it rather than at
@@ -901,36 +1128,41 @@ impl<'a> Repository<'a> {
         })
     }
 
-    pub fn entry_path(&self, id: &str) -> Result<Option<String>> {
-        self.db.read(|cx| {
-            cx.query_one("SELECT file FROM entry WHERE id = ?1", [id], |r| {
-                r.get::<_, String>(0)
-            })
-        })
+    pub fn entry_path(&self, id: &str, ceiling: &Ceiling) -> Result<Option<String>> {
+        let sql = format!(
+            "SELECT x.file FROM entry x WHERE x.id = ?1{}",
+            ceiling.and_edition("x.edition_id")
+        );
+        self.db
+            .read(|cx| cx.query_one(&sql, [id], |r| r.get::<_, String>(0)))
     }
 
     /// Every series' display name, in one query.
     ///
     /// Read once by the search rather than inside the row mapper: as a computed property
     /// this ran the whole series query again for every single hit.
-    pub fn series_names(&self) -> Result<std::collections::HashMap<String, String>> {
+    pub fn series_names(
+        &self,
+        ceiling: &Ceiling,
+    ) -> Result<std::collections::HashMap<String, String>> {
+        let sql = format!(
+            "SELECT e.id, e.name AS edition, w.name AS work, u.name AS universe
+             FROM edition e
+             JOIN work w ON w.id = e.work_id
+             LEFT JOIN universe u ON u.id = w.universe_id
+             WHERE 1 = 1{}",
+            ceiling.and_work("w")
+        );
         self.db.read(|cx| {
-            let rows = cx.query(
-                "SELECT e.id, e.name AS edition, w.name AS work, u.name AS universe
-                 FROM edition e
-                 JOIN work w ON w.id = e.work_id
-                 LEFT JOIN universe u ON u.id = w.universe_id",
-                [],
-                |r| {
-                    let universe: Option<String> = r.get("universe")?;
-                    let work: String = r.get("work")?;
-                    let edition: Option<String> = r.get("edition")?;
-                    Ok((
-                        r.get::<_, String>("id")?,
-                        composed_name(universe.as_deref(), &work, edition.as_deref()),
-                    ))
-                },
-            )?;
+            let rows = cx.query(&sql, [], |r| {
+                let universe: Option<String> = r.get("universe")?;
+                let work: String = r.get("work")?;
+                let edition: Option<String> = r.get("edition")?;
+                Ok((
+                    r.get::<_, String>("id")?,
+                    composed_name(universe.as_deref(), &work, edition.as_deref()),
+                ))
+            })?;
             Ok(rows.into_iter().collect())
         })
     }
@@ -1014,21 +1246,23 @@ fn match_expression(terms: &[String]) -> String {
 /// la verticale » and « Âmes sœurs » sorted *after* Z — so an alphabet ran A, B, …, Z, À, Â,
 /// and turned round it opened on the accents. A French library cannot have an alphabet that
 /// puts a fifth of its titles past the end.
-fn search_order(sort: SeriesSort, direction: SortDirection) -> String {
+fn search_order(sort: SeriesSort, direction: SortDirection, profile: &str) -> String {
     let way = direction.sql();
     // Only the leading value reverses; ties keep their stable alphabetical order.
     let value = match sort {
         // A file carries its own arrival; an edition borrows its latest entry's.
-        SeriesSort::Added => {
-            "COALESCE(entry.added_at, (SELECT MAX(x.added_at) FROM entry x \
+        SeriesSort::Added => "COALESCE(entry.added_at, (SELECT MAX(x.added_at) FROM entry x \
              WHERE x.edition_id = search.edition_id), 0)"
-        }
-        SeriesSort::Read => {
+            .to_string(),
+        // The caller's last reading, as on the shelf: another profile's evening is not when
+        // this one last opened the series.
+        SeriesSort::Read => format!(
             "COALESCE((SELECT MAX(p.updated_at) FROM progress p \
-             WHERE p.edition_id = search.edition_id), 0)"
-        }
+             WHERE p.edition_id = search.edition_id AND p.profile_id = {}), 0)",
+            literal(profile)
+        ),
         SeriesSort::Volumes => {
-            "(SELECT COUNT(*) FROM entry x WHERE x.edition_id = search.edition_id)"
+            "(SELECT COUNT(*) FROM entry x WHERE x.edition_id = search.edition_id)".to_string()
         }
         SeriesSort::Name => {
             return format!("search.name {way}, search.kind {way}, search.ref {way}");
@@ -1057,14 +1291,19 @@ impl Repository<'_> {
         limit: i64,
         kinds: &[String],
         filter: &SeriesFilter,
+        profile: &str,
+        ceiling: &Ceiling,
     ) -> Result<Vec<SearchHitDto>> {
-        Ok(self.search_page(query, limit, 0, kinds, filter)?.items)
+        Ok(self
+            .search_page(query, limit, 0, kinds, filter, profile, ceiling)?
+            .items)
     }
 
     /// The same ranked search, one bounded window and its exact counts.
     ///
     /// Editions still travel with the page because they carry approximate suggestions;
     /// `file_total` separately counts the ENTRY and CHAPTER levels a file list draws.
+    #[allow(clippy::too_many_arguments)]
     pub fn search_page(
         &self,
         query: &str,
@@ -1072,10 +1311,17 @@ impl Repository<'_> {
         page: i64,
         kinds: &[String],
         filter: &SeriesFilter,
+        profile: &str,
+        ceiling: &Ceiling,
     ) -> Result<SearchPageDto> {
-        self.search_page_ordered(query, size, page, kinds, filter, None)
+        self.search_page_ordered(query, size, page, kinds, filter, None, profile, ceiling)
     }
 
+    /// Nine arguments since the profile and the ceiling joined them. Each is one thing the
+    /// route read off the request or the caller, passed through untouched; a struct gathering
+    /// them would be built in one place and taken apart in the other, and say nothing either
+    /// does not.
+    #[allow(clippy::too_many_arguments)]
     pub fn search_page_ordered(
         &self,
         query: &str,
@@ -1084,6 +1330,8 @@ impl Repository<'_> {
         kinds: &[String],
         filter: &SeriesFilter,
         order: Option<(SeriesSort, SortDirection)>,
+        profile: &str,
+        ceiling: &Ceiling,
     ) -> Result<SearchPageDto> {
         let size = size.clamp(1, 200);
         let page = page.max(0);
@@ -1110,7 +1358,7 @@ impl Repository<'_> {
         let within = if filter.is_empty() {
             None
         } else {
-            let allowed = self.editions_matching(filter)?;
+            let allowed = self.editions_matching(filter, profile, ceiling)?;
             if allowed.is_empty() {
                 return Ok(SearchPageDto {
                     items: Vec::new(),
@@ -1125,7 +1373,7 @@ impl Repository<'_> {
 
         // Read once, here, and not inside the row mapper: as a computed property this ran
         // the whole series query again for every single hit.
-        let names = self.series_names()?;
+        let names = self.series_names(ceiling)?;
 
         let mut args: Vec<Value> = vec![Value::Text(expression)];
         let only_kinds = if wanted.is_empty() {
@@ -1141,15 +1389,18 @@ impl Repository<'_> {
                 format!("AND search.edition_id IN ({})", marks(ids.len()))
             }
         };
+        // Even inside `within`: that list is empty when no filter was given, and the ceiling
+        // holds whether or not anything else narrows the search.
+        let only_visible = ceiling.and_edition("search.edition_id");
 
         let count_sql = format!(
             "SELECT COUNT(*),
                     COALESCE(SUM(CASE WHEN search.kind IN ('ENTRY','CHAPTER') THEN 1 ELSE 0 END), 0)
              FROM search
-             WHERE search MATCH ? {only_kinds} {only_editions}"
+             WHERE search MATCH ? {only_kinds} {only_editions}{only_visible}"
         );
         let order_by = order
-            .map(|(sort, direction)| search_order(sort, direction))
+            .map(|(sort, direction)| search_order(sort, direction, profile))
             .unwrap_or_else(|| {
                 "bm25(search, 10.0, 1.0) * CASE search.kind WHEN 'EDITION' THEN 3.0 \
                  WHEN 'ENTRY' THEN 1.5 ELSE 1.0 END"
@@ -1167,7 +1418,7 @@ impl Repository<'_> {
                                       CASE WHEN search.kind = 'ENTRY' THEN search.ref END)
              LEFT JOIN chapter
                ON search.kind = 'CHAPTER' AND chapter.id = search.ref
-             WHERE search MATCH ? {only_kinds} {only_editions}
+             WHERE search MATCH ? {only_kinds} {only_editions}{only_visible}
              ORDER BY {order_by}
              LIMIT ? OFFSET ?"
         );
@@ -1218,7 +1469,7 @@ impl Repository<'_> {
         // reads what it compares, so what it reads has to stay bounded by the shelf — so it
         // is offered only when a series was among the things asked for.
         if total == 0 && (wanted.is_empty() || wanted.iter().any(|k| k == "EDITION")) {
-            let guesses = self.approximate(&terms, &names, 20, within.as_deref())?;
+            let guesses = self.approximate(&terms, &names, 20, within.as_deref(), ceiling)?;
             let total = guesses.len() as i64;
             let start = usize::try_from(offset).unwrap_or(usize::MAX);
             return Ok(SearchPageDto {
@@ -1264,6 +1515,7 @@ impl Repository<'_> {
         names: &std::collections::HashMap<String, String>,
         limit: i64,
         within: Option<&[String]>,
+        ceiling: &Ceiling,
     ) -> Result<Vec<SearchHitDto>> {
         if terms.iter().all(|t| tolerance(t) == 0) {
             return Ok(Vec::new());
@@ -1277,9 +1529,10 @@ impl Repository<'_> {
                 format!("AND edition_id IN ({})", marks(ids.len()))
             }
         };
+        let only_visible = ceiling.and_edition("search.edition_id");
         let sql = format!(
             "SELECT kind, ref, label, edition_id, entry_id, name, detail
-             FROM search WHERE kind = 'EDITION' {only_editions}"
+             FROM search WHERE kind = 'EDITION' {only_editions}{only_visible}"
         );
 
         let rows = self.db.read(|cx| {
@@ -1340,11 +1593,16 @@ impl Repository<'_> {
 impl Repository<'_> {
     /// The markers of several entries at once — what "up next" needs and asked for row by
     /// row.
-    pub fn chapters_of_entries(&self, entry_ids: &[String]) -> Result<Grouped<ChapterDto>> {
+    pub fn chapters_of_entries(
+        &self,
+        entry_ids: &[String],
+        ceiling: &Ceiling,
+    ) -> Result<Grouped<ChapterDto>> {
+        let visible = ceiling.and_edition("chapter.edition_id");
         self.grouped(entry_ids, |cx, part| {
             cx.query(
                 &format!(
-                    "SELECT * FROM chapter WHERE entry_id IN ({}) ORDER BY position",
+                    "SELECT * FROM chapter WHERE entry_id IN ({}){visible} ORDER BY position",
                     marks(part.len())
                 ),
                 rusqlite::params_from_iter(part.iter()),
@@ -1357,12 +1615,14 @@ impl Repository<'_> {
     pub fn entries_by_ids(
         &self,
         ids: &[String],
+        ceiling: &Ceiling,
     ) -> Result<std::collections::HashMap<String, EntryDto>> {
+        let visible = ceiling.and_edition("e.edition_id");
         let found = self.grouped(ids, |cx, part| {
             cx.query(
                 &format!(
                     "SELECT e.*, (SELECT COUNT(*) FROM chapter c WHERE c.entry_id = e.id) AS chapter_count
-                     FROM entry e WHERE e.id IN ({})",
+                     FROM entry e WHERE e.id IN ({}){visible}",
                     marks(part.len())
                 ),
                 rusqlite::params_from_iter(part.iter()),
