@@ -51,8 +51,8 @@ Four files carry the metadata, each holding only what belongs to its level:
 |---|---|---|
 | `universe.json` | universe folder | a name, a default order, and named reading orders |
 | `work.json` | work folder | title, authors, artists, status, reading direction, genres, tags, age rating |
-| `edition.json` | edition folder | publisher, collection, volume count, language, chapter label pattern (`Chap. {n}` when none is given), arcs, colour |
-| `entry.json` | **inside the CBZ** | number, title, chapters, their start pages and the volume they came from |
+| `edition.json` | edition folder | publisher, collection, volume count, language, chapter label pattern (`Chap. {n}` when none is given; `{n:000}` pads the number with zeros, and a pattern without `{n}` is followed by it), arcs, colour |
+| `entry.json` | **inside the CBZ** | number, title, chapters, their start pages and the volume they came from, the page chosen as its cover, its own credits (`authors`, `artists`) |
 
 `entry.json` lives inside the archive so a volume downloaded for offline reading carries its
 own chapter markers — otherwise "jump to chapter 103" stops working on a plane.
@@ -68,8 +68,11 @@ read-only is indexed exactly as before, by path, and the scan report says so.
 
 An entry has no identifier written anywhere: it is « this file, in this edition », so nothing
 is rewritten inside thousands of archives for one field. Renaming a *file* is therefore a new
-entry, and its reading position is lost — deliberately, because following a file through a
-rename would mean identifying it by its contents.
+entry for the index, and the scan follows it by its size in bytes, which a rename does not
+change: when exactly one volume of an edition has gone and exactly one new file of that size
+has appeared, the reading position and the date of arrival move across. Two volumes of the
+same size renamed together are not guessed, and a file renamed *and* modified is a new one —
+its position is lost, and counted in `progressLost`.
 
 **The sidecars decide what a folder is.** `Dragon Ball/{Perfect Edition, Original Edition}`
 and `Terres d'Arran/{Elfes, Mages}` have exactly the same shape on disk and opposite
@@ -77,10 +80,35 @@ meanings: one is a work in two editions, the other a universe of two works. No h
 tell them apart, which is what the level files are for. A folder that declares nothing and
 holds only folders is a **shelf** — walked through, not recorded.
 
-A cover can be chosen on disk rather than taken from page 0: drop `Tome 1.jpg` beside
-`Tome 1.cbz`, or `cover.jpg` in the folder to speak for the whole series. Page 0 is right
-most of the time and wrong often enough to matter — a colour insert, a scanlation credit —
-and overriding it should not mean editing the archive.
+An archive carrying `oneshot.json` declares itself a whole book: it becomes a work, an
+edition and an entry of its own, wherever it was dropped. Such a book may sit directly in a
+universe folder, beside the universe's works, and belongs to that universe; any other archive
+there belongs to no work, so the scan reports it rather than reading it.
+
+A cover can be chosen rather than taken from page 0. For a volume, in order: the `coverPage`
+its own `entry.json` names (a page of the archive, counted from 0 like `/entries/{id}/pages/{n}`,
+set with `PATCH /entries/{id}`); otherwise an image beside the archive, `Tome 1.jpg` for
+`Tome 1.cbz`; otherwise page 0 — except in a file whose pages are numbered from `001`
+(`001.jpg`, `001.webp`…): numbered from `000`, the file opens on its cover; from `001`, it has
+none, its first page is a page of the story, and it shows its series' cover instead. A file
+named any other way keeps its page 0. For a series: the image sent by the client (below); otherwise
+the volume its `coverVolume` names (a volume `number`, set with `PATCH /series/{id}`, `null` to
+withdraw it), shown as that volume shows itself; otherwise `cover.jpg` in the folder, otherwise
+its first volume's — when there is no cover anywhere, the first page of the first file.
+
+A cover can also come from an image on the reader's own disk: `PUT /series/{id}/cover` or
+`PUT /entries/{id}/cover` with the image as the body (edit right; JPEG, PNG or WebP, decoded in
+full, 20 MB at most). The server never takes a path: it writes the image itself, atomically, as
+`leaf-cover.png` in the series' folder or `Tome 1.leaf-cover.png` beside the archive, and that name
+is looked for **before** `cover.jpg` and `Tome 1.jpg`. A file placed by hand is never overwritten
+or removed, only outranked while the chosen image exists; `DELETE` on the same routes removes the
+image the server wrote and nothing else, so the folder's own image or the first volume speaks
+again. For a volume, a chosen page still beats an image, and sending an image clears the page
+chosen before it, so the last choice made is the one shown. For a series the rule is the same:
+sending an image forgets the `coverVolume` chosen before it, choosing a volume removes the
+`leaf-cover.*` the server wrote (never a `cover.jpg` placed by hand), and `DELETE` on the cover
+forgets both, so the last choice made is the one shown. Page 0 is right most of the time and wrong often enough to matter — a colour insert,
+a scanlation credit — and overriding it should not mean editing the archive.
 
 `ComicInfo.xml` is read as a fallback, so the server runs on an untouched library.
 
@@ -115,6 +143,23 @@ A whole work is a step without a range:
 { "work": "Dragon Ball" }
 ```
 
+A step may instead include another order of the same universe, whose steps are read in its
+place:
+
+```json
+{ "include": "terres-d-arran" }
+```
+
+The included order is designated by its `id`, or, when no order has that `id`, by its
+`name` (compared without case or accents). An order without an `id` is known by its name,
+and failing that by its rank. An including step carries nothing else: `work`, `unit`,
+`edition`, `from` and `to` next to `include` make it refused. A loop — an order that
+includes itself, directly or through others — refuses every inclusion that closes it, in
+every order of the loop, so that no order reads half a loop depending on where it is
+entered. An order that would grow past 4096 steps once its inclusions are read in place, or
+the orders of one universe past 16384 steps together, is kept without steps and the scan
+says so; so are the orders of a universe past its first 1024.
+
 The rules are:
 - an order lists only works currently present in the universe; a future work is added to
   the order when it is imported, not predeclared as an unresolved step;
@@ -125,8 +170,10 @@ The rules are:
 - chapter ranges are canonical because chapter numbers identify story content across
   differently divided editions;
 - a `CHAPTER` step never names an edition;
-- a `VOLUME` step always names its `edition`, because “volumes 1–7” describes different
-  content in a 42-volume edition and a 34-volume edition;
+- a `VOLUME` step names its `edition`, because “volumes 1–7” describes different
+  content in a 42-volume edition and a 34-volume edition; a work that has a single edition
+  needs no name for it (the one beside its archives has none), and the step is refused
+  again as soon as a second edition appears;
 - a reader's preferred edition is user state, not universe metadata, and progress remains
   attached to entries and editions;
 - an universe may offer several named orders, with one optional `defaultOrder`;
@@ -138,10 +185,10 @@ The rules are:
 whatever the answer holds.
 
 A step that cannot be resolved is **left out and reported**, never guessed at: a work the
-universe does not hold, a volume range naming no edition, a chapter range naming one, a
-range running backwards. The scan report says which order and which step, and everything
-else in the library is indexed regardless. An order that reaches a client is therefore
-always walkable.
+universe does not hold, a volume range naming no edition in a work that has several, a
+chapter range naming one, a range running backwards. The scan report says which order and
+which step, and everything else in the library is indexed regardless. An order that
+reaches a client is therefore always walkable.
 
 The rows are derived and rewritten whole at every scan — `universe.json` is the truth, and
 a half-updated order is an order that reads wrong.
@@ -328,6 +375,28 @@ nothing else; it now also holds the reading progress and the linked devices, whi
 cannot give back. Back up `LEAF_DB` (the folder that holds it, `tls/` included) the way you
 back up the library.
 
+It also remembers, for each archive an import rewrote, what it was made from: the size and
+checksum of the file that was sent, and the rewrite it was asked for. That is only a memory
+to compare against, so that the same folder announced again is recognised as already home —
+and the same file announced with another `entry.json` is not. Leaf's own later writes into
+such an archive (an edit, the stamp of a download) are followed; a change made by hand is
+not, and makes the archive a replacement again. Losing it costs nothing but those archives
+being sent again, and offered as replacements of the ones already there.
+
+**A volume an import replaces is kept, and keeps its readers.** `POST /import/{id}/commit`
+installs a file over a volume the library holds only where `replace` names it, and then
+under the old file's name, so the volume stays the same one: every profile's place, its
+read marks and the date it arrived survive, a place past the end of a shorter file coming
+back to its last page. `reset` names the volumes the asking profile starts again from the
+first page — only that profile. The old file is linked under `replaced/<id>/` in the inbox
+and the commit answers where (`replaced`); the index records it too. A volume the index has
+not read yet is not replaced — there would be no record of it — and stays pending until the
+next scan. Abandoning a session cut in the middle of a replacement finishes it if the new file
+is already in place and undoes it if the old one still is; if another import or another hand
+replaced the volume in between, nothing is touched and the copy set aside stays under
+`replaced/<id>/`, with no record in the index. Nothing lists, restores or empties that
+folder.
+
 ## Security
 
 **A key per device, made by linking.** No accounts, no passwords, no sign-in screen: a
@@ -341,10 +410,19 @@ with the rights they were given, and read as the principal profile.
 minutes, with `Retry-After` saying how long. Failures age out, so a device that gets it wrong
 once a week never accumulates its way into a lockout. A key that works clears the slate.
 
+**A silent connection is cut.** One that sends nothing, or a header that never ends, is closed
+after ten seconds (and so is one kept alive and left idle); a request body may take as long as
+it needs, but not stay still for more than thirty seconds. There is no cap on the number of
+connections, on purpose: it would only move the denial to whoever fills it.
+
+**An import receives volumes and images, nothing else.** A file announced to an import that is not a `.cbz`, a `.zip` or a cover image (`png`, `jpg`, `jpeg`, `webp`, `gif`, `tbn`) is refused when the import opens, before a byte is sent: whatever is received is installed in the library, and a page or a program would sit there beside the volumes. The drop folder never follows a link: a symbolic link in it is not a file of the drop.
+
 **The library is closed as soon as a device is linked, and stays closed.** Until then, on
 the loopback, it answers without a key, so a machine that serves only itself needs no setup.
 Revoking the last device does not open it again, and a key it does not know is refused even
-while it is open. Off the loopback
+while it is open. It is open only to a request addressed to a name of the machine
+(`localhost`, `127.0.0.1`, `[::1]`): a web page in a browser here can make a name of its own
+resolve to the loopback, and that name is what its requests carry. Off the loopback
 it is never open: with no key and no device it answers only `/health` and the exchange of a
 code, so that a first device can still be linked.
 
@@ -502,7 +580,7 @@ GET    /profile/reading  ·  PUT       this profile's reading preferences, kept 
 GET    /devices                       every linked device and the profile it sits on
 PATCH  /devices/{id}  ·  DELETE       seat a device on a profile, or remove it
 GET    /series                        a "series" is an edition
-GET    /series?author=&genre=&medium=&status=&universe=&language=&publisher=&read=
+GET    /series?author=&artist=&genre=&medium=&status=&universe=&language=&publisher=&read=
                                       repeat a parameter to widen, add another to narrow
 GET    /series?work=                  the other editions of this one
 GET    /series?sort=&page=&size=      name | added | updated | volumes · 100 by default,
@@ -511,12 +589,14 @@ GET    /filters                       the values worth offering, each with its c
 GET    /series/{id}/entries           volumes and loose chapters, in reading order
 GET    /series/{id}/chapters          the whole sequence, whatever the materialisation
 GET    /series/{id}/arcs
-GET    /series/{id}/cover?width=
+GET    /series/{id}/cover?width=  ·  PUT an image  ·  DELETE back to the default (edit)
 GET    /entries/{id}/chapters         a volume's markers
 GET    /entries/{id}/pages
 GET    /entries/{id}/pages/{n}?width=
-GET    /entries/{id}/cover?width=
+GET    /entries/{id}/cover?width=  ·  PUT an image  ·  DELETE back to the default (edit)
 GET    /entries/{id}/file             the original, stamped with its identity
+GET    /series/{id}/folders           the folders with their sidecars, and the files a copy carries
+GET    /series/{id}/files/{index}     one of those files, streamed (volumes stamped as above)
 GET    /entries/{id}/progress   ·  PATCH  ·  DELETE
 PUT    /series/{id}/reading-direction this profile's choice of direction, null for the default
 GET    /next                          what you are reading, then what follows it
@@ -529,8 +609,17 @@ GET    /intake/{id}                   how much of it the server holds, to resume
 PUT    /intake/{id}/file              the bytes, from an offset — 409 says the right one
 POST   /intake/{id}/file              you confirm, only then is it filed
 POST   /import  ·  /import/{id}/commit   a whole folder, resumable
+                                      an archive may ask to be rewritten on arrival (`rewrite`:
+                                      the `entry.json` to put inside, the members to drop, and
+                                      optionally a `oneshot.json`: a book standing alone)
+                                      a `target` lays it on a series, a universe, a volume or
+                                      a chapter the library holds (`splice`: the pages that
+                                      replace that chapter); the commit replaces, rewrites a
+                                      declaration, moves a series or resets a place only
+                                      where `replace`, `declare`, `move` and `reset` name it
 POST   /works/{id}/move               a series into a universe, or back out to the root
 POST   /cleanup  ·  /scan
+POST   /series/{id}/rescan  ·  /entries/{id}/rescan   read one work again from its files
 ```
 
 `/health` answers without a key — and so does `POST /link`, which is where a device without
@@ -567,6 +656,27 @@ confirm.
 **Over the network** — `POST /entries` with the file as the body, resumable in bulk through
 `/import` for a whole folder.
 
+A file announced to `/import` may carry a `rewrite`, `{ "entryJson": "…", "remove": ["…"] }`,
+when it is a `.cbz` or `.zip`: the archive is sent as it is, and the server installs it with
+that `entry.json` inside and every member of those names dropped, in any folder of the archive
+and whatever its case. `size` and `checksum` describe what was sent, so a folder announced
+again is not asked for twice. A `rewrite` may add `"oneShotJson": "…"`, a `oneshot.json` put in
+the archive beside the `entry.json`: the archive is then a book standing alone, which is the
+only kind the scan reads at the root of a universe. It is part of what was asked, so another
+`oneShotJson` sends the file again. An import is refused before a byte moves when a `rewrite`
+is not honourable (not an archive, an `entryJson` or `oneShotJson` that is not a JSON object, a
+name empty or holding `/`, `\` or `..`), when a sidecar is not a JSON object, or when a folder
+holds two of `universe.json`, `work.json` and `edition.json`, or when a declaration sits where
+the model has no room for it (a universe below a universe, a series or an edition; a series
+below a series or an edition; anything below an edition), among the folders the announcement
+declares, or when a `universe.json` of the announcement holds a reading order that includes an
+order the file does not hold, an including step that carries anything besides `include`, or
+inclusions that close a loop (the answer names the file, the order and the step). Two orders
+under one identifier, and a step naming a work the announcement does not carry, are not
+refused. A folder declaring a universe may hold archives directly: whether each one is a book
+of that universe is said by the `oneshot.json` inside it, so the scan decides, and reports
+those that carry none. The announcement itself is limited to 32 MiB; the files travel apart.
+
 **Through a shared folder**, when the application and the server are on the same machine. Set
 `LEAF_DROP`, have the application put the file there, and `POST /drop` with its name: the
 server renames it into the library. Nine gigabytes already on the disk are not written a
@@ -577,7 +687,9 @@ the library, or the rename becomes a copy and the point is lost.
 
 A profile is « who reads », not an account: no identifier, no password per person, no sign-in
 screen. Each device sits on one, which the server keeps, and each profile has its own reading
-progress and its own reading preferences. There are three kinds:
+progress and its own reading preferences (the desktop client keeps the page layout, the fit, the
+backdrop, the page motion and lines-or-covers there; the window, the appearance and the
+notifications stay on the machine). There are three kinds:
 
 | | Principal | Reader | Restricted |
 |---|---|---|---|
@@ -640,6 +752,23 @@ number (« Mature 17+ » is 17) or one of the usual words (`Teen`, `T`, `Tout pu
 series with no rating, or one that is not recognised, is hidden rather than guessed. A
 restricted profile's age changes what it sees from its next request.
 
+**A series' `work.json` names its default, and the series is credited with everyone its volumes
+are.** A volume's `entry.json` may carry its own `authors` (the script) and `artists` (the
+drawing); field by field, a volume without them is credited from the `Writer` and `Penciller` of
+its `ComicInfo.xml` on a library never imported, and otherwise with what its series' `work.json`
+declares (the former singular `author` counts). A volume that names someone replaces that
+default, it does not join it, and `authorsInherited` and `artistsInherited` say which volumes
+took it: changing the default changes them, and them alone. `PATCH /entries/{id}` with an empty
+list takes a volume's own away and gives it back to the default. The series' `authors` and
+`artists` are the union of what its volumes are credited with, in file order, each person once
+(« Arleston » and « ARLESTON » are one, under the first spelling met), so a series whose script
+changed hands is credited to all its writers; a series holding no volume is credited with its
+declaration. `declaredAuthors` and `declaredArtists` carry the declaration alone, which is what
+editing a series starts from. Credits are searchable like any other, and `artist=` filters on
+the drawing as `author=` does on the script. A series whose credits are all in its volumes is
+not reported as missing them. A book standing alone, lifted out of a folder, keeps its own and
+does not credit the series it stood in.
+
 **A device that must choose a profile gets `409` with `choose a profile`, on every route.**
 That is what a device sees when the profile it sat on was deleted. Only `/health`,
 `GET /profiles` and `PUT /profiles/active` answer it. Reading as the principal in the
@@ -647,8 +776,10 @@ meantime would open the whole library on a child's tablet whose profile was just
 the deleted profile was a restricted one, the device stays held on it: leaving that seat asks
 the code.
 
-**`GET /entries/{id}/file` is refused to a restricted profile** (`403`), and its pages still
-served one by one: a file that leaves Leaf escapes the age and the code.
+**`GET /entries/{id}/file`, `GET /series/{id}/folders` and `GET /series/{id}/files/{index}` are
+refused to a restricted profile**
+(`403`), and its pages still served one by one: a file that leaves Leaf escapes the age and the
+code.
 
 **`?width=` is the width you want per page.** A landscape image is a double-page spread and
 gets twice the requested width. Without the parameter the original bytes are served
@@ -688,6 +819,184 @@ for.** A client that asked for chapters wants "no chapters", not "here is a seri
 have meant". It stays series-only because it has no index behind it and reads what it
 compares, so what it reads has to stay bounded by the shelf.
 
+**Importing a folder reads it before it sends anything.** The application opens each archive once
+and reads its `entry.json` and its `ComicInfo.xml`, with a running count while it does, then
+announces the folder with what it found. A field shows what it holds, and not where it was read:
+a value from a sidecar of Leaf's, from a `ComicInfo.xml` or from a file name looks the same, and
+only a required value nobody gave is marked, as missing. The check is a frame of four zones, a
+tree, a list, a sheet and the filters, and the sheet follows the selection and opens on the
+first thing worth looking at. A missing value never shows as a blank field; it shows as missing.
+
+**It stops on what is missing or in doubt, and holds a series back on five things.** A number
+read off a file name, or a title off a folder's, is shown and asks nothing; a role read from the
+shape of the folders is still a question. A series
+without a name, a volume without a number, two volumes claiming the same number, a series that
+nobody is said to have written, one that nobody is said to have drawn, and one whose reading
+direction nobody said: each holds its series back. « Next » then walks to the sheet of the first
+of them instead of going on, and the footer counts the values still missing (« 2 values are
+missing ») and says how many series wait. Every volume is written and drawn by someone: one
+that names nobody is credited with its series' default, and it is the series that lacks a
+credit, once, when one of its volumes is credited with nobody — « Scénario manquant pour 41
+tomes » — and its sheet offers the field to type it in. The reading direction stops the import
+because a series read the wrong way round goes unnoticed until page forty. Any other missing
+field (genres, summary, publisher, language, ISBN, date) is shown and stops nothing, or no real
+folder would ever pass.
+A series aimed at one the library holds is asked none of the three: the library has them. A
+folder where everything is said goes through without stopping and stays visible. Folders the server
+already holds, byte for byte, are folded together with what they weigh.
+
+**The same frame holds one series or fifty.** The sheet's list shows every series of the node
+selected in the tree, scrolling rather than switching to another mode. A search field narrows
+the drop by name or author, and the counters follow what is left. Series can be ticked, one by
+one, by a range with the keys, or all at once; a reading direction, a language or a status
+typed once is then applied to every ticked series that can still take it, through the same path
+as a single correction, and the frame says how many changed and how many were left alone. A
+walk through the series still to review goes from one to the next, and the tree opens folded.
+A series the server refuses, or one that would land where another already is, stays in the frame
+with its reason and a way to remove it; the others go on. **Import** sends what can go, without
+waiting for what is still being read or completed. An application quit before the end leaves
+announced sessions on the server; at its next start it deletes the empty ones it left, and never
+one that may already hold a byte. A scan asked for while another runs is run again once the
+first ends, so an import that lands during a scan is not left unindexed.
+
+**A folder that says nothing is given a role in the import, never by the scan.** The scan stays
+strict: it reads declarations and never a shape, so `Dragon Ball/{Perfect, Original}` and
+`Terres d'Arran/{Elfes, Mages}` stay the same on disk. The import, which can ask, reads the names
+and numbers of what was dropped (no archive is opened for it) and proposes a role for each folder
+that declares none, marked **guessed**, with its confidence, the clues for it and against it, and
+the other reading when there is one, with what each would create. A role is chosen from a menu
+on each folder (series, edition, universe or shelf, and on an archive a volume or a book
+standing alone); the roles the model cannot hold at that place are greyed with their reason, and
+choosing one rearranges the tree under it. Nothing is applied by being guessed: a role becomes a
+fact only when the card is confirmed, by the `universe.json`, `work.json` or `edition.json` that
+is then written in the folder, so the next scan reads a declaration. Nothing is moved.
+
+**An archive at the root of a universe is sent only as a book standing alone.** Only a
+`oneshot.json` makes it one, and the import writes it (inside the archive, with the `rewrite`'s
+`oneShotJson`) when the book role is chosen. An archive that no role reads is flagged on its line
+and in the count of the confirmation, and is neither rewritten nor announced, since the server
+would only report it.
+
+**A `ComicInfo.xml` only fills a hole, and every one leaves.** It is read for what no Leaf file
+says — not the volume's `entry.json`, nor, for its credits, the default of its series'
+`work.json` — and a ComicInfo saying something else is ignored, neither written nor asked
+about. A volume's number as a chapter file never comes from it. Every archive imported loses its
+`ComicInfo.xml`, one nothing was taken from and one that cannot be read (malformed, huge, or
+declaring a DTD) included: removing it needs no reading of it, and Leaf reads none after the
+import. The archive is sent as it is, with the `rewrite` described above, and the server writes
+the `entry.json` and drops the `ComicInfo.xml`; the application never writes an archive itself.
+An archive that does not open at all is proposed too, its number taken from its name, with a
+rewrite never asked for.
+
+**Each Leaf file is written where it is true, by one rule.** For a `work.json`, an
+`edition.json` or an `entry.json`: there and nothing changed, it is not written again — a
+declaration travels with its original bytes, and a volume asks for no rewrite but its
+ComicInfo's leaving; there and something typed or filled, it is completed, keeping every key it
+had, known or not; not there, it is created, always, even for a volume nothing was read from.
+
+**A series' credits are its default, and a volume says only how it differs.** The `Writer` and
+`Penciller` of a `ComicInfo.xml` are lists separated by commas, as the server reads them, and
+the import writes them as `authors` and `artists`. For a series that names nobody, the list
+carried by more than half of its volumes — names compared as the search folds them, order
+ignored, spelt as first met — goes into its `work.json`, and only the volumes that differ
+write theirs into their `entry.json`; with no such majority, each volume writes its own. A
+hundred identical ComicInfo were otherwise a hundred copies of one name in a hundred archives.
+What an `entry.json` already says is never moved, though it counts in the majority, and a book
+standing alone counts in none. The sheet of a series shows who its volumes are credited with,
+the union the server will record, in file order and each person once. A series whose volumes
+are credited with nobody for the writing, or nobody for the drawing, is held back until a name
+is typed on it.
+
+**Lists are edited as words.** Authors, artists, genres and tags are pills. Enter keeps the word
+typed, under the library's spelling when it is the same word folded as the server folds it; ↓
+and ↑ choose a suggestion instead; a word already there is not added twice.
+
+**A universe's reading orders travel with it, and can be written in the import.** A
+`universe.json` the import completes keeps every key it had, its orders included, and an order
+nobody edited goes back as it was read. The sheet of a universe lists its orders; one that writes
+again every step of another is opened with an inclusion of that order offered in their place,
+which saving the order accepts. An order is written step by step, from the works of the drop and
+the other orders of the universe: an inclusion that would loop is greyed with its reason; a
+range running backwards, a chapter range naming an edition and a change that would take the
+orders past what the scan reads are refused and said on their step; a volume range naming no
+edition in a work of several holds the order back until one is chosen. A step naming a work the
+drop does not hold is kept, since the server may hold it. An inclusion writes the first of the
+order's `id`, its name and what the scan calls it (its folded name, or its rank) that the server
+resolves to that order; an order none of them reaches, one under an `id` already taken, is
+greyed.
+
+**A reimport lands on what the library holds, under its names.** An import may carry a
+`target` — a series, a universe, a volume or a chapter — and the folder is then laid on it
+rather than beside it. Each archive is matched with the volumes of its edition by its kind
+and its exact number, never by its name or its size: one that is already there byte for
+byte is `SAME` and sent nowhere, one at a number the series holds lands on **that volume's
+file name**, and one at a new number is added. Landing on the same name is what keeps the
+volume the same entry, so every profile's place, its read marks and the date it arrived
+survive the replacement. A file whose number cannot be read, or that two files of the drop
+claim, stays out until a number is given. Without a target, an archive that says what it
+is and arrives in the folder of an edition the library holds is compared the same way, so
+a series dropped a second time replaces its volumes instead of doubling them; one that
+says nothing lands at its path, as any import does.
+
+**Nothing is removed by being left out.** What the target holds and the drop does not bring
+is listed in the announcement (`absent`, and `absentSeries` for the series of a universe)
+and stays where it is. A replacement happens only for the paths the commit names in
+`replace`; the old file is set aside under `inbox/replaced/<session>/`, where nothing lists,
+restores or empties it, and the replacement is recorded in the index with what became of
+the places in it. `reset` sends the volume back to its first page for the profile that
+commits it, and for nobody else.
+
+**A universe's series are found by what they declare, then by name.** Each folder of a drop
+onto a universe is matched with a work: by the identity its `work.json` carries, wherever
+that work is; then, inside the universe, by its folder name, then by its title folded
+without case or accents. « DBGT » declaring « Dragon Ball GT » lands in the universe's
+« Dragon Ball GT » folder. A title two works share decides nothing, and the folder is a
+creation. A folder matching a work outside any universe is announced as a move (`moves`,
+`matched` saying how), made only if the commit names it in `move`. Without a target, a new
+series whose folded title is one the library already holds is named in `resembles`: « blue
+period » beside « Blue Period » is said before it becomes a second series. Two paths of
+one drop that would land on the same file are refused, both named.
+
+**A declaration differs, and the announcement says from what.** A sidecar arriving over one
+the library holds is listed in `declarations` with the fields the two disagree about and
+the library's own value for each (`present`); it is written over only when the commit names
+it in `declare`. The identity is never among those fields: it stays the library's.
+
+**A chapter is replaced inside its volume.** With a `CHAPTER` target and a `splice`, the
+pages named of the file sent take the place of the chapter's — from its first page to the
+page before the next chapter's — and the announcement gives the range of every chapter
+that says where it starts, before and after, the pages the volume will have, and where the asking profile's place goes. The
+volume keeps its name and its entry; the chapters after it, its cover and every reader's
+place move by what the range gained or lost, and a place inside the range stays where it
+was while it still fits. Every page is copied as it is, not re-encoded, and renamed in
+reading order. A splice is refused when a chapter that does not say where it starts lies
+in the range, and at the commit when the range is outside the file's pages or the volume's
+chapters are no longer where they were at the announcement: nothing is touched and the file
+stays in the session. The commit writes the whole new volume beside the old one before
+renaming it over it, so the disk needs room for a second copy of that volume while it
+runs.
+
+**The application reimports from the menu of what it replaces.** « Réimporter… » sits on a
+series, on a volume (« Réimporter ce tome… ») and on a universe's header, and « Remplacer un
+chapitre… » on a volume that has chapters. The drop that follows is announced with that target
+and opens the same frame as any import, titled after it, with the rail showing the path down to
+the target. Each file is listed by what happens to it: added, replaced, identical (read and sent
+nowhere), or at a number that cannot be read, which is offered a place and never refused. A drop
+onto a universe lists its series the same way — added, changed, identical, kept because the drop
+does not bring them — and offers to move a series the library holds elsewhere or to create a
+second one, whichever the reader picks.
+
+**What starts ticked, and what never travels.** Aimed at something, the volumes the server
+matched as replaced or updated start ticked, and so do the declarations that differ; each is
+unticked on its line, and a declaration's field can be kept as the library has it. Starting a
+replaced volume again from its first page is a switch that starts off: the place and the read
+status stay unless it is ticked. A move never starts ticked. What the target holds and the drop
+does not bring is shown and never removed, and a drop that aims at nothing ticks nothing: a
+folder dropped a second time onto a series it holds is met as that series (« Existe déjà »)
+rather than created again. A chapter's range is proposed from the source's own declaration of
+that chapter, or from the same pages when it declares none, and typed pages are counted from 1,
+one more than the contract.
+
 **The page prefetch reads forward.** Requesting pages in order therefore measures warm pages
 dressed as cold ones.
 
@@ -705,7 +1014,7 @@ cargo test --test scan -- name_of_the_test  # one test
 sudo apt-get install cmake ninja-build qt6-base-dev qt6-declarative-dev libqt6svg6-dev \
   qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-dialogs \
   qml6-module-qtquick-layouts qml6-module-qtquick-templates qml6-module-qtqml \
-  qml6-module-qtqml-workerscript qml6-module-qt5compat-graphicaleffects \
+  qml6-module-qtqml-models qml6-module-qtqml-workerscript qml6-module-qt5compat-graphicaleffects \
   qt6-image-formats-plugins xauth xvfb qtkeychain-qt6-dev
 cd desktop
 cmake -S . -B build -G Ninja && cmake --build build
