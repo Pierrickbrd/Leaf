@@ -30,6 +30,7 @@ Item {
         spacing: 8
 
         Text {
+            textFormat: Text.PlainText
             text: separator.name
             color: Theme.ink
             font.family: Theme.displayFamily
@@ -39,6 +40,7 @@ Item {
         }
 
         Text {
+            textFormat: Text.PlainText
             text: separator.range
             color: Theme.inkFaint
             font.family: Theme.textFamily

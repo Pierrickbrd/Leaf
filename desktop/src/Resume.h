@@ -54,6 +54,11 @@ public:
     qreal progress() const;
 
     Q_INVOKABLE void reload();
+    /// Lets go of the card, for a reader whose profile is not the one it was listed for: the
+    /// server shows each profile only what it may see, and a card kept until the answer — or
+    /// for good, if the answer is a refusal — shows the next profile a book that was never
+    /// listed to it. `reload` keeps what is on screen on purpose; this is the other case.
+    Q_INVOKABLE void forget();
 
 signals:
     void changed();

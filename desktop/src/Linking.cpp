@@ -127,7 +127,8 @@ QString Linking::nameHelp() const
 
 QString Linking::action() const
 {
-    return Words::linkAction(!m_found.isEmpty());
+    return m_stage == Stage::Unchecked ? Words::lookForTheLibrary()
+                                       : Words::linkAction(!m_found.isEmpty());
 }
 
 void Linking::offer(const QString &typed)
@@ -230,8 +231,20 @@ void Linking::lookAtTheClipboard()
         return;
     }
     const QString copied = QGuiApplication::clipboard()->text();
-    if (Link::read(copied)) {
-        offer(copied);
+    if (const std::optional<Link> read = Link::read(copied)) {
+        m_typed = copied;
+        m_link = read;
+        m_key.reset();
+        m_found.clear();
+        m_detail.clear();
+        become(Stage::Unchecked);
+    }
+}
+
+void Linking::look()
+{
+    if (canLook()) {
+        check();
     }
 }
 

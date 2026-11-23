@@ -19,7 +19,9 @@ import Leaf
 Item {
     id: cover
 
-    property alias source: picture.source
+    /// What it is asked for under. A cover changed from this window is asked for again: the same
+    /// address would be answered from the pixmap the `Image` already holds (`Server.coverChanged`).
+    property url source
     /// The image's own name, for a test that looks it up. The rounding is on this item, so
     /// the picture inside it cannot carry the name the caller wants to find.
     property alias pictureName: picture.objectName
@@ -47,6 +49,14 @@ Item {
             id: picture
 
             anchors.fill: parent
+            source: {
+                const asked = cover.source.toString()
+                // Only what the server answers: a file chosen on the disk has no query to add,
+                // and one added would be part of its name.
+                if (Server.coverStamp === 0 || !asked.startsWith("http"))
+                    return cover.source
+                return asked + (asked.indexOf("?") < 0 ? "?" : "&") + "v=" + Server.coverStamp
+            }
             fillMode: Image.PreserveAspectCrop
             asynchronous: true
             cache: true

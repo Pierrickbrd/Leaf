@@ -10,6 +10,7 @@
 
 #include <QUrl>
 
+#include <QScopeGuard>
 #include <QSettings>
 #include <QSizeF>
 #include <QSignalSpy>
@@ -341,6 +342,113 @@ private slots:
         QCOMPARE(again.fit(), Preferences::Fit::Width);
     }
 
+    /// What the reader chooses here is announced to be kept on the server, whole, under words.
+    void a_reading_choice_is_announced_with_all_seven_synced_values()
+    {
+        Preferences chosen;
+        chosen.chooseFit(Preferences::Fit::Height);
+        chosen.chooseMotion(Preferences::Motion::Slide);
+        QSignalSpy kept(&chosen, &Preferences::syncedChanged);
+        chosen.chooseFit(Preferences::Fit::Width);
+        QCOMPARE(kept.size(), 1);
+        const QVariantMap said = kept.at(0).at(0).toMap();
+        QCOMPARE(said.size(), 7);
+        QCOMPARE(said.value(u"fit"_s).toString(), u"width"_s);
+        QCOMPARE(said.value(u"stripFit"_s).toString(), u"original"_s);
+        QCOMPARE(said.value(u"stripZoom"_s).toDouble(), 1.0);
+        QCOMPARE(said.value(u"motion"_s).toString(), u"slide"_s);
+        // The appearance is this machine's, and is not among them.
+        QVERIFY(!said.contains(u"appearance"_s));
+        // Nor is what is already so announced.
+        chosen.chooseFit(Preferences::Fit::Width);
+        QCOMPARE(kept.size(), 1);
+    }
+
+    /// A webtoon's fit is its own: « Original » on a fresh install whatever the books are read
+    /// at, never « Hauteur », and its zoom held between a third and three times.
+    void a_strip_keeps_its_own_fit_and_zoom_apart_from_the_books()
+    {
+        {
+            Preferences chosen;
+            QCOMPARE(chosen.stripFit(), Preferences::Fit::Original);
+            QCOMPARE(chosen.stripZoom(), 1.0);
+            chosen.chooseFit(Preferences::Fit::Width);
+            QCOMPARE(chosen.stripFit(), Preferences::Fit::Original);
+
+            QSignalSpy kept(&chosen, &Preferences::syncedChanged);
+            chosen.chooseStrip(Preferences::Fit::Height, 1.5);
+            QCOMPARE(chosen.stripFit(), Preferences::Fit::Original);
+            QCOMPARE(chosen.stripZoom(), 1.5);
+            QCOMPARE(chosen.fit(), Preferences::Fit::Width);
+            QCOMPARE(kept.size(), 1);
+            chosen.chooseStrip(Preferences::Fit::Width, 40);
+            QCOMPARE(chosen.stripZoom(), 3.0);
+            chosen.chooseStrip(Preferences::Fit::Width, 0.01);
+            QCOMPARE(chosen.stripZoom(), 1.0 / 3.0);
+            chosen.chooseStrip(Preferences::Fit::Width, qQNaN());
+            QCOMPARE(chosen.stripZoom(), 1.0);
+        }
+        const Preferences again;
+        QCOMPARE(again.stripFit(), Preferences::Fit::Width);
+        QCOMPARE(again.stripZoom(), 1.0);
+
+        Preferences adopted;
+        adopted.adopt({{u"stripFit"_s, u"original"_s}, {u"stripZoom"_s, 0.8}});
+        QCOMPARE(adopted.stripFit(), Preferences::Fit::Original);
+        QVERIFY(qAbs(adopted.stripZoom() - 0.8) < 1e-9);
+        adopted.adopt({{u"stripZoom"_s, 1.2}});
+        QCOMPARE(adopted.stripFit(), Preferences::Fit::Original);
+        QVERIFY(qAbs(adopted.stripZoom() - 1.2) < 1e-9);
+    }
+
+    /// The server's answer is applied and written locally, but never sent back to it: an echo
+    /// is a write for nothing, and on a slow line two of them race.
+    void what_the_server_holds_is_adopted_without_being_said_back()
+    {
+        Preferences chosen;
+        chosen.choosePageLayout(Preferences::PageLayout::Single);
+        chosen.chooseBackdrop(Preferences::Backdrop::Black);
+        QSignalSpy kept(&chosen, &Preferences::syncedChanged);
+        QSignalSpy moved(&chosen, &Preferences::changed);
+        chosen.adopt({{u"layout"_s, u"double"_s},
+                      {u"backdrop"_s, u"grey"_s},
+                      {u"volumesAsGrid"_s, true}});
+        QCOMPARE(kept.size(), 0);
+        QVERIFY(moved.size() >= 1);
+        QCOMPARE(chosen.pageLayout(), Preferences::PageLayout::Double);
+        QCOMPARE(chosen.backdrop(), Preferences::Backdrop::Grey);
+        QVERIFY(chosen.volumesAsGrid());
+
+        // Written to the file, so that offline the next start still has them.
+        const Preferences again;
+        QCOMPARE(again.pageLayout(), Preferences::PageLayout::Double);
+        QCOMPARE(again.backdrop(), Preferences::Backdrop::Grey);
+
+        // And the echo switch is off again: a choice made afterwards is announced.
+        chosen.chooseFit(Preferences::Fit::Original);
+        QCOMPARE(kept.size(), 1);
+    }
+
+    /// A profile that never chose keeps what the machine has; a key from a later version, a
+    /// word this one does not know and a flag that is not one are each answered by the rule
+    /// of the file, not by a failure.
+    void what_the_server_does_not_say_is_left_as_it_is()
+    {
+        Preferences chosen;
+        chosen.chooseFit(Preferences::Fit::Width);
+        chosen.chooseMotion(Preferences::Motion::Instant);
+        chosen.showVolumesAsGrid(true);
+
+        chosen.adopt({});
+        QCOMPARE(chosen.fit(), Preferences::Fit::Width);
+        QCOMPARE(chosen.motion(), Preferences::Motion::Instant);
+
+        chosen.adopt({{u"zoom"_s, 3}, {u"volumesAsGrid"_s, u"yes"_s}, {u"fit"_s, u"cover"_s}});
+        QVERIFY(chosen.volumesAsGrid());
+        QCOMPARE(chosen.fit(), Preferences::Fit::Height);
+        QCOMPARE(chosen.motion(), Preferences::Motion::Instant);
+    }
+
     void auto_shows_two_pages_only_on_a_landscape_window()
     {
         const Preferences fresh;
@@ -441,6 +549,34 @@ private slots:
         const Preferences puzzled;
         QCOMPARE(puzzled.backdrop(), Preferences::Backdrop::Black);
         QCOMPARE(puzzled.motion(), Preferences::Motion::Slide);
+    }
+
+    /// The window comes back as it was closed: its size, and whether it was maximised. A
+    /// maximised close keeps the size it had before, which is the one it is restored to.
+    void the_window_is_remembered_as_it_was_closed()
+    {
+        {
+            QSettings file(QSettings::IniFormat, QSettings::UserScope, u"Leaf"_s,
+                           u"preferences"_s);
+            file.remove(u"window"_s);
+            file.sync();
+        }
+        // Left as found: the next window of any test would open at this size.
+        const auto forget = qScopeGuard([] {
+            QSettings file(QSettings::IniFormat, QSettings::UserScope, u"Leaf"_s,
+                           u"preferences"_s);
+            file.remove(u"window"_s);
+            file.sync();
+        });
+        Preferences first;
+        QVERIFY(first.windowFrame().isEmpty());
+        first.rememberWindow(1300, 820, false);
+        first.rememberWindow(1920, 1080, true);
+        const Preferences again;
+        const QVariantMap frame = again.windowFrame();
+        QCOMPARE(frame.value(u"width"_s).toInt(), 1300);
+        QCOMPARE(frame.value(u"height"_s).toInt(), 820);
+        QVERIFY(frame.value(u"maximized"_s).toBool());
     }
 };
 

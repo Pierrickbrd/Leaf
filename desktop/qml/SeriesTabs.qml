@@ -22,7 +22,12 @@ Item {
     signal searched(string text)
 
     objectName: "series-tabs"
-    implicitHeight: 40
+    /// As tall as the commands of the list centred on the tabs' words, with `compact` between
+    /// them and the rule: on tabs of 38 the volume search's frame stood 3 pixels above it,
+    /// closer to the rule than to anything it belonged to (audit, 25/10/2026).
+    readonly property int tabHeight: 2 * (34 / 2 + Widths.space.compact + 1)
+
+    implicitHeight: tabHeight + 2
 
     Row {
         anchors.left: parent.left
@@ -43,7 +48,7 @@ Item {
 
                 objectName: "series-tab-" + index
                 width: word.implicitWidth + 28
-                height: 38
+                height: bar.tabHeight
 
                 /// A stop of the page's walk — see `KeyWalk`.
                 readonly property bool keyStop: true
@@ -56,10 +61,11 @@ Item {
                     }
                 }
 
-                FocusRing {
-                    objectName: tab.objectName + "-focus"
-                    cornerRadius: 8
-                }
+                /// Lit by the keys alone, as every ring — see `FocusRing`.
+                readonly property var cursor: Window.window ? Window.window.navigationCursor
+                                                            : null
+                readonly property bool keyed: tab.activeFocus
+                                              && !(cursor && cursor.pointerTookOver)
 
                 TapHandler {
                     gesturePolicy: TapHandler.ReleaseWithinBounds
@@ -71,6 +77,7 @@ Item {
                     id: word
 
                     anchors.centerIn: parent
+                    textFormat: Text.PlainText
                     text: parent.modelData
                     color: bar.current === parent.index ? Theme.ink : Theme.inkSoft
                     font.family: Theme.textFamily
@@ -78,12 +85,16 @@ Item {
                     font.weight: bar.current === parent.index ? Font.DemiBold : Font.Normal
                 }
 
+                // The underline that says which tab is open is also the keys' focus: emerald and
+                // thicker on the open tab, a quiet one under another. A ring round a tab was
+                // a frame as tall as the bar round a single word.
                 Rectangle {
+                    objectName: tab.objectName + "-focus"
                     anchors.bottom: parent.bottom
                     width: parent.width
-                    height: 2
-                    color: Theme.emerald
-                    visible: bar.current === parent.index
+                    height: tab.keyed && bar.current === tab.index ? 3 : 2
+                    color: bar.current === tab.index ? Theme.emerald : Theme.inkSoft
+                    visible: bar.current === tab.index || tab.keyed
                 }
             }
         }
@@ -102,7 +113,7 @@ Item {
     Row {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: 4
+        anchors.bottomMargin: bar.tabHeight / 2 - 34 / 2
         spacing: 6
         visible: bar.current === 0
 

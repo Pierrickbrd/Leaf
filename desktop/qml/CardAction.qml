@@ -24,8 +24,9 @@ Rectangle {
 
     signal triggered()
 
-    implicitWidth: word.implicitWidth + 24
-    implicitHeight: 28
+    implicitWidth: word.implicitWidth + Widths.scale.fit(24)
+    // From its word, so a larger desktop text does not run it out of its outline.
+    implicitHeight: Math.max(Widths.scale.fit(28), word.implicitHeight + Widths.scale.fit(10))
     width: implicitWidth
     height: implicitHeight
     radius: height / 2
@@ -33,7 +34,7 @@ Rectangle {
     border.color: Theme.rule
     border.width: 1
     antialiasing: true
-    activeFocusOnTab: true
+    activeFocusOnTab: enabled
 
     Accessible.role: Accessible.Button
     Accessible.name: action.label
@@ -66,10 +67,13 @@ Rectangle {
         id: word
 
         anchors.centerIn: parent
+        textFormat: Text.PlainText
         text: action.label
-        color: action.alarming ? Theme.alert : Theme.inkSoft
+        // Off, in the faint ink: there is nothing for it to do yet, and it says so without
+        // leaving its place — « Revoir la suivante » with nothing left to review.
+        color: !action.enabled ? Theme.inkFaint : action.alarming ? Theme.alert : Theme.inkSoft
         font.family: Theme.textFamily
-        font.pixelSize: 13
+        font.pixelSize: Widths.scale.body(13)
         font.weight: Font.Medium
     }
 

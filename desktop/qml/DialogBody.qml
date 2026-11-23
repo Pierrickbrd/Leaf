@@ -21,6 +21,16 @@ Item {
 
     /// What had the focus when the window opened.
     property Item opener: null
+    /// What the window opens on, at every opening. A `focus: true` says it only the first
+    /// time: a window is a scope, and opened again it gave the keys back to whatever held them
+    /// when it closed — the red button of a deletion pressed once was where the next deletion
+    /// opened, and a habitual Enter deleted (audit, 25/10/2026).
+    property Item initialFocus: null
+
+    function settle() {
+        if (body.visible && body.initialFocus && body.initialFocus.visible)
+            body.initialFocus.forceActiveFocus(Qt.PopupFocusReason)
+    }
 
     // Shown with the window and before it takes the focus; hidden once Qt has given it away —
     // to the page, or to another window still open over it, which keeps it: the recovery code
@@ -28,6 +38,8 @@ Item {
     onVisibleChanged: {
         if (visible) {
             body.opener = body.Window.activeFocusItem
+            // Once the window has handed out its own focus, so that this one is the last word.
+            Qt.callLater(body.settle)
             return
         }
         // Asked of the opener: a closed window has left the window it was drawn in.

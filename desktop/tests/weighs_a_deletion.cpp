@@ -193,7 +193,10 @@ private slots:
 
         QVERIFY(m_asking->whole());
         const QVariantMap said = m_asking->said();
-        QCOMPARE(said.value(u"question"_s).toString(), u"Supprimer « Albums » ?"_s);
+        // Named as the shelf names it, « Work · Edition »: the edition alone would not say which
+        // work is going.
+        QCOMPARE(said.value(u"question"_s).toString(),
+                 u"Supprimer « Terres d'Arran · Elfes » ?"_s);
         QVERIFY(said.value(u"what"_s).toString().startsWith(u"2 fichiers, 91,6 Mio."_s));
         // What goes besides the files, in the same sentence: a reader who has to look twice
         // finds it afterwards.
@@ -203,12 +206,16 @@ private slots:
         // exactly on the day it must not be.
         QCOMPARE(said.value(u"untouched"_s).toString(),
                  u"L’édition Intégrale de la même œuvre n’est pas touchée."_s);
-        QCOMPARE(said.value(u"confirm"_s).toString(), u"Tapez Albums pour confirmer"_s);
+        // The button's own word, not an edition's name that is typed once and then pasted.
+        QCOMPARE(said.value(u"confirm"_s).toString(),
+                 u"Tapez « Supprimer » pour confirmer"_s);
 
         QVERIFY(!m_asking->ready());
-        m_asking->typed(u"albums"_s);
-        QVERIFY(!m_asking->ready());
         m_asking->typed(u"Albums"_s);
+        QVERIFY(!m_asking->ready());
+        m_asking->typed(u"supprimer"_s);
+        QVERIFY(!m_asking->ready());
+        m_asking->typed(u"Supprimer"_s);
         QVERIFY(m_asking->ready());
     }
 
@@ -224,7 +231,7 @@ private slots:
         m_asking->go();
         QVERIFY(!m_pretend->heard.contains("DELETE"));
 
-        m_asking->typed(u"Albums"_s);
+        m_asking->typed(u"Supprimer"_s);
         QSignalSpy gone(m_asking, &Erasure::erased);
         m_asking->go();
         QVERIFY(gone.wait(3000));
@@ -244,6 +251,28 @@ private slots:
         QVERIFY(gone.wait(3000));
 
         QVERIFY(m_pretend->heard.contains("DELETE /entries/v23 "));
+        QCOMPARE(gone.first().at(1).toString(), u"v23"_s);
+    }
+
+    /// The shelf is told once the modal that asked has finished closing, and a beat later: a
+    /// tile that started to leave under the window that had just closed was a tile nobody saw
+    /// start.
+    void the_shelf_is_told_only_after_the_modal_has_gone()
+    {
+        m_asking->aboutEntry(u"v23"_s, u"albums"_s);
+        settle();
+        m_asking->drawn(true);
+        QSignalSpy gone(m_asking, &Erasure::erased);
+        m_asking->go();
+        QTRY_VERIFY(m_pretend->heard.contains("DELETE /entries/v23 "));
+        QTRY_VERIFY(!m_asking->asking());
+        QTest::qWait(Erasure::BeatAfterTheModal * 2);
+        QCOMPARE(gone.count(), 0);
+
+        m_asking->drawn(false);
+        QTest::qWait(Erasure::BeatAfterTheModal / 2);
+        QCOMPARE(gone.count(), 0);
+        QVERIFY(gone.wait(2000));
         QCOMPARE(gone.first().at(1).toString(), u"v23"_s);
     }
 

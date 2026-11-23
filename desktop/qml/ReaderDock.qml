@@ -73,6 +73,10 @@ Rectangle {
         Layout.minimumHeight: step.drawn
         side: Widths.scale.icon(20)
 
+        // A stop, as the bar's buttons are: the chapter steps had no key at all.
+        activeFocusOnTab: true
+        Accessible.focusable: true
+
         LeafToolTip {
             visible: step.hovered
             text: step.label
@@ -166,6 +170,7 @@ Rectangle {
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 visible: dock.level.length > 0
+                textFormat: Text.PlainText
                 text: dock.level
                 color: Theme.ink
                 font.family: Theme.textFamily
@@ -198,6 +203,7 @@ Rectangle {
                     objectName: "reader-page-number"
                     width: Math.ceil(widest.advanceWidth)
                     horizontalAlignment: Text.AlignRight
+                    textFormat: Text.PlainText
                     text: Reader.firstPage >= 0 ? String(Reader.firstPage + 1) : ""
                     color: Theme.ink
                     font.family: Theme.textFamily
@@ -207,6 +213,7 @@ Rectangle {
 
                 Text {
                     objectName: "reader-page-count"
+                    textFormat: Text.PlainText
                     text: ReaderCaptions.outOf(Reader.pageCount)
                     color: Theme.inkFaint
                     font.family: Theme.textFamily

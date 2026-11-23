@@ -27,6 +27,29 @@
 #include <QTimer>
 #include <QVariantList>
 
+/// Outside the class so that weaving the arcs in — which reads lines and answers lines, and
+/// touches nothing else of the model — can be plain functions of `Entries.cpp`: as methods
+/// they were four of the thirty-nine `cpp:S1448` counted on the class.
+namespace Listing {
+
+/// One line: a file, or a hole where one is not.
+struct Line {
+    Api::Entry file;
+    std::optional<Api::Progress> read;
+    /// Set on a gap, which has no file behind it.
+    std::optional<double> missingNumber;
+    /// Set on a separator: the arc that begins here.
+    std::optional<Api::Arc> arc;
+    /// Set on a stretch of chapters inside the volume above — the two halves of a file an
+    /// arc runs through.
+    QString range;
+    /// One level of indentation, and one only: a saga holds its arcs, and past that the
+    /// eye loses the thread.
+    int depth = 0;
+};
+
+} // namespace Listing
+
 class Entries final : public QAbstractListModel
 {
     Q_OBJECT
@@ -84,6 +107,13 @@ public:
         /// The file's own name, which is all a deletion has to show. « the file name alone,
         /// never a path » — the client knows no path and does not invent one.
         FileName,
+        /// How many chapters the volume says it holds: what decides that one of them can be
+        /// replaced from another volume.
+        Chapters,
+        /// « Scénario : Jul · Dessin : Achdé » under the title, empty for a volume credited with
+        /// its series' default: sixty grey lines saying the same two names hid the three where
+        /// the team changed.
+        Credits,
     };
     Q_ENUM(Role)
 
@@ -119,6 +149,16 @@ public:
     /// route that carries the states and tells the view its rows changed, which leaves every
     /// delegate where it was and every cover decoded.
     Q_INVOKABLE void refreshProgress();
+    /// What is known of one file, as lines ready to draw — `[{ name, value }]` — and nothing
+    /// for a field the server left empty. Empty when the file is not on this page.
+    Q_INVOKABLE QVariantMap describe(const QString &entryId) const;
+    /// What the editing window starts from: number, title, ISBN, parution and summary, each
+    /// empty when the file says nothing.
+    Q_INVOKABLE QVariantMap forEditing(const QString &entryId) const;
+    /// The gaps and the arcs of the series the list is already pointed at, as its page now
+    /// says them: asked again when they are not the ones the list was woven with. A volume
+    /// deleted, a scan that found one — the header counted the change and the list did not.
+    Q_INVOKABLE void follow(const QVariantList &missing, int arcCount);
     /// Lets go of the list, for a reader who has left the page it belongs to. See
     /// `Series::forget`: what is kept is kept for a page being replaced under the eye, and a
     /// page one has left is not that.
@@ -128,25 +168,15 @@ public:
     /// a cleared field is the whole list back, the way a cleared chip is the whole shelf.
     Q_INVOKABLE void searchFor(const QString &query);
 
+    /// The files of the edition, without the gaps and the separators: what the page counts
+    /// its people from, rather than asking for the list a second time.
+    QList<Api::Entry> files() const;
+
 signals:
     void changed();
 
 private:
-    /// One line: a file, or a hole where one is not.
-    struct Line {
-        Api::Entry file;
-        std::optional<Api::Progress> read;
-        /// Set on a gap, which has no file behind it.
-        std::optional<double> missingNumber;
-        /// Set on a separator: the arc that begins here.
-        std::optional<Api::Arc> arc;
-        /// Set on a stretch of chapters inside the volume above — the two halves of a file an
-        /// arc runs through.
-        QString range;
-        /// One level of indentation, and one only: a saga holds its arcs, and past that the
-        /// eye loses the thread.
-        int depth = 0;
-    };
+    using Line = Listing::Line;
 
     void tookEntries(const Server::Answer &answer);
     void tookProgress(const Server::Answer &answer);
@@ -155,15 +185,8 @@ private:
     /// The states of one answer, by the entry they belong to.
     static QHash<QString, Api::Progress> statesIn(const Server::Answer &answer);
     void tookArcs(const Server::Answer &answer);
-    /// Puts every separator where its arc begins, and cuts the one volume an arc runs
-    /// through into the two stretches either side of the frontier.
-    void weaveArcs();
-    /// The line an arc begins at, or -1 when no file of this edition reaches it.
-    qsizetype beginsAt(const Api::Arc &arc) const;
-    /// Draws a frontier that falls *inside* a file: the file, then the stretch before it,
-    /// the separator, and the stretch after — `first` being that file's own first chapter.
-    void cutOpen(qsizetype at, double first, const Api::Arc &arc, const Line &separator);
-    std::optional<double> nextKey(qsizetype after) const;
+    /// Draws the list once the states and the separators it waits for have answered.
+    void settle();
     void rebuild();
 
     Server *m_server;
@@ -183,6 +206,8 @@ private:
     QTimer m_settling;
     QString m_query;
     bool m_loading = false;
+    bool m_progressPending = false;
+    bool m_arcsPending = false;
     QString m_trouble;
     int m_generation = 0;
 };

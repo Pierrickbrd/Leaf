@@ -33,7 +33,7 @@ Item {
 
     objectName: "edition-switch"
     implicitWidth: pill.width
-    implicitHeight: 24
+    implicitHeight: pill.height
     visible: opacity > 0
 
     /// A stop of the page's walk — see `KeyWalk`. Enter opens the list, the arrows move in it
@@ -70,8 +70,10 @@ Item {
     Rectangle {
         id: pill
 
-        height: 24
-        width: word.implicitWidth + chevron.width + 22
+        // From its word: a literal 24 round a word that follows the desktop's text size cut
+        // it at half as large again.
+        height: Math.max(Widths.scale.fit(24), word.implicitHeight + Widths.scale.fit(6))
+        width: word.implicitWidth + chevron.width + Widths.scale.fit(22)
         radius: height / 2
         color: pointer.hovered || menu.opened ? Theme.rule : Theme.onPaper
 
@@ -89,21 +91,22 @@ Item {
         Text {
             id: word
 
-            x: 11
+            x: Widths.scale.fit(11)
             anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
             text: switcher.label
             color: Theme.inkSoft
             font.family: Theme.textFamily
-            font.pixelSize: 13
+            font.pixelSize: Widths.scale.body(13)
         }
 
         Glyph {
             id: chevron
 
             anchors.left: word.right
-            anchors.leftMargin: 2
+            anchors.leftMargin: Widths.space.tight
             anchors.verticalCenter: parent.verticalCenter
-            side: 16
+            side: Widths.scale.icon(16)
             source: "assets/icons/expand_more.svg"
             tint: Theme.inkFaint
             // On the whole thing, so the mark and its colour turn together. Written out, the
@@ -116,9 +119,12 @@ Item {
         id: menu
 
         objectName: "editions-menu"
-        y: pill.height + 5
-        width: 264
-        padding: 4
+        // `compact` from its pill and inside, as every menu: its padding was 4, half the sort
+        // menu's and the filters' 8, for the same surface (spacing audit, 23/10/2026).
+        y: pill.height + Widths.space.compact
+        width: Widths.scale.column(264)
+        padding: Widths.space.compact
+        margins: Widths.space.gutter
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
         // Taken, so that the arrows reach the list and Escape closes it before the page.
         focus: true
@@ -135,7 +141,7 @@ Item {
         }
 
         background: Rectangle {
-            radius: 12
+            radius: Theme.buttonRadius
             color: Theme.surface
             border.color: Theme.rule
             border.width: 1
@@ -144,18 +150,30 @@ Item {
         }
 
         contentItem: Column {
-            spacing: 2
+            spacing: Widths.space.tight
             focus: true
+
+            /// The keys moved the edition they are on: their ring is shown. It moves inside the
+            /// list and not from one item to the next, which is what lights a ring anywhere
+            /// else — opened with a click, the list was walked with the arrows and no ring.
+            function keysMoved() {
+                const cursor = switcher.Window.window ? switcher.Window.window.navigationCursor
+                                                      : null
+                if (cursor)
+                    cursor.pointerTookOver = false
+            }
 
             Keys.onPressed: event => {
                 const last = switcher.editions.length - 1
                 if (event.key === Qt.Key_Down || event.key === Qt.Key_Right
                         || (event.key === Qt.Key_Tab && !(event.modifiers & Qt.ShiftModifier))) {
                     menu.pointed = Math.min(last, menu.pointed + 1)
+                    keysMoved()
                     event.accepted = true
                 } else if (event.key === Qt.Key_Up || event.key === Qt.Key_Left
                            || event.key === Qt.Key_Backtab || event.key === Qt.Key_Tab) {
                     menu.pointed = Math.max(0, menu.pointed - 1)
+                    keysMoved()
                     event.accepted = true
                 } else if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
                            || event.key === Qt.Key_Enter) {
@@ -166,17 +184,20 @@ Item {
             }
 
             Repeater {
-                model: switcher.editions
+                model: switcher.editions.length
 
                 Rectangle {
                     id: option
 
-                    required property var modelData
                     required property int index
+                    readonly property var modelData: switcher.editions[index]
+                                                     ?? ({ "seriesId": "", "here": false })
 
                     objectName: "edition-" + modelData.seriesId
-                    width: 256
-                    height: 48
+                    width: menu.availableWidth
+                    height: Math.max(Widths.scale.size(48),
+                                     art.height + Widths.scale.size(6),
+                                     said.implicitHeight + Widths.space.compact)
                     radius: 9
                     color: modelData.here || hover.hovered ? Theme.onPaper : "transparent"
 
@@ -202,10 +223,10 @@ Item {
                     Item {
                         id: art
 
-                        x: 4
+                        x: Widths.scale.size(4)
                         anchors.verticalCenter: parent.verticalCenter
-                        width: 28
-                        height: 42
+                        width: Widths.scale.size(28)
+                        height: Widths.scale.size(42)
 
                         CoverShadow {
                             under: "edition-" + option.modelData.seriesId
@@ -224,29 +245,33 @@ Item {
                     }
 
                     Column {
+                        id: said
+
                         anchors.left: art.right
-                        anchors.leftMargin: 8
+                        anchors.leftMargin: Widths.space.label
                         anchors.right: tick.left
-                        anchors.rightMargin: 6
+                        anchors.rightMargin: Widths.scale.room(6)
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: 0
 
                         Text {
                             width: parent.width
+                            textFormat: Text.PlainText
                             text: option.modelData.name
                             color: Theme.ink
                             font.family: Theme.textFamily
-                            font.pixelSize: 14
+                            font.pixelSize: Widths.scale.body(14)
                             font.weight: Font.Medium
                             elide: Text.ElideRight
                         }
 
                         Text {
                             width: parent.width
+                            textFormat: Text.PlainText
                             text: option.modelData.detail
                             color: Theme.inkFaint
                             font.family: Theme.textFamily
-                            font.pixelSize: 12
+                            font.pixelSize: Widths.scale.caption(12)
                             elide: Text.ElideRight
                         }
                     }
@@ -255,9 +280,9 @@ Item {
                         id: tick
 
                         anchors.right: parent.right
-                        anchors.rightMargin: 8
+                        anchors.rightMargin: Widths.space.compact
                         anchors.verticalCenter: parent.verticalCenter
-                        side: 18
+                        side: Widths.scale.icon(18)
                         source: "assets/icons/check.svg"
                         tint: Theme.emerald
                         visible: option.modelData.here

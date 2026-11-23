@@ -9,197 +9,181 @@ import QtQuick
 import QtQuick.Controls
 import Leaf
 
-Popup {
+LeafDialog {
     id: confirmation
 
     objectName: "erase-dialog"
-    width: Math.min(430, Overlay.overlay ? Overlay.overlay.width - 80 : 430)
-    anchors.centerIn: Overlay.overlay
-    padding: 0
-    modal: true
-    focus: true
-    closePolicy: Popup.CloseOnEscape
+    surfaceName: "erase-surface"
+    // The name to type when there is one, the way that loses nothing otherwise.
+    initialFocus: Erasure.whole ? confirmField : cancelAction
+    // Empty at every question: `Erasure.ask` forgets what was typed, and the field kept the
+    // last answer typed beside a question it no longer answered.
+    onAboutToShow: confirmField.clear()
     visible: Erasure.asking
-    // Closed by Escape, the question is withdrawn here. Closed because it was withdrawn —
-    // « Annuler » — it is not withdrawn a second time from inside the binding that is closing
-    // it: that was a binding loop on `visible` at every cancel.
+    // Only when closed by Escape, with the question still asked. « Annuler » dismisses
+    // first: the dialog then closed because `asking` went false, and dismissing again from
+    // here changed `asking` inside its own binding — a binding loop on `visible` at every
+    // cancel, measured on 23/10/2026.
+    onOpened: Erasure.drawn(true)
     onClosed: {
+        Erasure.drawn(false)
         if (Erasure.asking)
             Erasure.dismiss()
     }
 
-    // Dimmed and not hidden: what is about to go is on the screen behind this.
-    // The design's own veil, and the same one the import dialog is laid under: what is about
-    // to go stays visible behind it, because one deletes something one can see.
-    Overlay.modal: Rectangle {
-        color: Qt.rgba(12 / 255, 16 / 255, 14 / 255, 0.74)
+    // The question at a title's size, the details at a caption's — and the warning one pixel
+    // over them: at 12 like the rest, the sentence that stands between a reader and a loss was
+    // the smallest on the screen (audit, 23/10/2026). A caption of 13 and not a body: as a
+    // body it kept its 13 at 800 where the paragraphs round it fell to their 11, and stood
+    // out of the dialog two sizes larger than everything it qualifies (23/10/2026).
+    Text {
+        objectName: "erase-question"
+        width: parent.width
+        textFormat: Text.PlainText
+        text: Erasure.said.question ?? ""
+        color: Theme.ink
+        font.family: Theme.displayFamily
+        font.pixelSize: Widths.scale.title(20)
+        font.weight: Font.Bold
+        wrapMode: Text.WordWrap
     }
 
-    background: Rectangle {
-        objectName: "erase-surface"
-        radius: Theme.cardRadius
-        // A card, not the paper: a modal the colour of the page behind it has nothing but a
-        // hairline saying where the page stops and the question starts.
-        color: Theme.surface
-        border.color: Theme.rule
-        border.width: 1
-        antialiasing: true
+    // What goes and which file it is are one paragraph in two lines, not two blocks: they
+    // are one fact about one thing.
+    Column {
+        width: parent.width
+        spacing: Widths.space.tight
 
-        CardLift { level: CardLift.Modal }
-    }
-
-    contentItem: DialogBody {
-        Column {
-            id: body
-
-            x: 17
-            y: 16
-            width: parent.width - 34
-            spacing: 10
-
-            Text {
-                objectName: "erase-question"
-                width: parent.width
-                text: Erasure.said.question ?? ""
-                color: Theme.ink
-                font.family: Theme.displayFamily
-                font.pixelSize: 20
-                font.weight: Font.Bold
-                wrapMode: Text.WordWrap
-            }
-
-            // What goes and which file it is are one paragraph in two lines, not two blocks: they
-            // are one fact about one thing.
-            Column {
-                width: parent.width
-                spacing: 1
-
-                Text {
-                    width: parent.width
-                    text: Erasure.said.what ?? ""
-                    visible: text.length > 0
-                    color: Theme.ink
-                    font.family: Theme.textFamily
-                    font.pixelSize: 12
-                    wrapMode: Text.WordWrap
-                }
-
-                Text {
-                    width: parent.width
-                    text: Erasure.said.file ?? ""
-                    visible: text.length > 0
-                    color: Theme.inkSoft
-                    font.family: Theme.textFamily
-                    font.pixelSize: 12
-                    elide: Text.ElideMiddle
-                }
-            }
-
-            Text {
-                objectName: "erase-leaves"
-                width: parent.width
-                text: Erasure.said.leaves ?? ""
-                visible: text.length > 0
-                color: Theme.inkSoft
-                font.family: Theme.textFamily
-                font.pixelSize: 12
-                lineHeight: 1.4
-                wrapMode: Text.WordWrap
-            }
-
-            // Said plainly, in the colour of the two paragraphs above it. The design puts the
-            // garnet on the button and nowhere else: a modal where the prose shouts as loudly as
-            // the button is a modal where neither is read.
-            Text {
-                objectName: "erase-warning"
-                width: parent.width
-                text: Erasure.said.warning ?? ""
-                visible: text.length > 0
-                color: Theme.inkSoft
-                font.family: Theme.textFamily
-                font.pixelSize: 12
-                lineHeight: 1.4
-                wrapMode: Text.WordWrap
-            }
-
-            Text {
-                width: parent.width
-                text: Erasure.said.untouched ?? ""
-                visible: text.length > 0
-                color: Theme.inkSoft
-                font.family: Theme.textFamily
-                font.pixelSize: 12
-                wrapMode: Text.WordWrap
-            }
-
-            // Only for a whole edition. Thirty files and nothing to come back to is worth the
-            // weight; the same weight on one volume would be ceremony.
-            Column {
-                width: parent.width
-                spacing: 6
-                visible: Erasure.whole
-
-                Text {
-                    text: Erasure.said.confirm ?? ""
-                    color: Theme.inkSoft
-                    font.family: Theme.textFamily
-                    font.pixelSize: 12
-                }
-
-                LeafField {
-                    objectName: "erase-confirm"
-                    width: parent.width
-                    // The window opens on the name to type, when there is one.
-                    focus: Erasure.whole
-                    activeFocusOnTab: true
-                    onTextEdited: Erasure.typed(text)
-                    onAccepted: {
-                        if (Erasure.ready)
-                            Erasure.go()
-                    }
-                }
-            }
-
-            Text {
-                objectName: "erase-trouble"
-                width: parent.width
-                text: Erasure.trouble
-                visible: text.length > 0
-                color: Theme.alert
-                font.family: Theme.textFamily
-                font.pixelSize: 12
-                wrapMode: Text.WordWrap
-            }
+        Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            text: Erasure.said.what ?? ""
+            visible: text.length > 0
+            color: Theme.ink
+            font.family: Theme.textFamily
+            font.pixelSize: Widths.scale.caption(12)
+            wrapMode: Text.WordWrap
         }
 
-        Row {
-            anchors.right: body.right
-            anchors.top: body.bottom
-            anchors.topMargin: 16
-            anchors.bottomMargin: 16
-            spacing: 8
+        Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            text: Erasure.said.file ?? ""
+            visible: text.length > 0
+            color: Theme.inkSoft
+            font.family: Theme.textFamily
+            font.pixelSize: Widths.scale.caption(12)
+            elide: Text.ElideMiddle
+        }
+    }
 
-            LeafTextAction {
-                objectName: "erase-cancel"
-                label: Erasure.cancelLabel
-                // Otherwise on the way that erases nothing.
-                focus: !Erasure.whole
-                activeFocusOnTab: true
-                anchors.verticalCenter: parent.verticalCenter
-                onTriggered: Erasure.dismiss()
-            }
+    Text {
+        objectName: "erase-leaves"
+        width: parent.width
+        textFormat: Text.PlainText
+        text: Erasure.said.leaves ?? ""
+        visible: text.length > 0
+        color: Theme.inkSoft
+        font.family: Theme.textFamily
+        font.pixelSize: Widths.scale.caption(12)
+        lineHeight: 1.4
+        wrapMode: Text.WordWrap
+    }
 
-            ActionButton {
-                objectName: "erase-go"
-                label: Erasure.eraseLabel
-                danger: true
-                ready: Erasure.ready
-                onTriggered: Erasure.go()
+    // Said plainly, in the colour of the two paragraphs above it. The design puts the
+    // garnet on the button and nowhere else: a modal where the prose shouts as loudly as
+    // the button is a modal where neither is read.
+    Text {
+        objectName: "erase-warning"
+        width: parent.width
+        textFormat: Text.PlainText
+        text: Erasure.said.warning ?? ""
+        visible: text.length > 0
+        color: Theme.inkSoft
+        font.family: Theme.textFamily
+        font.pixelSize: Widths.scale.caption(13)
+        lineHeight: 1.4
+        wrapMode: Text.WordWrap
+    }
+
+    Text {
+        width: parent.width
+        textFormat: Text.PlainText
+        text: Erasure.said.untouched ?? ""
+        visible: text.length > 0
+        color: Theme.inkSoft
+        font.family: Theme.textFamily
+        font.pixelSize: Widths.scale.caption(12)
+        wrapMode: Text.WordWrap
+    }
+
+    // Only for a whole edition. Thirty files and nothing to come back to is worth the
+    // weight; the same weight on one volume would be ceremony.
+    Column {
+        width: parent.width
+        // Closer than two lines of the card: the sentence is the field's own caption.
+        spacing: Widths.scale.room(6)
+        visible: Erasure.whole
+
+        Text {
+            width: parent.width
+            textFormat: Text.PlainText
+            text: Erasure.said.confirm ?? ""
+            color: Theme.inkSoft
+            font.family: Theme.textFamily
+            font.pixelSize: Widths.scale.caption(12)
+            wrapMode: Text.WordWrap
+        }
+
+        LeafField {
+            id: confirmField
+
+            objectName: "erase-confirm"
+            width: parent.width
+            // The window opens on the name to type, when there is one.
+            focus: Erasure.whole
+            activeFocusOnTab: true
+            onTextEdited: Erasure.typed(text)
+            onAccepted: {
+                if (Erasure.ready)
+                    Erasure.go()
             }
         }
     }
 
-    // The popup grows with what it says, which is not the same height for a file and for an
-    // edition — and not the same again once the server has refused one.
-    implicitHeight: body.implicitHeight + 16 + 16 + 32 + 16
+    Text {
+        objectName: "erase-trouble"
+        width: parent.width
+        textFormat: Text.PlainText
+        text: Erasure.trouble
+        visible: text.length > 0
+        color: Theme.alert
+        font.family: Theme.textFamily
+        font.pixelSize: Widths.scale.caption(12)
+        wrapMode: Text.WordWrap
+    }
+
+    commands: [
+        LeafTextAction {
+            id: cancelAction
+
+            objectName: "erase-cancel"
+            scaled: true
+            label: Erasure.cancelLabel
+            // Otherwise on the way that erases nothing.
+            focus: !Erasure.whole
+            activeFocusOnTab: true
+            anchors.verticalCenter: parent.verticalCenter
+            onTriggered: Erasure.dismiss()
+        },
+
+        ActionButton {
+            objectName: "erase-go"
+            scaled: true
+            label: Erasure.eraseLabel
+            danger: true
+            ready: Erasure.ready
+            onTriggered: Erasure.go()
+        }
+    ]
 }

@@ -29,17 +29,28 @@ QtObject {
     /// a cover is not a decision to look at the chip the keys were left on.
     ///
     /// Set by any press in the window (`Boot`), and not only over a cover: the ring answers
-    /// Tab and the arrows, and the first click puts it away.
-    property bool pointerTookOver: false
+    /// Tab and the arrows, and the first click puts it away. True until a key is pressed: a
+    /// window that opens has been used by nobody yet, and « Qui lit ? » came up at launch with
+    /// a ring round a profile nobody had walked to.
+    property bool pointerTookOver: true
     /// A button is down. A focus change made under it is the hand's, and lights no ring.
     property bool pointerDown: false
+    /// A key that walks — Tab, an arrow, Home, a page — is being delivered. A focus change made
+    /// under it is the keys', and lights the ring.
+    property bool keyDown: false
 
     function noteFocus(item) {
         if (currentFocusItem === item)
             return
         // A key that moved the focus lights its ring; a click that did, does not — the ring
-        // is the keyboard's, and a click is the hand.
-        pointerTookOver = pointerDown
+        // is the keyboard's, and a click is the hand. A focus change that neither made is the
+        // screen's, and keeps whatever the last hand or key decided: it was read as the
+        // keys', so a page opened by a click, a dialog closing back onto its opener and a
+        // tab chosen with the pointer all came up ringed (owner, 25/10/2026).
+        if (pointerDown)
+            pointerTookOver = true
+        else if (keyDown)
+            pointerTookOver = false
         previousFocusItem = currentFocusItem
         currentFocusItem = item
     }

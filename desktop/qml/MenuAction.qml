@@ -19,19 +19,32 @@ MenuItem {
     /// where two things are red is a list where neither is.
     property bool dangerous: false
 
-    implicitWidth: 248
-    implicitHeight: 36
-    leftPadding: 10
-    rightPadding: 10
+    // As `LeafMenuItem`: a row of words, its height from them, `label` from glyph to word.
+    //
+    // Wide enough for its words when it can be: a constant 248 cut « Marquer toute la série
+    // comme non lue » to « … comme n… » in a window with room for twice that, because a menu
+    // is as wide as its widest row and none of them asked for more. The floor keeps short
+    // menus one width; the window's margins, which a popup respects, are the only ceiling.
+    implicitWidth: Math.max(Widths.scale.column(248),
+                            leftPadding + Widths.scale.icon(20) + spacing + said.implicitWidth
+                            + rightPadding)
+    implicitHeight: Math.max(Widths.scale.size(36), said.implicitHeight + Widths.space.row)
+    leftPadding: Widths.scale.size(10)
+    rightPadding: Widths.scale.size(10)
     topPadding: 0
     bottomPadding: 0
-    spacing: 12
+    spacing: Widths.space.label
 
     font.family: Theme.textFamily
-    font.pixelSize: 13
+    font.pixelSize: Widths.scale.body(13)
 
     Accessible.role: Accessible.MenuItem
     Accessible.name: text
+
+    // Hidden is not enough for a menu's keys: Down landed on « Réimporter » and « Supprimer »,
+    // hidden from a profile without the right (audit, 25/10/2026). What is not shown cannot
+    // be reached.
+    enabled: visible
 
     contentItem: Item {
         Glyph {
@@ -39,17 +52,20 @@ MenuItem {
 
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
-            side: 20
+            side: Widths.scale.icon(20)
             source: "assets/icons/" + command.glyph + ".svg"
             tint: command.dangerous ? Theme.alert
                                     : (command.enabled ? Theme.inkSoft : Theme.inkFaint)
         }
 
         Text {
+            id: said
+
             anchors.left: mark.right
             anchors.leftMargin: command.spacing
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
             text: command.text
             color: !command.enabled ? Theme.inkFaint
                                     : (command.dangerous ? Theme.alert : Theme.ink)

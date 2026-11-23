@@ -6,6 +6,8 @@
 #include <QDebug>
 #include <QQmlEngine>
 
+using namespace Qt::StringLiterals;
+
 ImportCaptions *ImportCaptions::create(QQmlEngine *engine, QJSEngine *)
 {
     auto *imports = engine->singletonInstance<Imports *>(qmlTypeId("Leaf", 1, 0, "Imports"));
@@ -33,14 +35,27 @@ QString ImportCaptions::title() const
     return Words::importing();
 }
 
-QString ImportCaptions::dropHereLabel() const
+QString ImportCaptions::waitingLabel() const
 {
-    return Words::dropFilesHere();
+    // A card stopped to be checked waits for a person as surely as one asking for a tick:
+    // counted apart, the bar said nothing over a Komga folder dropped and the window shut.
+    return Words::decisionsWaiting(m_imports ? m_imports->deciding() + m_imports->reviewing()
+                                             : 0);
 }
 
-QString ImportCaptions::dropHowLabel() const
+QStringList ImportCaptions::stepLabels() const
 {
-    return Words::dropHow();
+    return {Words::importStep(1), Words::importStep(2), Words::importStep(3)};
+}
+
+QString ImportCaptions::nextLabel() const
+{
+    return Words::next();
+}
+
+QString ImportCaptions::previousLabel() const
+{
+    return Words::previous();
 }
 
 QString ImportCaptions::cancelLabel() const
@@ -48,14 +63,19 @@ QString ImportCaptions::cancelLabel() const
     return Words::cancel();
 }
 
+QString ImportCaptions::closeLabel() const
+{
+    return Words::closeIt();
+}
+
 QString ImportCaptions::backLabel() const
 {
     return Words::goBack();
 }
 
-QString ImportCaptions::startLabel() const
+QString ImportCaptions::returnLabel() const
 {
-    return Words::startImport();
+    return Words::back();
 }
 
 QString ImportCaptions::pauseLabel() const
@@ -73,58 +93,44 @@ QString ImportCaptions::abandonLabel() const
     return Words::abandonIt();
 }
 
-QString ImportCaptions::noSeriesLabel() const
+QString ImportCaptions::sendLabel() const
 {
-    return Words::noSeriesForThisFile();
+    return Words::importAll();
 }
 
-QString ImportCaptions::acceptLabel() const
+QString ImportCaptions::finishLabel() const
 {
-    return Words::acceptCreations();
+    return Words::finishIt();
 }
 
-QString ImportCaptions::verifyLabel() const
+QString ImportCaptions::removeLabel() const
 {
-    return Words::verifyEachFile();
+    return Words::removeIt();
 }
 
-QString ImportCaptions::verifyAside() const
+QString ImportCaptions::emptyLabel() const
 {
-    return Words::verifyingMeans();
+    return Words::emptyTheQueue();
 }
 
-QString ImportCaptions::chooseLeadLabel() const
+QString ImportCaptions::anotherFileLabel() const
 {
-    return Words::chooseLead();
+    return Words::anotherFile();
 }
 
-QString ImportCaptions::dropSomethingElseLabel() const
+QString ImportCaptions::reimportTitle(const QString &kind, const QString &name) const
 {
-    return Words::dropSomethingElse();
+    return Words::reimportAsked(kind, name);
 }
 
-QString ImportCaptions::chooseFilesLabel() const
+QString ImportCaptions::reimportHolds(const QString &kind, int volumes) const
 {
-    return Words::chooseFiles();
+    if (kind == u"SERIES_NEW_EDITIONS"_s)
+        return Words::addEditionsSubtitle();
+    return kind == u"SERIES"_s && volumes > 0 ? Words::reimportHolds(volumes) : QString();
 }
 
-QString ImportCaptions::chooseFilesTitle() const
+QString ImportCaptions::reimportUniverseLabel(const QString &name) const
 {
-    return Words::chooseFilesTitle();
+    return Words::reimportUniverse(name);
 }
-
-QString ImportCaptions::chooseFolderLabel() const
-{
-    return Words::chooseFolder();
-}
-
-QString ImportCaptions::chooseFolderTitle() const
-{
-    return Words::chooseFolderTitle();
-}
-
-QString ImportCaptions::waitingLabel() const
-{
-    return Words::decisionsWaiting(m_imports ? m_imports->deciding() : 0);
-}
-

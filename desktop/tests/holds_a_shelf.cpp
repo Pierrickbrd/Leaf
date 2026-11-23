@@ -750,6 +750,18 @@ private slots:
                  m_settings->address() + u"/series/dn/cover"_s);
     }
 
+    /// An identifier is a segment of the cover's address, whatever it holds: the key rides to
+    /// that address, and an id with a slash, dots or a question mark would be another route.
+    void an_identifier_cannot_name_another_route_in_its_cover()
+    {
+        m_pretend->answers(200, aPage({aSeries(u"a/../b?x=1"_s, u"Piégée"_s)}, 1));
+        m_shelf->reload();
+        settle();
+
+        QCOMPARE(m_shelf->data(m_shelf->index(0), role(Shelf::Role::Cover)).toString(),
+                 m_settings->address() + u"/series/a%2F..%2Fb%3Fx%3D1/cover"_s);
+    }
+
     /// A book that is a whole book on its own says which file it is, so that its tile opens
     /// the reader on it with no request of its own (spec §01); every other tile says nothing.
     void a_book_on_its_own_hands_its_tile_the_file_to_open()
@@ -875,6 +887,74 @@ private slots:
         QCOMPARE(m_shelf->data(m_shelf->index(0), role(Shelf::Role::SeriesId)).toString(),
                  u"kq"_s);
         QCOMPARE(requests(), 0);
+    }
+
+    /// The tile of a series taken off the disk leaves with its own choreography, and the one of
+    /// a series a filter let go of does not: the tile can only tell them apart if it was told,
+    /// and told while its row was still there.
+    void a_series_forgotten_says_so_before_its_row_goes()
+    {
+        m_pretend->answers(200, aPage({aSeries(u"dn"_s, u"Death Note"_s),
+                                       aSeries(u"kq"_s, u"Koro Quest"_s)},
+                                      2));
+        m_shelf->reload();
+        settle();
+
+        int rowsWhenTold = -1;
+        QString told;
+        connect(m_shelf, &Shelf::forgetting, this, [&](const QString &id) {
+            told = id;
+            rowsWhenTold = m_shelf->rowCount();
+        });
+        m_shelf->forget(u"dn"_s);
+
+        QCOMPARE(told, u"dn"_s);
+        QCOMPARE(rowsWhenTold, 2);
+        QCOMPARE(m_shelf->rowCount(), 1);
+    }
+
+    /// What an import brought is asked for as an arrival: the shelf says so before the answer
+    /// puts the new row in, so that its tile — added rather than moved — comes in with its own
+    /// choreography, and a row added for any other reason does not.
+    void a_shelf_asked_for_arrivals_says_so_before_the_row_comes()
+    {
+        m_pretend->answers(200, aPage({aSeries(u"dn"_s, u"Death Note"_s)}, 1));
+        m_shelf->reload();
+        settle();
+
+        int rowsWhenTold = -1;
+        QSignalSpy told(m_shelf, &Shelf::arriving);
+        connect(m_shelf, &Shelf::arriving, this, [&] { rowsWhenTold = m_shelf->rowCount(); });
+        m_pretend->answers(200, aPage({aSeries(u"dn"_s, u"Death Note"_s),
+                                       aSeries(u"kq"_s, u"Koro Quest"_s)},
+                                      2));
+        m_shelf->refreshForArrivals();
+        QCOMPARE(told.count(), 1);
+        QCOMPARE(rowsWhenTold, 1);
+        settle();
+        QCOMPARE(m_shelf->rowCount(), 2);
+    }
+
+    /// Told to leave with a lead, a series stays in the model for that long and goes after it:
+    /// the tile leaves in front of the reader, and the neighbours close the gap when the row
+    /// goes.
+    void a_series_forgotten_with_a_lead_stays_until_it_is_over()
+    {
+        m_pretend->answers(200, aPage({aSeries(u"dn"_s, u"Death Note"_s),
+                                       aSeries(u"kq"_s, u"Koro Quest"_s)},
+                                      2));
+        m_shelf->reload();
+        settle();
+        m_shelf->setErasureLead(300);
+
+        QSignalSpy told(m_shelf, &Shelf::forgetting);
+        m_shelf->forget(u"dn"_s);
+        m_shelf->forget(u"dn"_s);
+        QCOMPARE(told.count(), 1);
+        QTest::qWait(100);
+        QCOMPARE(m_shelf->rowCount(), 2);
+        QTRY_COMPARE_WITH_TIMEOUT(m_shelf->rowCount(), 1, 2000);
+        QCOMPARE(m_shelf->total(), 1);
     }
 
     /// Asked again after a scan, the shelf asks for as many as it holds, in one answer. It

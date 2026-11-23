@@ -15,8 +15,9 @@
 //
 // **A webtoon keeps the fit and the backdrop, and nothing else.** It has no sense of reading,
 // no pair of pages to lay out and no page to turn, and « Hauteur » means nothing for a column
-// with no end. A fit chosen for books as « Hauteur » is shown as « Largeur », which is what a
-// strip does with it. The paper behind a strip is still the reader's paper.
+// with no end. Its fit is its own (`Preferences.stripFit`), « Original » until said otherwise:
+// the books' « Hauteur » shown as « Largeur » drew a laptop's strip at twice the size its
+// panels were drawn at (test of 24/11/2026). The paper behind a strip is still the reader's.
 //
 // **The backdrop and the motion are the choice of 22/10/2026**: a black paper in a lit
 // room tires some eyes, and a slide at every page is too much for some readers. Both are kept
@@ -45,7 +46,9 @@ import Leaf
 Rectangle {
     id: card
 
-    readonly property int padding: Widths.scale.size(18)
+    /// The padding of every card, which was 18 here and 16 on every other card of the
+    /// application: two pixels, and one role (spacing audit, 23/10/2026).
+    readonly property int padding: Widths.space.card
     /// The most height the window leaves it. Taller than that, the card stops at it and its
     /// groups scroll inside: on a short window it ran off the foot of the screen.
     property real room: Number.POSITIVE_INFINITY
@@ -58,9 +61,6 @@ Rectangle {
     readonly property bool stacked: body.width < card.labelColumn + card.labelGap
                                     + Math.max(layoutChoice.lineWidth, fitChoice.lineWidth,
                                                backdropChoice.lineWidth, motionChoice.lineWidth)
-    /// The fit a strip actually draws with, so that the pill lit is the one that is true.
-    readonly property int stripFit: Preferences.fit === Preferences.Original
-                                    ? Preferences.Original : Preferences.Width
 
     /// The cross was pressed: the card asks to be closed, as Escape does.
     signal closeRequested()
@@ -99,6 +99,7 @@ Rectangle {
             id: word
 
             objectName: group.objectName + "-heading"
+            textFormat: Text.PlainText
             anchors.bottom: parent.bottom
             color: Theme.inkFaint
             font.family: Theme.textFamily
@@ -138,6 +139,7 @@ Rectangle {
             id: label
 
             objectName: line.key + "-name"
+            textFormat: Text.PlainText
             width: line.stacked ? line.width : line.labelColumn
             y: line.stacked ? 0 : (line.height - height) / 2
             color: Theme.inkSoft
@@ -177,15 +179,19 @@ Rectangle {
         x: card.padding
         y: card.padding
         width: card.width - 2 * card.padding
-        height: Widths.scale.size(26)
+        // The cross's height, or the title's when the desktop's text makes it taller.
+        height: Math.max(Widths.scale.size(26), title.implicitHeight)
 
         Text {
+            id: title
+
             objectName: "reader-settings-title"
             anchors.left: parent.left
             anchors.right: cross.left
             anchors.rightMargin: Widths.scale.size(8)
             anchors.verticalCenter: parent.verticalCenter
             elide: Text.ElideRight
+            textFormat: Text.PlainText
             text: ReaderCaptions.cardTitle
             color: Theme.ink
             font.family: Theme.displayFamily
@@ -197,6 +203,9 @@ Rectangle {
             id: cross
 
             objectName: "reader-settings-close"
+            // A stop, as the bar's buttons are: Escape was the only way out by the keys.
+            activeFocusOnTab: true
+            Accessible.focusable: true
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             width: Widths.scale.size(26)
@@ -221,6 +230,8 @@ Rectangle {
         interactive: body.height > sheet.height
         boundsBehavior: Flickable.StopAtBounds
 
+        FollowsFocus { flick: sheet }
+
         Column {
             id: body
 
@@ -236,6 +247,8 @@ Rectangle {
 
             SettingsChoice {
                 objectName: "reader-direction"
+                tabStops: true
+                arrows: false
                 visible: !Reader.webtoon
                 width: parent.width
                 scaled: true
@@ -291,6 +304,8 @@ Rectangle {
                     id: layoutChoice
 
                     objectName: "reader-layout"
+                    tabStops: true
+                    arrows: false
                     width: parent.width
                     scaled: true
                     options: ReaderCaptions.layouts
@@ -310,11 +325,15 @@ Rectangle {
                     id: fitChoice
 
                     objectName: "reader-fit"
+                    tabStops: true
+                    arrows: false
                     width: parent.width
                     scaled: true
                     options: Reader.webtoon ? ReaderCaptions.stripFits : ReaderCaptions.fits
-                    chosen: Reader.webtoon ? card.stripFit : Preferences.fit
-                    onPicked: value => Preferences.chooseFit(value)
+                    chosen: Reader.webtoon ? Preferences.stripFit : Preferences.fit
+                    onPicked: value => Reader.webtoon
+                                       ? Preferences.chooseStrip(value, Preferences.stripZoom)
+                                       : Preferences.chooseFit(value)
                 }
             }
 
@@ -334,6 +353,8 @@ Rectangle {
                     id: backdropChoice
 
                     objectName: "reader-backdrop"
+                    tabStops: true
+                    arrows: false
                     width: parent.width
                     scaled: true
                     options: ReaderCaptions.backdrops
@@ -360,6 +381,8 @@ Rectangle {
                     id: motionChoice
 
                     objectName: "reader-motion"
+                    tabStops: true
+                    arrows: false
                     width: parent.width
                     scaled: true
                     options: ReaderCaptions.motions

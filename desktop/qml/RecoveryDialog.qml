@@ -12,10 +12,11 @@ import QtQuick
 import QtQuick.Controls
 import Leaf
 
-Popup {
+LeafDialog {
     id: dialog
 
     objectName: "recovery-dialog"
+    initialFocus: noted
 
     /// The code as the server sent it, set when the window is asked and cleared when it closes.
     property string code: ""
@@ -35,11 +36,8 @@ Popup {
         dialog.open()
     }
 
-    width: 440
-    anchors.centerIn: Overlay.overlay
-    padding: 0
-    modal: true
-    focus: true
+    drawnWidth: 440
+    lineSpacing: Widths.space.block
     closePolicy: Popup.NoAutoClose
     onClosed: {
         dialog.code = ""
@@ -60,112 +58,98 @@ Popup {
         }
     }
 
-    Overlay.modal: Rectangle {
-        color: Qt.rgba(12 / 255, 16 / 255, 14 / 255, 0.74)
+    Glyph {
+        anchors.horizontalCenter: parent.horizontalCenter
+        side: 36
+        source: "assets/icons/lock.svg"
+        tint: Theme.emerald
     }
 
-    background: Rectangle {
-        radius: Theme.cardRadius
-        color: Theme.surface
-        border.color: Theme.rule
-        border.width: 1
-        antialiasing: true
-
-        CardLift { level: CardLift.Modal }
+    Text {
+        objectName: "recovery-title"
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        textFormat: Text.PlainText
+        text: Profiles.words.recoveryTitle
+        color: Theme.ink
+        font.family: Theme.displayFamily
+        font.pixelSize: 24
+        font.weight: Font.Bold
+        wrapMode: Text.Wrap
     }
 
-    contentItem: DialogBody {
-        objectName: "recovery-dialog-body"
-        implicitHeight: form.height + 44
+    Rectangle {
+        visible: dialog.problem.length === 0
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: shown.implicitWidth + 40
+        height: 52
+        radius: 10
+        color: Theme.onBar
 
-        Column {
-            id: form
-
-            x: 24
-            y: 22
-            width: parent.width - 48
-            spacing: 16
-
-            Glyph {
-                anchors.horizontalCenter: parent.horizontalCenter
-                side: 36
-                source: "assets/icons/lock.svg"
-                tint: Theme.emerald
-            }
-
-            Text {
-                objectName: "recovery-title"
-                width: parent.width
-                horizontalAlignment: Text.AlignHCenter
-                text: Profiles.words.recoveryTitle
-                color: Theme.ink
-                font.family: Theme.displayFamily
-                font.pixelSize: 24
-                font.weight: Font.Bold
-                wrapMode: Text.Wrap
-            }
-
-            Rectangle {
-                visible: dialog.problem.length === 0
-                anchors.horizontalCenter: parent.horizontalCenter
-                width: shown.implicitWidth + 40
-                height: 52
-                radius: 10
-                color: Theme.onBar
-
-                TextEdit {
-                    id: shown
-
-                    objectName: "recovery-code"
-                    anchors.centerIn: parent
-                    readOnly: true
-                    selectByMouse: true
-                    text: dialog.code
-                    color: Theme.ink
-                    selectionColor: Theme.emerald
-                    selectedTextColor: Theme.onEmerald
-                    font.family: Theme.commandFamily
-                    font.pixelSize: 20
-                    font.weight: Font.Medium
-                    font.letterSpacing: 1
-                }
-            }
-
-            Text {
-                objectName: "recovery-explained"
-                visible: dialog.problem.length === 0
-                width: parent.width
-                horizontalAlignment: Text.AlignHCenter
-                text: Profiles.words.recoveryExplained
-                color: Theme.inkSoft
-                font.family: Theme.textFamily
-                font.pixelSize: 13
-                lineHeight: 1.35
-                wrapMode: Text.Wrap
-            }
-
-            Text {
-                objectName: "recovery-problem"
-                visible: dialog.problem.length > 0
-                width: parent.width
-                horizontalAlignment: Text.AlignHCenter
-                text: dialog.problem
-                color: Theme.alert
-                font.family: Theme.textFamily
-                font.pixelSize: 13
-                lineHeight: 1.35
-                wrapMode: Text.Wrap
-            }
-
-            ActionButton {
-                objectName: "recovery-noted"
-                anchors.horizontalCenter: parent.horizontalCenter
-                // The one thing to do here, and Escape does not do it: without the focus,
-                // Enter did nothing either.
-                focus: true
-                label: Profiles.words.recoveryNoted
-                onTriggered: dialog.close()
-            }
+        FocusRing {
+            cornerRadius: 10
+            focused: shown.activeFocus
         }
+
+        TextEdit {
+            id: shown
+
+            objectName: "recovery-code"
+            anchors.centerIn: parent
+            readOnly: true
+            selectByMouse: true
+            // Selected by the keys as by the hand: Tab reaches it and takes it whole.
+            activeFocusOnTab: true
+            onActiveFocusChanged: activeFocus ? selectAll() : deselect()
+            textFormat: Text.PlainText
+            text: dialog.code
+            color: Theme.ink
+            selectionColor: Theme.emerald
+            selectedTextColor: Theme.onEmerald
+            font.family: Theme.commandFamily
+            font.pixelSize: 20
+            font.weight: Font.Medium
+            font.letterSpacing: 1
+        }
+    }
+
+    Text {
+        objectName: "recovery-explained"
+        visible: dialog.problem.length === 0
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        textFormat: Text.PlainText
+        text: Profiles.words.recoveryExplained
+        color: Theme.inkSoft
+        font.family: Theme.textFamily
+        font.pixelSize: 13
+        lineHeight: 1.35
+        wrapMode: Text.Wrap
+    }
+
+    Text {
+        objectName: "recovery-problem"
+        visible: dialog.problem.length > 0
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        textFormat: Text.PlainText
+        text: dialog.problem
+        color: Theme.alert
+        font.family: Theme.textFamily
+        font.pixelSize: 13
+        lineHeight: 1.35
+        wrapMode: Text.Wrap
+    }
+
+    ActionButton {
+        id: noted
+
+        objectName: "recovery-noted"
+        anchors.horizontalCenter: parent.horizontalCenter
+        // The one thing to do here, and Escape does not do it: without the focus,
+        // Enter did nothing either.
+        focus: true
+        label: Profiles.words.recoveryNoted
+        onTriggered: dialog.close()
     }
 }

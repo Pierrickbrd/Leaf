@@ -145,8 +145,8 @@ FocusScope {
     readonly property string onScreen: Reader.entryId + "/" + Reader.firstPage + "/"
                                        + Reader.secondPage
 
-    /// The space round the pages in the stage, which is also what the panel keeps from the
-    /// window's edges.
+    /// The space round the pages in the stage. The cards over them keep the page's gutter
+    /// from the window's edges instead, as the bar above them does.
     readonly property int margin: Math.round(Math.min(view.width, view.height) * 0.022)
 
     readonly property bool rightToLeft: Reader.direction === Reader.RightToLeft
@@ -157,7 +157,8 @@ FocusScope {
     /// shrunk while the volume is open, or the file itself when the fit is its own pixels.
     /// Handed to the pages and to what is fetched ahead alike, so the two ask for the same
     /// file and the second finds it already decoded.
-    readonly property int requestWidth: Preferences.fit === Preferences.Original
+    readonly property int requestWidth: (Reader.webtoon ? Preferences.stripFit
+                                                        : Preferences.fit) === Preferences.Original
                                         ? 0 : Reader.askedWidth
 
     /// The bars go with a turn — and so do the bars a click in the middle was still about to
@@ -301,7 +302,7 @@ FocusScope {
             sheet.opacity = 0
         }
         arrivalHeld.restart()
-        Qt.callLater(view.startArrival)
+        arrivalNext.restart()
     }
 
     /// The arrival waiting starts, once its images are there or once it has waited long
@@ -449,8 +450,14 @@ FocusScope {
         if (view.shortcutsOpen)
             return
         if (Reader.webtoon) {
-            // Ctrl or not: the strip is not zoomed, and a Ctrl left held must not stop it
-            // scrolling.
+            // Ctrl and the wheel zoom the strip, a tenth a notch, as in every viewer — the
+            // touchpad's pinch does the same (`ReaderStrip`).
+            if (event.modifiers & Qt.ControlModifier) {
+                const notches = event.angleDelta.y / 120
+                if (notches !== 0)
+                    strip.zoomTo(strip.zoom * Math.pow(1.1, notches), true)
+                return
+            }
             const down = -(event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y)
             if (!Reader.atTheEnd) {
                 const from = strip.contentY
@@ -746,8 +753,23 @@ FocusScope {
     }
 
     onBarsShownChanged: {
-        if (!view.barsShown)
+        if (!view.barsShown) {
             view.settingsOpen = false
+            // The keys come back to the page with the bars gone: Qt leaves the focus on a
+            // button it hides, and Space went to a button nobody could see rather than to
+            // the page.
+            if (view.holds(bar) || view.holds(dock))
+                keysHome.forceActiveFocus(Qt.OtherFocusReason)
+        }
+    }
+
+    /// Whether the keys are somewhere inside `item`.
+    function holds(item) {
+        for (let at = view.Window.activeFocusItem; at; at = at.parent) {
+            if (at === item)
+                return true
+        }
+        return false
     }
     // One or the other: both are things hung from the bar, and a card over a panel over the
     // pages is a screen with nothing left to read.
@@ -822,6 +844,22 @@ FocusScope {
     /// The first or the last page, by the side it lies on: in a book read left to right the
     /// first is on the left, in a manga the last is — so Ctrl ← goes where ← goes on. A jump,
     /// and from the end card a jump too: the card is put away first.
+    /// ↓ or ↑ in a webtoon: held, the strip drives (`ReaderStrip.press`); at its foot, or with
+    /// the card up, the arrow does what the space bar does there. The key's own repeat is
+    /// nothing: the strip is already moving, and a press every 30 ms was the stutter.
+    function stripArrow(direction, event) {
+        if (event.isAutoRepeat)
+            return
+        if (Reader.atTheEnd || (direction > 0 && strip.atYEnd)) {
+            if (direction > 0)
+                view.forward()
+            else
+                view.backward()
+            return
+        }
+        strip.press(direction)
+    }
+
     function toAnEnd(left) {
         const last = left === view.rightToLeft
         if (Reader.atTheEnd)
@@ -835,6 +873,17 @@ FocusScope {
     // The keys the test of 22/10/2026 reached for and found doing nothing: F11 for the full
     // screen, Backspace to go back, Alt ← and Ctrl W to leave, + and − without Ctrl, Ctrl ←
     // and Ctrl → for the ends of the book, Enter on the end card.
+    // Only for a webtoon's arrows, whose press starts the strip moving and whose release stops
+    // it. Books turn on the press and never look at the release.
+    Keys.onReleased: event => {
+        if (!Reader.webtoon || event.isAutoRepeat)
+            return
+        if (event.key === Qt.Key_Down)
+            strip.release(1)
+        else if (event.key === Qt.Key_Up)
+            strip.release(-1)
+    }
+
     Keys.onPressed: event => {
         view.stirred()
         // Alt ← is the way back of every browser and file manager: the series, at once, and
@@ -864,10 +913,14 @@ FocusScope {
             case Qt.Key_Plus:
                 if (view.zoomable)
                     view.stepZoom(1)
+                else if (Reader.webtoon)
+                    strip.stepZoom(1)
                 break
             case Qt.Key_Minus:
                 if (view.zoomable)
                     view.stepZoom(-1)
+                else if (Reader.webtoon)
+                    strip.stepZoom(-1)
                 break
             default:
                 return
@@ -886,6 +939,20 @@ FocusScope {
         }
         if (view.shortcutsOpen)
             return
+        // Tab with the bars away calls them, and goes into them: their buttons are the only
+        // stops of the reader, and with the bars faded out there was nothing for Tab to reach
+        // — the keys had no way to the bars a click in the middle calls.
+        if ((event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) && !view.barsShown
+                && !Reader.atTheEnd) {
+            view.toggleTheBars()
+            const into = view.nextItemInFocusChain(event.key === Qt.Key_Tab
+                                                   && !(event.modifiers & Qt.ShiftModifier))
+            if (into && into !== view)
+                into.forceActiveFocus(event.key === Qt.Key_Tab ? Qt.TabFocusReason
+                                                               : Qt.BacktabFocusReason)
+            event.accepted = true
+            return
+        }
         // What is off the screen is moved by a third of it at an arrow, and by most of it at
         // the space bar, so the last lines read stay in view; at the edge, the key turns.
         const along = Math.round(sheet.width / 3)
@@ -905,6 +972,10 @@ FocusScope {
                 view.turnTowards(false)
             break
         case Qt.Key_Down:
+            if (Reader.webtoon) {
+                view.stripArrow(1, event)
+                break
+            }
             if (view.moving && view.nudge(0, down))
                 break
             // Past the foot of a page that was being moved, down goes on, as the space bar
@@ -914,6 +985,10 @@ FocusScope {
             view.forward()
             break
         case Qt.Key_Up:
+            if (Reader.webtoon) {
+                view.stripArrow(-1, event)
+                break
+            }
             if (view.moving && view.nudge(0, -down))
                 break
             if (!view.vertical && !Reader.webtoon && !view.moving)
@@ -959,10 +1034,14 @@ FocusScope {
         case Qt.Key_Plus:
             if (view.zoomable)
                 view.stepZoom(1)
+            else if (Reader.webtoon)
+                strip.stepZoom(1)
             break
         case Qt.Key_Minus:
             if (view.zoomable)
                 view.stepZoom(-1)
+            else if (Reader.webtoon)
+                strip.stepZoom(-1)
             break
         // Enter on the end card is its button. Anywhere else it is nothing here.
         case Qt.Key_Return:
@@ -980,6 +1059,15 @@ FocusScope {
             return
         }
         event.accepted = true
+    }
+
+    // Where the keys go back to when what held them goes: the view is a scope, and focusing
+    // it hands the focus back to the child that last had it, the hidden button itself. Its
+    // keys are the view's, which they reach by going up.
+    Item {
+        id: keysHome
+
+        objectName: "reader-keys"
     }
 
     Rectangle {
@@ -1260,6 +1348,17 @@ FocusScope {
         onFinished: view.settle()
     }
 
+    // The arrival is started once the turn that asked for it has returned. A `Qt.callLater`
+    // did that too, but outlived the view: a test that ended on a turn still waiting had its
+    // engine torn down first, and the call landed on a view with no `settle` left — "is not a
+    // function", from a screen already gone. A timer of the view dies with it.
+    Timer {
+        id: arrivalNext
+
+        interval: 0
+        onTriggered: view.startArrival()
+    }
+
     // How long an arrival waits for its images before it goes anyway.
     Timer {
         id: arrivalHeld
@@ -1279,6 +1378,7 @@ FocusScope {
         width: view.width
         requestWidth: view.requestWidth
         onTapped: (x, y) => view.tappedAt(x, y)
+        onWheeled: (event, x, y) => view.wheel(event, x, y)
     }
 
     // The pages after these and the one before, fetched while this one is read: turning must
@@ -1387,6 +1487,30 @@ FocusScope {
         onActivated: view.backToWhole()
     }
 
+    // The same three for a strip, which is never `zoomable` — a book's zoom pans a page — so
+    // the two sets are never both enabled.
+    Shortcut {
+        // qmllint disable unqualified
+        sequences: [StandardKey.ZoomIn, "Ctrl+="]
+        // qmllint enable unqualified
+        enabled: Reader.webtoon && !Reader.loading
+        onActivated: strip.stepZoom(1)
+    }
+
+    Shortcut {
+        // qmllint disable unqualified
+        sequences: [StandardKey.ZoomOut]
+        // qmllint enable unqualified
+        enabled: Reader.webtoon && !Reader.loading
+        onActivated: strip.stepZoom(-1)
+    }
+
+    Shortcut {
+        sequences: ["Ctrl+0", "Ctrl+À"]
+        enabled: Reader.webtoon && !Reader.loading
+        onActivated: strip.zoomTo(1, true)
+    }
+
     // A click in the middle calls the bars once it is sure not to be the first of a double
     // click; see `tapped`.
     Timer {
@@ -1470,7 +1594,9 @@ FocusScope {
         anchors.right: parent.right
         anchors.top: parent.top
         opacity: view.barsShown ? 1 : 0
-        visible: opacity > 0
+        // Shown the moment they are called, and faded only on the way out: a bar still at
+        // nought on its first frame is not in the chain Tab walks.
+        visible: view.barsShown || opacity > 0
         fullScreen: view.fullScreen
         onBackRequested: Navigation.back()
         onFullScreenToggled: view.toggleFullScreen()
@@ -1510,7 +1636,7 @@ FocusScope {
         // Up for the level as well as with the bars: the level is said there, and a reader
         // zooming with the bars away is the usual case.
         opacity: view.barsShown || levelHeld.running ? 1 : 0
-        visible: opacity > 0
+        visible: view.barsShown || levelHeld.running || opacity > 0
 
         Behavior on opacity {
             enabled: view.animated
@@ -1527,10 +1653,15 @@ FocusScope {
         // of 22/10/2026 on a window of 1920 it kept its drawn size beside a dock that had grown.
         // At half the dock's rate (`column`): its words no longer grow, and at the full rate
         // the card was a band of empty paper right of its pills.
-        width: Math.min(view.width - 24, Widths.scale.column(640))
-        x: Math.max(12, Math.min(view.width - card.width - 12, bar.settingsRight - card.width))
-        y: bar.height + 8
-        room: view.height - card.y - view.margin
+        // Hung under its button at `compact`, as a menu under its trigger, and kept from the
+        // window's edges by the page's gutter: its 12 and its 8 were the reader's own numbers
+        // where every other screen had a role for them (spacing audit, 23/10/2026).
+        width: Math.min(view.width - 2 * Widths.space.gutter, Widths.scale.column(640))
+        x: Math.max(Widths.space.gutter,
+                    Math.min(view.width - card.width - Widths.space.gutter,
+                             bar.settingsRight - card.width))
+        y: bar.height + Widths.space.compact
+        room: view.height - card.y - Widths.space.gutter
         visible: view.settingsOpen && view.barsShown
         onCloseRequested: view.settingsOpen = false
     }
@@ -1544,16 +1675,25 @@ FocusScope {
     ReaderVolumePanel {
         id: panel
 
-        x: view.width - panel.width - view.margin
-        y: view.barsShown ? bar.height + 8 : view.margin
+        // At the gutter from the window's right edge, where the bar's buttons above it stand,
+        // and `compact` under the bar and above the dock: at `view.margin` — the space round
+        // the pages — its edge stood 18 from the window's where the bar's stood 16 (spacing
+        // audit, 23/10/2026).
+        x: view.width - panel.width - Widths.space.gutter
+        y: view.barsShown ? bar.height + Widths.space.compact : Widths.space.gutter
         // Its share of the window, within its drawn widths so scaled, and never more than two
         // fifths of a window that has room for the pages beside it: on a narrow one a card
         // that thin holds nothing, and it takes what it needs over the page.
         width: Math.min(Widths.scale.column(480),
                         Math.max(Widths.scale.column(320), view.width * 0.36),
                         Widths.band === Widths.Band.Narrow ? view.width : view.width * 0.4,
-                        view.width - 2 * view.margin)
-        height: (view.barsShown ? dock.y - 8 : view.height - view.margin) - panel.y
+                        view.width - 2 * Widths.space.gutter)
+        // As tall as what it holds, and no taller than the window leaves: run down to the dock
+        // whatever it held, at 800 × 560 it drew 170 pixels of empty card under a volume's
+        // three facts (audit, 23/10/2026). A volume with forty chapters still fills the room.
+        height: Math.min(panel.natural,
+                         (view.barsShown ? dock.y - Widths.space.compact
+                                         : view.height - Widths.space.gutter) - panel.y)
         opacity: view.volumeOpen ? 1 : 0
         visible: panel.opacity > 0
         onCloseRequested: view.volumeOpen = false
@@ -1597,7 +1737,7 @@ FocusScope {
             if (why === view.lastRefusal)
                 return
             view.lastRefusal = why
-            Toasts.commandRefused(why)
+            Warnings.commandRefused(why)
         }
 
         // Kept once more: the next refusal, even for the same reason, is news again — offline,

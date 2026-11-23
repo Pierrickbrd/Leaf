@@ -82,6 +82,8 @@ qt_add_executable(leaf-desktop
     src/Fonts.cpp
     src/Widths.h
     src/Widths.cpp
+    src/DesktopText.h
+    src/DesktopText.cpp
     src/Isbn.h
     src/Isbn.cpp
     src/Navigation.h
@@ -97,19 +99,59 @@ qt_add_executable(leaf-desktop
     src/Profiles.cpp
     src/Scan.h
     src/Scan.cpp
+    src/CachePurge.h
+    src/CachePurge.cpp
+    src/ReadingExport.h
+    src/ReadingExport.cpp
     src/Shelf.cpp
     src/Cbz.h
     src/Cbz.cpp
     src/Manifest.h
     src/Manifest.cpp
+    src/ComicInfo.h
+    src/ComicInfo.cpp
+    src/Facts.h
+    src/Facts.cpp
+    src/Orders.h
+    src/Orders.cpp
+    src/Fold.h
+    src/Fold.cpp
+    src/Shape.h
+    src/Shape.cpp
     src/Card.h
     src/Card.cpp
     src/Carrier.h
     src/Carrier.cpp
+    src/ImportRows.h
+    src/ImportRows.cpp
     src/Imports.h
     src/Imports.cpp
+    src/ImportTally.h
+    src/ImportTally.cpp
+    src/ImportQueue.h
+    src/ImportQueue.cpp
+    src/ImportOffers.h
+    src/ImportOffers.cpp
     src/ImportCaptions.h
     src/ImportCaptions.cpp
+    src/DropCaptions.h
+    src/DropCaptions.cpp
+    src/RecapCaptions.h
+    src/RecapCaptions.cpp
+    src/ReviewCaptions.h
+    src/ReviewCaptions.cpp
+    src/SheetCaptions.h
+    src/SheetCaptions.cpp
+    src/Review.h
+    src/Review.cpp
+    src/Sagas.h
+    src/Sagas.cpp
+    src/Aimed.h
+    src/Aimed.cpp
+    src/OrderEditor.h
+    src/OrderEditor.cpp
+    src/OrderDraft.h
+    src/OrderDraft.cpp
     src/CardCaptions.h
     src/CardCaptions.cpp
     src/KeyShapes.h
@@ -119,6 +161,8 @@ qt_add_executable(leaf-desktop
     src/Search.cpp
     src/Captions.h
     src/Captions.cpp
+    src/BarCaptions.h
+    src/BarCaptions.cpp
     src/Filters.h
     src/Filters.cpp
     src/Resume.h
@@ -127,6 +171,8 @@ qt_add_executable(leaf-desktop
     src/Reader.cpp
     src/Series.h
     src/Series.cpp
+    src/Description.h
+    src/Description.cpp
     src/Entries.h
     src/Entries.cpp
     src/SeriesCaptions.h
@@ -137,10 +183,20 @@ qt_add_executable(leaf-desktop
     src/Library.cpp
     src/Erasure.h
     src/Erasure.cpp
+    src/Exports.h
+    src/Exports.cpp
+    src/ExportPlan.h
+    src/ExportPlan.cpp
     src/Commands.h
     src/Commands.cpp
+    src/Editing.h
+    src/Editing.cpp
+    src/Selection.h
+    src/Selection.cpp
     src/Toasts.h
     src/Toasts.cpp
+    src/Warnings.h
+    src/Warnings.cpp
     src/Notifier.h
     src/Notifier.cpp
     src/Covers.h
@@ -160,14 +216,19 @@ set(LEAF_QML
     qml/Pill.qml
     qml/ReadBar.qml
     qml/ReadCheck.qml
+    qml/FollowsFocus.qml
     qml/ScrollVeil.qml
     qml/ActionButton.qml
+    qml/BackButton.qml
     qml/BarButton.qml
+    qml/BarBrand.qml
     qml/LeafToolTip.qml
     qml/LeafMenu.qml
+    qml/LeafDialog.qml
     qml/LeafMenuItem.qml
     qml/AppBar.qml
     qml/ProfileSquare.qml
+    qml/ReaderRing.qml
     qml/WhoReads.qml
     qml/CodeDialog.qml
     qml/ProfileDialog.qml
@@ -179,8 +240,40 @@ set(LEAF_QML
     qml/LeafCheck.qml
     qml/LevelMark.qml
     qml/ImportDialog.qml
-    qml/ImportNode.qml
-    qml/ImportRow.qml
+    qml/ImportRecap.qml
+    qml/SendMark.qml
+    qml/ImportSteps.qml
+    qml/ImportReview.qml
+    qml/ReviewRail.qml
+    qml/ReviewList.qml
+    qml/ReviewSheet.qml
+    qml/ReviewGrouped.qml
+    qml/ReviewField.qml
+    qml/ReviewChoice.qml
+    qml/ReviewChoices.qml
+    qml/ReviewCompare.qml
+    qml/ReviewSplice.qml
+    qml/ReviewKeep.qml
+    qml/ReviewReadings.qml
+    qml/ReviewCredits.qml
+    qml/ImportLine.qml
+    qml/ImportStatus.qml
+    qml/QuietButton.qml
+    qml/ReviewArcs.qml
+    qml/ReviewChapters.qml
+    qml/ReviewChaptersWindow.qml
+    qml/ReviewArcsWindow.qml
+    qml/ReviewOrders.qml
+    qml/OrderSteps.qml
+    qml/OrderStepRow.qml
+    qml/OrderStepSheet.qml
+    qml/DashedChip.qml
+    qml/DashedEdge.qml
+    qml/ReviewPlace.qml
+    qml/RoleChip.qml
+    qml/RoleMenu.qml
+    qml/OriginChip.qml
+    qml/FoldChevron.qml
     qml/SeriesTile.qml
     qml/ShelfSkeleton.qml
     qml/SettingsView.qml
@@ -208,6 +301,13 @@ set(LEAF_QML
     qml/CoverShadow.qml
     qml/ResumeBand.qml
     qml/ShelfView.qml
+    qml/ClosesTheGap.qml
+    qml/ShelfNotice.qml
+    qml/PageColumn.qml
+    qml/PageStrip.qml
+    qml/SectionHeading.qml
+    qml/Card.qml
+    qml/TileLines.qml
     qml/SeriesView.qml
     qml/SeriesHeader.qml
     qml/SeriesTabs.qml
@@ -220,11 +320,27 @@ set(LEAF_QML
     qml/VolumeState.qml
     qml/ElsewhereTab.qml
     qml/ElsewhereBlock.qml
-    qml/BlockHeading.qml
     qml/TileShelf.qml
     qml/MenuAction.qml
     qml/CommandMenu.qml
+    qml/SelectionBar.qml
+    qml/ExportBar.qml
+    qml/ExportDialog.qml
+    qml/PickMark.qml
+    qml/PickHandler.qml
     qml/EraseDialog.qml
+    qml/FileInfoDialog.qml
+    qml/PeopleDialog.qml
+    qml/VolumeFact.qml
+    qml/DateField.qml
+    qml/DateCalendar.qml
+    qml/EditField.qml
+    qml/LeafSelect.qml
+    qml/TokenField.qml
+    qml/SeriesEditDialog.qml
+    qml/CoverChoice.qml
+    qml/EntryEditDialog.qml
+    qml/PagePicker.qml
     qml/VolumeTile.qml
     qml/LeafSwitch.qml
     qml/WarningLine.qml
@@ -260,6 +376,7 @@ foreach(qml_file IN LISTS LEAF_QML)
     string(REGEX REPLACE "^qml/" "" alias "${qml_file}")
     set_source_files_properties(${qml_file} PROPERTIES QT_RESOURCE_ALIAS "${alias}")
 endforeach()
+set_source_files_properties(qml/ClosesTheGap.qml PROPERTIES QT_QML_SKIP_CACHEGEN TRUE)
 
 set(LEAF_IMAGES
     qml/assets/cover-shadow-light.png
@@ -269,6 +386,9 @@ set(LEAF_IMAGES
     qml/assets/icons/arrow_back.svg
     qml/assets/icons/book.svg
     qml/assets/icons/book_2.svg
+    qml/assets/icons/calendar_month.svg
+    qml/assets/icons/drag_indicator.svg
+    qml/assets/icons/expand_less.svg
     qml/assets/icons/bookmark.svg
     qml/assets/icons/check.svg
     qml/assets/icons/check_circle.svg
@@ -288,6 +408,7 @@ set(LEAF_IMAGES
     qml/assets/icons/expand_more.svg
     qml/assets/icons/grid_view.svg
     qml/assets/icons/error.svg
+    qml/assets/icons/info.svg
     qml/assets/icons/library_add.svg
     qml/assets/icons/light_mode.svg
     qml/assets/icons/lock.svg
@@ -299,6 +420,7 @@ set(LEAF_IMAGES
     qml/assets/icons/search.svg
     qml/assets/icons/settings.svg
     qml/assets/icons/sort.svg
+    qml/assets/icons/swap_horiz.svg
     qml/assets/icons/tune.svg
     qml/assets/icons/tabler-arrow-down.svg
     qml/assets/icons/tabler-arrow-left.svg
@@ -321,6 +443,8 @@ set(LEAF_IMAGES
     qml/assets/icons/keyboard_double_arrow_right.svg
     qml/assets/icons/menu_book.svg
     qml/assets/icons/play_arrow.svg
+    qml/assets/icons/play_arrow_filled.svg
+    qml/assets/icons/pause.svg
 )
 foreach(image_file IN LISTS LEAF_IMAGES)
     string(REGEX REPLACE "^qml/" "" alias "${image_file}")
@@ -395,7 +519,7 @@ add_test(NAME checks-startup COMMAND leaf-desktop --check-startup)
 set_tests_properties(reports-version checks-startup
     PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-qt_add_executable(keeps-the-key tests/keeps_the_key.cpp src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp)
+qt_add_executable(keeps-the-key tests/keeps_the_key.cpp src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp)
 target_include_directories(keeps-the-key PRIVATE src)
 target_link_libraries(keeps-the-key PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Test ${QTKEYCHAIN_LIBRARIES})
@@ -404,7 +528,7 @@ add_test(NAME keeps-the-key COMMAND keeps-the-key)
 
 qt_add_executable(talks-to-the-server
     tests/talks_to_the_server.cpp tests/Pretend.h
-    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Server.h src/Server.cpp
+    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp src/Server.h src/Server.cpp
     src/Pinning.h src/Pinning.cpp)
 target_include_directories(talks-to-the-server PRIVATE src)
 target_link_libraries(talks-to-the-server PRIVATE
@@ -418,10 +542,37 @@ target_include_directories(reads-the-contract PRIVATE src)
 target_link_libraries(reads-the-contract PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME reads-the-contract COMMAND reads-the-contract)
 
+# ComicInfo.xml read the way the server reads it: bytes in, fields out, no window.
+qt_add_executable(reads-comicinfo tests/reads_comicinfo.cpp src/ComicInfo.h src/ComicInfo.cpp)
+target_include_directories(reads-comicinfo PRIVATE src)
+target_link_libraries(reads-comicinfo PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME reads-comicinfo COMMAND reads-comicinfo)
+
+# The reading orders of a universe.json: inclusions, loops and ceilings as the server has them,
+# and an order nobody edited written back as it came. No window.
+qt_add_executable(reads-an-order tests/reads_an_order.cpp
+    src/Orders.h src/Orders.cpp src/Fold.h src/Fold.cpp src/Shape.h src/Shape.cpp
+    src/Manifest.h src/Manifest.cpp src/Cbz.h src/Cbz.cpp
+    src/Api.h src/Words.h src/Words.cpp)
+target_include_directories(reads-an-order PRIVATE src)
+target_link_libraries(reads-an-order PRIVATE Qt6::Core Qt6::Qml Qt6::Test ZLIB::ZLIB)
+add_test(NAME reads-an-order COMMAND reads-an-order)
+
+# Where every value of an import comes from: folders and archives written by the test, read
+# through `Manifest` and `ComicInfo` into sheets. No window.
+qt_add_executable(knows-each-field tests/knows_each_field.cpp
+    src/Facts.h src/Facts.cpp src/Orders.h src/Orders.cpp src/ComicInfo.h src/ComicInfo.cpp src/Shape.h src/Shape.cpp
+    src/Fold.h src/Fold.cpp
+    src/Manifest.h src/Manifest.cpp src/Cbz.h src/Cbz.cpp
+    src/Api.h src/Words.h src/Words.cpp)
+target_include_directories(knows-each-field PRIVATE src)
+target_link_libraries(knows-each-field PRIVATE Qt6::Core Qt6::Qml Qt6::Test ZLIB::ZLIB)
+add_test(NAME knows-each-field COMMAND knows-each-field)
+
 # `Cbz` and zlib for a test that reads no archive: `Manifest`'s walk opens one per file to
 # read the title it declares, which the tree shows beside the file name.
 qt_add_executable(writes-french tests/writes_french.cpp
-    src/Api.h src/Words.h src/Words.cpp src/Manifest.h src/Manifest.cpp
+    src/Api.h src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp src/Manifest.h src/Manifest.cpp
     src/Cbz.h src/Cbz.cpp)
 target_include_directories(writes-french PRIVATE src)
 target_link_libraries(writes-french PRIVATE Qt6::Core Qt6::Qml Qt6::Test ZLIB::ZLIB)
@@ -443,7 +594,7 @@ qt_add_resources(embeds-its-fonts "test-fonts"
 add_test(NAME embeds-its-fonts COMMAND embeds-its-fonts)
 
 qt_add_executable(knows-its-widths tests/knows_its_widths.cpp
-    src/Widths.h src/Widths.cpp src/Words.h src/Words.cpp src/Api.h)
+    src/Widths.h src/Widths.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp src/Api.h)
 target_include_directories(knows-its-widths PRIVATE src)
 target_link_libraries(knows-its-widths PRIVATE Qt6::Core Qt6::Qml Qt6::Test)
 add_test(NAME knows-its-widths COMMAND knows-its-widths)
@@ -464,7 +615,7 @@ qt_add_resources(reads-webp "webp-fixture"
 add_test(NAME reads-webp COMMAND reads-webp)
 
 qt_add_executable(finds-its-way-back tests/finds_its_way_back.cpp
-    src/Navigation.h src/Navigation.cpp src/Words.h src/Words.cpp src/Api.h)
+    src/Navigation.h src/Navigation.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp src/Api.h)
 target_include_directories(finds-its-way-back PRIVATE src)
 target_link_libraries(finds-its-way-back PRIVATE Qt6::Core Qt6::Qml Qt6::Test)
 add_test(NAME finds-its-way-back COMMAND finds-its-way-back)
@@ -481,7 +632,14 @@ qt_add_executable(crosses-the-seam
     src/Boot.h src/Boot.cpp
     src/Covers.h src/Covers.cpp
     src/Card.h src/Card.cpp src/Carrier.h src/Carrier.cpp
+    src/Facts.h src/Facts.cpp src/Orders.h src/Orders.cpp src/ComicInfo.h src/ComicInfo.cpp src/Shape.h src/Shape.cpp
+    src/Fold.h src/Fold.cpp
     src/Imports.h src/Imports.cpp src/ImportCaptions.h src/ImportCaptions.cpp
+    src/ImportRows.h src/ImportRows.cpp src/ImportTally.h src/ImportTally.cpp
+    src/ImportQueue.h src/ImportQueue.cpp src/ImportOffers.h src/ImportOffers.cpp
+    src/DropCaptions.h src/DropCaptions.cpp src/RecapCaptions.h src/RecapCaptions.cpp
+    src/ReviewCaptions.h src/ReviewCaptions.cpp src/SheetCaptions.h src/SheetCaptions.cpp
+    src/Review.h src/Review.cpp src/Sagas.h src/Sagas.cpp src/Aimed.h src/Aimed.cpp src/OrderEditor.h src/OrderEditor.cpp src/OrderDraft.h src/OrderDraft.cpp
     src/CardCaptions.h src/CardCaptions.cpp
     src/ReaderCaptions.h src/ReaderCaptions.cpp
     src/Cbz.h src/Cbz.cpp src/Manifest.h src/Manifest.cpp
@@ -494,29 +652,31 @@ qt_add_executable(crosses-the-seam
     src/Fonts.h src/Fonts.cpp
     src/Theme.h src/Theme.cpp
     src/Words.h src/Words.cpp
-    src/Widths.h src/Widths.cpp
+    src/Widths.h src/Widths.cpp src/DesktopText.h src/DesktopText.cpp
     src/Isbn.h src/Isbn.cpp
     src/Navigation.h src/Navigation.cpp
     src/Api.h src/Api.cpp
     src/Rearrange.h src/Rearrange.cpp
     src/Shelf.h src/Shelf.cpp
     src/Search.h src/Search.cpp
-    src/Captions.h src/Captions.cpp
+    src/Captions.h src/Captions.cpp src/BarCaptions.h src/BarCaptions.cpp
     src/Filters.h src/Filters.cpp
     src/Health.h src/Health.cpp
     src/Profiles.h src/Profiles.cpp
-    src/Scan.h src/Scan.cpp
+    src/Scan.h src/Scan.cpp src/CachePurge.h src/CachePurge.cpp
+    src/ReadingExport.h src/ReadingExport.cpp
     src/Preferences.h src/Preferences.cpp
     src/Resume.h src/Resume.cpp
     src/Reader.h src/Reader.cpp src/Spreads.h src/Spreads.cpp
-    src/Series.h src/Series.cpp
-    src/Entries.h src/Entries.cpp
+    src/Series.h src/Series.cpp src/Description.h src/Description.cpp
+    src/Entries.h src/Entries.cpp src/Rearrange.h src/Rearrange.cpp
     src/SeriesCaptions.h src/SeriesCaptions.cpp
     src/Elsewhere.h src/Elsewhere.cpp
     src/Library.h src/Library.cpp
-    src/Erasure.h src/Erasure.cpp
-    src/Commands.h src/Commands.cpp
-    src/Toasts.h src/Toasts.cpp
+    src/Erasure.h src/Erasure.cpp src/Exports.h src/Exports.cpp src/ExportPlan.h src/ExportPlan.cpp
+    src/Commands.h src/Commands.cpp src/Editing.h src/Editing.cpp src/Fold.h src/Fold.cpp
+    src/Selection.h src/Selection.cpp
+    src/Toasts.h src/Toasts.cpp src/Warnings.h src/Warnings.cpp
     src/Notifier.h src/Notifier.cpp
 )
 target_include_directories(crosses-the-seam PRIVATE src)
@@ -548,7 +708,7 @@ qt_add_executable(holds-a-shelf
     tests/holds_a_shelf.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
     src/Pinning.h src/Pinning.cpp
-    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Rearrange.h src/Rearrange.cpp src/Shelf.h src/Shelf.cpp)
 target_include_directories(holds-a-shelf PRIVATE src)
@@ -560,8 +720,12 @@ add_test(NAME holds-a-shelf COMMAND holds-a-shelf)
 # not pixels, so every branch is exercised without constructing a window.
 qt_add_executable(holds-the-imports
     tests/holds_the_imports.cpp tests/Pretend.h
-    src/Card.h src/Card.cpp src/Carrier.h src/Carrier.cpp
+    src/Card.h src/Card.cpp src/Carrier.h src/Carrier.cpp src/Aimed.h src/Aimed.cpp
+    src/Facts.h src/Facts.cpp src/Orders.h src/Orders.cpp src/ComicInfo.h src/ComicInfo.cpp src/Shape.h src/Shape.cpp
+    src/Fold.h src/Fold.cpp
     src/Imports.h src/Imports.cpp src/Cbz.h src/Cbz.cpp src/Manifest.h src/Manifest.cpp
+    src/ImportRows.h src/ImportRows.cpp src/ImportTally.h src/ImportTally.cpp
+    src/ImportQueue.h src/ImportQueue.cpp src/ImportOffers.h src/ImportOffers.cpp
     src/Api.h src/Api.cpp src/Words.h src/Words.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Server.h src/Server.cpp src/Settings.h src/Settings.cpp
@@ -570,6 +734,46 @@ target_include_directories(holds-the-imports PRIVATE src)
 target_link_libraries(holds-the-imports PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Concurrent Qt6::Test ZLIB::ZLIB ${QTKEYCHAIN_LIBRARIES})
 add_test(NAME holds-the-imports COMMAND holds-the-imports)
+
+# The checking frame's model, against the same forty-line server: a tree, a list, counters,
+# a sheet and a footer are decisions, and a decision drawn is one nobody can assert on.
+qt_add_executable(holds-the-review
+    tests/holds_the_review.cpp tests/Pretend.h tests/Zip.h
+    src/Review.h src/Review.cpp src/Sagas.h src/Sagas.cpp src/Aimed.h src/Aimed.cpp
+    src/Card.h src/Card.cpp src/Carrier.h src/Carrier.cpp
+    src/Facts.h src/Facts.cpp src/Orders.h src/Orders.cpp src/ComicInfo.h src/ComicInfo.cpp src/Shape.h src/Shape.cpp
+    src/Fold.h src/Fold.cpp
+    src/Imports.h src/Imports.cpp src/Cbz.h src/Cbz.cpp src/Manifest.h src/Manifest.cpp
+    src/ImportRows.h src/ImportRows.cpp src/ImportTally.h src/ImportTally.cpp
+    src/ImportQueue.h src/ImportQueue.cpp src/ImportOffers.h src/ImportOffers.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
+    src/Server.h src/Server.cpp src/Settings.h src/Settings.cpp
+    src/Pinning.h src/Pinning.cpp)
+target_include_directories(holds-the-review PRIVATE src)
+target_link_libraries(holds-the-review PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Concurrent Qt6::Test ZLIB::ZLIB ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME holds-the-review COMMAND holds-the-review)
+
+# The draft of a universe's orders, against the same server: an inclusion offered, a loop
+# greyed and a range refused are decisions made before the announcement would make them.
+qt_add_executable(edits-an-order
+    tests/edits_an_order.cpp tests/Pretend.h tests/Zip.h
+    src/OrderEditor.h src/OrderEditor.cpp src/OrderDraft.h src/OrderDraft.cpp
+    src/Card.h src/Card.cpp src/Carrier.h src/Carrier.cpp
+    src/Facts.h src/Facts.cpp src/Orders.h src/Orders.cpp src/ComicInfo.h src/ComicInfo.cpp src/Shape.h src/Shape.cpp
+    src/Fold.h src/Fold.cpp
+    src/Imports.h src/Imports.cpp src/Cbz.h src/Cbz.cpp src/Manifest.h src/Manifest.cpp
+    src/ImportRows.h src/ImportRows.cpp src/ImportTally.h src/ImportTally.cpp
+    src/ImportQueue.h src/ImportQueue.cpp src/ImportOffers.h src/ImportOffers.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
+    src/Server.h src/Server.cpp src/Settings.h src/Settings.cpp
+    src/Pinning.h src/Pinning.cpp)
+target_include_directories(edits-an-order PRIVATE src)
+target_link_libraries(edits-an-order PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Concurrent Qt6::Test ZLIB::ZLIB ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME edits-an-order COMMAND edits-an-order)
 
 # `Words.cpp` and `Qt6::Qml` for a test that draws nothing: the sentences these two
 # modules show a reader live in `Words` like every other, and `Words.h` reaches
@@ -580,16 +784,29 @@ qt_add_executable(describes-a-folder
     tests/describes_a_folder.cpp
     src/Manifest.h src/Manifest.cpp
     src/Cbz.h src/Cbz.cpp
-    src/Words.h src/Words.cpp)
+    src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp)
 target_include_directories(describes-a-folder PRIVATE src)
 target_link_libraries(describes-a-folder PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Test ZLIB::ZLIB)
 add_test(NAME describes-a-folder COMMAND describes-a-folder)
 
+# What a dropped folder's shape suggests, on folders the test writes. `Cbz` and zlib for a
+# test that opens no archive: `Manifest` links them, and the test proves they are not used.
+qt_add_executable(reads-the-shape
+    tests/reads_the_shape.cpp
+    src/Shape.h src/Shape.cpp
+    src/Manifest.h src/Manifest.cpp
+    src/Cbz.h src/Cbz.cpp
+    src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp)
+target_include_directories(reads-the-shape PRIVATE src)
+target_link_libraries(reads-the-shape PRIVATE
+    Qt6::Core Qt6::Qml Qt6::Test ZLIB::ZLIB)
+add_test(NAME reads-the-shape COMMAND reads-the-shape)
+
 qt_add_executable(opens-an-archive
     tests/opens_an_archive.cpp
     src/Cbz.h src/Cbz.cpp
-    src/Words.h src/Words.cpp)
+    src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp)
 target_include_directories(opens-an-archive PRIVATE src)
 target_link_libraries(opens-an-archive PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Test ZLIB::ZLIB)
@@ -597,7 +814,7 @@ add_test(NAME opens-an-archive COMMAND opens-an-archive)
 
 qt_add_executable(keeps-a-preference
     tests/keeps_a_preference.cpp
-    src/Preferences.h src/Preferences.cpp src/Words.h src/Words.cpp
+    src/Preferences.h src/Preferences.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp
     src/Api.h src/Api.cpp src/Navigation.h src/Navigation.cpp
     src/Widths.h src/Widths.cpp)
 target_include_directories(keeps-a-preference PRIVATE src)
@@ -609,9 +826,9 @@ add_test(NAME keeps-a-preference COMMAND keeps-a-preference)
 # goes and a failure that waits, and the desktop only when the window is not there.
 qt_add_executable(warns-once
     tests/warns_once.cpp
-    src/Preferences.h src/Preferences.cpp src/Words.h src/Words.cpp
+    src/Preferences.h src/Preferences.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp
     src/Api.h src/Api.cpp src/Navigation.h src/Navigation.cpp
-    src/Widths.h src/Widths.cpp src/Toasts.h src/Toasts.cpp
+    src/Widths.h src/Widths.cpp src/Toasts.h src/Toasts.cpp src/Warnings.h src/Warnings.cpp
     src/Notifier.h src/Notifier.cpp)
 target_include_directories(warns-once PRIVATE src)
 target_link_libraries(warns-once PRIVATE
@@ -622,11 +839,11 @@ qt_add_executable(holds-the-search
     tests/holds_the_search.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
     src/Pinning.h src/Pinning.cpp
-    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Rearrange.h src/Rearrange.cpp
     src/Shelf.h src/Shelf.cpp src/Search.h src/Search.cpp
-    src/Captions.h src/Captions.cpp)
+    src/Captions.h src/Captions.cpp src/BarCaptions.h src/BarCaptions.cpp)
 target_include_directories(holds-the-search PRIVATE src)
 target_link_libraries(holds-the-search PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
@@ -637,7 +854,7 @@ qt_add_executable(holds-the-resume
     tests/holds_the_resume.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
     src/Pinning.h src/Pinning.cpp
-    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Resume.h src/Resume.cpp)
 target_include_directories(holds-the-resume PRIVATE src)
@@ -652,9 +869,9 @@ qt_add_executable(holds-the-series
     tests/holds_the_series.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
     src/Pinning.h src/Pinning.cpp
-    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
-    src/Series.h src/Series.cpp)
+    src/Series.h src/Series.cpp src/Description.h src/Description.cpp)
 target_include_directories(holds-the-series PRIVATE src)
 target_link_libraries(holds-the-series PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
@@ -665,9 +882,9 @@ qt_add_executable(holds-the-volumes
     tests/holds_the_volumes.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
     src/Pinning.h src/Pinning.cpp
-    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
-    src/Entries.h src/Entries.cpp
+    src/Entries.h src/Entries.cpp src/Rearrange.h src/Rearrange.cpp
     # `SeriesCaptions` speaks for the universe block as well, so it carries that block with it
     # wherever it is built: a caption bound to two models links against both.
     src/SeriesCaptions.h src/SeriesCaptions.cpp
@@ -683,9 +900,9 @@ qt_add_executable(holds-elsewhere
     tests/holds_elsewhere.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
     src/Pinning.h src/Pinning.cpp
-    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
-    src/Entries.h src/Entries.cpp src/SeriesCaptions.h src/SeriesCaptions.cpp
+    src/Entries.h src/Entries.cpp src/Rearrange.h src/Rearrange.cpp src/SeriesCaptions.h src/SeriesCaptions.cpp
     src/Elsewhere.h src/Elsewhere.cpp)
 target_include_directories(holds-elsewhere PRIVATE src)
 target_link_libraries(holds-elsewhere PRIVATE
@@ -698,15 +915,15 @@ qt_add_executable(holds-the-reader
     tests/holds_the_reader.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
     src/Pinning.h src/Pinning.cpp
-    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Spreads.h src/Spreads.cpp src/Preferences.h src/Preferences.cpp
     src/Reader.h src/Reader.cpp
     src/Library.h src/Library.cpp
     src/Rearrange.h src/Rearrange.cpp src/Shelf.h src/Shelf.cpp
     src/Search.h src/Search.cpp src/Captions.h src/Captions.cpp
-    src/Series.h src/Series.cpp
-    src/Entries.h src/Entries.cpp src/SeriesCaptions.h src/SeriesCaptions.cpp
+    src/Series.h src/Series.cpp src/Description.h src/Description.cpp
+    src/Entries.h src/Entries.cpp src/Rearrange.h src/Rearrange.cpp src/SeriesCaptions.h src/SeriesCaptions.cpp
     src/Elsewhere.h src/Elsewhere.cpp)
 target_include_directories(holds-the-reader PRIVATE src)
 target_link_libraries(holds-the-reader PRIVATE
@@ -718,7 +935,7 @@ add_test(NAME holds-the-reader COMMAND holds-the-reader)
 qt_add_executable(lays-out-pages
     tests/lays_out_pages.cpp
     src/Spreads.h src/Spreads.cpp
-    src/Api.h src/Api.cpp src/Words.h src/Words.cpp)
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp)
 target_include_directories(lays-out-pages PRIVATE src)
 target_link_libraries(lays-out-pages PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
@@ -730,7 +947,7 @@ qt_add_executable(weighs-a-deletion
     tests/weighs_a_deletion.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
     src/Pinning.h src/Pinning.cpp
-    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Erasure.h src/Erasure.cpp)
 target_include_directories(weighs-a-deletion PRIVATE src)
@@ -745,11 +962,25 @@ qt_add_executable(commands-the-library
     src/Pinning.h src/Pinning.cpp
     src/Api.h src/Api.cpp src/Words.h src/Words.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
-    src/Commands.h src/Commands.cpp)
+    src/Commands.h src/Commands.cpp src/Editing.h src/Editing.cpp src/Fold.h src/Fold.cpp src/Selection.h src/Selection.cpp)
 target_include_directories(commands-the-library PRIVATE src)
 target_link_libraries(commands-the-library PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
 add_test(NAME commands-the-library COMMAND commands-the-library)
+
+# What an export writes to a disk: the manifests merged, the files streamed, and nothing left
+# half-written when it stops.
+qt_add_executable(writes-an-export
+    tests/writes_an_export.cpp tests/Pretend.h
+    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
+    src/Pinning.h src/Pinning.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
+    src/Fold.h src/Fold.cpp src/Exports.h src/Exports.cpp src/ExportPlan.h src/ExportPlan.cpp)
+target_include_directories(writes-an-export PRIVATE src)
+target_link_libraries(writes-an-export PRIVATE
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
+add_test(NAME writes-an-export COMMAND writes-an-export)
 
 # The two axes the bandeau offers, and the rule that decides whether an axis exists at all.
 # Headless like the shelf: a filter that is not offered is a decision, not a drawing.
@@ -766,9 +997,10 @@ qt_add_executable(holds-the-server-state
     tests/holds_the_server_state.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
     src/Pinning.h src/Pinning.cpp
-    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
-    src/Health.h src/Health.cpp src/Scan.h src/Scan.cpp)
+    src/Health.h src/Health.cpp src/Scan.h src/Scan.cpp
+    src/CachePurge.h src/CachePurge.cpp src/ReadingExport.h src/ReadingExport.cpp)
 target_include_directories(holds-the-server-state PRIVATE src)
 target_link_libraries(holds-the-server-state PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Network Qt6::Test ${QTKEYCHAIN_LIBRARIES})
@@ -779,7 +1011,7 @@ qt_add_executable(holds-the-profiles
     tests/holds_the_profiles.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
     src/Pinning.h src/Pinning.cpp
-    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Profiles.h src/Profiles.cpp)
 target_include_directories(holds-the-profiles PRIVATE src)
@@ -791,7 +1023,7 @@ qt_add_executable(holds-the-filters
     tests/holds_the_filters.cpp tests/Pretend.h
     src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp
     src/Pinning.h src/Pinning.cpp
-    src/Api.h src/Api.cpp src/Words.h src/Words.cpp
+    src/Api.h src/Api.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp
     src/Navigation.h src/Navigation.cpp src/Widths.h src/Widths.cpp
     src/Rearrange.h src/Rearrange.cpp src/Shelf.h src/Shelf.cpp
     src/Filters.h src/Filters.cpp)
@@ -804,7 +1036,7 @@ add_test(NAME holds-the-filters COMMAND holds-the-filters)
 # one configured, and another that must never be told the key.
 qt_add_executable(puts-the-key-where-it-belongs
     tests/puts_the_key_where_it_belongs.cpp tests/Pretend.h
-    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Server.h src/Server.cpp
+    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp src/Server.h src/Server.cpp
     src/Pinning.h src/Pinning.cpp
     src/Covers.h src/Covers.cpp)
 target_include_directories(puts-the-key-where-it-belongs PRIVATE src)
@@ -816,7 +1048,7 @@ add_test(NAME puts-the-key-where-it-belongs COMMAND puts-the-key-where-it-belong
 # handshake, and only a server that heard nothing proves the key never left.
 qt_add_executable(pins-a-certificate
     tests/pins_a_certificate.cpp
-    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Server.h src/Server.cpp
+    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp src/Server.h src/Server.cpp
     src/Pinning.h src/Pinning.cpp src/Covers.h src/Covers.cpp)
 target_include_directories(pins-a-certificate PRIVATE src)
 target_compile_definitions(pins-a-certificate PRIVATE
@@ -836,7 +1068,7 @@ add_test(NAME reads-a-link COMMAND reads-a-link)
 # the network. What the server heard is the proof that nothing left before « Relier ».
 qt_add_executable(links-a-device
     tests/links_a_device.cpp
-    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Api.h src/Api.cpp
+    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp src/Api.h src/Api.cpp
     src/Pinning.h src/Pinning.cpp src/Link.h src/Link.cpp src/Linking.h src/Linking.cpp)
 target_include_directories(links-a-device PRIVATE src)
 target_compile_definitions(links-a-device PRIVATE
@@ -850,7 +1082,7 @@ add_test(NAME links-a-device COMMAND links-a-device)
 # And another device relayed in: the link, its code withdrawn, the QR code drawn from it.
 qt_add_executable(keeps-the-bond
     tests/keeps_the_bond.cpp tests/Pretend.h
-    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp src/Words.h src/Words.cpp
+    src/Settings.h src/Settings.cpp src/Server.h src/Server.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp
     src/Api.h src/Api.cpp src/Pinning.h src/Pinning.cpp src/Link.h src/Link.cpp
     src/Linking.h src/Linking.cpp src/Bond.h src/Bond.cpp src/QrImage.h src/QrImage.cpp)
 target_include_directories(keeps-the-bond PRIVATE src)
@@ -871,7 +1103,7 @@ add_test(NAME answers-the-doorbell COMMAND answers-the-doorbell)
 
 qt_add_executable(against-the-real-server EXCLUDE_FROM_ALL
     tests/against_real.cpp
-    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Server.h src/Server.cpp
+    src/Settings.h src/Settings.cpp src/Words.h src/Words.cpp src/Fold.h src/Fold.cpp src/Server.h src/Server.cpp
     src/Pinning.h src/Pinning.cpp)
 target_include_directories(against-the-real-server PRIVATE src)
 target_link_libraries(against-the-real-server PRIVATE
@@ -887,6 +1119,9 @@ add_test(NAME bytes-stay-utf8
 
 add_test(NAME nothing-talks-to-the-console
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/nothing_talks_to_the_console.py)
+
+add_test(NAME text-stays-plain
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/text_stays_plain.py)
 
 add_test(NAME words-stay-french
     COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../tools/words_stay_french.py)

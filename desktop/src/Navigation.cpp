@@ -2,6 +2,7 @@
 
 #include "Words.h"
 
+#include <algorithm>
 #include <optional>
 
 using Qt::Literals::StringLiterals::operator""_s;
@@ -35,6 +36,13 @@ Navigation::Navigation(QObject *parent) : QObject(parent)
     m_stack.append({Destination::Shelf, {}});
 }
 
+bool Navigation::holdsSeries() const
+{
+    return std::ranges::any_of(m_stack, [](const Step &one) {
+        return one.where == Destination::Series;
+    });
+}
+
 QString Navigation::label() const
 {
     return Words::destination(destination());
@@ -56,6 +64,14 @@ bool Navigation::open(Destination where, const QVariantMap &with)
         return false;
     if (!needs->isEmpty() && with.value(*needs).toString().isEmpty())
         return false;
+
+    // Where one already is, with what one already has: nothing to open. Pushed, the shelf stood
+    // in the stack as a second copy of itself, and the Escape that came back from it came back
+    // to what it had left, and seemed to do nothing. Only for the screens that name nothing: a
+    // series page can show another edition than the one its parameters say, and opening the
+    // series it was opened with is then a real request.
+    if (needs->isEmpty() && where == destination() && with == parameters())
+        return true;
 
     m_stack.append({where, with});
     emit changed();

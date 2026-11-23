@@ -22,6 +22,7 @@
 #include "Server.h"
 
 #include <QObject>
+#include <optional>
 #include <QQmlEngine>
 #include <QString>
 #include <QVariantMap>
@@ -35,6 +36,10 @@ class Erasure : public QObject
     /// Whether the confirmation is up. Nothing is asked for and nothing is deleted while it
     /// is false — this is the only thing that opens and closes the modal.
     Q_PROPERTY(bool asking READ asking NOTIFY changed)
+    /// Whether the modal is still drawn: from the moment it is opened to the moment it has
+    /// finished closing, which `asking` going false does not say — the window outlives the
+    /// question. What a tile leaving the shelf waits for, so that it starts under no modal.
+    Q_PROPERTY(bool onScreen READ onScreen NOTIFY onScreenChanged)
     /// Still finding out what the deletion would take. The modal is drawn either way, because
     /// a question that appears after a wait is a question nobody expected.
     Q_PROPERTY(bool loading READ loading NOTIFY changed)
@@ -62,6 +67,7 @@ public:
     static Erasure *create(QQmlEngine *engine, QJSEngine *);
 
     bool asking() const { return m_asking; }
+    bool onScreen() const { return m_onScreen; }
     bool loading() const { return m_pending > 0; }
     bool whole() const { return m_entryId.isEmpty(); }
     QVariantMap said() const;
@@ -82,9 +88,15 @@ public:
     Q_INVOKABLE void go();
     /// Closes the confirmation without doing anything.
     Q_INVOKABLE void dismiss();
+    /// Told by the modal when it has opened and when it has finished closing.
+    Q_INVOKABLE void drawn(bool now);
+
+    /// How long the shelf is left alone once the modal is gone, before the tile moves.
+    static constexpr int BeatAfterTheModal = 400;
 
 signals:
     void changed();
+    void onScreenChanged();
     /// Gone from the disk. `entryId` is empty when a whole edition went, and the screen that
     /// was showing it has to stop showing it.
     void erased(const QString &seriesId, const QString &entryId);
@@ -111,6 +123,13 @@ private:
     QString m_written;
     QString m_trouble;
     bool m_asking = false;
+    bool m_onScreen = false;
+    /// What went, said once the modal has finished closing: see `drawn`.
+    struct Gone {
+        QString series;
+        QString entry;
+    };
+    std::optional<Gone> m_toSay;
     bool m_going = false;
     int m_pending = 0;
     int m_generation = 0;

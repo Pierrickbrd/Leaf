@@ -55,6 +55,6 @@ Item {
         duration: 900
         loops: Animation.Infinite
         easing.type: Easing.InOutSine
-        running: skeleton.visible
+        running: skeleton.visible && Preferences.motion !== Preferences.Instant
     }
 }

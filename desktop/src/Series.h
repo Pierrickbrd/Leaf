@@ -18,6 +18,7 @@
 // skeleton is drawn for.
 
 #include "Api.h"
+#include "Description.h"
 #include "Server.h"
 
 #include <QObject>
@@ -48,24 +49,9 @@ class Series : public QObject
     Q_PROPERTY(QString edition READ edition NOTIFY changed)
     Q_PROPERTY(QString cover READ cover NOTIFY changed)
 
-    /// The two lines of the header: who made it, and what it weighs.
-    Q_PROPERTY(QString makers READ makers NOTIFY changed)
-    Q_PROPERTY(QString weights READ weights NOTIFY changed)
-    Q_PROPERTY(QStringList genres READ genres NOTIFY changed)
-    Q_PROPERTY(QString summary READ summary NOTIFY changed)
-
-    /// The four columns of the description, under the names the design gives them:
-    /// `credits` and `nature` — who made it and who publishes it on the left, what it is on
-    /// the right — then `holding`, what *this library* holds of the edition, and `received`,
-    /// when it arrived. Each is a list of `{label, value}` rather than a getter apiece: a
-    /// fifteenth fact then costs nothing, and a line whose value is missing is simply not in
-    /// the list.
-    ///
-    /// One map and not four properties, the shape `Erasure::said` and `Shelf::narrowing`
-    /// already take. Four getters of the same kind, read by one `.qml`, are a group whether
-    /// or not it is written down — and writing it down is what keeps this class under the
-    /// ceiling a page object reaches quickly.
-    Q_PROPERTY(QVariantMap facts READ facts NOTIFY changed)
+    /// Who made it, what it weighs, its genres, its summary and the four columns of the
+    /// description: everything that words the answer and asks nothing (`Description.h`).
+    Q_PROPERTY(Description *description READ description CONSTANT)
 
     /// The other editions of the same work, this one among them. Below two the switcher is
     /// not drawn at all: there is nothing to choose between.
@@ -79,6 +65,12 @@ class Series : public QObject
     Q_PROPERTY(QVariantList missingVolumes READ missingVolumes NOTIFY changed)
     /// How many arcs the edition declares, which is the guard on asking for them at all.
     Q_PROPERTY(int arcCount READ arcCount NOTIFY changed)
+    /// How many volumes this library holds of the edition, for what a reimport says it aims at.
+    Q_PROPERTY(int volumeCount READ volumeCount NOTIFY changed)
+    /// What is held is the answer for the series pointed at. Pointed at another, the old
+    /// answer is kept under the eye until the new one arrives, and what it says — the gaps,
+    /// the arcs, the universe — belongs to the one that was left.
+    Q_PROPERTY(bool settled READ settled NOTIFY changed)
 
 public:
     explicit Series(Server *server, QObject *parent = nullptr);
@@ -87,6 +79,7 @@ public:
 
     QString identifier() const { return m_id; }
     bool available() const { return m_one.has_value(); }
+    bool settled() const { return m_one.has_value() && m_one->id == m_id; }
     bool loading() const { return m_loading; }
     QString trouble() const { return m_trouble; }
 
@@ -95,16 +88,13 @@ public:
     QString work() const;
     QString edition() const;
     QString cover() const;
-    QString makers() const;
-    QString weights() const;
-    QStringList genres() const;
-    QString summary() const;
-    QVariantMap facts() const;
+    Description *description() const { return m_description; }
     QVariantList editions() const;
     QString editionsLabel() const;
     QString oneShotEntry() const;
     QVariantList missingVolumes() const;
     int arcCount() const;
+    int volumeCount() const;
 
     /// Points the page at a series. Asking for the one already held asks again — that is what
     /// a retry is — but it keeps what is on screen either way.
@@ -129,6 +119,9 @@ signals:
     void changed();
 
 private:
+    /// It words the answer held here, and reads it here rather than keeping a copy.
+    friend class Description;
+
     void took(const Server::Answer &answer);
     void tookSiblings(const Server::Answer &answer);
 
@@ -139,4 +132,6 @@ private:
     bool m_loading = false;
     QString m_trouble;
     int m_generation = 0;
+    /// A child, so it goes with the page; made in the constructor, never null.
+    Description *m_description;
 };

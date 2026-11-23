@@ -4,6 +4,7 @@
 
 #include "Words.h"
 
+#include <algorithm>
 #include <utility>
 #include <QDebug>
 
@@ -99,7 +100,7 @@ QVariant Shelf::data(const QModelIndex &index, int role) const
         // Whole, and straight into an `Image`. The key it needs is put on by `Covers`, the
         // engine's network manager factory, so the route is spelled once here instead of
         // being assembled out of `Settings.address` in every `.qml` that draws a tile.
-        return m_server->address() + u"/series/"_s + one.id + u"/cover"_s;
+        return m_server->address() + u"/series/"_s + Server::segment(one.id) + u"/cover"_s;
     case Medium:
         // Absent stays absent. "Autre" is the answer for a word this client has not been
         // taught, not the answer for a medium nobody recorded.
@@ -120,6 +121,8 @@ QVariant Shelf::data(const QModelIndex &index, int role) const
         return one.holding.readStatus == Api::ReadStatus::Read;
     case OneShotEntry:
         return one.oneShotEntry.value_or(QString());
+    case VolumeCount:
+        return one.holding.ownedVolumes;
     default:
         // Reached for `Qt::DisplayRole` and everything else a view asks about by habit, so it
         // is an ordinary answer rather than a case that should not happen.
@@ -143,6 +146,7 @@ QHash<int, QByteArray> Shelf::roleNames() const
     named.insert(qToUnderlying(Finished), "finished");
     named.insert(qToUnderlying(HowFarRead), "howFarRead");
     named.insert(qToUnderlying(OneShotEntry), "oneShotEntry");
+    named.insert(qToUnderlying(VolumeCount), "volumeCount");
     return named;
 }
 
@@ -342,6 +346,12 @@ void Shelf::refresh()
     ask(0, qBound(Size, (held + Size - 1) / Size * Size, MostAtOnce));
 }
 
+void Shelf::refreshForArrivals()
+{
+    emit arriving();
+    refresh();
+}
+
 void Shelf::take(const Api::Series &fresh)
 {
     int at = -1;
@@ -389,7 +399,36 @@ void Shelf::take(const Api::Series &fresh)
         emit outOfOrder();
 }
 
+void Shelf::setErasureLead(int milliseconds)
+{
+    milliseconds = qMax(0, milliseconds);
+    if (m_erasureLead == milliseconds)
+        return;
+    m_erasureLead = milliseconds;
+    emit erasureLeadChanged();
+}
+
 void Shelf::forget(const QString &seriesId)
+{
+    if (const bool held = std::ranges::any_of(
+            m_held, [&](const Api::Series &one) { return one.id == seriesId; });
+        !held || m_leaving.contains(seriesId))
+        return;
+    emit forgetting(seriesId);
+    if (m_erasureLead <= 0) {
+        takeOff(seriesId);
+        return;
+    }
+    // Kept for as long as its tile needs to leave in front of the reader, and taken off then:
+    // the neighbours close the gap when the row goes, so it goes when the tile has gone down.
+    m_leaving.insert(seriesId);
+    QTimer::singleShot(m_erasureLead, this, [this, seriesId] {
+        m_leaving.remove(seriesId);
+        takeOff(seriesId);
+    });
+}
+
+void Shelf::takeOff(const QString &seriesId)
 {
     for (int at = 0; at < int(m_held.size()); ++at) {
         if (m_held.at(at).id != seriesId)

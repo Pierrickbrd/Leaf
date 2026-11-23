@@ -45,6 +45,27 @@ Item {
     readonly property bool narrow: Widths.band !== Widths.Band.Wide
     /// The card, so the view can tell a click on it from a click beside it.
     readonly property Item card: face
+    /// How wide each line's keys are, by line: the column of keys is as wide as the widest.
+    property var keyWidths: ({})
+    /// The column the keys stand in: its drawn 232, or the widest line of keys when that is
+    /// wider. At 800 and 1100 « Espace / Maj + Espace » ran past a column of 232 and touched
+    /// the words beside it (audit, 23/10/2026); the keys follow the desktop's text, so the
+    /// column does too.
+    readonly property real keyColumn: {
+        let widest = Widths.scale.column(232)
+        for (const line in shortcuts.keyWidths)
+            widest = Math.max(widest, shortcuts.keyWidths[line])
+        return Math.ceil(widest)
+    }
+
+    /// Notes how wide one line's keys are; a new object, so that `keyColumn` is told.
+    function measured(line, wide) {
+        if (shortcuts.keyWidths[line] === wide)
+            return
+        const next = Object.assign({}, shortcuts.keyWidths)
+        next[line] = wide
+        shortcuts.keyWidths = next
+    }
 
     /// The cross was pressed: the card asks to be closed, as Escape does.
     signal closeRequested()
@@ -83,6 +104,7 @@ Item {
         Text {
             id: words
 
+            textFormat: Text.PlainText
             text: heading.text
             color: Theme.emerald
             font.family: Theme.textFamily
@@ -106,6 +128,8 @@ Item {
         id: group
 
         required property var modelData
+        /// The card's root: an inline component does not see the ids of the file it is in.
+        property var owner: null
 
         objectName: "reader-shortcuts-" + group.modelData.name
         spacing: 0
@@ -127,6 +151,17 @@ Item {
                 id: line
 
                 required property var modelData
+                required property int index
+                readonly property real keysWide: keys.implicitWidth
+
+                function report() {
+                    if (group.owner)
+                        group.owner.measured(group.modelData.name + "/" + line.index,
+                                             line.keysWide)
+                }
+
+                onKeysWideChanged: line.report()
+                Component.onCompleted: line.report()
 
                 width: group.width
                 height: Math.max(Widths.scale.size(52),
@@ -136,7 +171,7 @@ Item {
                     id: keys
 
                     anchors.verticalCenter: parent.verticalCenter
-                    width: Widths.scale.icon(232)
+                    width: group.owner ? group.owner.keyColumn : Widths.scale.column(232)
                     keys: line.modelData.keys
                 }
 
@@ -148,6 +183,7 @@ Item {
                     anchors.leftMargin: Widths.scale.size(14)
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
                     text: line.modelData.does
                     color: Theme.ink
                     font.family: Theme.textFamily
@@ -204,6 +240,7 @@ Item {
                 objectName: "reader-shortcuts-title"
                 x: Widths.scale.icon(28) + Widths.scale.size(12)
                 anchors.verticalCenter: parent.verticalCenter
+                textFormat: Text.PlainText
                 text: ReaderCaptions.shortcuts
                 color: Theme.ink
                 font.family: Theme.displayFamily
@@ -213,6 +250,9 @@ Item {
 
             IconButton {
                 objectName: "reader-shortcuts-close"
+                // A stop, as the bar's buttons are: Escape was the only way out by the keys.
+                activeFocusOnTab: true
+                Accessible.focusable: true
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 glyph: "tabler-x"
@@ -275,6 +315,7 @@ Item {
 
                             Group {
                                 width: column.width
+                                owner: shortcuts
                             }
                         }
                     }

@@ -1,4 +1,9 @@
 // A scope-changing action. It navigates within the search; it never unfolds content inline.
+//
+// As wide as its words, the chevron right after them. It took the width of what it followed:
+// the series' link ran the window's whole width and the files' the column's, so the two
+// chevrons stood at two places, both far from the words they belonged to, and the ring of the
+// series' one ran under the last title of the row above it (audit, 25/10/2026).
 
 import QtQuick
 import Leaf
@@ -13,6 +18,10 @@ Rectangle {
     signal wentPast(bool forward)
 
     objectName: "search-link"
+    implicitWidth: Widths.space.compact + words.implicitWidth + Widths.space.label
+                   + chevron.implicitWidth + Widths.space.compact
+    // Never past the column it stands in: the words give way first.
+    width: parent ? Math.min(implicitWidth, parent.width) : implicitWidth
     height: 38
     radius: Theme.buttonRadius
     color: activeFocus || pointer.hovered ? Theme.onPaper : "transparent"
@@ -81,9 +90,14 @@ Rectangle {
     }
 
     Text {
-        anchors.left: parent.left
-        anchors.leftMargin: 8
+        id: words
+
+        x: Widths.space.compact
+        width: Math.min(implicitWidth, Math.max(0, link.width - 2 * Widths.space.compact
+                                                    - Widths.space.label - chevron.implicitWidth))
         anchors.verticalCenter: parent.verticalCenter
+        elide: Text.ElideRight
+        textFormat: Text.PlainText
         text: link.label
         color: Theme.emerald
         font.family: Theme.textFamily
@@ -92,9 +106,11 @@ Rectangle {
     }
 
     Text {
-        anchors.right: parent.right
-        anchors.rightMargin: 9
+        id: chevron
+
+        x: words.x + words.width + Widths.space.label
         anchors.verticalCenter: parent.verticalCenter
+        textFormat: Text.PlainText
         text: "›"
         color: Theme.emerald
         font.family: Theme.textFamily

@@ -6,10 +6,36 @@
 
 #include "Widths.h"
 
+#include <QQmlComponent>
+#include <QQmlContext>
+#include <QQmlEngine>
 #include <QSignalSpy>
 #include <QTest>
 
+#include <cmath>
+#include <memory>
+
 using Qt::Literals::StringLiterals::operator""_s;
+
+namespace {
+
+/// A desktop whose text size the test sets, as someone moves the slider in its settings.
+class AnyText : public SystemText
+{
+public:
+    explicit AnyText(qreal factor) : m_factor(factor) {}
+    qreal factor() const override { return m_factor; }
+    void becomes(qreal factor)
+    {
+        m_factor = factor;
+        emit changed();
+    }
+
+private:
+    qreal m_factor;
+};
+
+} // namespace
 
 class KnowsItsWidths : public QObject
 {
@@ -163,6 +189,14 @@ private slots:
         QCOMPARE(Scale::bodyFor(14, 0.85), 13);
         QCOMPARE(Scale::bodyFor(15, 0.85), 13);
         QCOMPARE(Scale::lettersFor(2, 0.85), 1.7);
+        // The box a word stands in keeps the word's proportions: it never grows with the
+        // window, however wide, and follows the desktop's text size as the word does. The
+        // reader's pills stood 45 high round a body of 14 at 1920 because theirs was a length.
+        for (const int window : {1280, 1920, 2560, 3840})
+            QCOMPARE(Scale::fitFor(36, Widths::controlsFor(window)), 36);
+        QCOMPARE(Scale::fitFor(36, 0.85), 31);
+        QCOMPARE(Scale::fitFor(36, 1.25, 1.25), 45);
+        QCOMPARE(Scale::fitFor(36, 0.85, 0.8), 24);
         // A title gives twice as much, and stops at 15.
         QCOMPARE(Scale::titleFor(28, 0.85), 20);
         QCOMPARE(Scale::titleFor(19, 0.85), 15);
@@ -208,6 +242,299 @@ private slots:
         QCOMPARE(widths.scale()->room(14), 12);
     }
 
+    /// The one word that grows, for the three places the owner allowed on 23/10/2026: as a
+    /// title under 1, at half a length's rate above it, and never past a quarter more.
+    void the_subject_of_a_screen_grows_at_half_the_rate_and_no_further_than_a_quarter()
+    {
+        QCOMPARE(Scale::displayFor(36, Widths::controlsFor(900)), 25);
+        QCOMPARE(Scale::displayFor(36, Widths::controlsFor(1280)), 36);
+        QCOMPARE(Scale::displayFor(36, Widths::controlsFor(1920)), 41);
+        QCOMPARE(Scale::displayFor(36, Widths::controlsFor(2560)), 45);
+        QCOMPARE(Scale::displayFor(30, Widths::controlsFor(1920)), 34);
+        // A title's floor under 1, and a quarter more as the ceiling whatever the factor.
+        QCOMPARE(Scale::displayFor(20, 0.85), 15);
+        QCOMPARE(Scale::displayFor(36, 3.0), 45);
+
+        Widths widths;
+        widths.setWindow(1920);
+        QCOMPARE(widths.scale()->display(36), 41);
+        QCOMPARE(widths.scale()->title(36), 36);
+    }
+
+    /// Words follow the desktop's text size, asked for on 23/10/2026: the window's floors
+    /// apply after it and are never scaled by it, and the ceiling is the drawn size times it.
+    void words_follow_the_desktops_text_size_with_the_floors_after_it()
+    {
+        // Larger: as large again as asked at the drawn window, and no larger on a large one.
+        QCOMPARE(Scale::bodyFor(14, 1.0, 1.25), 18);
+        QCOMPARE(Scale::bodyFor(14, Widths::controlsFor(1920), 1.25), 18);
+        QCOMPARE(Scale::captionFor(12, Widths::controlsFor(2560), 1.5), 18);
+        QCOMPARE(Scale::titleFor(20, Widths::controlsFor(1920), 1.5), 30);
+        // A small window still shrinks them, and the floor is the window's, not 1.25 × it.
+        QCOMPARE(Scale::bodyFor(14, 0.85, 1.25), 15);
+        QCOMPARE(Scale::captionFor(12, 0.85, 1.5), 15);
+        QCOMPARE(Scale::titleFor(20, 0.85, 1.25), 18);
+        QCOMPARE(Scale::titleFor(19, 0.85, 1.5), 20);
+        // Smaller, asked for on purpose: the floor never lifts a word back over what was
+        // asked, and the window shrinks it no further than the floor.
+        QCOMPARE(Scale::bodyFor(14, 1.0, 0.8), 11);
+        QCOMPARE(Scale::bodyFor(14, 0.85, 0.8), 11);
+        QCOMPARE(Scale::captionFor(12, 0.85, 0.8), 10);
+        QCOMPARE(Scale::bodyFor(20, 0.85, 0.8), 14);
+        // The one word that grows, grows with it too.
+        QCOMPARE(Scale::displayFor(36, Widths::controlsFor(1920), 1.5), 61);
+        QCOMPARE(Scale::displayFor(36, Widths::controlsFor(2560), 2.0), 90);
+        // Its spacing belongs to the words.
+        QCOMPARE(Scale::lettersFor(2, 1.0, 1.5), 3.0);
+        // Lengths, icons and gaps do not: a screen at 200 % is already doubled by Qt.
+        Widths widths;
+        AnyText text(1.5);
+        widths.follow(&text);
+        widths.setWindow(1280);
+        QCOMPARE(widths.scale()->size(26), 26);
+        QCOMPARE(widths.scale()->icon(20), 20);
+        QCOMPARE(widths.scale()->room(14), 14);
+        QCOMPARE(widths.scale()->body(14), 21);
+    }
+
+    /// A card of words widens with them: at 380 round words half as large again, every line
+    /// of the reader's cards would wrap in two.
+    void a_card_of_words_widens_with_the_desktops_text_size()
+    {
+        QCOMPARE(Scale::columnFor(640, Widths::controlsFor(1920), 1.5), 1080);
+        QCOMPARE(Scale::columnFor(380, Widths::controlsFor(900), 0.8), 258);
+        QCOMPARE(Scale::columnFor(640, Widths::controlsFor(1280), 1.25), 800);
+
+        Widths widths;
+        AnyText text(1.25);
+        widths.follow(&text);
+        widths.setWindow(1920);
+        QCOMPARE(widths.scale()->column(640), 900);
+    }
+
+    /// A setting typed by hand is held to what a layout survives, and nonsense from the
+    /// desktop is no setting at all.
+    void the_desktops_text_size_is_held_between_08_and_2()
+    {
+        QCOMPARE(Widths::textFor(1.25), 1.25);
+        QCOMPARE(Widths::textFor(0.5), 0.8);
+        QCOMPARE(Widths::textFor(3.0), 2.0);
+        QCOMPARE(Widths::textFor(0), 1.0);
+        QCOMPARE(Widths::textFor(-2), 1.0);
+        QCOMPARE(Widths::textFor(std::nan("")), 1.0);
+
+        Widths widths;
+        QCOMPARE(widths.systemText(), 1.0);
+        AnyText text(4.0);
+        widths.follow(&text);
+        QCOMPARE(widths.systemText(), 2.0);
+        widths.follow(nullptr);
+        QCOMPARE(widths.systemText(), 1.0);
+    }
+
+    /// The setting moved while the application was open, and every `Widths.scale` binding
+    /// takes it at once — through a real binding, since a binding re-reads a call only when
+    /// a property it read says it changed.
+    void a_text_size_changed_on_the_desktop_reaches_every_binding_live()
+    {
+        Widths widths;
+        widths.setWindow(1280);
+        AnyText text(1.0);
+        widths.follow(&text);
+
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty(u"widths"_s, &widths);
+        QQmlComponent component(&engine);
+        component.setData("import QtQml\nQtObject {\n"
+                          "    property int body: widths.scale.body(14)\n"
+                          "    property int column: widths.scale.column(400)\n"
+                          "}\n",
+                          QUrl());
+        std::unique_ptr<QObject> bound(component.create());
+        QVERIFY2(bound, qPrintable(component.errorString()));
+        QCOMPARE(bound->property("body").toInt(), 14);
+        QCOMPARE(bound->property("column").toInt(), 400);
+
+        QSignalSpy sized(&widths, &Widths::systemTextChanged);
+        QSignalSpy scale(&widths, &Widths::scaleChanged);
+        text.becomes(1.5);
+        QCOMPARE(sized.count(), 1);
+        QCOMPARE(scale.count(), 1);
+        QCOMPARE(bound->property("body").toInt(), 21);
+        QCOMPARE(bound->property("column").toInt(), 600);
+
+        // The same size said again changes nothing and rebinds nothing.
+        text.becomes(1.5);
+        QCOMPARE(scale.count(), 1);
+        // A window dragged wider still rebinds through the same signal.
+        widths.setWindow(900);
+        QCOMPARE(scale.count(), 2);
+        QCOMPARE(bound->property("body").toInt(), 18);
+        // A source let go of is no longer heard.
+        widths.follow(nullptr);
+        text.becomes(2.0);
+        QCOMPARE(widths.systemText(), 1.0);
+    }
+
+    /// Each gap by its role, at the smallest window, the window it was drawn for and the
+    /// owner's. The first thing on a page stood 16, 14, 12, 11 or 9 under the bar on
+    /// 23/10/2026, three of them literals that stayed put while the others grew: one number
+    /// per role, and one law per number, is what keeps them from drifting apart again.
+    void the_space_between_things_is_named_by_its_role()
+    {
+        Widths widths;
+        const Space *space = widths.space();
+
+        widths.setWindow(Widths::MinimumWindowWidth);
+        QCOMPARE(space->gutter(), 14);
+        QCOMPARE(space->top(), 14);
+        QCOMPARE(space->section(), 24);
+        QCOMPARE(space->block(), 12);
+        QCOMPARE(space->heading(), 7);
+        QCOMPARE(space->card(), 14);
+        QCOMPARE(space->compact(), 7);
+        QCOMPARE(space->row(), 9);
+        QCOMPARE(space->label(), 7);
+        QCOMPARE(space->pill(), 5);
+        QCOMPARE(space->tight(), 2);
+        QCOMPARE(space->column(), 935);
+
+        widths.setWindow(1280);
+        QCOMPARE(space->gutter(), 16);
+        QCOMPARE(space->top(), 16);
+        QCOMPARE(space->section(), 28);
+        QCOMPARE(space->block(), 14);
+        QCOMPARE(space->heading(), 8);
+        QCOMPARE(space->card(), 16);
+        QCOMPARE(space->compact(), 8);
+        QCOMPARE(space->row(), 10);
+        QCOMPARE(space->label(), 8);
+        QCOMPARE(space->pill(), 6);
+        QCOMPARE(space->tight(), 2);
+        QCOMPARE(space->column(), 1100);
+
+        // Gaps at twice a length's rate, paddings at a length's, the column at half of it.
+        widths.setWindow(1920);
+        QCOMPARE(space->gutter(), 24);
+        QCOMPARE(space->top(), 24);
+        QCOMPARE(space->section(), 42);
+        QCOMPARE(space->block(), 21);
+        QCOMPARE(space->heading(), 12);
+        QCOMPARE(space->card(), 20);
+        QCOMPARE(space->compact(), 10);
+        QCOMPARE(space->row(), 15);
+        QCOMPARE(space->label(), 12);
+        QCOMPARE(space->pill(), 9);
+        QCOMPARE(space->tight(), 3);
+        QCOMPARE(space->column(), 1238);
+
+        // The shelf's two names are the same two numbers, until nothing reads them.
+        QCOMPARE(widths.shelfMargin(), space->gutter());
+        QCOMPARE(widths.shelfGap(), space->block());
+    }
+
+    /// The hierarchy the roles stand for holds at every window: a gap that overtook the one
+    /// above it in the order would make two blocks read as closer than two lines of a card.
+    void the_roles_keep_their_order_at_every_window()
+    {
+        Widths widths;
+        const Space *space = widths.space();
+        for (int window = Widths::MinimumWindowWidth; window <= 2560; window += 40) {
+            widths.setWindow(window);
+            const QList<int> ordered{space->tight(), space->pill(),  space->label(),
+                                     space->row(),   space->block(), space->gutter(),
+                                     space->section()};
+            for (qsizetype at = 1; at < ordered.size(); ++at)
+                QVERIFY2(ordered.at(at - 1) < ordered.at(at),
+                         qPrintable(u"at %1, role %2 is not under role %3"_s.arg(window)
+                                        .arg(at - 1)
+                                        .arg(at)));
+            QCOMPARE(space->top(), space->gutter());
+            QVERIFY(space->heading() < space->block());
+        }
+    }
+
+    /// Through a real binding, as `scale` is: a window dragged wider and a text size changed
+    /// on the desktop both reach `Widths.space.…`, which a property only does if it notifies.
+    void a_window_dragged_wider_reaches_every_space_binding()
+    {
+        Widths widths;
+        widths.setWindow(1280);
+        AnyText text(1.0);
+        widths.follow(&text);
+
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty(u"widths"_s, &widths);
+        QQmlComponent component(&engine);
+        component.setData("import QtQml\nQtObject {\n"
+                          "    property int top: widths.space.top\n"
+                          "    property int column: widths.space.column\n"
+                          "}\n",
+                          QUrl());
+        std::unique_ptr<QObject> bound(component.create());
+        QVERIFY2(bound, qPrintable(component.errorString()));
+        QCOMPARE(bound->property("top").toInt(), 16);
+        QCOMPARE(bound->property("column").toInt(), 1100);
+
+        QSignalSpy changed(widths.space(), &Space::changed);
+        widths.setWindow(1920);
+        QCOMPARE(changed.count(), 1);
+        QCOMPARE(bound->property("top").toInt(), 24);
+
+        // The column holds words, so it widens with them; a gap does not.
+        text.becomes(1.5);
+        QCOMPARE(changed.count(), 2);
+        QCOMPARE(bound->property("top").toInt(), 24);
+        QCOMPARE(bound->property("column").toInt(), qRound(1100 * 1.125 * 1.5));
+    }
+
+    /// The height is fed as the width is, and a window under 700 high is short: a banner of
+    /// 120, a header of 208 and a bar of 58 left no volume row on a window of 560.
+    void the_height_is_kept_and_a_window_under_700_is_short()
+    {
+        Widths widths;
+        QSignalSpy said(&widths, &Widths::heightChanged);
+        widths.setHeight(760);
+        QCOMPARE(widths.height(), 760);
+        QVERIFY(!widths.isShort());
+        widths.setHeight(700);
+        QVERIFY(!widths.isShort());
+        widths.setHeight(699);
+        QVERIFY(widths.isShort());
+        widths.setHeight(Widths::MinimumWindowHeight);
+        QVERIFY(widths.isShort());
+        widths.setHeight(Widths::MinimumWindowHeight);
+        QCOMPARE(said.count(), 4);
+        QCOMPARE(widths.minimumWindowWidth(), 800);
+        QCOMPARE(widths.minimumWindowHeight(), 560);
+    }
+
+    /// The paper round the shelf is room: on a larger window it gives the width to the space
+    /// between covers, as the bar does since 23/10/2026; the count is the pure rule's, fed
+    /// that paper.
+    void the_shelfs_paper_is_room_and_its_columns_are_counted_with_it()
+    {
+        QCOMPARE(Widths::shelfColumnsFor(800, 14, 12), 5);
+        QCOMPARE(Widths::shelfColumnsFor(1100, 15, 13), 7);
+        QCOMPARE(Widths::shelfColumnsFor(1000, 0, 0), 5);
+        QCOMPARE(Widths::shelfColumnsFor(1300, -5, -5), 8);
+
+        Widths widths;
+        QSignalSpy said(&widths, &Widths::windowChanged);
+        widths.setWindow(1280);
+        QCOMPARE(widths.shelfMargin(), 16);
+        QCOMPARE(widths.shelfGap(), 14);
+        widths.setWindow(1920);
+        QCOMPARE(widths.shelfMargin(), 24);
+        QCOMPARE(widths.shelfGap(), 21);
+        QCOMPARE(widths.shelfColumns(), 8);
+        widths.setWindow(Widths::MinimumWindowWidth);
+        QCOMPARE(widths.shelfMargin(), 14);
+        QCOMPARE(widths.shelfGap(), 12);
+        QCOMPARE(widths.shelfColumns(), 5);
+        QCOMPARE(said.count(), 3);
+    }
+
     void the_band_label_is_the_bands_own_name_in_french()
     {
         Widths widths;
@@ -220,5 +547,6 @@ private slots:
     }
 };
 
-QTEST_APPLESS_MAIN(KnowsItsWidths)
+// Guiless and not appless: the binding test needs an application for its engine.
+QTEST_GUILESS_MAIN(KnowsItsWidths)
 #include "knows_its_widths.moc"

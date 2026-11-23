@@ -737,6 +737,34 @@ private slots:
         QCOMPARE(volume.value(u"howFarRead"_s).toReal(), 46 / 190.0);
     }
 
+    /// Who wrote and who drew the open volume, each role a line after the series and before
+    /// the pages: the card said the series and never the people, and Takeshi Obata, who drew
+    /// every page of Death Note, was nowhere on it. Every name, wrapped rather than counted.
+    void a_volume_card_names_its_writer_and_drawer_after_the_series()
+    {
+        m_more = QJsonObject{{u"authors"_s, QJsonArray{u"Tsugumi Ōba"_s}},
+                             {u"artists"_s, QJsonArray{u"Takeshi Obata"_s}}};
+        opened();
+        const QVariantList credits = m_reader->volume().value(u"credits"_s).toList();
+        QCOMPARE(credits.size(), 2);
+        QCOMPARE(credits.at(0).toMap().value(u"name"_s).toString(), u"Scénario"_s);
+        QCOMPARE(credits.at(0).toMap().value(u"value"_s).toString(), u"Tsugumi Ōba"_s);
+        QCOMPARE(credits.at(1).toMap().value(u"name"_s).toString(), u"Dessin"_s);
+        QCOMPARE(credits.at(1).toMap().value(u"value"_s).toString(), u"Takeshi Obata"_s);
+    }
+
+    /// One person who writes and draws is one « Auteur », not the same name twice.
+    void one_person_doing_both_is_one_author_line()
+    {
+        m_more = QJsonObject{{u"authors"_s, QJsonArray{u"Hajime Isayama"_s}},
+                             {u"artists"_s, QJsonArray{u"Hajime Isayama"_s}}};
+        opened();
+        const QVariantList credits = m_reader->volume().value(u"credits"_s).toList();
+        QCOMPARE(credits.size(), 1);
+        QCOMPARE(credits.at(0).toMap().value(u"name"_s).toString(), u"Auteur"_s);
+        QCOMPARE(credits.at(0).toMap().value(u"value"_s).toString(), u"Hajime Isayama"_s);
+    }
+
     /// A field the volume does not have has no key, so the panel has no line for it — an
     /// empty value would be a label standing over nothing.
     void a_volume_without_an_isbn_has_no_isbn_in_what_the_panel_is_told()
@@ -748,6 +776,7 @@ private slots:
         QVERIFY(!volume.contains(u"summary"_s));
         QVERIFY(!volume.contains(u"title"_s));
         QVERIFY(!volume.contains(u"chapters"_s));
+        QVERIFY(volume.value(u"credits"_s).toList().isEmpty());
     }
 
     /// A chapter on its own is not the book an ISBN names: what its file carries is the

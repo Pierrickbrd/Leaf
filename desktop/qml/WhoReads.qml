@@ -23,6 +23,9 @@ FocusScope {
     readonly property bool unproven: Profiles.unproven
     readonly property bool closable: !locked && !mustChoose && !unproven
     property bool keep: false
+    /// From a profile's square to the outside of the ring round the one reading now: the focus
+    /// ring starts past it, so the two read as two marks and not one thick one.
+    readonly property int readerRingRoom: 8
 
     /// The code window (9b): `target` is a profile of `Profiles.list`, or null with `add`.
     signal codeNeeded(var target, string mode)
@@ -93,7 +96,27 @@ FocusScope {
         if (visible) {
             whoReads.keep = false
             whoReads.forceActiveFocus()
+            whoReads.focusTheReader()
         }
+    }
+
+    /// The tile of the profile reading now, else the first: a scope opened again gave the keys
+    /// back to the tile they were on when it closed, and with nobody reading it opened on
+    /// nothing, and the first Enter pressed nothing.
+    function focusTheReader() {
+        let first = null
+        for (let at = 0; at < tiles.count; ++at) {
+            const one = tiles.itemAt(at)
+            if (!one)
+                continue
+            if (one.modelData.current === true) {
+                one.forceActiveFocus(Qt.OtherFocusReason)
+                return
+            }
+            first = first ?? one
+        }
+        if (first)
+            first.forceActiveFocus(Qt.OtherFocusReason)
     }
 
     Rectangle {
@@ -117,37 +140,21 @@ FocusScope {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        height: 58
+        height: Widths.scale.size(58)
         color: Theme.surface
 
-        Image {
-            id: mark
-
+        // The application bar's name, and not a copy of it: this one kept its 36, its 10 and
+        // its 25 by hand, as the link screen's did.
+        BarBrand {
             anchors.left: parent.left
-            anchors.leftMargin: Widths.shelfMargin
+            anchors.leftMargin: Widths.space.gutter
             anchors.verticalCenter: parent.verticalCenter
-            width: 36
-            height: 36
-            source: Theme.dark ? "assets/logos/leaf-mark-dark.svg"
-                               : "assets/logos/leaf-mark-light.svg"
-            sourceSize: Qt.size(36, 36)
-        }
-
-        Text {
-            anchors.left: mark.right
-            anchors.leftMargin: 10
-            anchors.verticalCenter: parent.verticalCenter
-            text: "Leaf"
-            color: Theme.ink
-            font.family: Theme.displayFamily
-            font.pixelSize: 25
-            font.weight: Font.Bold
         }
 
         BarButton {
             objectName: "who-reads-close"
             anchors.right: parent.right
-            anchors.rightMargin: Widths.shelfMargin
+            anchors.rightMargin: Widths.space.gutter
             anchors.verticalCenter: parent.verticalCenter
             visible: whoReads.closable
             activeFocusOnTab: visible
@@ -174,6 +181,7 @@ FocusScope {
         Text {
             objectName: "who-reads-title"
             anchors.horizontalCenter: parent.horizontalCenter
+            textFormat: Text.PlainText
             text: Profiles.words.whoReads
             color: Theme.ink
             font.family: Theme.displayFamily
@@ -186,6 +194,8 @@ FocusScope {
             spacing: 28
 
             Repeater {
+                id: tiles
+
                 model: Profiles.list
 
                 delegate: Column {
@@ -208,7 +218,9 @@ FocusScope {
                     Keys.onPressed: event => {
                         if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
                                 || event.key === Qt.Key_Enter) {
-                            whoReads.choose(tile.modelData)
+                            // Once for a key held down, as `ActionButton`.
+                            if (!event.isAutoRepeat)
+                                whoReads.choose(tile.modelData)
                             event.accepted = true
                         }
                     }
@@ -218,17 +230,13 @@ FocusScope {
                         width: 132
                         height: 132
 
-                        Rectangle {
-                            objectName: "who-reads-ring-" + tile.modelData.id
-                            visible: tile.modelData.current
-                            anchors.centerIn: parent
-                            width: 148
-                            height: 148
-                            radius: 36
-                            color: "transparent"
+                        ReaderRing {
+                            objectName: "who-reads-focus-" + tile.modelData.id
+                            side: 132
+                            squareRadius: face.radius
+                            room: whoReads.readerRingRoom
+                            focused: tile.activeFocus
                             border.color: face.color
-                            border.width: 3
-                            antialiasing: true
                         }
 
                         ProfileSquare {
@@ -238,11 +246,6 @@ FocusScope {
                             profile: tile.modelData
                             side: 132
                             radius: 28
-                        }
-
-                        FocusRing {
-                            cornerRadius: 36
-                            focused: tile.activeFocus
                         }
 
                         HoverHandler {
@@ -255,19 +258,50 @@ FocusScope {
                         }
                     }
 
-                    Text {
-                        objectName: "who-reads-name-" + tile.modelData.id
+                    Column {
                         width: parent.width
-                        horizontalAlignment: Text.AlignHCenter
-                        elide: Text.ElideRight
-                        text: tile.modelData.name
-                        // A reader names itself, and every profile sees this screen: « <img
-                        // src=…> » as a name was drawn as markup and fetched on each opening.
-                        textFormat: Text.PlainText
-                        color: Theme.ink
-                        font.family: Theme.textFamily
-                        font.pixelSize: 16
-                        font.weight: Font.Medium
+                        spacing: 4
+
+                        Text {
+                            objectName: "who-reads-name-" + tile.modelData.id
+                            width: parent.width
+                            horizontalAlignment: Text.AlignHCenter
+                            elide: Text.ElideRight
+                            text: tile.modelData.name
+                            // A reader names itself, and every profile sees this screen: « <img
+                            // src=…> » as a name was drawn as markup and fetched on each opening.
+                            textFormat: Text.PlainText
+                            color: Theme.ink
+                            font.family: Theme.textFamily
+                            font.pixelSize: 16
+                            font.weight: Font.Medium
+                        }
+
+                        // Who is reading now, said in words and not by a ring: the ring is the keys'
+                        // focus, and two marks of one shape on two profiles left a reader unsure
+                        // which one was current and which one was about to be chosen.
+                        Row {
+                            objectName: "who-reads-current-" + tile.modelData.id
+                            visible: tile.modelData.current === true
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            spacing: 6
+
+                            Rectangle {
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 8
+                                height: 8
+                                radius: 4
+                                color: Theme.emerald
+                            }
+
+                            Text {
+                                textFormat: Text.PlainText
+                                text: Profiles.words.youMark
+                                color: Theme.inkSoft
+                                font.family: Theme.textFamily
+                                font.pixelSize: 13
+                            }
+                        }
                     }
 
                     // The age a restricted profile reads up to, the one fact about it that
@@ -276,6 +310,7 @@ FocusScope {
                         width: parent.width
                         horizontalAlignment: Text.AlignHCenter
                         wrapMode: Text.Wrap
+                        textFormat: Text.PlainText
                         text: tile.modelData.kind === "restricted" && tile.modelData.maxAge > 0
                               ? Profiles.saySeriesUpToYears(tile.modelData.maxAge)
                               : (tile.modelData.kind === "principal" ? "" : tile.modelData.note)
@@ -324,8 +359,11 @@ FocusScope {
                         tint: Theme.inkSoft
                     }
 
-                    FocusRing {
-                        cornerRadius: 28
+                    ReaderRing {
+                        objectName: "who-reads-add-focus"
+                        side: 132
+                        squareRadius: 28
+                        room: whoReads.readerRingRoom
                         focused: addTile.activeFocus
                     }
 
@@ -342,6 +380,7 @@ FocusScope {
                 Text {
                     width: parent.width
                     horizontalAlignment: Text.AlignHCenter
+                    textFormat: Text.PlainText
                     text: Profiles.words.addOne
                     color: Theme.inkSoft
                     font.family: Theme.textFamily
@@ -355,7 +394,7 @@ FocusScope {
             objectName: "who-reads-keep"
             anchors.horizontalCenter: parent.horizontalCenter
             visible: !whoReads.locked
-            width: 230
+            snug: true
             activeFocusOnTab: visible
             label: Profiles.words.keepOnThisDevice
             checked: whoReads.keep
@@ -375,6 +414,7 @@ FocusScope {
             objectName: "who-reads-needs-code"
             anchors.horizontalCenter: parent.horizontalCenter
             visible: whoReads.locked
+            textFormat: Text.PlainText
             text: Profiles.words.switchNeedsCode
             color: Theme.inkSoft
             font.family: Theme.textFamily

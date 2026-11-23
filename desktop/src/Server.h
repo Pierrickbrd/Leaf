@@ -28,6 +28,10 @@ class Server : public QObject
     QML_ELEMENT
     QML_SINGLETON
 
+    /// How many times a cover has been changed from this window, for a picture to be asked for
+    /// again. See `coverChanged`.
+    Q_PROPERTY(int coverStamp READ coverStamp NOTIFY coverStampChanged)
+
 public:
     /// The header the key rides on. Spelled once because two different network managers write
     /// it now: this one, and the engine's own for the covers an `Image` fetches.
@@ -56,6 +60,12 @@ public:
 
     explicit Server(Settings *settings, QObject *parent = nullptr);
 
+    /// How long a request may stall — no byte sent or received — before it fails as an
+    /// unreachable server. Without one a server that accepted the connection and never
+    /// answered held a screen on « loading » for ever. Two minutes by default: a scan or a
+    /// large opening answers late, but not silently.
+    void setPatience(int milliseconds) { m_patience = milliseconds; }
+
     /// The one instance the application talks through, built by the engine from the `Settings`
     /// singleton.
     ///
@@ -68,6 +78,26 @@ public:
     /// Where the server is, tidied — for whoever has to build a URL this class will not fetch
     /// itself. A cover is one: it is drawn by an `Image`, not asked for here.
     QString address() const;
+
+    int coverStamp() const { return m_coverStamp; }
+
+    /// Runs `then` once `Settings` has loaded: at once if it has, otherwise on the change that
+    /// says so. For what must name the address it speaks to — an address read before the
+    /// keyring answered is empty, and a thing done under it is done under no server at all.
+    /// Dropped with `caller`.
+    void whenLoaded(const QObject *caller, std::function<void()> then) const;
+
+    /// A cover was chosen, replaced or taken back, and every picture of a cover is now asked for
+    /// again.
+    ///
+    /// **Measured, not supposed:** a cover URL is the same string before and after the change
+    /// (`/series/{id}/cover`), and an `Image` keeps its pixmap under that string for as long as
+    /// the application runs — the old picture stayed on the shelf and in the window until the
+    /// restart, and the server's ETag, which does change, was never asked about. So the pictures
+    /// ask under a new address, `RoundedCover` adding `?v=<stamp>` once this is not zero. One
+    /// stamp for all of them and not one per series: the cover of a series is its first volume's
+    /// when nothing else was chosen, so a volume's change reaches the shelf.
+    void coverChanged();
 
     /// A path, and what goes after the `?` — separately, and never spliced by the caller.
     ///
@@ -94,6 +124,15 @@ public:
     /// call is `get` word for word, which is why it goes through the same place.
     void getFile(const QString &path, const QObject *caller,
                  std::function<void(const Answer &)> then);
+
+    /// The same request, for a file too big to hold: every piece is handed to `chunk` as it
+    /// arrives, and nothing is kept. `chunk` answers whether to go on; false drops the
+    /// connection, which is how a cancelled export stops a transfer without waiting for its
+    /// end. The Answer's `file` stays empty, and a transfer cut short is an `unreachable`
+    /// answer rather than a short file called a success.
+    void download(const QString &path, const QObject *caller,
+                  std::function<bool(const QByteArray &)> chunk,
+                  std::function<void(const Answer &)> then);
 
     /// The same path, the same waiting, the same refusals — with a body, and a verb the
     /// server reads as a command rather than a question.
@@ -133,7 +172,7 @@ public:
     /// What to make of the bytes that come back. A route that answers with an archive and a
     /// route that answers with a document are read differently, and nothing else about the
     /// call changes — so it is one word here rather than a second `send`.
-    enum class Reading { Document, Bytes };
+    enum class Reading { Document, Bytes, Stream };
 
     /// Whether anything more will be sent.
     ///
@@ -174,7 +213,16 @@ public:
     /// Typing `leaf.local:8081` into a box is not a mistake anybody should be corrected for.
     static QString tidy(const QString &address);
 
+    /// The loopback, the one place plain http is allowed: nothing on it leaves the machine.
+    /// Asked of the host alone, no port, no brackets.
+    static bool loopback(const QString &host);
+
+    /// An identifier as one segment of a path. They come from the server and are put into
+    /// addresses the key rides to: one holding `/`, `..` or `?` would name another route.
+    static QString segment(const QString &id);
+
 signals:
+    void coverStampChanged();
     /// The server refused the key as one it does not know — `403 unknown key`. Not a key
     /// that lacks a right, nor a library that is shut: this device was removed from it with
     /// `device revoke`, or never was in it. Said once per refusal, and only for the key this
@@ -188,6 +236,7 @@ signals:
     void mustChoose();
 
 private:
+    int m_coverStamp = 0;
 
     /// A request made before `Settings` had finished loading, kept until it can be sent.
     ///
@@ -257,6 +306,9 @@ private:
         /// the caller rather than read off the verb, since `set` is a PUT that carries a
         /// document — the one PUT in the contract that is not part of a file.
         bool octets = false;
+        /// Where the pieces of the answer go, for a download too big to hold. Empty for
+        /// everything else.
+        std::function<bool(const QByteArray &)> chunks = {};
     };
 
     void send(const Sending &what, const QObject *caller,
@@ -267,6 +319,8 @@ private:
 
     Settings *m_settings;
     QNetworkAccessManager m_network;
+    /// How long a transfer may go without a byte either way before it is given up.
+    int m_patience = 120000;
     /// Empty while it will still send. Set by a refusal, cleared when the key changes.
     QString m_stopped;
     QDateTime m_notBefore;

@@ -15,11 +15,16 @@
 // Lighting a pill is an "or" inside its axis and an "and" across them, because that is what
 // the contract does with a repeated parameter and what anyone expects a row of chips to do.
 // The lists go to `Shelf` in the contract's own spelling; nothing here interprets them.
+//
+// A `PageStrip`, as the search's tabs are: the strip owns the paper, the gutter and the gaps
+// above and below, and the screen says only which gap goes above — `top` under the bar,
+// `block` under the band. Its own two gaps of 14 round a button of 34 put the button 14
+// under the bar where the search's tabs stood at 9 and the band at 16 (23/10/2026).
 
 import QtQuick
 import Leaf
 
-Item {
+PageStrip {
     id: row
 
     // Replaceable for the same reason ShelfView's `sourceModel` is: so the QML can be
@@ -57,7 +62,8 @@ Item {
                             label = known.label
                     }
                 }
-                shown.push({ "axis": axis, "value": value, "label": label })
+                shown.push({ "axis": axis, "value": value, "label": label, "word": label,
+                             "count": -1 })
             }
         }
         return shown
@@ -73,7 +79,7 @@ Item {
     readonly property bool drawsRead: readStatusValues.length > 0
     readonly property bool drawsMedium: mediumValues.length > 0
     /// What a chip reads in the moment between its list shrinking and the chip going.
-    readonly property var nothing: ({ "axis": "", "value": "", "label": "" })
+    readonly property var nothing: ({ "axis": "", "value": "", "label": "", "word": "", "count": -1 })
     readonly property var drawnHere: (drawsRead ? ["read"] : [])
                                      .concat(drawsMedium ? ["medium"] : [])
 
@@ -102,7 +108,7 @@ Item {
         if (!visible)
             panel.close()
     }
-    height: showing ? Math.max(chips.height, filterButton.height) + 2 * Widths.shelfGap : 0
+    height: showing ? implicitHeight : 0
 
     /// The row was passed through, in that direction: forward is towards the covers, backward
     /// towards the band. The row knows how to walk its own chips and nothing else — where the
@@ -198,12 +204,6 @@ Item {
         all[to].forceActiveFocus(on ? Qt.TabFocusReason : Qt.BacktabFocusReason)
     }
 
-    // The band passes behind this, so the paper cannot show through it.
-    Rectangle {
-        anchors.fill: parent
-        color: Theme.paper
-    }
-
     // The command that produces the pills, at the head of the line they appear on. It was
     // in the application bar, between the field and the order, where it was one command
     // among three and a long way from what it acts on; and the bar's fourth slot is wanted
@@ -215,10 +215,9 @@ Item {
         property bool filterChip: true
 
         objectName: "filter-button"
-        x: Widths.shelfMargin
         anchors.verticalCenter: parent.verticalCenter
         source: "assets/icons/tune.svg"
-        label: Captions.filterLabel
+        label: BarCaptions.filterLabel
         // Green while its panel is open, as every button that opens something is — and not
         // while a filter is in force: held for that, it stayed green through a whole session
         // of browsing, and a colour that never changes says nothing.
@@ -230,8 +229,8 @@ Item {
             id: panel
 
             // Hung from the button's left edge, which is the left edge of the page: the
-            // 380 px it needs are always to its right. In the bar it was pulled the other
-            // way, the button sitting in the middle of a row.
+            // width it needs is always to its right. In the bar it was pulled the other way,
+            // the button sitting in the middle of a row.
             x: 0
             y: filterButton.height + gap
             overFiles: row.overFiles
@@ -245,9 +244,8 @@ Item {
         id: chips
 
         objectName: "filter-chips"
-        x: filterButton.x + filterButton.width + 14
         anchors.verticalCenter: parent.verticalCenter
-        spacing: 6
+        spacing: Widths.space.pill
 
         // A count, and each chip reads its own entry: handed the list, the repeater rebuilt
         // every chip whenever one number moved — « Terminées 1 » becoming 2 tore down « Non
@@ -263,6 +261,8 @@ Item {
                 axis: "read"
                 value: pill.value
                 label: pill.label
+                word: pill.word
+                tally: pill.count
                 lit: row.isLit("read", pill.value)
                 onToggled: row.toggle("read", pill.value)
             }
@@ -272,7 +272,7 @@ Item {
         Rectangle {
             objectName: "filter-separator"
             width: 1
-            height: 18
+            height: Widths.scale.size(18)
             anchors.verticalCenter: parent.verticalCenter
             color: Theme.rule
             visible: row.readStatusValues.length > 0 && row.mediumValues.length > 0
@@ -288,6 +288,8 @@ Item {
                 axis: "medium"
                 value: pill.value
                 label: pill.label
+                word: pill.word
+                tally: pill.count
                 lit: row.isLit("medium", pill.value)
                 onToggled: row.toggle("medium", pill.value)
             }
@@ -296,7 +298,7 @@ Item {
         Rectangle {
             objectName: "filter-elsewhere-separator"
             width: 1
-            height: 18
+            height: Widths.scale.size(18)
             anchors.verticalCenter: parent.verticalCenter
             color: Theme.rule
             visible: row.elsewhereValues.length > 0
@@ -313,6 +315,8 @@ Item {
                 axis: pill.axis
                 value: pill.value
                 label: pill.label
+                word: pill.word
+                tally: pill.count
                 // Always lit: it is only here because it is.
                 lit: true
                 onToggled: row.toggle(pill.axis, pill.value)

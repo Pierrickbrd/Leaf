@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 
+#include <QScopeGuard>
 #include <QVariantMap>
 #include <memory>
 #include <utility>
@@ -138,6 +140,15 @@ QString spell(Preferences::Fit which)
     return u"height"_s;
 }
 
+/// A zoom between a third and three times: below, a column of thumbnails nobody reads;
+/// above, one panel cut by both edges. Nothing that is not a number is a zoom.
+double stripZoomed(double zoom)
+{
+    if (!std::isfinite(zoom) || zoom <= 0)
+        return 1.0;
+    return std::clamp(zoom, 1.0 / 3.0, 3.0);
+}
+
 Preferences::Fit readFit(const QString &word)
 {
     using enum Preferences::Fit;
@@ -224,6 +235,11 @@ Preferences::Preferences(QObject *parent)
     }
     m_pageLayout = readLayout(m_file.value(u"reader/layout"_s).toString());
     m_fit = readFit(m_file.value(u"reader/fit"_s).toString());
+    // Height means nothing to a column with no end: anything but « Largeur » is the file.
+    m_stripFit = readFit(m_file.value(u"reader/stripFit"_s).toString()) == Fit::Width
+                     ? Fit::Width
+                     : Fit::Original;
+    m_stripZoom = stripZoomed(m_file.value(u"reader/stripZoom"_s, 1.0).toDouble());
     m_backdrop = readBackdrop(m_file.value(u"reader/backdrop"_s).toString());
     m_motion = readMotion(m_file.value(u"reader/motion"_s).toString());
     m_corner = readCorner(m_file.value(u"corner"_s).toString());
@@ -351,6 +367,11 @@ QString Preferences::appearanceTitle() const
     return Words::appearance();
 }
 
+QString Preferences::readerDefaultsTitle() const
+{
+    return Words::readerDefaults();
+}
+
 QVariantList Preferences::appearances() const
 {
     return {
@@ -388,6 +409,28 @@ void Preferences::rememberPlace(const QUrl &place)
     m_file.setValue(u"lastPlace"_s, place.toString());
 }
 
+QVariantMap Preferences::windowFrame() const
+{
+    const int width = m_file.value(u"window/width"_s, 0).toInt();
+    const int height = m_file.value(u"window/height"_s, 0).toInt();
+    if (width <= 0 || height <= 0)
+        return {};
+    return {{u"width"_s, width},
+            {u"height"_s, height},
+            {u"maximized"_s, m_file.value(u"window/maximized"_s, false).toBool()}};
+}
+
+void Preferences::rememberWindow(int width, int height, bool maximized)
+{
+    // A maximised window keeps the size it had before, which is the one to come back to when
+    // it is restored: the screen's own is no choice of the reader's.
+    if (!maximized && width > 0 && height > 0) {
+        m_file.setValue(u"window/width"_s, width);
+        m_file.setValue(u"window/height"_s, height);
+    }
+    m_file.setValue(u"window/maximized"_s, maximized);
+}
+
 void Preferences::showVolumesAsGrid(bool asGrid)
 {
     if (asGrid == m_volumesAsGrid)
@@ -398,6 +441,7 @@ void Preferences::showVolumesAsGrid(bool asGrid)
     // Once. It was said before the write and again after it, which is two notifications for
     // one fact and one redraw of everything bound to this object for nothing.
     emit changed();
+    announce();
 }
 
 void Preferences::choosePageLayout(PageLayout wanted)
@@ -408,6 +452,7 @@ void Preferences::choosePageLayout(PageLayout wanted)
     m_file.setValue(u"reader/layout"_s, spell(wanted));
     m_file.sync();
     emit changed();
+    announce();
 }
 
 void Preferences::chooseFit(Fit wanted)
@@ -418,6 +463,23 @@ void Preferences::chooseFit(Fit wanted)
     m_file.setValue(u"reader/fit"_s, spell(wanted));
     m_file.sync();
     emit changed();
+    announce();
+}
+
+void Preferences::chooseStrip(Fit fit, double zoom)
+{
+    using enum Preferences::Fit;
+    const Fit kept = fit == Width ? Width : Original;
+    const double held = stripZoomed(zoom);
+    if (kept == m_stripFit && qFuzzyCompare(held, m_stripZoom))
+        return;
+    m_stripFit = kept;
+    m_stripZoom = held;
+    m_file.setValue(u"reader/stripFit"_s, spell(kept));
+    m_file.setValue(u"reader/stripZoom"_s, held);
+    m_file.sync();
+    emit changed();
+    announce();
 }
 
 void Preferences::chooseBackdrop(Backdrop wanted)
@@ -428,6 +490,7 @@ void Preferences::chooseBackdrop(Backdrop wanted)
     m_file.setValue(u"reader/backdrop"_s, spell(wanted));
     m_file.sync();
     emit changed();
+    announce();
 }
 
 void Preferences::chooseMotion(Motion wanted)
@@ -438,6 +501,47 @@ void Preferences::chooseMotion(Motion wanted)
     m_file.setValue(u"reader/motion"_s, spell(wanted));
     m_file.sync();
     emit changed();
+    announce();
+}
+
+QVariantMap Preferences::synced() const
+{
+    return {{u"layout"_s, spell(m_pageLayout)},
+            {u"fit"_s, spell(m_fit)},
+            {u"stripFit"_s, spell(m_stripFit)},
+            {u"stripZoom"_s, m_stripZoom},
+            {u"backdrop"_s, spell(m_backdrop)},
+            {u"motion"_s, spell(m_motion)},
+            {u"volumesAsGrid"_s, m_volumesAsGrid}};
+}
+
+void Preferences::announce()
+{
+    if (!m_adopting)
+        emit syncedChanged(synced());
+}
+
+void Preferences::adopt(const QVariantMap &held)
+{
+    // The ordinary setters, with the echo switched off: one place writes each choice, and a
+    // word this version does not know falls back to the default through the same readers the
+    // file is read by.
+    const QScopeGuard done([this] { m_adopting = false; });
+    m_adopting = true;
+    if (held.contains(u"layout"_s))
+        choosePageLayout(readLayout(held.value(u"layout"_s).toString()));
+    if (held.contains(u"fit"_s))
+        chooseFit(readFit(held.value(u"fit"_s).toString()));
+    if (held.contains(u"stripFit"_s) || held.contains(u"stripZoom"_s))
+        chooseStrip(readFit(held.value(u"stripFit"_s, spell(m_stripFit)).toString()),
+                    held.value(u"stripZoom"_s, m_stripZoom).toDouble());
+    if (held.contains(u"backdrop"_s))
+        chooseBackdrop(readBackdrop(held.value(u"backdrop"_s).toString()));
+    if (held.contains(u"motion"_s))
+        chooseMotion(readMotion(held.value(u"motion"_s).toString()));
+    // A flag is a flag: anything else is not an answer to this question.
+    if (held.value(u"volumesAsGrid"_s).typeId() == QMetaType::Bool)
+        showVolumesAsGrid(held.value(u"volumesAsGrid"_s).toBool());
 }
 
 Spreads::Layout Preferences::layoutFor(QSizeF window) const

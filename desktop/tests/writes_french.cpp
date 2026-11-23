@@ -5,6 +5,7 @@
 // seen on screen once the window is narrow enough to break the line in front of the colon.
 
 #include "Manifest.h"
+#include "Orders.h"
 #include "Words.h"
 
 #include <QSet>
@@ -18,6 +19,19 @@ class WritesFrench : public QObject
 
 private slots:
     // ——— La fiche d'une série ————————————————————————————————————————————————
+
+    /// The machine's « part: field is missing » is said as a sentence for whoever reads the
+    /// card, with the part and the field still named; a line that already was one is left alone.
+    void a_field_the_server_left_out_is_said_in_plain_words()
+    {
+        QCOMPARE(Words::answerNotUnderstood(u"opened: present is missing"_s),
+                 u"Leaf n’a pas compris la réponse du serveur : il manque « present » "
+                 u"dans « opened ». Le serveur et l’application ne sont sans doute pas de "
+                 u"la même version : mettez le serveur à jour, puis réessayez. Rien ne se "
+                 u"corrige dans cette fiche."_s);
+        QCOMPARE(Words::answerNotUnderstood(u"Le serveur est injoignable — refusé"_s),
+                 u"Le serveur est injoignable — refusé"_s);
+    }
 
     void the_three_tabs_are_worded_once_and_in_order()
     {
@@ -57,6 +71,71 @@ private slots:
         // A range of one is a range all the same, and says so once rather than twice.
         QCOMPARE(Words::arcRange(Volume, 7, 7), u"tome 7"_s);
         QCOMPARE(Words::arcRange(Chapter, 12.5, 12.5), u"chapitre 12,5"_s);
+    }
+
+    /// The window of a series' arcs says its sagas as separators: each with the count and the
+    /// span of the arcs under it, the hole between two arcs as a line of its own, and the words
+    /// that move a separator. One of each and several, and a span of one said once.
+    void the_sagas_say_their_arcs_and_the_holes_between_them()
+    {
+        using enum Api::Arc::Unit;
+        const QString dot = u"\u00A0· "_s;
+        QCOMPARE(Words::arcsCount(3, 9), u"3 sagas"_s + dot + u"9 arcs"_s);
+        QCOMPARE(Words::arcsCount(1, 1), u"1 saga"_s + dot + u"1 arc"_s);
+        QCOMPARE(Words::arcsCount(0, 4), u"4 arcs"_s);
+        QVERIFY(Words::arcsCount(0, 0).isEmpty());
+        QCOMPARE(Words::arcsSagaSpan(3, u"CHAPTER"_s, 2, 194),
+                 u"3 arcs"_s + dot + Words::arcRange(Chapter, 2, 194));
+        QCOMPARE(Words::arcsSagaSpan(1, u"CHAPTER"_s, 5, 5),
+                 u"1 arc"_s + dot + Words::arcRange(Chapter, 5, 5));
+        QCOMPARE(Words::arcsSagaSpan(2, u"VOLUME"_s, 4, 9),
+                 u"2 arcs"_s + dot + Words::arcRange(Volume, 4, 9));
+        QVERIFY(Words::arcsSagaSpan(0, QString(), 0, 0).isEmpty());
+        QCOMPARE(Words::arcsGap(113, 135),
+                 Words::arcRange(Chapter, 113, 135) + dot + u"aucun arc"_s);
+        QCOMPARE(Words::arcsGap(113, 113), Words::arcRange(Chapter, 113, 113) + dot + u"aucun arc"_s);
+        QCOMPARE(Words::arcsNoSaga(), u"Aucune saga"_s);
+        QCOMPARE(Words::arcsAddNone(), u"+\u00A0Aucune saga"_s);
+        QCOMPARE(Words::arcsStartAt(), u"Commencer à l’arc…"_s);
+        QCOMPARE(Words::arcsEditionPick(), u"Pages et tomes de"_s);
+        QCOMPARE(Words::arcsInEdition(), u"Dans cette édition"_s);
+        QCOMPARE(Words::arcsMoveHint(), u"Séparateur choisi\u00A0: ↑ ↓ pour le déplacer, ou"_s);
+        QVERIFY(Words::arcsNote().contains(u"séparateur"_s));
+        QVERIFY(!Words::arcsNote().contains(u"va d’un arc à un autre"_s));
+    }
+
+    /// A series names two people and counts the rest, but never « et 1 autre »: the name it
+    /// would hide takes no more room than the words that hide it.
+    void a_series_names_two_people_and_counts_the_others()
+    {
+        QCOMPARE(Words::andOthers(9), u"et 9 autres"_s);
+        Api::Series bare;
+        QCOMPARE(Words::makers(bare, {u"Morris"_s}), u"Morris"_s);
+        QCOMPARE(Words::makers(bare, {u"Morris"_s, u"René Goscinny"_s}), u"Morris, René Goscinny"_s);
+        QCOMPARE(Words::makers(bare, {u"Morris"_s, u"René Goscinny"_s, u"Jul"_s}),
+                 u"Morris, René Goscinny, Jul"_s);
+        QStringList eleven{u"Morris"_s, u"René Goscinny"_s};
+        for (int at = 0; at < 9; ++at)
+            eleven << u"Scénariste %1"_s.arg(at);
+        QCOMPARE(Words::makers(bare, eleven), u"Morris, René Goscinny et 9 autres"_s);
+        QCOMPARE(Words::peopleTitle(u"Lucky Luke"_s), u"Les auteurs de Lucky Luke"_s);
+        QCOMPARE(Words::peopleTitle(u"Elfes"_s), u"Les auteurs d’Elfes"_s);
+        Api::Series bd;
+        bd.medium = Api::Medium::Bd;
+        QCOMPARE(Words::peopleCount(11, bd.medium), u"11 personnes\u00A0· rangées par nombre d’albums"_s);
+        QCOMPARE(Words::peopleCount(4, std::nullopt), u"4 personnes\u00A0· rangées par nombre de tomes"_s);
+    }
+
+    /// A line of the description names three a line, one more than the header: four
+    /// writers are four names, and only the fifth is counted. Both went through the
+    /// header's two, and Lucky Luke's four writers read « René Goscinny, Jul et 2 autres ».
+    void a_description_line_names_three_and_counts_the_others()
+    {
+        const QStringList four{u"René Goscinny"_s, u"Jul"_s, u"Bob de Groot"_s, u"Laurent Gerra"_s};
+        QCOMPARE(Words::namesWithin(four, 3), u"René Goscinny, Jul, Bob de Groot, Laurent Gerra"_s);
+        QCOMPARE(Words::namesWithin(four + QStringList{u"Fauche"_s}, 3),
+                 u"René Goscinny, Jul, Bob de Groot et 2 autres"_s);
+        QCOMPARE(Words::namesWithin(four, 2), u"René Goscinny, Jul et 2 autres"_s);
     }
 
     /// The two halves of a file an arc runs through — and the open one, for the last file of
@@ -125,10 +204,23 @@ private slots:
         QCOMPARE(Words::command(MarkEntryRead), u"Marquer comme lu"_s);
         QCOMPARE(Words::command(ReimportEntry), u"Réimporter ce tome…"_s);
         QCOMPARE(Words::command(EraseSeries), u"Supprimer la série…"_s);
+        QCOMPARE(Words::command(AddEditions), u"Ajouter des éditions…"_s);
+        QCOMPARE(Words::addEditionsTitle(u"Bleach"_s), u"Ajouter des éditions à Bleach"_s);
+        QCOMPARE(Words::unnamedEdition(), u"Édition sans nom"_s);
+        QCOMPARE(Words::newEditionOf(u"Bleach"_s), u"Nouvelle édition de «\u00A0Bleach\u00A0»"_s);
+        QCOMPARE(Words::renamedExample(u"a.cbz"_s, u"b.cbz"_s), u"a.cbz → b.cbz"_s);
+        QCOMPARE(Words::editionNameHelp(),
+                 u"Ses tomes iront dans un dossier à ce nom et seront renommés. La lecture en cours est conservée."_s);
+        // The quotes hold a non-breaking space each, so a line break never parts « X » from them.
+        QCOMPARE(Words::editionNameTaken(u"Originale"_s),
+                 u"Ce nom est déjà celui de «\u00A0Originale\u00A0»"_s);
+        // An edition is read on the shelf as « Work · Edition », and its menu says edition.
+        QCOMPARE(Words::command(EraseEdition), u"Supprimer l’édition…"_s);
+        QCOMPARE(Words::command(EditEdition), u"Modifier l’édition…"_s);
         // The ellipsis is the promise that something else opens, and it is the real one and
         // not three dots: three dots break across a line.
-        for (const Words::Command one : {ReimportSeries, ReimportEntry, SaveACopy, EraseSeries,
-                                         EraseEntry}) {
+        for (const Words::Command one : {ReimportSeries, AddEditions, ReimportEntry, SaveACopy, EraseSeries,
+                                         EraseEntry, EraseEdition, EditEdition}) {
             QVERIFY2(Words::command(one).endsWith(u"…"_s),
                      qPrintable(Words::command(one)));
         }
@@ -165,6 +257,8 @@ private slots:
     void the_words_a_deletion_uses_are_the_ones_it_means()
     {
         QCOMPARE(Words::eraseEntryQuestion(23), u"Supprimer le tome 23 ?"_s);
+        QCOMPARE(Words::reimportHolds(42), u"Série · 42 tomes dans la bibliothèque"_s);
+        QCOMPARE(Words::reimportHolds(1), u"Série · 1 tome dans la bibliothèque"_s);
         QCOMPARE(Words::eraseSeriesQuestion(u"Elfes"_s),
                  u"Supprimer « Elfes » ?"_s);
         QCOMPARE(Words::whatGoes(u"La Dryade"_s, 54, 48000000),
@@ -172,7 +266,8 @@ private slots:
         // A volume with no title of its own says what it weighs, not a dash leading nowhere.
         QCOMPARE(Words::whatGoes(QString(), 54, 48000000), u"54 pages, 45,8 Mio"_s);
         QCOMPARE(Words::whichFile(u"Tome 23.cbz"_s), u"Fichier : Tome 23.cbz"_s);
-        QCOMPARE(Words::typeToConfirm(u"Elfes"_s), u"Tapez Elfes pour confirmer"_s);
+        QCOMPARE(Words::typeToConfirm(u"Supprimer"_s),
+                 u"Tapez « Supprimer » pour confirmer"_s);
         QVERIFY(Words::noTrash(true).contains(u"les ramènera pas"_s));
         QVERIFY(Words::noTrash(false).contains(u"le ramènera pas"_s));
         QCOMPARE(Words::wouldNotGo({u"Tome 4.cbz"_s}),
@@ -564,7 +659,75 @@ private slots:
 
         // A word this client has not been taught is shown as it stands: the reader can still
         // choose it, and it is their own library saying it.
-        QCOMPARE(Words::editionStatus(u"hiatus"_s), u"hiatus"_s);
+        QCOMPARE(Words::editionStatus(u"paused"_s), u"paused"_s);
+        QCOMPARE(Words::editionStatus(u"hiatus"_s), u"En pause"_s);
+        QCOMPARE(Words::editionStatus(u"cancelled"_s), u"Abandonnée"_s);
+    }
+
+    /// A volume's title that only repeats its name is not said twice, whatever the zeros.
+    void a_title_that_repeats_the_name_is_left_out()
+    {
+        const QString name = u"Tome"_s + Words::Nbsp + u"1"_s;
+        QCOMPARE(Words::titled(name, u"Tome 1"_s), name);
+        QCOMPARE(Words::titled(name, u"tome 01"_s), name);
+        QCOMPARE(Words::titled(name, u"Son Gokû"_s), name + Words::Nbsp + u"· Son Gokû"_s);
+        QCOMPARE(Words::fieldLabel(u"chapterLabel"_s, Manifest::Level::Work),
+                 u"Nom des chapitres"_s);
+    }
+
+    /// The library holding part of a drop is said by the series' name, and a card is said read
+    /// the way the legend names it.
+    void a_drop_held_in_part_is_said_by_name()
+    {
+        QCOMPARE(Words::heldNamed(u"Blue Period"_s, 12, 14),
+                 u"Blue Period existe déjà dans la bibliothèque\u00A0: 12 tomes sur 14. "
+                 u"Cet apport sera traité comme un réimport."_s);
+        QCOMPARE(Words::readHow(0), u"Complet"_s);
+        QCOMPARE(Words::readHow(1), u"Komga"_s);
+        QCOMPARE(Words::readHow(3), u"Nu"_s);
+    }
+
+    /// What the choosing step counts with: the word in front of the count goes before the count
+    /// does, a walk that did not hash says « Lecture » and never « Vérification », and the
+    /// line under the zone agrees « 0 tome » and « 1 tome » as the rest of the window does.
+    void the_counts_of_the_choosing_step_are_said_as_drawn()
+    {
+        QCOMPARE(Words::lineCounting(true, 6, 14, false), u"Vérification · 6 / 14"_s);
+        QCOMPARE(Words::lineCounting(true, 6, 14, true), u"6 / 14"_s);
+        QCOMPARE(Words::lineCounting(false, 6, 14, false), u"Lecture · 6 / 14"_s);
+        // Before the folder has said how many it holds: the word alone, nothing to count.
+        QCOMPARE(Words::lineCounting(true, 0, 0, false), u"Vérification"_s);
+        QCOMPARE(Words::lineCounting(true, 0, 0, true), QString());
+        QCOMPARE(Words::lineChecked(true, 14, false), u"Vérifié · 14 / 14"_s);
+        QCOMPARE(Words::lineChecked(false, 14, false), u"Lu · 14 / 14"_s);
+        QCOMPARE(Words::lineChecked(true, 14, true), u"14 / 14"_s);
+        QCOMPARE(Words::lineCheckedFileOnly(false), u"Fichier vérifié, pages non vérifiées"_s);
+        QCOMPARE(Words::lineCheckedFileOnly(true), u"Pages non vérifiées"_s);
+
+        QCOMPARE(Words::checkingAll(true, 37, 120),
+                 u"Vérification\u00A0: 37 tomes sur 120"_s);
+        QCOMPARE(Words::checkingAll(false, 1, 120), u"Lecture\u00A0: 1 tome sur 120"_s);
+        QCOMPARE(Words::checkingAll(true, 0, 3), u"Vérification\u00A0: 0 tome sur 3"_s);
+        QCOMPARE(Words::readingAll(2, 5), u"Lecture en cours\u00A0: 2 séries sur 5"_s);
+        QCOMPARE(Words::readyAll(5), u"Prêt\u00A0: 5 séries à importer"_s);
+        QCOMPARE(Words::readyAll(1), u"Prêt\u00A0: 1 série à importer"_s);
+        QCOMPARE(Words::decidingAll(2), u"À vous de dire\u00A0: 2 séries"_s);
+        QCOMPARE(Words::startWaits(), u"Suivant s’active à la fin"_s);
+    }
+
+    /// The one line under the zone says what the whole drop is doing, and each state of it has
+    /// its own words: the series before any volume is counted, then the volumes, then the wait
+    /// for the server, then what is left to answer, then ready.
+    void the_line_under_the_zone_says_what_the_whole_drop_is_doing()
+    {
+        QCOMPARE(Words::dropProgress({1, 4, 1, 0, 0, true, 0, 5}), Words::readingAll(1, 5));
+        QCOMPARE(Words::dropProgress({1, 4, 1, 37, 120, true, 0, 5}),
+                 Words::checkingAll(true, 37, 120));
+        QCOMPARE(Words::dropProgress({1, 4, 1, 37, 120, false, 0, 5}),
+                 Words::checkingAll(false, 37, 120));
+        QCOMPARE(Words::dropProgress({5, 0, 2, 120, 120, true, 0, 5}), Words::announcing());
+        QCOMPARE(Words::dropProgress({5, 0, 0, 120, 120, true, 2, 5}), Words::decidingAll(2));
+        QCOMPARE(Words::dropProgress({5, 0, 0, 120, 120, true, 0, 5}), Words::readyAll(5));
     }
 
     void a_language_tag_becomes_a_word_for_it()
@@ -624,6 +787,16 @@ private slots:
         QVERIFY(Words::didYouMean(u"x"_s).contains(Words::Nbsp));
 
         QCOMPARE(Words::noSeriesByThatName(), u"Aucune série ne porte ce nom."_s);
+        // A search that found nothing says so in a sentence, and says what to try instead.
+        QCOMPARE(Words::nothingFound(),
+                 u"Rien dans cette bibliothèque ne répond à cette recherche. Essayez un autre "
+                 u"mot, ou le nom d’un auteur."_s);
+        // An empty shelf is a sentence, and not the same one when the filters emptied it.
+        QCOMPARE(Words::emptyShelfHeadline(), u"Votre étagère est vide"_s);
+        QVERIFY(Words::emptyShelf().endsWith(u"."_s));
+        QVERIFY(Words::emptyShelf() != Words::nothingLeft());
+        QCOMPARE(Words::nothingLeftHeadline(), u"Aucune série ne correspond"_s);
+        QCOMPARE(Words::shelfTroubleHeadline(), u"L’étagère n’a pas pu s’afficher"_s);
         QVERIFY(Words::searchHint().endsWith(u"…"_s));
         QVERIFY2(!Words::searchHint().contains(u"..."_s), "three dots are not an ellipsis");
         QCOMPARE(Words::filter(), u"Filtrer"_s);
@@ -761,10 +934,14 @@ private slots:
                           Words::seeAllFiles(12),    Words::didYouMean(u"Tsugumi Ōba"_s),
                           Words::searchHint(),       Words::searchHintShort(),
                           Words::clearTheSearch(),   Words::filter(),
-                          Words::noSeriesByThatName(),
+                          Words::noSeriesByThatName(), Words::nothingFound(),
+                          Words::emptyShelfHeadline(), Words::emptyShelf(),
+                          Words::nothingLeftHeadline(), Words::nothingLeft(),
+                          Words::shelfTroubleHeadline(),
                           Words::noLibrary(),
                           Words::unreachable(u"Connection refused"_s),
                           Words::unreadableAnswer(),
+                          Words::answerNotUnderstood(u"opened: present is missing"_s),
                           Words::keyRefused({}),
                           Words::keyRefused(u"expirée"_s),
                           Words::tooManyWrongKeys(u"30"_s),
@@ -784,7 +961,9 @@ private slots:
                           Words::cancel(),
                           Words::goBack(),
                           Words::next(),
-                          Words::startImport(),
+                          Words::previous(),
+                          Words::importIt(),
+                          Words::fileDetail(u"Tome 7.cbz"_s, 48 * 1024 * 1024),
                           Words::pauseIt(),
                           Words::resumeIt(),
                           Words::abandonIt(),
@@ -796,11 +975,19 @@ private slots:
                           Words::couldNotBeRead(u"Tome 7.cbz"_s),
                           Words::couldNotCleanUp(u"Koro"_s),
                           Words::sameDestination(u"Vieux/Death Note"_s, u"Death Note"_s),
+                          Words::roleWaitsForTheCards(),
+                          Words::impossibleInsideAnEdition(),
+                          Words::roleSpoken(u"Vrac"_s, u"Série"_s),
+                          Words::rolesGreyed({{u"Univers"_s, Words::impossibleNoSubfolder()}}),
+                          Words::declaredOutOfPlace(u"Terres d’Arran"_s, u"universe.json"_s,
+                                                    Words::impossibleUniverseInUniverse()),
                           Words::size(4404019200LL),
                           Words::nodeHolds(34, 4404019200LL),
                           Words::checking(12, 68),
                           Words::checking(0, 1),
                           Words::checking(0, 0),
+                          Words::reading(23, 50),
+                          Words::reading(1, 1),
                           Words::waitingToBeChecked(),
                           Words::willBeCreated(Manifest::Level::Universe),
                           Words::willBeCreated(Manifest::Level::Work),
@@ -814,7 +1001,6 @@ private slots:
                           Words::failedToSend(),
                           Words::announcing(),
                           Words::nothingToSend(),
-                          Words::dropSomethingElse(),
                           Words::declarationDiffers(u"Death Note"_s, {u"résumé"_s}),
                           Words::declarationDiffers(QString(), {}),
                           Words::fileNamed(u"Assassinat"_s, u"Tome 1.cbz"_s),
@@ -831,9 +1017,9 @@ private slots:
                           Words::levelAnd(Manifest::Level::Work,
                                           Words::willBeCreated(Manifest::Level::Work)),
                           Words::levelAnd(Manifest::Level::Edition, QString())};
-        for (int i = 0; i <= int(Manifest::Level::Volume); ++i)
+        for (int i = 0; i <= int(Manifest::Level::Book); ++i)
             every << Words::level(Manifest::Level(i));
-        for (int i = 0; i <= int(Words::Importing::Failed); ++i)
+        for (int i = 0; i <= int(Words::Importing::Reviewing); ++i)
             every << Words::importStage(Words::Importing(i));
         for (int i = 0; i <= int(Words::Asking::Reader); ++i)
             every << Words::notSetUp(Words::Asking(i));
@@ -850,6 +1036,139 @@ private slots:
 
         for (const QString &one : std::as_const(every))
             QVERIFY2(!one.contains(u'\''), qPrintable(u"straight apostrophe in: "_s + one));
+    }
+
+    /// A book is a level of its own with its own word and its own icon; a level added to the
+    /// enum without a case here reads as an empty label in the tree.
+    void a_book_has_its_word_and_its_icon()
+    {
+        QCOMPARE(Words::level(Manifest::Level::Book), u"livre"_s);
+        QCOMPARE(Words::levelIcon(Manifest::Level::Book), u"menu_book"_s);
+        QCOMPARE(int(Manifest::Level::Book), 5);
+    }
+
+    /// What the shape of a folder suggests, said the way the checking frame says it: the
+    /// roles, the confidence, the two readings and every clue for or against one. A count
+    /// joined by an ordinary space before « · » let « · 84 tomes » open the next line.
+    void what_a_folder_s_shape_suggests_is_written_in_french()
+    {
+        const QChar n = Words::Nbsp;
+        QCOMPARE(Words::readingSummary(0, 1, 2, 84),
+                 u"1 série"_s + n + u"· 2 éditions"_s + n + u"· 84 tomes"_s);
+        QCOMPARE(Words::readingSummary(1, 2, 0, 84),
+                 u"1 univers"_s + n + u"· 2 séries"_s + n + u"· 84 tomes"_s);
+        QCOMPARE(Words::readingSummary(0, 1, 0, 1), u"1 série"_s + n + u"· 1 tome"_s);
+        QCOMPARE(Words::readingName(Shape::Role::Work, 0, 1, 2), u"Une série, deux éditions"_s);
+        QCOMPARE(Words::readingName(Shape::Role::Universe, 1, 2, 0),
+                 u"Un univers, deux séries"_s);
+        QCOMPARE(Words::readingName(Shape::Role::Work, 0, 1, 0),
+                 u"Une série, une seule édition"_s);
+        QCOMPARE(Words::readingName(Shape::Role::Shelf, 1, 12, 2),
+                 u"Une étagère, un univers et 12 séries"_s);
+
+        const QStringList roles{u"Étagère"_s, u"Univers"_s, u"Série"_s, u"Édition"_s,
+                                u"Tome"_s,    u"Livre"_s,   u"Non lu"_s};
+        for (int i = 0; i <= int(Shape::Role::Unread); ++i)
+            QCOMPARE(Words::role(Shape::Role(i)), roles.at(i));
+        QCOMPARE(Words::confidence(Shape::Confidence::Certain), QString());
+        QCOMPARE(Words::confidence(Shape::Confidence::Likely), u"probable"_s);
+        QCOMPARE(Words::confidence(Shape::Confidence::ToConfirm), u"à confirmer"_s);
+
+        QCOMPARE(Words::clueEditionWords({u"Perfect"_s, u"Original"_s}),
+                 u"Perfect et Original sont des mots d’édition connus."_s);
+        QCOMPARE(Words::clueEditionWords({u"Intégrale"_s}),
+                 u"Intégrale est un mot d’édition connu."_s);
+        QCOMPARE(Words::clueSameNumbers(2, 1, 42),
+                 u"Les deux numérotent leurs tomes de 1 à 42"_s + n
+                     + u": probablement la même œuvre en deux présentations."_s);
+        QCOMPARE(Words::clueSameNumbers(3, 1, 7),
+                 u"Les trois numérotent leurs tomes de 1 à 7"_s + n
+                     + u": probablement la même œuvre en trois présentations."_s);
+        QCOMPARE(Words::clueOtherNumbers({4, 3}),
+                 u"Des numérotations différentes, 4 et 3 tomes"_s + n
+                     + u": plutôt des séries distinctes."_s);
+        QCOMPARE(Words::clueProperNames(),
+                 u"Deux séries distinctes auraient plutôt deux noms propres, comme Elfes et "
+                 u"Mages."_s);
+        QCOMPARE(Words::clueDistinctNames({u"Akira"_s, u"Blame"_s, u"Claymore"_s, u"Eden"_s}),
+                 u"Akira, Blame, Claymore et 1 autre sont des noms propres, sans mot d’édition"_s
+                     + n + u": plutôt des séries distinctes."_s);
+        QCOMPARE(Words::clueArchivesHere(1, 9),
+                 u"Des fichiers directement dedans, numérotés de 1 à 9"_s + n
+                     + u": des tomes d’une même œuvre."_s);
+        QCOMPARE(Words::clueArchivesHere(),
+                 u"Des fichiers directement dedans"_s + n + u": des tomes d’une même œuvre."_s);
+        QCOMPARE(Words::clueNoSubfolder(),
+                 u"Aucun sous-dossier"_s + n + u": une seule édition suffit."_s);
+        QCOMPARE(Words::clueGenericName(u"Vrac"_s),
+                 u"«"_s + n + u"Vrac"_s + n + u"» ne ressemble pas au titre d’une œuvre."_s);
+        QCOMPARE(Words::clueNameToGive(u"Vrac"_s),
+                 u"«"_s + n + u"Vrac"_s + n + u"» ne ressemble pas au titre d’une œuvre"_s + n
+                     + u": il faut en donner un."_s);
+        QCOMPARE(Words::clueTooDeep(),
+                 u"Des fichiers trop profonds"_s + n
+                     + u": sous un univers, une série et une édition, il n’y a plus de dossier."_s);
+        QCOMPARE(Words::clueHoldsUniverse(u"Terres d’Arran"_s),
+                 u"«"_s + n + u"Terres d’Arran"_s + n
+                     + u"» est un univers, et un univers ne se range que sur une étagère."_s);
+        QCOMPARE(Words::clueManySeries(9),
+                 u"9 séries"_s + n + u": plus qu’un univers n’en range d’habitude."_s);
+        QCOMPARE(Words::clueNoUniverseInUniverse(),
+                 u"Pas d’univers dans un univers"_s + n
+                     + u": dans un univers, un dossier est une série."_s);
+        QCOMPARE(Words::clueAllDeclared(),
+                 u"Tout ce qu’il contient se déclare déjà"_s + n
+                     + u": un rangement, pas un univers."_s);
+        QCOMPARE(Words::clueDropped(),
+                 u"C’est le dossier déposé lui-même"_s + n
+                     + u": un dossier qui range toutes ses séries ressemble aussi à un univers."_s);
+    }
+
+    /// The role menu: what each role is, and why one is greyed here. A reason joined by an
+    /// ordinary space before its colon let « : » open the next line under the role's name.
+    void the_role_menu_says_what_each_role_is_and_why_not()
+    {
+        const QChar n = Words::Nbsp;
+        QCOMPARE(Words::roleDetail(Shape::Role::Work),
+                 u"Une œuvre, avec une seule édition si rien d’autre n’est dit."_s);
+        QCOMPARE(Words::roleDetail(Shape::Role::Book), u"Œuvre, édition et tome à la fois."_s);
+        QCOMPARE(Words::roleDetail(Shape::Role::Volume), u"Rangé dans une série, à un numéro."_s);
+        QCOMPARE(Words::roleDetail(Shape::Role::Unread),
+                 u"Aucun rôle"_s + n + u": il ne sera pas lu."_s);
+        for (int i = 0; i <= int(Shape::Role::Unread); ++i)
+            QVERIFY(!Words::roleDetail(Shape::Role(i)).isEmpty());
+
+        const QString no = u"Impossible"_s + n + u": "_s;
+        QCOMPARE(Words::saidBy(u"work.json"_s),
+                 u"Dit par work.json"_s + n + u": à changer dans le fichier."_s);
+        QCOMPARE(Words::impossibleNoSubfolder(), no + u"ce dossier n’a pas de sous-dossier."_s);
+        QCOMPARE(Words::impossibleHoldsFiles(), no + u"ce dossier contient des fichiers."_s);
+        QCOMPARE(Words::impossibleEditionAlone(), no + u"une édition se range dans une série."_s);
+        QCOMPARE(Words::impossibleUniverseInUniverse(), no + u"pas d’univers dans un univers."_s);
+        QCOMPARE(Words::impossibleFolderInUniverse(),
+                 no + u"dans un univers, un dossier est une série."_s);
+        QCOMPARE(Words::impossibleShelfInSeries(), no + u"une série ne range pas d’étagère."_s);
+        QCOMPARE(Words::impossibleUniverseInSeries(), no + u"une série ne range pas d’univers."_s);
+        QCOMPARE(Words::impossibleSeriesInSeries(),
+                 no + u"une série ne contient pas d’autre série."_s);
+        QCOMPARE(Words::impossibleFilesTooDeep(),
+                 no + u"ses fichiers sont plus bas qu’une série et ses éditions."_s);
+        QCOMPARE(Words::impossibleBeyondTheModel(), no + u"rien n’est lu à cette profondeur."_s);
+        QCOMPARE(Words::roleBeyondTheModel(),
+                 u"Hors du modèle"_s + n + u": rien n’est lu à cette profondeur."_s);
+        QCOMPARE(Words::impossibleFilesTooDeepForAUniverse(),
+                 no + u"ses fichiers sont plus bas qu’un univers, une série et une édition."_s);
+        QCOMPARE(Words::clueEditionsDeclared(),
+                 u"Ce qu’il contient se déclare édition"_s + n
+                     + u": une édition se range dans une série."_s);
+        QCOMPARE(Words::impossibleNotAFolder(), no + u"ce n’est pas un dossier."_s);
+        QCOMPARE(Words::impossibleBookIsAnArchive(), no + u"un livre seul est une archive."_s);
+        QCOMPARE(Words::impossibleFilingMoves(),
+                 u"Impossible ici"_s + n
+                     + u": ranger ce fichier dans une série, c’est le déplacer dans son dossier."_s);
+        QCOMPARE(Words::impossibleDeclaredBelow(u"Terres d’Arran"_s, u"universe.json"_s),
+                 no + u"«"_s + n + u"Terres d’Arran"_s + n
+                     + u"», plus bas, est dit par universe.json."_s);
     }
 
     /// The placeholder card's own name for each screen — the five strings first written
@@ -1122,9 +1441,11 @@ private slots:
     /// the application look crashed.
     void what_a_node_holds_and_where_its_checking_is_are_counted()
     {
-        QCOMPARE(Words::nodeHolds(34, 4404019200LL), u"34 tomes · 4,1 Gio"_s);
-        QCOMPARE(Words::nodeHolds(1, 1048576), u"1 tome · 1,0 Mio"_s);
+        QCOMPARE(Words::nodeHolds(34, 4404019200LL), u"34 tomes\u00A0· 4,1 Gio"_s);
+        QCOMPARE(Words::nodeHolds(1, 1048576), u"1 tome\u00A0· 1,0 Mio"_s);
         QVERIFY(Words::nodeHolds(0, 0).isEmpty());
+        // A file's line: its name and its weight, the separator never opening a line.
+        QCOMPARE(Words::fileDetail(u"Tome 7.cbz"_s, 1048576), u"Tome 7.cbz\u00A0· 1,0 Mio"_s);
 
         QCOMPARE(Words::checking(12, 68), u"Vérification · 12/68 tomes"_s);
         // A single volume does not pluralise — the file already has what it takes to
@@ -1132,6 +1453,13 @@ private slots:
         QCOMPARE(Words::checking(0, 1), u"Vérification · 0/1 tome"_s);
         // Nothing to check is not "0/0": it is the word alone.
         QCOMPARE(Words::checking(0, 0), u"Vérification"_s);
+
+        // The same count without a checksum, under the word for the work actually done:
+        // every archive is opened to read what it says, and that is not a verification.
+        QCOMPARE(Words::reading(23, 50), u"Lecture · 23/50 tomes"_s);
+        QCOMPARE(Words::reading(1, 1), u"Lecture · 1/1 tome"_s);
+        // And the card that stopped to be checked says what it waits for.
+        QCOMPARE(Words::importStage(Words::Importing::Reviewing), u"À vérifier"_s);
 
         QCOMPARE(Words::waitingToBeChecked(), u"En attente"_s);
         // Three moments, three words. « En attente » used to say all of them, so nothing
@@ -1161,23 +1489,6 @@ private slots:
         // count a reader takes for something lost.
         QVERIFY2(all.contains(u"déjà là et non annoncés"_s), qPrintable(all));
         QCOMPARE(all.count(u"·"_s), 3);
-    }
-
-    /// The three things a folder can create, each with the article French gives it.
-    ///
-    /// The elision is the whole reason this is not in the QML: « créera le UNIVERSE » is
-    /// what a binding joining two strings produces, and no `.qml` file can know that
-    /// « univers » takes « l’ » and « série » takes « la ».
-    void the_word_for_what_a_folder_creates_carries_its_article()
-    {
-        QVERIFY(Words::willCreate(u"UNIVERSE"_s, u"Terres"_s).startsWith(u"créera l’univers"_s));
-        QVERIFY(Words::willCreate(u"WORK"_s, u"Elfes"_s).startsWith(u"créera la série"_s));
-        QVERIFY(Words::willCreate(u"EDITION"_s, u"Perfect"_s).startsWith(u"créera l’édition"_s));
-        // A kind this client has not learnt stands as it came. The server may name one
-        // before the client does — `Api.h`'s own rule — and a hole where the word should be
-        // says less than the word nobody translated.
-        QVERIFY2(Words::willCreate(u"ARC"_s, u"x"_s).contains(u"ARC"_s),
-                 qPrintable(Words::willCreate(u"ARC"_s, u"x"_s)));
     }
 
     /// Every way an archive can fail to hold together, in French.
@@ -1422,6 +1733,8 @@ private slots:
         QCOMPARE(Words::editProfile(u"Camille"_s), u"Modifier Camille"_s);
         QCOMPARE(Words::yearsOld(10), u"10 ans"_s);
         QCOMPARE(Words::opensOn(u"Camille"_s), u"S’ouvre sur Camille"_s);
+        QVERIFY(Words::deviceSeen(1792931520000).startsWith(u"Vu le "_s));
+        QVERIFY(Words::deviceSeen(0).isEmpty());
         QCOMPARE(Words::seriesForYou(42), u"42 séries pour vous"_s);
         QVERIFY(Words::codeHintHeld(u"Camille"_s).endsWith(u"ici Camille."_s));
         QVERIFY(!Words::retainedOn(u"Salon"_s).contains(u"%"_s));
@@ -1512,6 +1825,814 @@ private slots:
         QCOMPARE(Words::yearsOld(2), u"2 ans"_s);
         QCOMPARE(Words::seriesUpToYears(1), u"séries jusqu’à 1 an"_s);
         QCOMPARE(Words::seriesUpToYears(12), u"séries jusqu’à 12 ans"_s);
+    }
+
+    // ——— Les doutes d'une fiche d'import ————————————————————————————————————————
+
+    /// The lines of who made a work, as « Label=names, … » to compare at a glance.
+    static QStringList shown(const QList<Words::CreditLine> &lines)
+    {
+        QStringList out;
+        for (const Words::CreditLine &line : lines)
+            out << line.label + u'=' + line.names.join(u", "_s);
+        return out;
+    }
+
+    /// Isayama writes and draws: one author, said once — « Scénario : Isayama · Dessin :
+    /// Isayama » said him twice and read as two people.
+    void one_person_who_writes_and_draws_is_one_author()
+    {
+        QCOMPARE(shown(Words::creditLines({u"Hajime Isayama"_s}, {u"Hajime Isayama"_s})),
+                 QStringList{u"Auteur=Hajime Isayama"_s});
+    }
+
+    void a_writer_and_a_drawer_are_two_lines()
+    {
+        QCOMPARE(shown(Words::creditLines({u"Tsugumi Ōba"_s}, {u"Takeshi Obata"_s})),
+                 (QStringList{u"Scénario=Tsugumi Ōba"_s, u"Dessin=Takeshi Obata"_s}));
+    }
+
+    /// Morris drew and wrote, Goscinny wrote, Achdé drew: Morris once, as an author, and the
+    /// others under their one role — in that order, whatever order they came in.
+    void someone_in_both_lists_is_said_once_among_others()
+    {
+        QCOMPARE(shown(Words::creditLines({u"Morris"_s, u"René Goscinny"_s},
+                                          {u"Morris"_s, u"Achdé"_s})),
+                 (QStringList{u"Auteur=Morris"_s, u"Scénario=René Goscinny"_s,
+                              u"Dessin=Achdé"_s}));
+        // One person spelt two ways the search folds together is one person.
+        QCOMPARE(shown(Words::creditLines({u"Ōba"_s}, {u"OBA"_s})), QStringList{u"Auteur=Ōba"_s});
+    }
+
+    /// « Auteur » is a person and agrees with how many; « Scénario » and « Dessin » are roles
+    /// and do not.
+    void the_author_label_agrees_and_the_roles_do_not()
+    {
+        QCOMPARE(shown(Words::creditLines({u"A"_s, u"B"_s}, {u"A"_s, u"B"_s})),
+                 QStringList{u"Auteurs=A, B"_s});
+        QCOMPARE(shown(Words::creditLines({u"A"_s, u"B"_s}, {})),
+                 QStringList{u"Scénario=A, B"_s});
+        QCOMPARE(shown(Words::creditLines({}, {u"A"_s, u"B"_s})), QStringList{u"Dessin=A, B"_s});
+        QVERIFY(Words::creditLines({}, {}).isEmpty());
+    }
+
+    /// The header named the writers alone: Death Note read « Tsugumi Ōba », and Takeshi Obata,
+    /// who drew every page, was nowhere. Both, each person once.
+    void the_header_names_the_drawer_too()
+    {
+        Api::Series death;
+        death.credits.authors = {u"Tsugumi Ōba"_s};
+        death.credits.artists = {u"Takeshi Obata"_s};
+        QVERIFY(Words::makers(death).startsWith(u"Tsugumi Ōba, Takeshi Obata"_s));
+        Api::Series titan;
+        titan.credits.authors = {u"Hajime Isayama"_s};
+        titan.credits.artists = {u"Hajime Isayama"_s};
+        QCOMPARE(Words::makers(titan).count(u"Isayama"_s), 1);
+    }
+
+    /// Who a series is by, on every screen, says « Scénario » and « Dessin » — the edit window
+    /// said « Auteurs » and « Dessinateurs » for the same two fields.
+    void the_credit_fields_say_script_and_drawing_everywhere()
+    {
+        for (const Manifest::Level level : {Manifest::Level::Work, Manifest::Level::Volume}) {
+            QCOMPARE(Words::fieldLabel(u"authors"_s, level), u"Scénario"_s);
+            QCOMPARE(Words::fieldLabel(u"artists"_s, level), u"Dessin"_s);
+        }
+        QCOMPARE(Words::editing().value(u"authors"_s).toString(), u"Scénario"_s);
+        QCOMPARE(Words::editing().value(u"artists"_s).toString(), u"Dessin"_s);
+    }
+
+    /// Under a series' credit in its window, which volumes the name stands for, by the word the
+    /// series uses for them: the field held the union of every volume, and saving it froze into
+    /// the series the writer of a single album.
+    void the_hint_names_the_medium_word()
+    {
+        QCOMPARE(Words::creditDefault(false, Api::Medium::Bd),
+                 u"Pour les albums ne précisant pas de scénariste"_s);
+        QCOMPARE(Words::creditDefault(true, Api::Medium::Manga),
+                 u"Pour les tomes ne précisant pas de dessinateur"_s);
+        QCOMPARE(Words::creditDefault(true, std::nullopt),
+                 u"Pour les tomes ne précisant pas de dessinateur"_s);
+    }
+
+    /// What a series' volumes lack is said once on the series, with how many wait for it: one
+    /// tome, forty-one tomes — the role, never « Scénariste ».
+    void a_credit_lacking_says_how_many_volumes_wait_for_it()
+    {
+        QCOMPARE(Words::creditLacking(u"authors"_s, 41), u"Scénario manquant pour 41 tomes"_s);
+        QCOMPARE(Words::creditLacking(u"artists"_s, 1), u"Dessin manquant pour 1 tome"_s);
+    }
+
+    /// The line under an order counts its series and its steps; what is not written in it is
+    /// said as written again or as read from another order, and neither is a plural when alone.
+    /// An order of one inclusion reading one step writes as many steps as it reads, and it is
+    /// still « incluse »: told by the counts, it was said to copy what it includes.
+    void an_order_line_counts_series_steps_and_what_is_not_its_own()
+    {
+        QCOMPARE(Words::orderLine(5, 7, 3, false), u"5 séries · 7 étapes, dont 3 recopiées"_s);
+        QCOMPARE(Words::orderLine(5, 7, 3, true), u"5 séries · 7 étapes, dont 3 incluses"_s);
+        QCOMPARE(Words::orderLine(3, 3, 0, false), u"3 séries · 3 étapes"_s);
+        QCOMPARE(Words::orderLine(1, 1, 0, false), u"1 série · 1 étape"_s);
+        QCOMPARE(Words::orderLine(1, 1, 1, false), u"1 série · 1 étape, dont 1 recopiée"_s);
+        QCOMPARE(Words::orderLine(1, 2, 1, true), u"1 série · 2 étapes, dont 1 incluse"_s);
+        QCOMPARE(Words::orderLine(1, 1, 1, true), u"1 série · 1 étape, dont 1 incluse"_s);
+        QCOMPARE(Words::orderLine(0, 0, 0, false), u"0 série · 0 étape"_s);
+    }
+
+    /// Credits and reading orders as the checking frame says them: each count agrees
+    /// with its noun from one on, a separator « · » is held to the word before it, a colon is
+    /// held to its label, guillemets hold the name they quote, and no apostrophe is straight.
+    void credits_and_orders_are_said_in_the_singular_and_the_plural()
+    {
+        const QString nb = Words::Nbsp;
+        const QString arran = u"Terres d’Arran"_s;
+        const QString quoted = u"«"_s + nb + arran + nb + u"»"_s;
+        QCOMPARE(Words::creditsLine({u"Auteur A"_s}, {u"Auteur B"_s}),
+                 u"Scénario"_s + nb + u": Auteur A"_s + nb + u"· Dessin"_s + nb + u": Auteur B"_s);
+        QCOMPARE(Words::creditsLine({u"A"_s, u"B"_s}, {}), u"Scénario"_s + nb + u": A, B"_s);
+        QCOMPARE(Words::creditsLine({}, {u"B"_s}), u"Dessin"_s + nb + u": B"_s);
+        QCOMPARE(Words::volumesCredited(u"Elfes"_s), u"Tomes d’Elfes"_s + nb + u"· crédits"_s);
+        QCOMPARE(Words::volumesCredited(u"Écume"_s), u"Tomes d’Écume"_s + nb + u"· crédits"_s);
+        QCOMPARE(Words::volumesCredited(u"Nains"_s), u"Tomes de Nains"_s + nb + u"· crédits"_s);
+        // A « y » said as a consonant keeps its « de ».
+        QCOMPARE(Words::volumesCredited(u"Yoko Tsuno"_s),
+                 u"Tomes de Yoko Tsuno"_s + nb + u"· crédits"_s);
+        QCOMPARE(Words::creditsFooter(12), u"12 auteurs au total"_s);
+        QCOMPARE(Words::creditsFooter(1), u"1 auteur au total"_s);
+        // What holds a series back comes first, and nothing else is counted as missing.
+        QCOMPARE(Words::creditsFooter(12, 2),
+                 u"2 valeurs manquent encore"_s + nb + u"· 12 auteurs au total"_s);
+        QStringList twelve;
+        for (const QChar letter : u"ABCDEFGHIJKL"_s)
+            twelve << u"Auteur "_s + letter;
+        QCOMPARE(Words::creditsListed(twelve), u"Auteur A, Auteur B, Auteur C et 9 autres"_s);
+        QCOMPARE(Words::creditsListed(twelve.first(4)),
+                 u"Auteur A, Auteur B, Auteur C et 1 autre"_s);
+        QCOMPARE(Words::creditsListed(twelve.first(2)), u"Auteur A et Auteur B"_s);
+        QCOMPARE(Words::creditsListed(twelve.first(1)), u"Auteur A"_s);
+
+        QCOMPARE(Words::ordersSummary(1, 5, 2),
+                 u"1 univers · 5 séries · universe.json et 2 ordres de lecture"_s);
+        QCOMPARE(Words::ordersSummary(1, 1, 1),
+                 u"1 univers · 1 série · universe.json et 1 ordre de lecture"_s);
+        QCOMPARE(Words::ordersCopied(arran, u"Tout Aquilon"_s),
+                 u"«"_s + nb + u"Tout Aquilon"_s + nb + u"» recopie les étapes de "_s + quoted
+                     + nb + u"; les inclure à la place laisserait un seul endroit à tenir à jour."_s);
+
+        for (const QString &one :
+             {Words::ordersCopied(arran, arran),
+              Words::volumesCredited(u"Elfes"_s)})
+            QVERIFY2(!one.contains(u'\''), qPrintable(one));
+    }
+
+    /// The window of a volume's chapters: its count agrees with its noun, a separator « · »
+    /// is held to the word before it, and an arc says where it runs or where it opens.
+    void the_chapters_window_says_its_count_and_its_arcs()
+    {
+        const QString nb = Words::Nbsp;
+        QCOMPARE(Words::chaptersCount(12, 188), u"12 chapitres"_s + nb + u"· 188 pages"_s);
+        QCOMPARE(Words::chaptersCount(1, 1), u"1 chapitre"_s + nb + u"· 1 page"_s);
+        QCOMPARE(Words::chaptersCount(0, -1), u"0 chapitre"_s);
+        QCOMPARE(Words::chaptersArcRuns(1, 14, 3), u"chapitres 1 à 14, sur 3 tomes"_s);
+        QCOMPARE(Words::chaptersArcRuns(1, 4, 1), u"chapitres 1 à 4, sur 1 tome"_s);
+        QCOMPARE(Words::chaptersArcStarts(7, 114), u"chapitre 7, page 114"_s);
+        QCOMPARE(Words::chaptersArcStarts(7.5, std::nullopt), u"chapitre 7,5"_s);
+        QCOMPARE(Words::chaptersArcState(false), u"se poursuit"_s);
+        QCOMPARE(Words::chaptersArcState(true), u"commence ici"_s);
+        // The server's own, `DEFAULT_CHAPTER_LABEL`.
+        QCOMPARE(Words::defaultChapterLabel(), u"Chap."_s + nb + u"{n}"_s);
+        QCOMPARE(Words::chapterLabelHint(),
+                 u"{n} est le numéro, {n:000} le complète de zéros (Chap.007)"_s + nb
+                     + u"; sans {n}, le numéro suit le nom."_s);
+        QCOMPARE(Words::chaptersAdd(), u"+"_s + nb + u"Chapitre"_s);
+        QCOMPARE(Words::chaptersWindowTitle(u"Tome 2"_s), u"Chapitres du tome 2"_s);
+        QCOMPARE(Words::chaptersWindowTitle(u"Le Grand Livre"_s), u"Chapitres de «"_s + nb + u"Le Grand Livre"_s + nb + u"»"_s);
+        QVERIFY(!Words::chaptersArcsNote().contains(u'\''));
+    }
+
+    /// What the green asterisk after a field's name means, said once at the right of the bar:
+    /// a required field was only told apart by the red it wore when empty, so a filled one
+    /// looked as optional as a summary.
+    void the_required_legend_says_what_the_asterisk_means()
+    {
+        QCOMPARE(Words::requiredLegend(), u"obligatoire"_s);
+    }
+
+    /// The pills, the computed credits and the orders as the sheet draws them: what an empty
+    /// list offers by the field it is, the × of a word said with its field — the colon held to
+    /// it, the word held in its guillemets — and each label with its accented capital.
+    void the_words_of_pills_credits_and_orders_on_a_sheet()
+    {
+        const QString nb = Words::Nbsp;
+        QCOMPARE(Words::addWord(u"tags"_s), u"+ Étiquette"_s);
+        // A list of names says what it waits for in words, inside its box (planche 2m).
+        QCOMPARE(Words::addWord(u"authors"_s), u"Ajouter un nom"_s);
+        QCOMPARE(Words::addWord(u"artists"_s), u"Ajouter un nom"_s);
+        QCOMPARE(Words::addWord(u"genres"_s), u"+ Genre"_s);
+        QCOMPARE(Words::removeWordFrom(u"Étiquettes"_s, u"Terres d’Arran"_s),
+                 u"Étiquettes"_s + nb + u": retirer «"_s + nb + u"Terres d’Arran"_s + nb + u"»"_s);
+        QCOMPARE(Words::seriesCredits(), u"Auteurs de la série"_s);
+        QCOMPARE(Words::showEveryCredit(), u"Voir tous les auteurs"_s);
+        QCOMPARE(Words::foldTheCredits(), u"Replier les auteurs"_s);
+        QCOMPARE(Words::readingOrders(), u"Ordres de lecture"_s);
+        QCOMPARE(Words::defaultOrder(), u"Par défaut"_s);
+        QCOMPARE(Words::subsetOrder(), u"Sous-ensemble"_s);
+    }
+
+    /// What the order editor says: its footer counts what is written and what is read once
+    /// flattened, its button counts the orders it saves, a loop is named by both orders, and
+    /// a guillemet is held to the name it quotes.
+    void the_words_of_the_order_editor()
+    {
+        const QString nb = Words::Nbsp;
+        const auto quoted = [&nb](const QString &name) { return u"«"_s + nb + name + nb + u"»"_s; };
+        const QString arran = u"Terres d’Arran"_s;
+        const QString tout = u"Tout Aquilon"_s;
+        QCOMPARE(Words::orderFooter(5, 7),
+                 u"5 étapes écrites"_s + nb + u"· 7 une fois aplati"_s);
+        QCOMPARE(Words::orderFooter(1, 1), u"1 étape écrite"_s + nb + u"· 1 une fois aplati"_s);
+        QCOMPARE(Words::orderFooter(0, 0), u"0 étape écrite"_s + nb + u"· 0 une fois aplati"_s);
+        QCOMPARE(Words::saveOrders(1), u"Enregistrer l’ordre"_s);
+        QCOMPARE(Words::saveOrders(0), u"Enregistrer l’ordre"_s);
+        QCOMPARE(Words::saveOrders(2), u"Enregistrer les ordres"_s);
+        QCOMPARE(Words::includeWouldLoop(arran, tout),
+                 u"Dans "_s + quoted(arran) + u", inclure "_s + quoted(tout)
+                     + u" ramènerait à "_s + quoted(arran) + u"."_s);
+        QCOMPARE(Words::inheritedFrom(arran),
+                 u"Lu dans "_s + quoted(arran) + nb + u"· se modifie là-bas"_s);
+        QCOMPARE(Words::includeStep(arran), u"Inclure "_s + quoted(arran));
+        QCOMPARE(Words::orderUnit({}), u"Œuvre entière"_s);
+        QCOMPARE(Words::orderUnit(u"VOLUME"_s), u"Tomes"_s);
+        QCOMPARE(Words::orderUnit(u"CHAPTER"_s), u"Chapitres"_s);
+        QCOMPARE(Words::rangeBackwards(),
+                 u"La plage va à rebours"_s + nb + u": son premier numéro passe le dernier."_s);
+        QCOMPARE(Words::rangeNeedsEdition(u"Elfes"_s),
+                 quoted(u"Elfes"_s) + u" a plusieurs éditions, et leurs tomes ne se comptent pas"
+                                      u" de la même façon"_s
+                     + nb + u": choisissez laquelle."_s);
+        QCOMPARE(Words::chapterRangeNamesNoEdition(),
+                 u"Un chapitre est le même dans chaque édition"_s + nb
+                     + u": une plage de chapitres n’en nomme aucune."_s);
+        QCOMPARE(Words::orderPastTheCeiling(),
+                 u"Le serveur ne lirait pas cet ordre en entier"_s + nb
+                     + u": il dépasserait ce qu’un univers peut tenir une fois aplati."_s);
+        QCOMPARE(Words::includeExplained(),
+                 u"L’étape nomme un ordre du même univers"_s + nb
+                     + u"; ses étapes sont lues à sa place, à jour."_s);
+        QCOMPARE(Words::followsIt(arran, tout),
+                 u"Si "_s + quoted(arran) + u" change, "_s + quoted(tout) + u" suit."_s);
+        QCOMPARE(Words::nothingCopied(),
+                 u"Rien n’est recopié"_s + nb + u": il n’y a qu’un endroit à tenir à jour."_s);
+        QCOMPARE(Words::absentFromDrop(),
+                 u"Absente de ce dépôt"_s + nb
+                     + u": l’étape est gardée, l’œuvre est peut-être déjà sur le serveur."_s);
+        QCOMPARE(Words::removeStep(u"Elfes"_s), u"Retirer "_s + quoted(u"Elfes"_s));
+        QCOMPARE(Words::orderDisregarded(u"Doublon"_s),
+                 quoted(u"Doublon"_s) + u" porte l’identifiant d’un ordre écrit avant lui"_s + nb
+                     + u": le serveur ne le lit pas, et rien ne peut l’inclure."_s);
+        QCOMPARE(Words::noEdition(), u"Aucune"_s);
+        QCOMPARE(Words::chooseIncludedOrder(), u"Choisir l’ordre à inclure"_s);
+        QCOMPARE(Words::flatSteps(7), u"7 étapes"_s);
+        QCOMPARE(Words::flatSteps(1), u"1 étape"_s);
+        QCOMPARE(Words::stepNumbered(2), u"Étape 2"_s);
+        QCOMPARE(Words::addWorkStep(), u"+ Une œuvre"_s);
+        QCOMPARE(Words::keepInclusion(), u"Garder l’inclusion"_s);
+    }
+
+    /// An inclusion the announcement refuses is said by its order and its step, counted from 1
+    /// as a reader counts, with the colon held to its word and the name inside guillemets held.
+    void a_refused_inclusion_names_its_order_its_step_and_why()
+    {
+        const QString quoted = u"«"_s + Words::Nbsp + u"nowhere"_s + Words::Nbsp + u"»"_s;
+        const QString named = Words::orderRefused(u"a"_s, 2, Orders::Refusal::NamesNothing,
+                                                  u"nowhere"_s);
+        QVERIFY2(named.startsWith(u"Ordre «"_s + Words::Nbsp + u"a"_s + Words::Nbsp +
+                                  u"», étape 2"_s),
+                 qPrintable(named));
+        QVERIFY2(named.contains(Words::Nbsp + u": "_s), qPrintable(named));
+        QVERIFY2(named.contains(quoted), qPrintable(named));
+        const QStringList all{
+            named, Words::orderRefused(u"a"_s, 1, Orders::Refusal::CarriesMore, {}),
+            Words::orderRefused(u"a"_s, 3, Orders::Refusal::ClosesLoop, u"b"_s),
+            Words::ordersPastTheCeiling()};
+        for (const QString &one : all) {
+            QVERIFY2(!one.contains(u'\''), qPrintable(one));
+            QVERIFY2(!one.endsWith(u'.'), qPrintable(one));
+        }
+        QCOMPARE((QSet<QString>(all.cbegin(), all.cend())).size(), 4);
+    }
+
+    /// A duplicate number is written the way the rest of Leaf writes one: « 686,5 », with a
+    /// comma, never the « 686.5 » a bare `QString::number` would print.
+    void a_duplicate_number_is_written_in_french()
+    {
+        QCOMPARE(Words::sameNumberTwice(4), u"Un autre fichier porte aussi le numéro 4"_s);
+        QCOMPARE(Words::sameNumberTwice(686.5),
+                 u"Un autre fichier porte aussi le numéro 686,5"_s);
+    }
+
+    /// What a sheet says when a file could not be read: each one a sentence, none with a
+    /// straight apostrophe, and the archive's own trouble kept in front of what it costs.
+    void what_could_not_be_read_on_a_sheet_says_what_it_costs()
+    {
+        const QString archive = Words::archiveUnreadable(Words::notAnArchive());
+        QVERIFY(archive.startsWith(Words::notAnArchive()));
+        QVERIFY(archive.size() > Words::notAnArchive().size());
+        QVERIFY(!Words::archiveUnreadable({}).isEmpty());
+        QVERIFY(Words::sidecarUnreadable(u"work.json"_s)
+                    .contains(u"«"_s + Words::Nbsp + u"work.json"_s + Words::Nbsp + u"»"_s));
+        for (const QString &one : {archive, Words::comicInfoUnreadable(),
+                                   Words::sidecarUnreadable(u"work.json"_s),
+                                   Words::oneShotUnreadable()}) {
+            QVERIFY2(one.endsWith(u'.'), qPrintable(one));
+            QVERIFY2(!one.contains(u'\''), qPrintable(one));
+        }
+    }
+
+    // ——— Le cadre de vérification ———————————————————————————————————————————————
+
+    /// The line under « Importer » says what was dropped and where its values come from. A
+    /// universe nobody dropped is not « 0 univers », and one file is « 1 fichier », not
+    /// « 1 fichiers ».
+    void the_line_under_the_title_counts_what_was_dropped_and_names_its_source()
+    {
+        QCOMPARE(Words::apportSummary(0, 1, 14, Words::Source::ComicInfo),
+                 u"1 série · 14 fichiers · ComicInfo.xml"_s);
+        QCOMPARE(Words::apportSummary(1, 2, 42, Words::Source::Leaf),
+                 u"1 univers · 2 séries · 42 fichiers · JSON Leaf"_s);
+        QCOMPARE(Words::apportSummary(0, 1, 1, Words::Source::Nothing),
+                 u"1 série · 1 fichier · aucune information"_s);
+        QCOMPARE(Words::apportSummary(2, 3, 5, Words::Source::Several),
+                 u"2 univers · 3 séries · 5 fichiers · plusieurs sources"_s);
+    }
+
+    /// What a field lacking a value reads, and the fields by name, capital and accent included.
+    void a_missing_field_and_the_fields_are_one_word_each()
+    {
+        QCOMPARE(Words::missing(), u"Manquant"_s);
+        QCOMPARE(Words::notFilledIn(), u"Non renseigné"_s);
+        QCOMPARE(Words::fieldLabel(u"readingDirection"_s, Manifest::Level::Work),
+                 u"Sens de lecture"_s);
+        QCOMPARE(Words::fieldLabel(u"volumeCount"_s, Manifest::Level::Work), u"Tomes prévus"_s);
+        QCOMPARE(Words::fieldLabel(u"publisher"_s, Manifest::Level::Edition), u"Éditeur"_s);
+        // A key this client has not been taught is shown by its name rather than as nothing.
+        QCOMPARE(Words::fieldLabel(u"ageRating"_s, Manifest::Level::Work), u"ageRating"_s);
+    }
+
+    /// A credit is named by its role at every level: « Scénario » and « Dessin » on a series
+    /// as on its volumes — a series' « Auteurs » beside its volumes' « Scénario » read as two
+    /// fields for one. A tag is « Étiquette », which is not a genre.
+    void credits_and_tags_are_named_by_what_they_are_on_the_sheet_that_holds_them()
+    {
+        for (const Manifest::Level level :
+             {Manifest::Level::Volume, Manifest::Level::Chapter, Manifest::Level::Book})
+            QCOMPARE(Words::fieldLabel(u"authors"_s, level), u"Scénario"_s);
+        QCOMPARE(Words::fieldLabel(u"authors"_s, Manifest::Level::Work), u"Scénario"_s);
+        QCOMPARE(Words::fieldLabel(u"artists"_s, Manifest::Level::Volume), u"Dessin"_s);
+        QCOMPARE(Words::fieldLabel(u"artists"_s, Manifest::Level::Work), u"Dessin"_s);
+        QCOMPARE(Words::fieldLabel(u"tags"_s, Manifest::Level::Work), u"Étiquettes"_s);
+    }
+
+    /// The search over the list says what it finds, and the whole drop what its identical
+    /// lines spare: « identique » agrees with the count, « non renvoyés » with the bytes.
+    void the_frame_says_what_it_searches_and_what_is_spared()
+    {
+        QCOMPARE(Words::searchTheDrop(), u"Chercher une série, un auteur…"_s);
+        QCOMPARE(Words::identicalSpared(1, 9), u"1 identique\u00A0: 9 o non renvoyés"_s);
+        QCOMPARE(Words::identicalSpared(15, 22LL * 1024 * 1024 * 1024),
+                 u"15 identiques\u00A0: 22,0 Gio non renvoyés"_s);
+    }
+
+    /// What the ticks say: « cochée » agrees with the count, and the note says why a name
+    /// or a number is never offered for every series at once.
+    void the_ticked_series_are_counted_and_the_grouped_values_explained()
+    {
+        QCOMPARE(Words::forTicked(1), u"Pour la série cochée"_s);
+        QCOMPARE(Words::forTicked(4), u"Pour les 4 cochées"_s);
+        QCOMPARE(Words::applyToTicked(1), u"Appliquer à la série"_s);
+        QCOMPARE(Words::applyToTicked(4), u"Appliquer aux 4"_s);
+        QCOMPARE(Words::leaveUnchanged(), u"Ne pas changer"_s);
+        QCOMPARE(Words::groupedActions(), u"actions groupées"_s);
+        QCOMPARE(Words::groupedNote(),
+                 u"Une valeur choisie ici est écrite dans chacune des séries cochées. Les "
+                 u"noms et les numéros se règlent une série à la fois\u00A0: ils ne se "
+                 u"copient pas."_s);
+        QCOMPARE(Words::tickAll(), u"Tout"_s);
+        QCOMPARE(Words::reviewNext(), u"Prochain point à vérifier"_s);
+        QCOMPARE(Words::groupedOutcome(4, 0, 0), u"4 séries changées."_s);
+        QCOMPARE(Words::groupedOutcome(1, 0, 0), u"1 série changée."_s);
+        QCOMPARE(Words::groupedOutcome(3, 1, 0),
+                 u"3 séries changées, 1 qui portait déjà ces valeurs."_s);
+        QCOMPARE(Words::groupedOutcome(0, 2, 1),
+                 u"Aucune série changée, 2 qui portaient déjà ces valeurs, 1 qui ne peut "
+                 u"plus être corrigée."_s);
+        QCOMPARE(Words::tickedCount(0), u"Aucune série cochée"_s);
+        QCOMPARE(Words::tickedCount(1), u"1 série cochée"_s);
+        QCOMPARE(Words::tickedCount(4), u"4 séries cochées"_s);
+    }
+
+    /// How far the walk has come, kept whole on one line: « 23 / » left at the end of a line
+    /// and « 50 dossiers lus » at the start of the next read as two numbers.
+    void the_frame_counts_the_folders_read_without_breaking_the_count()
+    {
+        QCOMPARE(Words::foldersRead(23, 50), u"23 / 50 dossiers lus"_s);
+        QCOMPARE(Words::foldersRead(0, 1), u"0 / 1 dossier lu"_s);
+        QCOMPARE(Words::whileRead(u"2 univers"_s, 23, 50),
+                 u"2 univers · "_s + Words::foldersRead(23, 50));
+    }
+
+    /// What waits is counted by why, and said not to hold back the rest: « attendent »,
+    /// « Elles » and « retiennent » agree with the whole, each reason keeps its own count.
+    void the_series_left_waiting_are_counted_by_why_in_the_singular_and_the_plural()
+    {
+        QCOMPARE(Words::waitingSeries(0, 0, 0), QString());
+        QCOMPARE(Words::waitingSeries(2, 1, 0),
+                 u"3 séries attendent : 2 à compléter, 1 encore en lecture. Elles ne "
+                 u"retiennent pas les autres."_s);
+        QCOMPARE(Words::waitingSeries(1, 0, 0),
+                 u"1 série attend : 1 à compléter. Elle ne retient pas les autres."_s);
+        QCOMPARE(Words::waitingSeries(0, 1, 0),
+                 u"1 série attend : 1 encore en lecture. Elle ne retient pas les autres."_s);
+        QCOMPARE(Words::waitingSeries(0, 0, 1),
+                 u"1 série attend : 1 en échec. Elle ne retient pas les autres."_s);
+        QCOMPARE(Words::waitingSeries(1, 2, 1),
+                 u"4 séries attendent : 1 à compléter, 2 encore en lecture, 1 en échec. "
+                 u"Elles ne retiennent pas les autres."_s);
+    }
+
+    /// A card refused is said by one word on its line, and taken away by another.
+    void a_failed_card_is_named_and_removed_in_a_word()
+    {
+        QCOMPARE(Words::failedChip(), u"Échec"_s);
+        QCOMPARE(Words::removeIt(), u"Retirer"_s);
+    }
+
+    /// The frame's fixed labels: the apostrophe of « Tout l’apport » is the typographic one,
+    /// like every other in this file.
+    void the_frame_names_its_tree_and_its_filters()
+    {
+        QCOMPARE(Words::apport(), u"Apport"_s);
+        QCOMPARE(Words::wholeApport(), u"Tout l’apport"_s);
+        QCOMPARE(Words::withoutUniverse(), u"Sans univers"_s);
+        QCOMPARE(Words::seriesOfTheUniverse(), u"Séries de l’univers"_s);
+        QCOMPARE(Words::volumesOf(u"Blue Period"_s), u"Tomes de Blue Period"_s);
+        // Elided as the credited title over the same list is: « Tomes de Elfes » was the other.
+        QCOMPARE(Words::volumesOf(u"Elfes"_s), u"Tomes d’Elfes"_s);
+        QCOMPARE(Words::volumesOf(u"Œdipe"_s), u"Tomes d’Œdipe"_s);
+        QCOMPARE(Words::volumesOf(u"Yoko Tsuno"_s), u"Tomes de Yoko Tsuno"_s);
+        QCOMPARE(Words::reviewFilter(Words::Reviewed::All), u"Tout"_s);
+        QCOMPARE(Words::reviewFilter(Words::Reviewed::ToReview), u"À revoir"_s);
+        QCOMPARE(Words::reviewFilter(Words::Reviewed::Ready), u"Prêtes"_s);
+        QCOMPARE(Words::reviewFilter(Words::Reviewed::Identical), u"Identiques"_s);
+        QCOMPARE(Words::reviewGroup(Words::Reviewed::ToReview, 2), u"À revoir · 2"_s);
+        QCOMPARE(Words::showIt(), u"Afficher"_s);
+        QCOMPARE(Words::hideIt(), u"Masquer"_s);
+        QCOMPARE(Words::nothingToImport(), u"Rien à importer"_s);
+    }
+
+    /// The folded group of identical files says how many and what they spare, singular or
+    /// plural — the bytes are the point: « déjà là » alone does not say why it is quick.
+    void the_identical_group_says_how_many_and_what_they_spare()
+    {
+        QCOMPARE(Words::identicalGroup(1, 9), u"Identiques · 1 · 9 o non renvoyés"_s);
+        QCOMPARE(Words::identicalGroup(12, 3 * 1024), u"Identiques · 12 · 3 Kio non renvoyés"_s);
+    }
+
+    /// What the rail says under the tree: how many ComicInfo.xml will be converted, the verb
+    /// agreeing with the count, or that everything is already said.
+    void the_rail_note_agrees_with_how_many_files_it_converts()
+    {
+        const QString then = u"il sera converti en entry.json, puis retiré."_s;
+        QCOMPARE(Words::comicInfoConverted(1),
+                 u"Le nouveau fichier a un ComicInfo.xml"_s + Words::Nbsp + u": "_s + then);
+        QCOMPARE(Words::comicInfoConverted(2),
+                 u"Les 2 nouveaux fichiers ont un ComicInfo.xml"_s + Words::Nbsp + u": "_s + then);
+        QCOMPARE(Words::everythingSaid(),
+                 u"Univers, séries, éditions et tomes disent déjà ce qu’ils sont."_s);
+    }
+
+    /// The sentences of a reimport agree in number, and every colon keeps its non-breaking
+    /// space.
+    void a_reimport_agrees_in_number_and_keeps_its_colons()
+    {
+        QCOMPARE(Words::aimedChanges(1, 0, 0), u"1 ajouté"_s);
+        QCOMPARE(Words::aimedChanges(2, 1, 3), u"2 ajoutés · 1 remplacé · 3 absents"_s);
+        QCOMPARE(Words::aimedChanges(0, 2, 1), u"2 remplacés · 1 absent"_s);
+        QCOMPARE(Words::applyChanges(1), u"Appliquer 1 changement"_s);
+        QCOMPARE(Words::applyChanges(8), u"Appliquer 8 changements"_s);
+        QCOMPARE(Words::infosChanged(1), u"1 info modifiée"_s);
+        QCOMPARE(Words::infosChanged(4), u"4 infos modifiées"_s);
+        QCOMPARE(Words::aimedVolumeNote(u"2"_s), u"Cible : le tome 2"_s);
+        QCOMPARE(Words::reimportSeriesHolds(u"Édition française"_s, 1),
+                 u"Série · Édition française · 1 tome dans la bibliothèque"_s);
+        QCOMPARE(Words::pagesGoFromTo(196, 200, true), u"196 → 200 pages · progression gardée"_s);
+        QCOMPARE(Words::pagesGoFromTo(196, 200, false), u"196 → 200 pages"_s);
+        QCOMPARE(Words::titleAdded(u"Le ciel"_s), u"titre ajouté « Le ciel »"_s);
+        QCOMPARE(Words::comicInfoSays(u"5"_s, 204), u"ComicInfo : Tome 5 · 204 p."_s);
+        QCOMPARE(Words::chaptersSpan(3, u"5"_s, u"7"_s), u"3 (5 à 7)"_s);
+        QCOMPARE(Words::progressStays(u"2"_s),
+                 u"Votre progression appartient au tome 2 : elle ne bouge pas."_s);
+        QCOMPARE(Words::identicalNothingToDo(9), u"Identiques · 9 · rien à faire"_s);
+    }
+
+    /// « Réimporter le tome Tome 2 » : a volume called « Tome 2 » on its folder was introduced
+    /// by the word it already said. A name that holds the word is shown as it is — in any case,
+    /// at the start of a line and inside a sentence — and a bare number still gets it.
+    void a_volume_named_with_the_word_tome_is_not_introduced_by_it()
+    {
+        QCOMPARE(Words::reimportVolume(u"2"_s), u"Réimporter le tome 2"_s);
+        QCOMPARE(Words::reimportVolume(u"Tome 2"_s), u"Réimporter le Tome 2"_s);
+        QCOMPARE(Words::reimportVolume(u"tome 2"_s), u"Réimporter le tome 2"_s);
+        QCOMPARE(Words::aimedVolumeNote(u"Tome 2"_s), u"Cible : le Tome 2"_s);
+        QCOMPARE(Words::volumeNumbered(u"2"_s), u"Tome 2"_s);
+        QCOMPARE(Words::volumeNumbered(u"Tome 2"_s), u"Tome 2"_s);
+        QCOMPARE(Words::filePutAtVolume(u"Tome 5"_s), u"Ranger au Tome 5"_s);
+        QCOMPARE(Words::fileIsAnotherVolume(u"Tome 5"_s, u"2"_s),
+                 u"Ce fichier est le Tome 5, pas le tome 2."_s);
+        QCOMPARE(Words::volumeIsReplaced(u"2"_s, u"Tome 2"_s),
+                 u"Le tome 2 est remplacé. Le Tome 2 reste intact."_s);
+        QCOMPARE(Words::replaceChapterTitle(u"Tome 2"_s), u"Remplacer un chapitre du Tome 2"_s);
+        QCOMPARE(Words::spliceFooter(u"Tome 2"_s), u"L’archive du Tome 2 est réécrite une fois."_s);
+    }
+
+    /// « Blue Period existe déjà : 12 tomes sur 14 » — the count agrees, and the colon keeps
+    /// its non-breaking space.
+    void a_series_already_held_says_how_much_of_it()
+    {
+        QCOMPARE(Words::alreadyHeld(u"Blue Period"_s, 12, 14),
+                 u"Blue Period existe déjà"_s + Words::Nbsp + u": 12 tomes sur 14"_s);
+        QCOMPARE(Words::alreadyHeld(u"Blue Period"_s, 1, 14),
+                 u"Blue Period existe déjà"_s + Words::Nbsp + u": 1 tome sur 14"_s);
+    }
+
+    /// Under a sheet's title: its level, and where the essential came from, the participle
+    /// agreeing with the level — « Série · lue », « Univers · lu ».
+    void a_sheet_says_its_level_and_where_it_was_read()
+    {
+        QCOMPARE(Words::sheetSubtitle(Manifest::Level::Work, u"ComicInfo.xml"_s, false),
+                 u"Série · lue dans ComicInfo.xml"_s);
+        QCOMPARE(Words::sheetSubtitle(Manifest::Level::Universe, u"universe.json"_s, false),
+                 u"Univers · lu dans universe.json"_s);
+        QCOMPARE(Words::sheetSubtitle(Manifest::Level::Volume, u"Tome 3.cbz"_s, true),
+                 u"Tome · deviné d’après son nom"_s);
+        QCOMPARE(Words::sheetSubtitle(Manifest::Level::Edition, {}, false),
+                 u"Édition · rien n’est dit"_s);
+    }
+
+    /// The footer counts what is still missing and what will be rewritten, each agreeing
+    /// with its own count: « 1 valeur manque encore · 2 archives seront réécrites ».
+    void the_footer_agrees_with_both_its_counts()
+    {
+        QCOMPARE(Words::reviewFooter(1, 2),
+                 u"1 valeur manque encore · 2 archives seront réécrites"_s);
+        QCOMPARE(Words::reviewFooter(2, 1),
+                 u"2 valeurs manquent encore · 1 archive sera réécrite"_s);
+        QCOMPARE(Words::reviewFooter(0, 0), u"Rien ne manque · aucune archive réécrite"_s);
+        // The writer and the drawer of a series count as the values they are.
+        QCOMPARE(Words::lackingValues(2), u"2 valeurs manquent encore"_s);
+        QCOMPARE(Words::lackingValues(1), u"1 valeur manque encore"_s);
+        QCOMPARE(Words::lackingValues(0), u"Rien ne manque"_s);
+        // Nothing travels and a declaration will still be written: the button says only
+        // what it does, not « Importer 0 tome ».
+        QCOMPARE(Words::importVolumes(0), u"Importer"_s);
+        QCOMPARE(Words::importVolumes(1), u"Importer 1 tome"_s);
+        QCOMPARE(Words::importVolumes(2), u"Importer 2 tomes"_s);
+    }
+
+    /// The words of the way through an import: its three steps and the three buttons that
+    /// walk them — « Suivant » on, « Précédent » back, « Importer » at the last.
+    void the_steps_of_an_import_are_named_in_french()
+    {
+        QCOMPARE(Words::importStep(1), u"Choisir"_s);
+        QCOMPARE(Words::importStep(2), u"Vérifier"_s);
+        QCOMPARE(Words::importStep(3), u"Envoyer"_s);
+        QCOMPARE(Words::next(), u"Suivant"_s);
+        QCOMPARE(Words::previous(), u"Précédent"_s);
+        QCOMPARE(Words::importIt(), u"Importer"_s);
+        QCOMPARE(Words::importAll(), u"Importer tout"_s);
+        QCOMPARE(Words::finishIt(), u"Terminer"_s);
+        QCOMPARE(Words::closeIt(), u"Fermer"_s);
+    }
+
+    /// The third step counts volumes, which is what a reader counts — « 53 tomes », and not the
+    /// A send that ended with a line short is not « terminé »: « Envoi terminé : 0 tome sur
+    /// 76 » read as a success that had sent nothing.
+    void an_ended_send_with_a_failed_line_says_it_was_interrupted()
+    {
+        const QString nbsp = Words::Nbsp;
+        QCOMPARE(Words::sentTitle(0, 76), u"Envoi interrompu"_s + nbsp + u": 0 tome sur 76"_s);
+        QCOMPARE(Words::sentTitle(69, 79), u"Envoi interrompu"_s + nbsp + u": 69 tomes sur 79"_s);
+    }
+
+    /// « 76 fichiers » the same sum was called — and says under each line what the client
+    /// knows of it, separated by the one separator the rest of the import uses.
+    void the_third_step_counts_volumes_and_says_what_a_line_is()
+    {
+        const QString nbsp = Words::Nbsp;
+        QCOMPARE(Words::recapTitle(53), u"Prêt à envoyer"_s + nbsp + u": 53 tomes"_s);
+        QCOMPARE(Words::recapTitle(1), u"Prêt à envoyer"_s + nbsp + u": 1 tome"_s);
+        QCOMPARE(Words::recapVolumes(), u"Tomes"_s);
+        QCOMPARE(Words::recapState(), u"État"_s);
+        QCOMPARE(Words::sendingTitle(69, 79),
+                 u"Envoi en cours"_s + nbsp + u": 69 tomes sur 79"_s);
+        QCOMPARE(Words::sentTitle(79, 79), u"Envoi terminé"_s + nbsp + u": 79 tomes"_s);
+        QCOMPARE(Words::sentAbout((qint64(1) << 30), 2),
+                 Words::size((qint64(1) << 30)) + u" envoyés · 2 lignes en échec"_s);
+        QCOMPARE(Words::percentSent(0.466), u"46"_s + nbsp + u"%"_s);
+        QCOMPARE(Words::percentSent(1.0), u"100"_s + nbsp + u"%"_s);
+        QCOMPARE(Words::percentSent(-1.0), u"0"_s + nbsp + u"%"_s);
+
+        using Level = Manifest::Level;
+        QCOMPARE(Words::lineAbout(Level::Work, 0, 2, u"sera créée"_s, 0),
+                 u"Série · 2 éditions · sera créée · JSON Leaf lu"_s);
+        QCOMPARE(Words::lineAbout(Level::Universe, 3, 5, QString(), -1),
+                 u"Univers · 3 séries · 5 éditions"_s);
+        QCOMPARE(Words::lineAbout(Level::Edition, 0, 0, QString(), 1),
+                 u"Édition · ComicInfo.xml lu"_s);
+        // Nothing read says nothing, rather than « nu » or a guess.
+        QCOMPARE(Words::lineAbout(Level::Work, 0, 1, QString(), 2), u"Série · 1 édition"_s);
+        QCOMPARE(Words::lineQueued(u"Série"_s), u"En attente · Série"_s);
+        QCOMPARE(Words::linePaused(u"Série"_s), u"En pause · Série"_s);
+        QCOMPARE(Words::importAll(), u"Importer tout"_s);
+        QCOMPARE(Words::recapFoot(),
+                 u"Importer tout lance l’envoi. Vous pourrez fermer la fenêtre"_s + nbsp
+                     + u": il continue."_s);
+    }
+
+    /// The sentences the sheet says out loud: the reading direction nobody said, and a number
+    /// typed that does not read as one — quoted, so « 12a » is seen as what was typed.
+    void what_the_sheet_warns_of_is_written_in_french()
+    {
+        QCOMPARE(Words::readingDirectionUnsaid(),
+                 u"Le sens de lecture n’est dit nulle part. Il faut le choisir"_s + Words::Nbsp
+                     + u": une série lue à l’envers ne se remarque pas."_s);
+        const QString typed = u"«"_s + Words::Nbsp + u"12a"_s + Words::Nbsp + u"»"_s;
+        QCOMPARE(Words::notANumber(u"12a"_s, false),
+                 typed + u" ne se lit pas comme un nombre."_s);
+        QCOMPARE(Words::notANumber(u"12a"_s, true),
+                 typed + u" ne se lit pas comme un nombre entier."_s);
+        QCOMPARE(Words::notAChoice(u"12a"_s), typed + u" n’est pas une des valeurs proposées."_s);
+    }
+
+    /// What the frame says about roles, each count in the singular and in the plural:
+    /// « Confirmer les 1 lectures » is what a count glued to a plural noun writes the day
+    /// there is one.
+    void what_the_frame_says_about_roles_agrees_with_its_counts()
+    {
+        const QChar n = Words::Nbsp;
+        const QString dot = QString(n) + u"· "_s;
+        QCOMPARE(Words::proposedApport(), u"Apport"_s + dot + u"rôle proposé"_s);
+        QCOMPARE(Words::whatWillBeWritten(), u"Ce qui sera écrit"_s);
+        QCOMPARE(Words::readingsPossible(2), u"Deux lectures possibles"_s);
+        QCOMPARE(Words::readingsPossible(12), u"12 lectures possibles"_s);
+        QCOMPARE(Words::anArchive(), u"Archive"_s);
+        QCOMPARE(Words::roleHint(),
+                 u"Le rôle d’un dossier se change d’un clic sur son étiquette. Les dossiers "
+                 u"qu’il contient se relisent aussitôt."_s);
+        QCOMPARE(Words::nothingSaid(),
+                 u"Rien n’est dit"_s + n + u": tout est lu d’après la forme des dossiers"_s);
+        QCOMPARE(Words::onlyABookAtTheRoot(),
+                 u"Seul un livre seul peut se poser à la racine d’un univers"_s);
+
+        QCOMPARE(Words::dropSummary(1, 100, Words::Source::Nothing),
+                 u"1 dossier"_s + dot + u"100 fichiers"_s + dot + u"ni JSON ni ComicInfo.xml"_s);
+        QCOMPARE(Words::dropSummary(2, 1, Words::Source::Leaf),
+                 u"2 dossiers"_s + dot + u"1 fichier"_s + dot + u"JSON Leaf"_s);
+        QCOMPARE(Words::rootSummary(1, 5, 2),
+                 u"1 univers"_s + dot + u"5 séries"_s + dot + u"2 archives à sa racine"_s);
+        QCOMPARE(Words::rootSummary(2, 1, 1),
+                 u"2 univers"_s + dot + u"1 série"_s + dot + u"1 archive à leur racine"_s);
+
+        QCOMPARE(Words::readingChip(Shape::Role::Universe, Shape::Confidence::Likely, false),
+                 u"Un univers"_s + dot + u"probable"_s);
+        QCOMPARE(Words::readingChip(Shape::Role::Work, Shape::Confidence::ToConfirm, false),
+                 u"Une série"_s + dot + u"à confirmer"_s);
+        QCOMPARE(Words::readingChip(Shape::Role::Work, Shape::Confidence::Certain, true),
+                 u"Une série"_s + dot + u"nom à donner"_s);
+        QCOMPARE(Words::readingChip(Shape::Role::Shelf, Shape::Confidence::Certain, false),
+                 u"Une étagère"_s);
+
+        QCOMPARE(Words::foldersHeld({{u"Elfes"_s, 4}, {u"Mages"_s, 3}}, 0),
+                 u"2 dossiers"_s + n + u": Elfes (4 tomes), Mages (3 tomes)"_s);
+        QCOMPARE(Words::foldersHeld({{u"Bonus"_s, 1}}, 0),
+                 u"1 dossier"_s + n + u": Bonus (1 tome)"_s);
+        QCOMPARE(Words::foldersHeld({}, 9), u"9 fichiers directement dedans"_s);
+        QCOMPARE(Words::foldersHeld({}, 1), u"1 fichier directement dedans"_s);
+        QCOMPARE(Words::foldersHeld({{u"A"_s, 1}, {u"B"_s, 2}, {u"C"_s, 3}, {u"D"_s, 4}}, 2),
+                 u"4 dossiers"_s + n + u": A (1 tome), B (2 tomes), C (3 tomes) et 1 autre"_s
+                     + dot + u"2 fichiers directement dedans"_s);
+
+        QCOMPARE(Words::mostLikely(), u"Plus probable"_s);
+        QCOMPARE(Words::nameToGive(), u"Nom à donner"_s);
+        QCOMPARE(Words::whyTheFirst(), u"Pourquoi la première"_s);
+        QCOMPARE(Words::why(), u"Pourquoi"_s);
+        QCOMPARE(Words::writtenTimes(u"entry.json"_s, 84),
+                 u"entry.json"_s + n + u"×"_s + n + u"84"_s);
+        // A folder's name is put in as it is: « Rayon 100%2 » read as a place to fill took
+        // the count of its volumes in the middle of its own name.
+        QCOMPARE(Words::foldersHeld({{u"Rayon 100%2"_s, 3}}, 0),
+                 u"1 dossier"_s + n + u": Rayon 100%2 (3 tomes)"_s);
+        QCOMPARE(Words::writesNote(),
+                 u"Une fois confirmée, la lecture est écrite dans ces fichiers"_s + n
+                     + u": la forme du disque n’aura plus à être devinée."_s);
+
+        QCOMPARE(Words::roleOption(Shape::Role::Book), u"Livre seul"_s);
+        QCOMPARE(Words::roleOption(Shape::Role::Volume), u"Tome d’une série"_s);
+        QCOMPARE(Words::roleOption(Shape::Role::Work), u"Série"_s);
+        QCOMPARE(Words::oneShotUnreadableReason(),
+                 u"Impossible"_s + n
+                     + u": son oneshot.json ne se lit pas, et rien n’est écrit par-dessus."_s);
+        QCOMPARE(Words::declareABook(), u"Le déclarer livre seul"_s);
+        QCOMPARE(Words::declareABookDetail(),
+                 u"oneshot.json est écrit dans l’archive"_s + n + u"; elle reste à la racine."_s);
+        QCOMPARE(Words::fileInASeries(), u"Le ranger dans une série"_s);
+        QCOMPARE(Words::unreadAtTheRoot(),
+                 u"Posé à la racine d’un univers sans se déclarer livre"_s + n
+                     + u": il ne sera pas lu. Il n’apparaîtra nulle part tant qu’il n’a pas "
+                       u"de rôle."_s);
+        QCOMPARE(Words::clueHoldsAShelf(u"Terres d’Arran"_s),
+                 u"«"_s + n + u"Terres d’Arran"_s + n
+                     + u"» est une étagère, et un univers ne range que des séries."_s);
+        QCOMPARE(Words::noRoleNotRead(), u"Aucun rôle"_s + n + u": il ne sera pas lu"_s);
+        QCOMPARE(Words::atTheRoot(2), u"À la racine"_s + dot + u"2"_s);
+        QCOMPARE(Words::insideOf(u"BD"_s), u"Dans «"_s + n + u"BD"_s + n + u"»"_s);
+
+        QCOMPARE(Words::leftOutCount(1), u"1 archive sans rôle ne sera pas lue"_s);
+        QCOMPARE(Words::leftOutCount(2), u"2 archives sans rôle ne seront pas lues"_s);
+        QCOMPARE(Words::confirmReadings(1), u"Confirmer la lecture"_s);
+        QCOMPARE(Words::confirmReadings(3), u"Confirmer les 3 lectures"_s);
+        QCOMPARE(Words::nothingSentBeforeReadings(1),
+                 u"Rien n’est envoyé avant que la lecture soit confirmée."_s);
+        QCOMPARE(Words::nothingSentBeforeReadings(3),
+                 u"Rien n’est envoyé avant que les 3 lectures soient confirmées."_s);
+        QCOMPARE(Words::afterLeftOut(0, u"Rien ne manque"_s), u"Rien ne manque"_s);
+        QCOMPARE(Words::afterLeftOut(2, u"Rien ne manque"_s),
+                 Words::leftOutCount(2) + dot + u"Rien ne manque"_s);
+
+        const QString nb = QString(QChar(0x00A0));
+        QCOMPARE(Words::command(Words::Command::ReplaceChapter), u"Remplacer un chapitre…"_s);
+        QCOMPARE(Words::replaceChapterTitle(u"2"_s), u"Remplacer un chapitre du tome 2"_s);
+        QCOMPARE(Words::chaptersOfVolume(u"2"_s), u"Chapitres du tome 2"_s);
+        QCOMPARE(Words::chapterListed(u"6"_s, u"Couleurs froides"_s),
+                 u"6"_s + nb + u"· Couleurs froides"_s);
+        QCOMPARE(Words::chapterListed(u"6"_s, {}), u"6"_s);
+        QCOMPARE(Words::chapterListed({}, u"Couleurs froides"_s), u"Couleurs froides"_s);
+        QCOMPARE(Words::pagesRangeChange(63, 121, 63, 124), u"pages 63 à 121 → 63 à 124"_s);
+        QCOMPARE(Words::chapterShifted(3), u"Décalé de 3"_s);
+        QCOMPARE(Words::spliceExtra(3), u"3 pages en plus"_s);
+        QCOMPARE(Words::spliceExtra(1), u"1 page en plus"_s);
+        QCOMPARE(Words::spliceExtra(-2), u"2 pages en moins"_s);
+        QCOMPARE(Words::spliceExtra(0), u"Même longueur"_s);
+        QCOMPARE(Words::spliceVolumeNote(u"2"_s, 188, 191),
+                 u"Le tome 2 passe de 188 à 191 pages"_s + nb
+                     + u"; les chapitres suivants sont décalés."_s);
+        QCOMPARE(Words::spliceVolumeNote(u"2"_s, 188, 188), u"Le tome 2 garde ses 188 pages."_s);
+        QCOMPARE(Words::spliceProgressKept(112, u"6"_s),
+                 u"Votre progression, page 112, reste dans le chapitre 6"_s + nb
+                     + u": elle est gardée."_s);
+        QCOMPARE(Words::spliceProgressBrought(131, 124),
+                 u"Votre progression, page 131, est ramenée à la page 124."_s);
+        QCOMPARE(Words::spliceSource(u"blue_period_t02_v2.cbz"_s),
+                 u"Source"_s + nb + u": blue_period_t02_v2.cbz"_s);
+        QCOMPARE(Words::spliceFooter(u"2"_s), u"L’archive du tome 2 est réécrite une fois."_s);
+        QCOMPARE(Words::replaceChapterLabel(), u"Remplacer le chapitre"_s);
+
+        QCOMPARE(Words::reimportUniverse(u"Dragon Ball"_s),
+                 u"Réimporter l’univers « "_s + u"Dragon Ball"_s + u" »…"_s);
+        QCOMPARE(Words::universeSubtitle(3, 4),
+                 u"Univers · 3 séries dans la bibliothèque · 4 dans l’apport"_s);
+        QCOMPARE(Words::moveDetail(QString(), 18, 20), u"à la racine, 18 → 20 tomes dans l’univers"_s);
+        QCOMPARE(Words::moveDetail(u"BD"_s, 18, 20),
+                 u"dans « "_s + u"BD"_s + u" », 18 → 20 tomes dans l’univers"_s);
+        QCOMPARE(Words::newSeriesDetail(26), u"nouvelle série · 26 tomes"_s);
+        QCOMPARE(Words::absentSeriesDetail(3), u"absente de l’apport · 3 tomes"_s);
+        QCOMPARE(Words::changedSeriesDetail(2, 1), u"2 tomes modifiés · 1 tome ajouté"_s);
+        QCOMPARE(Words::existsAlreadyAt(QString()), u"Elle existe déjà, à la racine."_s);
+        QCOMPARE(Words::existsAlreadyAt(u"BD"_s),
+                 u"Elle existe déjà, dans « "_s + u"BD"_s + u" »."_s);
+        QCOMPARE(Words::moveKeepsDetail(18, 2),
+                 u"18 tomes gardent leur progression ; 2 sont ajoutés."_s);
+        QCOMPARE(Words::moveKeepsDetail(1, 1), u"1 tome garde sa progression ; 1 est ajouté."_s);
+        QCOMPARE(Words::createSecondSeries(), u"Créer une seconde série"_s);
+        QCOMPARE(Words::universeOrdersNote(), u"Univers + ordre nommé ajouté"_s);
+        QCOMPARE(Words::alreadyInLibrary(u"Blue Period"_s),
+                 u"« "_s + u"Blue Period"_s + u" » est déjà dans la bibliothèque."_s);
+        QCOMPARE(Words::reimportOnto(u"Blue Period"_s),
+                 u"Réimporter sur « "_s + u"Blue Period"_s + u" »"_s);
+
+        QCOMPARE(Words::filedUnder(u"Blue Period › Originale"_s),
+                 u"Sera rangé sous Blue Period › Originale"_s);
+        QCOMPARE(Words::reshelved(42, u"Blue Period › Originale"_s),
+                 u"42 tomes → passent dans Blue Period › Originale et prennent ce nom, lecture conservée"_s);
+        QCOMPARE(Words::reshelved(1, u"X"_s), u"1 tome → passe dans X et prend ce nom, lecture conservée"_s);
+
+        // Swept like every other sentence: no straight apostrophe in any of them.
+        for (const QString &one :
+             {Words::roleHint(), Words::nothingSaid(), Words::onlyABookAtTheRoot(),
+              Words::writesNote(), Words::declareABookDetail(), Words::unreadAtTheRoot(),
+              Words::oneShotUnreadableReason(), Words::nothingSentBeforeReadings(2),
+              Words::greyedRolesHint()})
+            QVERIFY2(!one.contains(u'\''), qPrintable(one));
     }
 };
 

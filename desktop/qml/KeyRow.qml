@@ -26,7 +26,8 @@ Row {
             required property var modelData
 
             width: drawn.item ? drawn.item.width : 0
-            height: Widths.scale.icon(row.compact ? 26 : 34)
+            height: Math.max(Widths.scale.icon(row.compact ? 26 : 34),
+                             drawn.item ? drawn.item.height : 0)
 
             Loader {
                 id: drawn
@@ -70,6 +71,7 @@ Row {
 
                 Text {
                     leftPadding: Widths.scale.size(4)
+                    textFormat: Text.PlainText
                     text: one.modelData.text
                     color: Theme.inkSoft
                     font.family: Theme.textFamily
@@ -83,6 +85,7 @@ Row {
                 Text {
                     leftPadding: Widths.scale.size(2)
                     rightPadding: Widths.scale.size(2)
+                    textFormat: Text.PlainText
                     text: one.modelData.text
                     color: Theme.inkFaint
                     font.family: Theme.textFamily

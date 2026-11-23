@@ -53,6 +53,7 @@ Item {
                 Text {
                     anchors.left: parent.left
                     anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
                     text: Bond.deviceLabel
                     color: Theme.ink
                     font.family: Theme.textFamily
@@ -180,6 +181,7 @@ Item {
 
             Text {
                 width: parent.width
+                textFormat: Text.PlainText
                 text: Profiles.words.opensOnThisComputer
                 color: Theme.ink
                 font.family: Theme.textFamily
@@ -224,19 +226,24 @@ Item {
                 width: parent.width
                 spacing: 4
 
+                // A count, as `ProfilesSection` reads its own: each answer of the profiles gave
+                // a new list of devices and every row was built again.
                 Repeater {
-                    model: section.others
+                    model: section.others.length
 
                     delegate: Item {
                         id: device
 
-                        required property var modelData
+                        required property int index
+                        readonly property var modelData: section.others[index] ?? ({})
 
                         objectName: "device-row-" + modelData.id
                         width: parent.width
-                        height: 52
+                        height: Math.max(52, words.implicitHeight + 12)
 
                         Column {
+                            id: words
+
                             anchors.left: parent.left
                             anchors.right: actions.left
                             anchors.rightMargin: 8
@@ -267,6 +274,20 @@ Item {
                                 font.pixelSize: 13
                                 elide: Text.ElideRight
                             }
+
+                            // When it last asked: a device that has not for a month is one to
+                            // unlink, and nothing here said so.
+                            Text {
+                                objectName: device.objectName + "-seen"
+                                width: parent.width
+                                visible: text.length > 0
+                                text: Profiles.sayDeviceSeen(device.modelData.seenAt)
+                                textFormat: Text.PlainText
+                                color: Theme.inkFaint
+                                font.family: Theme.textFamily
+                                font.pixelSize: 13
+                                elide: Text.ElideRight
+                            }
                         }
 
                         Row {
@@ -274,7 +295,8 @@ Item {
 
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
-                            spacing: 2
+                            // `label` apart, as the profiles' rows: see there.
+                            spacing: Widths.space.label
 
                             // The pencil chooses what that device opens on; only the device
                             // one is sitting at is renamed.
@@ -291,7 +313,7 @@ Item {
                                     id: profileMenu
 
                                     objectName: device.objectName + "-menu"
-                                    y: choose.height + 4
+                                    y: choose.height + Widths.space.compact
 
                                     LeafMenuItem {
                                         text: Profiles.words.askWhoReads
@@ -346,97 +368,62 @@ Item {
 
     // « Délier cet appareil ? », after the design: what goes, how to come back, and what to
     // do on the server should it not answer — this device forgets either way.
-    Popup {
+    LeafDialog {
         id: unlinking
 
         objectName: "unlink-dialog"
-        width: Math.min(430, Overlay.overlay ? Overlay.overlay.width - 80 : 430)
-        anchors.centerIn: Overlay.overlay
-        padding: 0
-        modal: true
-        focus: true
-        closePolicy: Popup.CloseOnEscape
 
-        Overlay.modal: Rectangle {
-            color: Qt.rgba(12 / 255, 16 / 255, 14 / 255, 0.74)
+        Text {
+            objectName: "unlink-question"
+            width: parent.width
+            textFormat: Text.PlainText
+            text: Bond.unlinkQuestion
+            color: Theme.ink
+            font.family: Theme.displayFamily
+            font.pixelSize: Widths.scale.title(20)
+            font.weight: Font.Bold
+            wrapMode: Text.WordWrap
         }
 
-        background: Rectangle {
-            radius: Theme.cardRadius
-            color: Theme.surface
-            border.color: Theme.rule
-            border.width: 1
-            antialiasing: true
+        Repeater {
+            model: [Bond.unlinkWhat, Bond.unlinkComeBack, Bond.unlinkIfSilent]
 
-            CardLift { level: CardLift.Modal }
-        }
+            delegate: Text {
+                required property string modelData
 
-        contentItem: DialogBody {
-            Column {
-                id: unlinkBody
-
-                x: 17
-                y: 16
-                width: parent.width - 34
-                spacing: 10
-
-                Text {
-                    objectName: "unlink-question"
-                    width: parent.width
-                    text: Bond.unlinkQuestion
-                    color: Theme.ink
-                    font.family: Theme.displayFamily
-                    font.pixelSize: 20
-                    font.weight: Font.Bold
-                    wrapMode: Text.WordWrap
-                }
-
-                Repeater {
-                    model: [Bond.unlinkWhat, Bond.unlinkComeBack, Bond.unlinkIfSilent]
-
-                    delegate: Text {
-                        required property string modelData
-
-                        width: unlinkBody.width
-                        text: modelData
-                        color: Theme.inkSoft
-                        font.family: Theme.textFamily
-                        font.pixelSize: 12
-                        lineHeight: 1.4
-                        wrapMode: Text.WordWrap
-                    }
-                }
-            }
-
-            Row {
-                anchors.right: unlinkBody.right
-                anchors.top: unlinkBody.bottom
-                anchors.topMargin: 16
-                spacing: 8
-
-                LeafTextAction {
-                    objectName: "unlink-cancel"
-                    label: Bond.cancelLabel
-                    focus: true
-                    activeFocusOnTab: true
-                    anchors.verticalCenter: parent.verticalCenter
-                    onTriggered: unlinking.close()
-                }
-
-                ActionButton {
-                    objectName: "unlink-go"
-                    label: Bond.unlinkGo
-                    danger: true
-                    ready: !Bond.busy
-                    onTriggered: {
-                        unlinking.close()
-                        Bond.unlink()
-                    }
-                }
+                width: parent ? parent.width : 0
+                text: modelData
+                color: Theme.inkSoft
+                font.family: Theme.textFamily
+                font.pixelSize: Widths.scale.caption(12)
+                lineHeight: 1.4
+                wrapMode: Text.WordWrap
             }
         }
 
-        implicitHeight: unlinkBody.implicitHeight + 16 + 16 + 32 + 16
+        commands: [
+            LeafTextAction {
+                objectName: "unlink-cancel"
+                scaled: true
+                label: Bond.cancelLabel
+                focus: true
+                activeFocusOnTab: true
+                anchors.verticalCenter: parent.verticalCenter
+                onTriggered: unlinking.close()
+            },
+
+            ActionButton {
+                objectName: "unlink-go"
+                scaled: true
+                label: Bond.unlinkGo
+                danger: true
+                ready: !Bond.busy
+                onTriggered: {
+                    unlinking.close()
+                    Bond.unlink()
+                }
+            }
+        ]
     }
 
     RelayDialog {
@@ -503,6 +490,7 @@ Item {
 
                 Text {
                     width: parent.width
+                    textFormat: Text.PlainText
                     text: Profiles.words.removeDeviceConsequence
                     color: Theme.inkSoft
                     font.family: Theme.textFamily

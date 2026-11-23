@@ -19,6 +19,7 @@
 // agree are two classifiers that drift.
 
 #include <QByteArray>
+#include <QList>
 #include <QString>
 
 namespace Cbz {
@@ -42,11 +43,56 @@ struct Found {
     bool opened() const { return trouble.isEmpty(); }
 };
 
-/// Reads the archive at `path` and returns its `entry.json`.
+/// What one member of an archive decompresses to: its path inside the archive, its length
+/// once decompressed and the SHA-256 of those bytes, lowercase hex.
 ///
-/// The member is matched on its **last path segment**, without case — `entry.json`,
+/// Hashed on the content and not on what is stored: the server rewrites an archive by
+/// copying its members raw and may rename them, so the content is the only thing that
+/// is still the same afterwards.
+struct Digest {
+    QString name;
+    qint64 size = 0;
+    QString checksum;
+};
+
+/// The three members an archive may carry its description in, each with its own outcome.
+///
+/// They are read together because the import wants all three for every file of a folder, and
+/// an archive's catalogue costs an open and a read each time it is asked for.
+/// `Found::sidecar` holds the bytes of the member in any of the fields.
+struct Members {
+    Found entry;
+    Found comicInfo;
+    /// `oneshot.json`: the archive saying it is a whole book and not a volume of something.
+    Found oneShot;
+    /// The members whose extension is an image (`jpg jpeg png webp gif avif`), counted in
+    /// the same pass over the catalogue that finds the three above: a reimport compares
+    /// page counts, and a second open per archive would cost 115 000 seeks over a library.
+    /// -1 when the archive does not open.
+    int pages = -1;
+    /// Every member that is not a folder, hashed — only when asked for, and empty when it
+    /// was not or when one member could not be read: a list with a hole in it would make
+    /// the server refuse a volume that is whole, so there is none.
+    QList<Digest> digests = {};
+    /// Why `digests` is empty when they were asked for and could not be had — a sentence in
+    /// French — and empty otherwise. The sender is told, because a volume announced without
+    /// them is checked as a file and no further, and nothing else would say so.
+    QString digestTrouble;
+};
+
+/// Reads the archive at `path` once and returns its `entry.json`, its `ComicInfo.xml` and
+/// its `oneshot.json`; with `withDigests`, in the same pass over the catalogue, the digest
+/// of every member too. The members are inflated then, which is the minutes-long part of
+/// the walk, and asked for only by the sender who verifies each volume.
+///
+/// Each member is matched on its **last path segment**, without case — `entry.json`,
 /// `ENTRY.JSON`, `some/folder/Entry.Json` — which is what the server matches on. An archive
-/// holding several takes the first the catalogue lists, as the server does.
+/// holding several takes the first the catalogue lists, as the server does. A member too
+/// large or compressed in a way this does not read troubles only itself; an archive that
+/// does not open puts the same sentence in all three.
+Members membersOf(const QString &path, bool withDigests = false);
+
+/// Reads the archive at `path` and returns its `entry.json` alone: `membersOf(path).entry`.
 Found sidecarOf(const QString &path);
 
 } // namespace Cbz

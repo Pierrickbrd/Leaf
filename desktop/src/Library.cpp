@@ -1,6 +1,7 @@
 #include "Library.h"
 
 #include "Elsewhere.h"
+#include "Entries.h"
 #include "Search.h"
 #include "Series.h"
 #include "Shelf.h"
@@ -23,8 +24,16 @@ Library *Library::create(QQmlEngine *engine, QJSEngine *)
         connect(library, &Library::fresh, shelf, &Shelf::take);
         connect(library, &Library::gone, shelf, &Shelf::forget);
     }
-    if (auto *page = engine->singletonInstance<Series *>(qmlTypeId("Leaf", 1, 0, "Series")))
+    if (const auto *page = engine->singletonInstance<Series *>(qmlTypeId("Leaf", 1, 0, "Series"))) {
         connect(library, &Library::fresh, page, &Series::take);
+        // The page counts its people off the volumes the list already has.
+        if (const auto *list =
+                engine->singletonInstance<Entries *>(qmlTypeId("Leaf", 1, 0, "Entries")))
+            connect(list, &Entries::changed, page,
+                    [page, list] {
+                        page->description()->takeVolumes(list->pointedAt(), list->files());
+                    });
+    }
     if (auto *universe =
             engine->singletonInstance<Elsewhere *>(qmlTypeId("Leaf", 1, 0, "Elsewhere")))
         connect(library, &Library::fresh, universe, &Elsewhere::take);

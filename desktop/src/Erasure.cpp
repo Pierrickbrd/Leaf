@@ -4,9 +4,11 @@
 
 #include <QDebug>
 #include <QJsonArray>
+#include <QTimer>
 #include <QUrlQuery>
 
 #include <algorithm>
+#include <utility>
 
 using namespace Qt::StringLiterals;
 
@@ -65,14 +67,14 @@ QVariantMap Erasure::saidOfEdition() const
     qint64 bytes = 0;
     for (const Api::Entry &one : m_files)
         bytes += one.size;
-    lines.insert(u"question"_s, Words::eraseSeriesQuestion(name));
+    lines.insert(u"question"_s, Words::eraseSeriesQuestion(m_one->name));
     lines.insert(u"what"_s,
                  Words::whatAWholeEditionTakes(int(m_files.size()), bytes,
                                                m_one->holding.readEntries,
                                                m_one->holding.partRead > 0,
                                                m_one->holding.readEntries + 1));
     lines.insert(u"warning"_s, Words::noTrash(true));
-    lines.insert(u"confirm"_s, Words::typeToConfirm(name));
+    lines.insert(u"confirm"_s, Words::typeToConfirm(Words::eraseButton()));
 
     // Named only when there is one. « Supprimer Elfes » is ambiguous the day two editions
     // carry that name, and that is exactly the day nobody may be wrong.
@@ -129,9 +131,10 @@ bool Erasure::ready() const
         return false;
     if (!whole())
         return theEntry() != nullptr;
-    // The name, typed. The only protection that works against a gesture made by reflex, and
-    // it is compared as it was written — a reader who types the name types the name.
-    return m_written == m_one->edition.value_or(m_one->work);
+    // The word, typed. The only protection that works against a gesture made by reflex, and
+    // it is compared as it was written. It is « Supprimer » and not the edition's name: a
+    // name of forty characters is typed once and then pasted, which protects nothing.
+    return m_written == Words::eraseButton();
 }
 
 void Erasure::aboutEntry(const QString &entryId, const QString &seriesId)
@@ -294,7 +297,26 @@ void Erasure::tookErasure(const Server::Answer &answer)
     const QString series = m_seriesId;
     const QString entry = m_entryId;
     dismiss();
-    emit erased(series, entry);
+    // Said once the modal is gone, and a beat after: the shelf's tile leaves in front of the
+    // reader, and one that started under the window that had just closed was a tile nobody
+    // saw start. Said at once when no modal is drawn — a deletion made without one.
+    if (m_onScreen)
+        m_toSay = Gone{series, entry};
+    else
+        emit erased(series, entry);
+}
+
+void Erasure::drawn(bool now)
+{
+    if (m_onScreen == now)
+        return;
+    m_onScreen = now;
+    emit onScreenChanged();
+    if (now || !m_toSay)
+        return;
+    const Gone gone = *std::exchange(m_toSay, std::nullopt);
+    QTimer::singleShot(Erasure::BeatAfterTheModal,
+                       this, [this, gone] { emit erased(gone.series, gone.entry); });
 }
 
 void Erasure::dismiss()

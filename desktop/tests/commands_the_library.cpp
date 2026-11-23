@@ -1,9 +1,12 @@
 // What the three dots do once something has been chosen from them.
 
 #include "Commands.h"
+#include "Editing.h"
 #include "Pretend.h"
+#include "Selection.h"
 #include "Server.h"
 #include "Settings.h"
+#include "Words.h"
 
 #include <QDir>
 #include <QFile>
@@ -141,6 +144,30 @@ private slots:
         QVERIFY(m_menu->trouble().isEmpty());
     }
 
+    /// A volume is a hundred megabytes and more. It goes to the disk as it arrives and not
+    /// through a buffer held whole, and what lands is every byte of it.
+    void a_large_copy_arrives_whole()
+    {
+        QByteArray archive(6 * 1024 * 1024, '\0');
+        for (qsizetype i = 0; i < archive.size(); ++i)
+            archive[i] = char((i * 31 + i / 4099) & 0xFF);
+        m_pretend->answer = "HTTP/1.1 200 .\r\nContent-Type: application/vnd.comicbook+zip\r\n"
+                            "Content-Length: " + QByteArray::number(archive.size())
+                            + "\r\n\r\n" + archive;
+
+        QTemporaryDir folder;
+        QVERIFY(folder.isValid());
+        const QString path = folder.filePath(u"Gros.cbz"_s);
+        QSignalSpy written(m_menu, &Commands::saved);
+        m_menu->saveACopy(u"v5"_s, QUrl::fromLocalFile(path));
+        QVERIFY(written.wait(10000));
+
+        QFile out(path);
+        QVERIFY(out.open(QIODevice::ReadOnly));
+        QCOMPARE(out.size(), archive.size());
+        QVERIFY(out.readAll() == archive);
+    }
+
     /// Nothing is written when nothing came back, and the file the reader named is not left
     /// behind empty: an archive that opens and is the wrong length is worse than none.
     void a_copy_that_was_refused_leaves_no_file_behind()
@@ -217,6 +244,96 @@ private slots:
         QVERIFY(!m_menu->busy());
     }
 
+    /// The way a series is read is the caller's own choice, sent to its own route, and
+    /// « Par défaut » is `null` taking it away rather than a field left out.
+    void a_reading_direction_is_chosen_for_one_series_and_taken_back_with_null()
+    {
+        const QByteArray series =
+            R"({"id":"albums","workId":"w","name":"Elfes","work":"Elfes","entryCount":1,)"
+            R"("chapterCount":0,"arcCount":0,"readingDirectionChosen":"RIGHT_TO_LEFT"})";
+        m_pretend->answers(200, series);
+        QSignalSpy moved(m_menu, &Commands::directionChanged);
+        m_menu->chooseDirection(u"albums"_s, 1);
+        QVERIFY(moved.wait(3000));
+        QVERIFY(m_pretend->heard.contains("PUT /series/albums/reading-direction "));
+        QVERIFY(m_pretend->heard.contains("\"readingDirection\":\"RIGHT_TO_LEFT\""));
+        QCOMPARE(m_menu->direction(), 1);
+
+        m_pretend->answers(200, QByteArrayLiteral(
+            R"({"id":"albums","workId":"w","name":"Elfes","work":"Elfes","entryCount":1,)"
+            R"("chapterCount":0,"arcCount":0})"));
+        m_pretend->heard.clear();
+        m_menu->chooseDirection(u"albums"_s, -1);
+        QVERIFY(moved.wait(3000));
+        QVERIFY(m_pretend->heard.contains("\"readingDirection\":null"));
+        QCOMPARE(m_menu->direction(), -1);
+
+        // A value the contract does not have is not sent.
+        m_pretend->heard.clear();
+        m_menu->chooseDirection(u"albums"_s, 9);
+        QVERIFY(m_pretend->heard.isEmpty());
+    }
+
+    /// A field emptied is `null` on the wire and a field not touched is not there: the two
+    /// are the whole of « take it away » and « leave it ».
+    void an_edit_sends_what_changed_and_null_for_what_was_taken_away()
+    {
+        m_pretend->answers(200, QByteArrayLiteral("{}"));
+        QSignalSpy done(m_menu, &Commands::edited);
+        m_menu->editSeries(u"albums"_s, {{u"title"_s, u"Elfes"_s},
+                                         {u"ageRating"_s, QVariant()},
+                                         {u"genres"_s, QStringList{u"Fantasy"_s}}});
+        QVERIFY(done.wait(3000));
+        QVERIFY(m_pretend->heard.contains("PATCH /series/albums "));
+        QVERIFY(m_pretend->heard.contains("\"ageRating\":null"));
+        QVERIFY(m_pretend->heard.contains("\"title\":\"Elfes\""));
+        QVERIFY(m_pretend->heard.contains("\"genres\":[\"Fantasy\"]"));
+        QVERIFY(!m_pretend->heard.contains("summary"));
+        QCOMPARE(done.first().at(0).toString(), u"albums"_s);
+        QVERIFY(done.first().at(1).toString().isEmpty());
+
+        m_pretend->heard.clear();
+        m_menu->editEntry(u"v2"_s, u"albums"_s, {{u"isbn"_s, QVariant()}});
+        QVERIFY(done.wait(3000));
+        QVERIFY(m_pretend->heard.contains("PATCH /entries/v2 "));
+        QVERIFY(m_pretend->heard.contains("\"isbn\":null"));
+        QCOMPARE(done.last().at(1).toString(), u"v2"_s);
+    }
+
+    /// The series' window starts from what `work.json` declares, never from every name its
+    /// volumes carry: Jul wrote three albums, and saving the window made him the series'
+    /// writer for the ones that name nobody.
+    void the_series_dialog_starts_from_what_work_json_declares()
+    {
+        m_pretend->answers(200, QByteArray(R"({"id":"lucky","workId":"lucky","name":"Lucky Luke",
+            "work":"Lucky Luke","entryCount":2,"chapterCount":0,"arcCount":0,"medium":"bd",
+            "authors":["René Goscinny","Jul"],"artists":["Morris","Achdé"],
+            "declaredAuthors":["René Goscinny"],"declaredArtists":["Morris"]})"));
+        Editing window(m_server);
+        QSignalSpy loaded(&window, &Editing::seriesLoaded);
+        window.loadSeries(u"lucky"_s);
+        QVERIFY(loaded.wait(3000));
+        const QVariantMap said = loaded.first().at(0).toMap();
+        QCOMPARE(said.value(u"authors"_s).toStringList(), QStringList{u"René Goscinny"_s});
+        QCOMPARE(said.value(u"artists"_s).toStringList(), QStringList{u"Morris"_s});
+        QCOMPARE(said.value(u"authorsDefault"_s).toString(),
+                 Words::creditDefault(false, Api::Medium::Bd));
+        QCOMPARE(said.value(u"artistsDefault"_s).toString(),
+                 Words::creditDefault(true, Api::Medium::Bd));
+    }
+
+    /// A refusal is said, and nothing is announced as written.
+    void an_edit_the_server_refuses_is_said_and_not_announced()
+    {
+        m_pretend->answers(400, QByteArrayLiteral(
+            R"({"error":"another file of this edition already has that number"})"));
+        QSignalSpy done(m_menu, &Commands::edited);
+        QSignalSpy told(m_menu, &Commands::changed);
+        m_menu->editEntry(u"v2"_s, u"albums"_s, {{u"number"_s, 1}});
+        QTRY_VERIFY(!m_menu->trouble().isEmpty());
+        QVERIFY(done.isEmpty());
+    }
+
     void with_no_server_the_menus_open_and_command_nothing()
     {
         Commands orphan(nullptr);
@@ -228,21 +345,115 @@ private slots:
         QVERIFY(orphan.trouble().isEmpty());
     }
 
-    /// Nine entries, each a sentence naming what it acts on, and no two the same: a menu with
-    /// two rows saying the same thing is a menu nobody can use.
-    void the_nine_entries_are_worded_once_and_differently()
+    /// A selection of editions is one request each and one announcement each: a tile is
+    /// redrawn from the edition it names, and nothing else would tell it.
+    void several_editions_are_marked_read_by_a_request_each()
+    {
+        QSignalSpy done(m_menu, &Commands::marked);
+        m_menu->markMany({u"albums"_s, u"romans"_s, u"revues"_s}, QString(), true);
+        QTRY_COMPARE_WITH_TIMEOUT(done.count(), 3, 3000);
+
+        QCOMPARE(m_pretend->heard.count("PATCH /series/"), 3);
+        QVERIFY(m_pretend->heard.contains("PATCH /series/romans/progress "));
+        QCOMPARE(m_pretend->heard.count("{\"finished\":true}"), 3);
+        QVERIFY(!m_menu->busy());
+    }
+
+    /// The volumes of one edition say it once, after the last answer: five announcements for
+    /// one page would be five reloads of the same list.
+    void several_volumes_are_forgotten_and_announced_once()
+    {
+        m_pretend->answers(204, QByteArray());
+        QSignalSpy done(m_menu, &Commands::marked);
+        m_menu->markMany({u"v1"_s, u"v2"_s, u"v3"_s}, u"albums"_s, false);
+        QVERIFY(done.wait(3000));
+        QTest::qWait(100);
+
+        QCOMPARE(m_pretend->heard.count("DELETE /entries/"), 3);
+        QCOMPARE(done.count(), 1);
+        QCOMPARE(done.first().at(0).toString(), u"albums"_s);
+        QVERIFY(done.first().at(1).toString().isEmpty());
+    }
+
+    /// Nothing picked is nothing asked: an empty list that still said `marked` would reload
+    /// a page for a command that was never given.
+    void marking_nothing_asks_nothing()
+    {
+        QSignalSpy done(m_menu, &Commands::marked);
+        m_menu->markMany({}, QString(), true);
+        QTest::qWait(100);
+        QVERIFY(m_pretend->heard.isEmpty());
+        QCOMPARE(done.count(), 0);
+        QVERIFY(!m_menu->busy());
+    }
+
+    /// A refusal is said and nothing is announced: the tiles keep the state that is true.
+    void a_refused_batch_says_so_and_announces_nothing()
+    {
+        m_pretend->answers(500, QByteArrayLiteral(R"({"error":"le disque ne répond pas"})"));
+        QSignalSpy done(m_menu, &Commands::marked);
+        QSignalSpy moved(m_menu, &Commands::changed);
+        m_menu->markMany({u"albums"_s, u"romans"_s}, QString(), true);
+        QTRY_VERIFY_WITH_TIMEOUT(!m_menu->busy() && moved.count() >= 2, 3000);
+
+        QVERIFY(!m_menu->trouble().isEmpty());
+        QCOMPARE(done.count(), 0);
+    }
+
+    /// Picking the same one twice puts it back, and picking across kinds starts again: a
+    /// series and a volume have no command in common that means the same to both.
+    void picking_again_puts_back_and_another_kind_starts_over()
+    {
+        Selection picked;
+        picked.toggle(u"albums"_s);
+        picked.toggle(u"romans"_s);
+        QCOMPARE(picked.ids(), (QStringList{u"albums"_s, u"romans"_s}));
+        picked.toggle(u"albums"_s);
+        QCOMPARE(picked.ids(), QStringList{u"romans"_s});
+
+        picked.toggle(u"v1"_s, u"romans"_s);
+        QCOMPARE(picked.ids(), QStringList{u"v1"_s});
+        QCOMPARE(picked.seriesId(), u"romans"_s);
+        // Another edition's volume is another selection, too.
+        picked.toggle(u"w9"_s, u"albums"_s);
+        QCOMPARE(picked.ids(), QStringList{u"w9"_s});
+
+        picked.clear();
+        QVERIFY(!picked.active());
+        QVERIFY(picked.seriesId().isEmpty());
+    }
+
+    /// The bar says what it holds in French, singular for one: « 1 série sélectionnée ».
+    void the_selection_counts_in_french()
+    {
+        Selection picked;
+        picked.toggle(u"albums"_s);
+        QCOMPARE(picked.label(), u"1 série sélectionnée"_s);
+        picked.toggle(u"romans"_s);
+        QCOMPARE(picked.label(), u"2 séries sélectionnées"_s);
+        picked.clear();
+        picked.toggle(u"v1"_s, u"albums"_s);
+        picked.toggle(u"v2"_s, u"albums"_s);
+        QCOMPARE(picked.label(), u"2 tomes sélectionnés"_s);
+    }
+
+    /// Twenty-one entries and the word that closes a window, each a sentence naming what it acts on,
+    /// and no two the same: a menu with two rows saying the same thing is a menu nobody can
+    /// use.
+    void the_entries_are_worded_once_and_differently()
     {
         const QVariantMap said = m_menu->words();
-        QCOMPARE(said.size(), 9);
+        QCOMPARE(said.size(), 22);
         QSet<QString> seen;
         for (auto it = said.constBegin(); it != said.constEnd(); ++it) {
             QVERIFY2(!it.value().toString().isEmpty(), qPrintable(it.key()));
             seen.insert(it.value().toString());
         }
-        QCOMPARE(seen.size(), 9);
+        QCOMPARE(seen.size(), 22);
         QCOMPARE(said.value(u"markSeriesRead"_s).toString(),
                  u"Marquer toute la série comme lue"_s);
         QCOMPARE(said.value(u"saveACopy"_s).toString(), u"Enregistrer une copie…"_s);
+        QCOMPARE(said.value(u"replaceChapter"_s).toString(), u"Remplacer un chapitre…"_s);
     }
 };
 

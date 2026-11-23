@@ -32,6 +32,8 @@ class Health : public QObject
     Q_PROPERTY(QString status READ status NOTIFY changed)
     Q_PROPERTY(int api READ api NOTIFY changed)
     Q_PROPERTY(int format READ format NOTIFY changed)
+    /// The release the server says it is, or nothing when it does not say.
+    Q_PROPERTY(QString version READ version NOTIFY changed)
     /// How many series it holds. The one number that says the library is really there: a
     /// server answering perfectly over an unmounted disk answers zero.
     Q_PROPERTY(int library READ library NOTIFY changed)
@@ -76,6 +78,7 @@ public:
     QString status() const { return m_said.status; }
     int api() const { return m_said.api; }
     int format() const { return m_said.format; }
+    QString version() const { return m_said.version; }
     int library() const { return m_said.library; }
     bool localDrop() const { return m_said.localDrop; }
     bool linked() const { return m_said.linked; }

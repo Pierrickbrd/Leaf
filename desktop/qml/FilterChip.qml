@@ -24,7 +24,13 @@ Pill {
     signal toggled()
 
     objectName: "chip-" + value
-    height: 28
+    // A command of the shelf, at a body's size, and as tall as its word with a little air:
+    // a literal 28 round a word that follows the desktop's text size was a pill that clipped
+    // it. Smaller than the 34 of an action on purpose (spacing audit, 23/10/2026) — a chip is
+    // secondary to the button that produces it.
+    textSize: Widths.scale.body(14)
+    padding: Widths.scale.fit(14)
+    height: Math.max(Widths.scale.fit(28), wordHeight + Widths.scale.fit(8))
     onPressed: chip.toggled()
     /// A stop of the row, and the row is walked by the screen rather than by Qt's own
     /// traversal — see ShelfView. Out of that traversal on purpose: in it, the row sits after

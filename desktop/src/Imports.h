@@ -1,141 +1,124 @@
 #pragma once
 
-// The queue of files on their way into the library, as a list a screen can draw.
+// What a reader says of a card before it goes: a role given to a folder, a value corrected,
+// a series ticked to move, a volume allowed to land on the one the library holds.
 //
-// A singleton, and that is the whole shape of it: an import outlives the screen that
-// started it. You drop files, you answer the questions, you close the dialog and go back to
-// reading, and this keeps going. `ImportDialog` is one view of it and never its owner.
+// The list itself is `ImportRows`, which this derives from, and why the import is five
+// classes is written at the top of `ImportRows.h`. This is the one a `.qml` file names as
+// the model, and the one `Review`, the order editor and `Carrier` hold: every correction is
+// made on the list that draws it.
 //
-// **What a card *is* lives in `Card.h`, and what happens to it in `Carrier.h`.** This holds
-// the list, answers the roles a `.qml` file binds to, and takes what a reader clicks. It
-// was one class of sixty-one methods doing all three, which is what `cpp:S1448` had been
-// saying: a queue with one slot, two roads and retries is not a list model, and neither
-// half was easy to find inside the other.
-//
-// **One transfer at a time.** Two on a domestic line steal each other's bandwidth and both
-// finish later than they would have in series.
-//
-// **Pause yields a place, it does not stop.** That is the rule the whole queue turns on:
-// pausing the one in flight lets the next go ahead, and resuming it puts the other one
-// behind. There is exactly one slot and pause decides who holds it — which is why a paused
-// file starts again on its own when the one ahead of it is done, without anybody clicking.
-// Stopping for good is `abandon`, and it is a different button because it is a different
-// decision: the server cleans its copy up. `Carrier` is where all of that is written.
+// **A correction is refused once the card has gone** (`Carrier::correctable`): the bytes on
+// their way carry what was agreed to, and a value changed under them could only reach the
+// library by an upload nobody asked for.
 
 #include "Api.h"
 #include "Card.h"
+#include "ImportRows.h"
 #include "Server.h"
 
-#include <QAbstractListModel>
-#include <QByteArray>
-#include <QHash>
+#include <QJsonValue>
 #include <QList>
 #include <QQmlEngine>
 #include <QString>
-#include <QVariantList>
-#include <QUrl>
 
-class Carrier;
+#include <functional>
 
-class Imports : public QAbstractListModel
+class Imports : public ImportRows
 {
     Q_OBJECT
     QML_ELEMENT
     QML_SINGLETON
 
-    Q_PROPERTY(int count READ count NOTIFY changed)
-    /// How many are still to go — anything not filed and not failed. What the bar's button
-    /// shows while the dialog is shut.
-    Q_PROPERTY(int inFlight READ inFlight NOTIFY changed)
-    /// How many are waiting for an answer. The other half of what that button says: a
-    /// transfer that finished and a question nobody saw look the same from a closed dialog.
-    Q_PROPERTY(int deciding READ deciding NOTIFY changed)
-    /// How many are still being looked at — a folder being walked, a file the server has
-    /// not answered about yet.
-    ///
-    /// The start button waits on this. Without it, pressing « Démarrer » while a folder is
-    /// still being read starts nothing at all: the queue looks for what is ready, finds
-    /// none of it, and the dialog closes on a transfer that never began.
-    Q_PROPERTY(int reading READ reading NOTIFY changed)
-    Q_PROPERTY(bool busy READ busy NOTIFY changed)
-    /// Set when the queue stopped for a reason that is not one file's fault — a key that
-    /// lost its right to import, said once rather than fifty times.
-    Q_PROPERTY(QString trouble READ trouble NOTIFY changed)
-    /// Whether each file is fingerprinted before it is announced.
-    ///
-    /// Set **before** anything is dropped, because that is when it costs: it is a full read
-    /// of every file in the folder. It buys the two things nothing else can — a file
-    /// recognised as changed when its length did not change, and a volume verified before
-    /// it is installed. A volume that travelled wrong is worse than one that did not
-    /// travel, because nothing afterwards would say so.
-    Q_PROPERTY(bool verifying READ verifying WRITE setVerifying NOTIFY changed)
-
 public:
-    /// Where one card is on its journey, and how loudly to say so — both on `Card`, which
-    /// is what they describe. Aliased here because `Imports::Stage::Ready` is how the rest
-    /// of this client and every test already spell it, and a rename would be churn for
-    /// nothing.
-    using Stage = Card::Stage;
-    using Tone = Card::Tone;
-
-    enum class Role {
-        Name = Qt::UserRole,
-        Stage_,
-        Sent,
-        Size,
-        Reason,
-        Confidence,
-        Candidates,
-        Concerns,
-        Chosen,
-        Trouble,
-        RetryIn,
-        Folder,
-        Creates,
-        Moves,
-        Nodes,
-        Checking,
-    };
-    Q_ENUM(Role)
-
     explicit Imports(Server *server, QObject *parent = nullptr);
 
     static Imports *create(QQmlEngine *engine, QJSEngine *);
 
-    int rowCount(const QModelIndex &parent = QModelIndex()) const override;
-    QVariant data(const QModelIndex &index, int role) const override;
-    QHash<int, QByteArray> roleNames() const override;
-
-    int count() const { return int(m_rows.size()); }
-    int inFlight() const;
-    int deciding() const;
-    int reading() const;
-    bool busy() const;
-    QString trouble() const { return m_trouble; }
-    bool verifying() const { return m_verifying; }
-    void setVerifying(bool verifying);
-
-    /// Takes local files in and asks the server where each would go. Nothing is sent.
+    /// Gives the folder or archive at `at` — relative to the dropped folder — the role
+    /// `role`, and reads again what that changes (`Shape::apply`).
     ///
-    /// A file this client cannot open at all is offered anyway, without its sidecar: the
-    /// proposal then rests on the name, is weaker for it, and the row says so rather than
-    /// pretending. That is the spec's own rule.
-    Q_INVOKABLE void offer(const QStringList &paths);
-
-    /// The same, from what a picker or a drop hands over. Returns how many were taken, so a
-    /// dialog knows whether to move on — a drop of three folders and a shortcut takes none,
-    /// and moving to a list of nothing would be the wrong answer.
+    /// Inside one card, its sheets are read again from the walk already made, the
+    /// corrections whose field still exists put back, and the card is edited: « Importer »
+    /// announces it again, the way it carries a correction. When the cards themselves change
+    /// — a shelf turned universe, a universe turned shelf — the cards touched are abandoned
+    /// and the new ones read as a drop is.
     ///
-    /// Turning a URL into a path belongs here and not in the QML: `file:///…` is the only
-    /// scheme this can do anything with, and a `http:` dropped from a browser has to be
-    /// left on the floor rather than sent on as a path no server could open.
-    Q_INVOKABLE int offerUrls(const QList<QUrl> &urls);
+    /// False, and nothing changed, when `Shape` refuses the role or when a card it would
+    /// touch can no longer be corrected (`Carrier::correctable`).
+    bool setRole(quint64 drop, const QString &at, Shape::Role role);
 
-    /// Throws away everything still being set up, and leaves alone whatever is moving.
+    /// The same for a whole reading of a folder (`Shape::applyReading`).
+    bool setReading(quint64 drop, const QString &at, int index);
+
+    /// Whether `setRole` would refuse `role` at `at` only because a card it touches cannot be
+    /// corrected now — still announced, or gone: the role is possible, the cards are not.
+    bool roleWaits(quint64 drop, const QString &at, Shape::Role role) const;
+
+    /// What asking `roleWaits` cost, for a test to assert on, as `Review::cost` does: the
+    /// roles tried on a copy of a whole drop.
+    struct Cost {
+        qint64 trials = 0;
+    };
+    static Cost cost();
+
+    /// Corrects one value of one card: the field `key` of the sheet at `at` (`Facts::edit`).
     ///
-    /// What the × means. The server is told about each, because it keeps what nobody named
-    /// — a place reserved and then forgotten holds the library's own disk for good.
-    Q_INVOKABLE void giveUpPreparing();
+    /// By `token` and not by row, for the reason `Card::token` gives: a card abandoned and
+    /// redropped under the same row must not receive a correction typed against the old one.
+    /// Only while nothing has gone — `Reviewing`, `Deciding` or `Ready`, and not `Ready`
+    /// once « Importer » let it go to wait its turn (`Carrier::correctable`) — and a card
+    /// that was ready goes back to `Reviewing`: the announcement it was ready with no longer
+    /// says what will be written. Nothing is sent: a correction travels with « Importer ».
+    /// Nor is anything changed by the value a field already holds (`Facts::edit`).
+    bool edit(quint64 token, const QString &at, const QString &key, const QJsonValue &value);
+
+    /// One correction of a batch, what the single form takes.
+    struct Edit {
+        quint64 token = 0;
+        QString at;
+        QString key;
+        QJsonValue value;
+    };
+    /// Each correction as the single form makes it — the same refusals, the same
+    /// `corrections`, the same return to `Reviewing` — and the queue said to change once, at
+    /// the end, when one was taken. How many were taken.
+    int edit(const QList<Edit> &edits);
+
+    /// Whether the asking profile starts the volume landing at `path` again from its first
+    /// page. Travels with the commit, and only when asked. False when the card can no longer
+    /// be corrected (`Carrier::correctable`).
+    bool setResetting(quint64 token, const QString &path, bool reset);
+
+    /// Whether the value the library holds under `key` of the declaration at `sidecar` stays
+    /// over the one the drop brings. A correction like any other: the card goes back to
+    /// `Reviewing` and « Importer » announces it again with the library's value in place of
+    /// the drop's.
+    bool keep(quint64 token, const QString &sidecar, const QString &key, bool keep);
+
+    /// Announces the card again now, for a range whose effect on its volume the server is the
+    /// one to say: `confirm` would do it too, but only after the reader has pressed the button
+    /// that sends, over a note about the range they had before.
+    bool askAgain(quint64 token);
+
+    /// The reader wants a second series for the folder `at` of the card, whatever looks like
+    /// it in the library: the card stops asking about it.
+    bool chooseSecond(quint64 token, const QString &at);
+
+    /// The pages of the file that replace the chapter aimed at, counted from 0. A correction
+    /// like `keep`: nothing is uploaded until « Importer ».
+    bool setSplice(quint64 token, int from, int to);
+
+    /// The name the reader typed for an edition the import adds (`@current` for the one the
+    /// series holds): kept on the card, and the folder announced again with it.
+    bool setEditionName(quint64 token, const QString &path, const QString &name);
+
+    /// Aims the card at another `{kind, id}` — a series that `resembles` the one the drop
+    /// would create, another chapter of the same volume — from the walk already made: the
+    /// session is dropped and the folder announced again, the files not read a second time.
+    /// `at` is the folder of the drop the answer named, and only the card's own root, `""`,
+    /// can be aimed elsewhere.
+    bool retarget(quint64 token, const QString &at, const QString &kind, const QString &id);
 
     /// Answers the question a row is asking, by naming the series it belongs to. A file
     /// only: a folder is not asked which series it is, it *declares* one.
@@ -179,47 +162,31 @@ public:
     /// root.
     Q_INVOKABLE void toggle(int row, const QString &at);
 
-    /// Everything answered goes into the queue, and the first of them starts.
-    Q_INVOKABLE void send();
-
-    /// Yields the one slot: the file in flight steps back and the next one takes over.
-    Q_INVOKABLE void pause(int row);
-
-    /// Takes the slot back. Whatever held it steps behind, exactly as if it had been
-    /// paused — which is what "now it is that one that waits" means.
-    Q_INVOKABLE void resume(int row);
-
     /// Out of the queue, and the server told to clean up its copy. A refusal is this card's
     /// own fact: it comes back as itself, `Stage::Failed`, rather than a queue-wide
     /// `trouble` that would stop every other row from sending over one session the server
     /// would not drop.
     Q_INVOKABLE void abandon(int row);
 
-signals:
-    void changed();
-    /// A card has reached the end of its road, one way or the other. What warns listens to
-    /// this and not to `changed`: a card moves a dozen times on its way and only the last of
-    /// those is news — it is the commit that warns, not each byte.
-    void settled(bool went, const QString &subject, const QString &said);
-
 private:
-    /// The carrier reaches into `m_rows` and into the model's own `beginInsertRows` and
-    /// `dataChanged`, because it is what changes a card. One list, one object drawing it.
-    friend class Carrier;
+    /// `ImportOffers` adds the cards a drop reads through `addCard`, the one road onto the list
+    /// that a role changed later takes too.
+    friend class ImportOffers;
 
-    /// The one copy of the cards, in the order they were dropped. `Carrier` reaches in
-    /// here rather than keeping a second list, which is what that friendship buys.
-    QList<Card> m_rows;
-    bool m_verifying = true;
-    /// The one folder actually on the pool right now, or `0` — no card's own token, since
-    /// `Carrier`'s counter starts at `1`. A dropped shelf of a dozen series queues every
-    /// one of them at `Stage::Asking`, and only this one has a walk under way — the other
-    /// eleven are not stuck, they are waiting their turn, and showing them a count frozen
-    /// at zero would say the opposite of that.
-    quint64 m_walkingToken = 0;
-    /// Set when the queue stopped for a reason that is not one card's fault. Written by
-    /// `Carrier::retryLater`, read by the property above.
-    QString m_trouble;
-    /// Parented to this, so it goes when the model does.
-    Carrier *m_carrier;
+    /// One card of `drop` rooted at `within`, unless a card already reads that folder; a
+    /// second folder of the same name in one drop is posed failed (`Words::sameDestination`).
+    /// True when a card of the drop was added.
+    bool addCard(const Shape::Drop &drop, const QString &within);
+
+    /// What `setRole` and `setReading` share: `change` is tried on a copy of the drop, and
+    /// what it does to the cards decides the rest.
+    bool reshape(quint64 token, const std::function<bool(Shape::Drop &)> &change);
+    /// `change` tried on a copy of the drop into `trial`, and the rows it would read again or
+    /// abandon; true when `Shape` takes it and every one of those rows can be corrected.
+    template <typename Change>
+    bool tried(quint64 token, const Change &change, Shape::Drop &trial, QList<int> &reread,
+               QList<int> &gone) const;
+
+    /// One correction of `edit`'s batch, said by nobody: the batch says it once.
+    bool editOne(quint64 token, const QString &at, const QString &key, const QJsonValue &value);
 };

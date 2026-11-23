@@ -1,7 +1,9 @@
 #include "Cbz.h"
 #include "Words.h"
 
+#include <QCryptographicHash>
 #include <QFile>
+#include <QStringList>
 
 #include <optional>
 #include <QtEndian>
@@ -149,16 +151,42 @@ struct Listed {
     quint32 where = 0;
 };
 
-/// The row naming the sidecar, or nothing when the archive holds none.
-///
-/// The **first** one, and the walk stops at the first row that is not a catalogue entry:
-/// a truncated or lying catalogue is an archive without a sidecar, not a reason to fail.
-std::optional<Listed> sidecarIn(const QByteArray &listing, quint16 count)
+/// The first row naming each of the three members, or nothing for one the archive lacks.
+struct Rows {
+    std::optional<Listed> entry;
+    std::optional<Listed> comicInfo;
+    std::optional<Listed> oneShot;
+    int pages = 0;
+    /// Every member that is not a folder, by name, when the walk was asked to keep them.
+    QList<std::pair<QByteArray, Listed>> all;
+};
+
+/// Whether the last segment of a member's name ends in the extension of an image.
+bool isImage(const QByteArray &name)
 {
+    static const QStringList extensions{u"jpg"_s, u"jpeg"_s, u"png"_s,
+                                        u"webp"_s, u"gif"_s,  u"avif"_s};
+    const QString whole = QString::fromUtf8(name);
+    const qsizetype cut = whole.lastIndexOf(u'/');
+    const QStringView last = cut < 0 ? QStringView(whole) : QStringView(whole).mid(cut + 1);
+    const qsizetype dot = last.lastIndexOf(u'.');
+    return dot > 0 && extensions.contains(last.mid(dot + 1).toString().toLower());
+}
+
+/// One walk of the catalogue for the three names.
+///
+/// The **first** of each, and the walk stops at the first row that is not a catalogue
+/// entry: a truncated or lying catalogue is an archive without sidecars, not a reason to
+/// fail. It goes on after all three are found, because the images are counted in the same
+/// walk. The catalogue is already in memory, read in one piece, so the walk reads nothing
+/// from the disk.
+Rows rowsIn(const QByteArray &listing, quint16 count, bool keepAll)
+{
+    Rows rows;
     qint64 at = 0;
     for (quint16 seen = 0; seen < count; ++seen) {
         if (at + 46 > listing.size() || fourAt(listing, at) != CatalogueEntry)
-            return std::nullopt;
+            return rows;
         Listed row;
         row.method = twoAt(listing, at + 10);
         row.packedSize = fourAt(listing, at + 20);
@@ -170,10 +198,19 @@ std::optional<Listed> sidecarIn(const QByteArray &listing, quint16 count)
         const QByteArray name = listing.mid(at + 46, nameLength);
         at += 46 + nameLength + extraLength + commentLength;
 
-        if (namedLike(name, u"entry.json"_s))
-            return row;
+        if (keepAll && !name.endsWith('/'))
+            rows.all.append({name, row});
+
+        if (!rows.entry && namedLike(name, u"entry.json"_s))
+            rows.entry = row;
+        else if (!rows.comicInfo && namedLike(name, u"comicinfo.xml"_s))
+            rows.comicInfo = row;
+        else if (!rows.oneShot && namedLike(name, u"oneshot.json"_s))
+            rows.oneShot = row;
+        else if (isImage(name))
+            ++rows.pages;
     }
-    return std::nullopt;
+    return rows;
 }
 
 /// The member's own bytes, or nothing when its local header does not line up.
@@ -195,36 +232,18 @@ QByteArray memberAt(QFile &file, const Listed &row)
     return packed.size() == qint64(row.packedSize) ? packed : QByteArray();
 }
 
-} // namespace
-
-namespace Cbz {
-
-Found sidecarOf(const QString &path)
+/// What one member comes to: its bytes, or why they could not be had.
+Cbz::Found readMember(QFile &file, const std::optional<Listed> &row)
 {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly))
-        return {{}, Words::couldNotBeOpened()};
-
-    const Catalogue catalogue = catalogueOf(file);
-    if (catalogue.at < 0)
-        return {{}, Words::notAnArchive()};
-    // Zip64 says so by filling these with ones, and its real figures live in a second
-    // record this does not read. Said outright rather than read wrong: a comic volume is
-    // never four gigabytes, and a file that gets here is offered without its sidecar.
-    if (catalogue.count == 0xFFFF || catalogue.offset == 0xFFFFFFFF
-        || catalogue.size == 0xFFFFFFFF) {
-        return {{}, Words::archiveTooBig()};
-    }
-    if (!file.seek(catalogue.offset))
-        return {{}, Words::catalogueMissing()};
-
-    const std::optional<Listed> row = sidecarIn(file.read(catalogue.size), catalogue.count);
     if (!row.has_value()) {
-        // Opened, walked, and holding no sidecar. An ordinary file from somewhere else,
+        // Opened, walked, and holding no such member. An ordinary file from somewhere else,
         // and not a failure: the proposal will rest on its name and its size.
         return {};
     }
-    if (row->wholeSize > MostSidecarBytes)
+    // Both figures come from the catalogue and are the writer's to choose: a member that is
+    // small once unpacked and four gigabytes packed is not a sidecar either. Twice the
+    // ceiling is room for a deflate that grew what it was given.
+    if (row->wholeSize > Cbz::MostSidecarBytes || row->packedSize > 2 * Cbz::MostSidecarBytes)
         return {{}, Words::sidecarTooBig()};
     if (row->method != Stored && row->method != Deflated)
         return {{}, Words::sidecarCompressedInAnUnknownWay()};
@@ -239,6 +258,107 @@ Found sidecarOf(const QString &path)
     if (json.isEmpty() && row->wholeSize > 0)
         return {{}, Words::sidecarCouldNotBeInflated()};
     return {json, {}};
+}
+
+/// The SHA-256 of what a member decompresses to, or nothing when it cannot be had.
+///
+/// Inflated in blocks into the hash rather than into a buffer the size of the member: the
+/// whole of a volume is hashed this way, and a page held twice over is memory spent for
+/// nothing.
+QString digestOf(QByteArray packed, const Listed &row)
+{
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    if (row.method == Stored || row.wholeSize == 0) {
+        hash.addData(packed);
+    } else if (row.method == Deflated) {
+        z_stream stream {};
+        if (inflateInit2(&stream, -MAX_WBITS) != Z_OK)
+            return {};
+        stream.next_in = reinterpret_cast<Bytef *>(packed.data());
+        stream.avail_in = uInt(packed.size());
+        QByteArray block(1 << 16, Qt::Uninitialized);
+        int went = Z_OK;
+        while (went == Z_OK) {
+            stream.next_out = reinterpret_cast<Bytef *>(block.data());
+            stream.avail_out = uInt(block.size());
+            went = inflate(&stream, Z_NO_FLUSH);
+            hash.addData(QByteArrayView(block.constData(), block.size() - qsizetype(stream.avail_out)));
+        }
+        const uLong got = stream.total_out;
+        inflateEnd(&stream);
+        if (went != Z_STREAM_END || got != row.wholeSize)
+            return {};
+    } else {
+        return {};
+    }
+    // `fromUtf8` on plain hex, as `Manifest::checksumOf` does.
+    return QString::fromUtf8(hash.result().toHex());
+}
+
+/// Every listed member hashed, or nothing at all if one of them cannot be, and then `trouble`
+/// says which way.
+QList<Cbz::Digest> digestsOf(QFile &file, const Rows &rows, QString &trouble)
+{
+    QList<Cbz::Digest> digests;
+    for (const auto &[name, row] : rows.all) {
+        if (row.method != Stored && row.method != Deflated) {
+            trouble = Words::memberCompressedInAnUnknownWay();
+            return {};
+        }
+        const QByteArray packed = memberAt(file, row);
+        const QString sum = (packed.isEmpty() && row.packedSize > 0) ? QString()
+                                                                     : digestOf(packed, row);
+        if (sum.isEmpty()) {
+            trouble = Words::memberCouldNotBeRead();
+            return {};
+        }
+        digests.append({QString::fromUtf8(name), qint64(row.wholeSize), sum});
+    }
+    return digests;
+}
+
+} // namespace
+
+namespace Cbz {
+
+Members membersOf(const QString &path, bool withDigests)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        const Found trouble{{}, Words::couldNotBeOpened()};
+        return {trouble, trouble, trouble, -1, {}, withDigests ? trouble.trouble : QString()};
+    }
+
+    const Catalogue catalogue = catalogueOf(file);
+    if (catalogue.at < 0) {
+        const Found trouble{{}, Words::notAnArchive()};
+        return {trouble, trouble, trouble, -1, {}, withDigests ? trouble.trouble : QString()};
+    }
+    // Zip64 says so by filling these with ones, and its real figures live in a second
+    // record this does not read. Said outright rather than read wrong: a comic volume is
+    // never four gigabytes, and a file that gets here is offered without its sidecar.
+    if (catalogue.count == 0xFFFF || catalogue.offset == 0xFFFFFFFF
+        || catalogue.size == 0xFFFFFFFF) {
+        const Found trouble{{}, Words::archiveTooBig()};
+        return {trouble, trouble, trouble, -1, {}, withDigests ? trouble.trouble : QString()};
+    }
+    if (!file.seek(catalogue.offset)) {
+        const Found trouble{{}, Words::catalogueMissing()};
+        return {trouble, trouble, trouble, -1, {}, withDigests ? trouble.trouble : QString()};
+    }
+
+    const Rows rows = rowsIn(file.read(catalogue.size), catalogue.count, withDigests);
+    QString digestTrouble;
+    QList<Digest> digests;
+    if (withDigests)
+        digests = digestsOf(file, rows, digestTrouble);
+    return {readMember(file, rows.entry), readMember(file, rows.comicInfo),
+            readMember(file, rows.oneShot), rows.pages, digests, digestTrouble};
+}
+
+Found sidecarOf(const QString &path)
+{
+    return membersOf(path).entry;
 }
 
 } // namespace Cbz

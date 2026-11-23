@@ -35,13 +35,6 @@ constexpr int Patience = 15000;
 /// reply, as `Pinning` keeps its own mark.
 constexpr const char *Refused = "leafBondRefused";
 
-/// The loopback, the one place plain http is allowed: nothing on it leaves the machine.
-bool loopback(const QString &host)
-{
-    return host == u"127.0.0.1"_s || host == u"::1"_s
-           || host.compare(u"localhost"_s, Qt::CaseInsensitive) == 0;
-}
-
 /// How long a code lives, as the server makes it. Only a fallback: the code's own expiry is
 /// what is counted down, unless this machine's clock disagrees with the server's so much that
 /// a code just made reads as already gone, or as living longer than any code does.
@@ -320,7 +313,7 @@ void Bond::move(const QString &typed)
         say(Words::notAnAddress());
         return;
     }
-    if (scheme == u"http"_s && !loopback(address.host())) {
+    if (scheme == u"http"_s && !Server::loopback(address.host())) {
         say(Words::httpsElsewhere());
         return;
     }

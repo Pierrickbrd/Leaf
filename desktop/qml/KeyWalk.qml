@@ -10,7 +10,9 @@
 //
 // Tab and Down go on, Shift+Tab and Up go back; Left and Right do the same except in a field,
 // where they move the caret. Past either end it says so, and where the focus goes next is the
-// screen's business.
+// screen's business. Home and End go to the first and the last of the stops beside this one —
+// the volumes of the list — or of the region when it stands alone: on forty-two volumes the
+// last was forty-one presses of Down away (audit, 25/10/2026).
 
 import QtQuick
 
@@ -66,14 +68,40 @@ QtObject {
         return true
     }
 
+    /// What holds `stop` among others: its parent, or past the loader each row of a list is
+    /// drawn in, the column of rows.
+    function holder(stop) {
+        let at = stop.parent
+        while (at && at.parent && at.children.length < 2)
+            at = at.parent
+        return at
+    }
+
+    /// The stops held with `stop`, in order: its list of volumes. The whole region when it
+    /// stands alone, as the way back does.
+    function beside(all, stop) {
+        const home = holder(stop)
+        const kin = all.filter(one => holder(one) === home)
+        return kin.length > 1 ? kin : all
+    }
+
     /// Answers a key pressed somewhere in the region: true when it moved the focus or left.
     function step(event) {
         const typing = event.key === Qt.Key_Left || event.key === Qt.Key_Right
+                || event.key === Qt.Key_Home || event.key === Qt.Key_End
         const all = stops()
         const here = at(all)
-        // A field keeps Left and Right for its caret.
+        // A field keeps Left and Right, Home and End for its caret.
         if (typing && here >= 0 && all[here].cursorPosition !== undefined)
             return false
+        if (event.key === Qt.Key_Home || event.key === Qt.Key_End) {
+            if (here < 0)
+                return take(event.key === Qt.Key_Home)
+            const row = beside(all, all[here])
+            give(row[event.key === Qt.Key_Home ? 0 : row.length - 1],
+                 event.key === Qt.Key_End)
+            return true
+        }
         const back = event.key === Qt.Key_Backtab || event.key === Qt.Key_Up
                 || event.key === Qt.Key_Left
                 || (event.key === Qt.Key_Tab && (event.modifiers & Qt.ShiftModifier))

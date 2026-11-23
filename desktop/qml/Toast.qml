@@ -30,11 +30,26 @@ Rectangle {
     signal held(bool on)
 
     objectName: "toast-" + index
-    // Its time stops while the keys are on it, as it does under the pointer: a bubble that
-    // went while its cross was being reached took the focus with it.
-    onActiveFocusChanged: bubble.held(activeFocus)
-    width: 420
-    implicitHeight: Math.max(52, words.implicitHeight + 22)
+    /// Whether the keys are on the bubble or on one of its two buttons. Its own `activeFocus`
+    /// said neither: a rectangle is not a scope, and the keys on its cross left the ten
+    /// seconds running until it went with the focus.
+    readonly property bool keysInside: {
+        for (let at = Window.activeFocusItem; at; at = at.parent) {
+            if (at === bubble)
+                return true
+        }
+        return false
+    }
+    // Its time stops while the keys are on it, as it does under the pointer, and goes on
+    // only once both have left: a bubble that went while its cross was being reached took the
+    // focus with it.
+    readonly property bool holding: bubble.keysInside || pointer.hovered
+    onHoldingChanged: bubble.held(bubble.holding)
+    // The stack's width, which bounds it: see `ToastStack`.
+    width: parent ? parent.width : Widths.scale.column(420)
+    // From its words, `compact` above and under them, and never under a line's worth of
+    // bubble: two lines of a larger desktop text no longer run out of a literal 52.
+    implicitHeight: Math.max(Widths.scale.size(52), words.implicitHeight + 2 * Widths.space.compact)
     height: implicitHeight
     radius: Theme.cardRadius
     color: Theme.surface
@@ -50,15 +65,15 @@ Rectangle {
 
     // Being read is not being ignored: the ten seconds wait while the pointer is here.
     HoverHandler {
-        onHoveredChanged: bubble.held(hovered)
+        id: pointer
     }
 
     Glyph {
         id: mark
 
-        x: 14
+        x: Widths.space.card
         anchors.verticalCenter: parent.verticalCenter
-        side: 20
+        side: Widths.scale.icon(20)
         source: bubble.failed ? "assets/icons/error.svg" : "assets/icons/check_circle.svg"
         tint: bubble.failed ? Theme.alert : Theme.emerald
     }
@@ -70,19 +85,20 @@ Rectangle {
         id: words
 
         anchors.left: mark.right
-        anchors.leftMargin: 12
+        anchors.leftMargin: Widths.space.label
         anchors.right: act.left
-        anchors.rightMargin: 10
+        anchors.rightMargin: Widths.space.row
         anchors.verticalCenter: parent.verticalCenter
-        spacing: 1
+        spacing: Widths.space.tight
 
         Text {
             objectName: bubble.objectName + "-headline"
             width: parent.width
+            textFormat: Text.PlainText
             text: bubble.headline
             color: Theme.ink
             font.family: Theme.textFamily
-            font.pixelSize: 13
+            font.pixelSize: Widths.scale.body(13)
             wrapMode: Text.WordWrap
             maximumLineCount: 2
             elide: Text.ElideRight
@@ -90,11 +106,12 @@ Rectangle {
 
         Text {
             width: parent.width
+            textFormat: Text.PlainText
             text: bubble.detail
             visible: text.length > 0
             color: Theme.inkFaint
             font.family: Theme.textFamily
-            font.pixelSize: 11
+            font.pixelSize: Widths.scale.caption(11)
             wrapMode: Text.WordWrap
             maximumLineCount: 2
             elide: Text.ElideRight
@@ -108,8 +125,9 @@ Rectangle {
 
         objectName: bubble.objectName + "-action"
         anchors.right: cross.left
-        anchors.rightMargin: 4
+        anchors.rightMargin: Widths.scale.room(4)
         anchors.verticalCenter: parent.verticalCenter
+        scaled: true
         label: bubble.label
         visible: bubble.offer !== 0
         width: visible ? implicitWidth : 0
@@ -121,9 +139,9 @@ Rectangle {
 
         objectName: bubble.objectName + "-close"
         anchors.right: parent.right
-        anchors.rightMargin: 8
+        anchors.rightMargin: Widths.space.compact
         anchors.verticalCenter: parent.verticalCenter
-        side: 16
+        side: Widths.scale.icon(16)
         glyph: "close"
         label: bubble.headline
         tint: Theme.inkFaint

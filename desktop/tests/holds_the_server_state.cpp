@@ -3,18 +3,22 @@
 // Headless, against `Pretend`. Both models exist apart from any screen — a scan outlives
 // the page that started it — so both are testable without one, which is the point.
 
+#include "CachePurge.h"
 #include "Health.h"
 #include "Pretend.h"
+#include "ReadingExport.h"
 #include "Scan.h"
 #include "Server.h"
 #include "Settings.h"
 #include "Words.h"
 
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSignalSpy>
 #include <QStandardPaths>
+#include <QTemporaryDir>
 #include <QTest>
 
 using namespace Qt::StringLiterals;
@@ -112,6 +116,78 @@ private slots:
         QCOMPARE(scan.foundTitle(), Words::whatItFound());
         QCOMPARE(scan.startLabel(), Words::startAScan());
         QCOMPARE(scan.lastScanLabel(), Words::lastScan(0));
+    }
+
+    void the_version_of_the_server_is_what_it_says_and_nothing_before_it_does()
+    {
+        Health health(m_server);
+        m_pretend->answers(200, asJson({{u"status"_s, u"ok"_s}, {u"api"_s, 1},
+                                        {u"format"_s, 1}, {u"library"_s, 6}}));
+        health.ask();
+        QTRY_VERIFY(health.reachable());
+        QVERIFY(health.version().isEmpty());
+
+        m_pretend->answers(200, asJson({{u"status"_s, u"ok"_s}, {u"api"_s, 1},
+                                        {u"format"_s, 1}, {u"library"_s, 6},
+                                        {u"version"_s, u"0.1.0"_s}}));
+        health.ask();
+        QTRY_COMPARE(health.version(), u"0.1.0"_s);
+    }
+
+    void emptying_the_cache_says_how_much_went_and_a_refusal_says_why()
+    {
+        CachePurge purge(m_server);
+        QCOMPARE(purge.title(), Words::theCache());
+        QCOMPARE(purge.label(), Words::purgeTheCache());
+        QVERIFY(purge.sentence().isEmpty());
+
+        m_pretend->answers(200, asJson({{u"files"_s, 12}, {u"bytes"_s, 5 * 1024 * 1024}}));
+        purge.purge();
+        QVERIFY(purge.purging());
+        QTRY_VERIFY(!purge.purging());
+        QCOMPARE(purge.sentence(), Words::cachePurged(12, 5 * 1024 * 1024));
+        QVERIFY(!purge.failed());
+        QVERIFY(m_pretend->heard.contains("DELETE /cache"));
+
+        m_pretend->answers(200, asJson({{u"files"_s, 0}, {u"bytes"_s, 0}}));
+        purge.purge();
+        QTRY_COMPARE(purge.sentence(), Words::cachePurged(0, 0));
+
+        m_pretend->answers(200, QByteArrayLiteral("{}"));
+        purge.purge();
+        QTRY_VERIFY(purge.failed());
+        QCOMPARE(purge.sentence(), Words::unreadableAnswer());
+    }
+
+    void exporting_the_reading_writes_the_file_the_server_sent_and_nothing_when_it_refuses()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        ReadingExport saving(m_server);
+        const QString target = dir.filePath(saving.name());
+
+        m_pretend->answers(200, asJson({{u"exportedAt"_s, 1}, {u"series"_s, QJsonArray()}}));
+        saving.save(QUrl::fromLocalFile(target));
+        QVERIFY(saving.exporting());
+        QTRY_VERIFY(!saving.exporting());
+        QVERIFY(!saving.failed());
+        QCOMPARE(saving.sentence(), Words::readingExported(target));
+        QFile written(target);
+        QVERIFY(written.open(QIODevice::ReadOnly));
+        QVERIFY(written.readAll().contains("exportedAt"));
+        QVERIFY(m_pretend->heard.contains("GET /profile/export"));
+
+        const QString refused = dir.filePath(u"refused.json"_s);
+        m_pretend->answers(404, asJson({{u"error"_s, u"no"_s}}));
+        saving.save(QUrl::fromLocalFile(refused));
+        QTRY_VERIFY(saving.failed());
+        QVERIFY(!QFile::exists(refused));
+
+        // A place that cannot be written is said, not swallowed.
+        m_pretend->answers(200, asJson({{u"exportedAt"_s, 1}, {u"series"_s, QJsonArray()}}));
+        saving.save(QUrl::fromLocalFile(dir.filePath(u"absent/x.json"_s)));
+        QTRY_VERIFY(saving.failed());
+        QVERIFY(!saving.sentence().isEmpty());
     }
 
     void malformed_health_preserves_the_previous_information()

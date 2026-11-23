@@ -41,6 +41,8 @@ namespace Boot {
 /// `Notifier` takes one: a test that boots the real window boots the real notifier, and a
 /// bubble raised over the shelf then lands on the desktop of whoever ran the test. The
 /// application hands it the session bus; `crosses-the-seam` hands it one that goes nowhere.
+/// The desktop's text size is read on the same bus (`DesktopText`), so a test that boots the
+/// window lays it out at 1 and not at the text size of whoever ran it.
 ///
 /// `doorbell` and `link` are what a clicked `leaf://` link brings: the link this launch was
 /// started with, and the door a later launch will hand its own to. Both go to `Linking::arrive`

@@ -8,6 +8,13 @@
 // bar's words are not a list model — the class carried fifty-six methods, half of them
 // captions, and neither half was easy to find inside the other.
 //
+// What the search *found* stays here: the headings that count, the sentence that says what
+// a lit filter hid, the guess, and what an empty shelf says. The bar's own words, its sort and
+// the filter panel's are `BarCaptions`, split off when this class in its turn reached
+// thirty-nine methods — Sonar's `cpp:S1448`, the defect the paragraph above describes,
+// repeated one floor down. The line is the one between a word that quotes a result and a word
+// the bar wears whatever was found.
+//
 // Nothing here decides anything. `Words` holds the French and the typography; `Search` and
 // `Shelf` hold the state; this binds the two and re-announces itself when either moves, so
 // a QML binding on a caption is refreshed by the same change that refreshed the count it
@@ -17,7 +24,6 @@
 #include <QQmlEngine>
 #include <QString>
 #include <QStringList>
-#include <QVariantList>
 
 class QJSEngine;
 class QQmlEngine;
@@ -44,19 +50,15 @@ class Captions final : public QObject
     /// « Vouliez-vous dire Tsugumi Ōba ? » — a guess, phrased as one.
     Q_PROPERTY(QString suggestion READ suggestion NOTIFY changed)
 
-    /// The bar's own words, which never change.
-    Q_PROPERTY(QString placeholder READ placeholder CONSTANT)
-    Q_PROPERTY(QString shortPlaceholder READ shortPlaceholder CONSTANT)
-    Q_PROPERTY(QString clearLabel READ clearLabel CONSTANT)
-    Q_PROPERTY(QString filterLabel READ filterLabel CONSTANT)
-    Q_PROPERTY(QString settingsLabel READ settingsLabel CONSTANT)
+    /// What the shelf says when it holds nothing: that the library is empty, or that the
+    /// filters lit emptied it — two different things to do about it.
+    Q_PROPERTY(QString emptyHeadline READ emptyHeadline NOTIFY changed)
+    Q_PROPERTY(QString emptySaid READ emptySaid NOTIFY changed)
+    Q_PROPERTY(QString troubleHeadline READ troubleHeadline CONSTANT)
+
     Q_PROPERTY(QString noSeriesLabel READ noSeriesLabel CONSTANT)
-    Q_PROPERTY(QString clearFiltersLabel READ clearFiltersLabel CONSTANT)
-    Q_PROPERTY(QString nothingToFilterLabel READ nothingToFilterLabel CONSTANT)
-    Q_PROPERTY(QString noValueByThatNameLabel READ noValueByThatNameLabel CONSTANT)
-    Q_PROPERTY(QString sortLabel READ sortLabel NOTIFY changed)
-    Q_PROPERTY(QVariantList sortOptions READ sortOptions CONSTANT)
-    Q_PROPERTY(QString sortValue READ sortValue NOTIFY changed)
+    /// The one sentence of a search that found nothing at all.
+    Q_PROPERTY(QString nothingFoundLabel READ nothingFoundLabel CONSTANT)
 
 public:
     explicit Captions(Search *search, Shelf *shelf, QObject *parent = nullptr);
@@ -73,22 +75,14 @@ public:
     QString outsideFilters() const;
     QString suggestion() const;
 
-    QString placeholder() const;
-    QString shortPlaceholder() const;
-    QString clearLabel() const;
-    QString filterLabel() const;
-    QString settingsLabel() const;
-    QString noSeriesLabel() const;
-    QString clearFiltersLabel() const;
-    QString nothingToFilterLabel() const;
-    QString noValueByThatNameLabel() const;
-    /// « Chercher dans auteur… » — the placeholder of one axis's own field.
-    Q_INVOKABLE QString quotedAxis(const QString &axisTitle) const;
-    Q_INVOKABLE QString searchWithin(const QString &axisTitle) const;
+    QString emptyHeadline() const;
+    QString emptySaid() const;
+    QString troubleHeadline() const;
+    /// Whether a lit filter of the shelf's, and not the library, is what left it empty.
+    bool filtered() const;
 
-    QString sortLabel() const;
-    QString sortValue() const;
-    QVariantList sortOptions() const;
+    QString noSeriesLabel() const;
+    QString nothingFoundLabel() const;
 
 signals:
     void changed();

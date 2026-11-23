@@ -26,6 +26,10 @@ class Navigation : public QObject
     Q_PROPERTY(Destination destination READ destination NOTIFY changed)
     Q_PROPERTY(QVariantMap parameters READ parameters NOTIFY changed)
     Q_PROPERTY(bool canGoBack READ canGoBack NOTIFY changed)
+    /// A series page is somewhere in the stack, showing or under another screen. The window
+    /// keeps that page alive while it is: a page one comes back to — from the settings, from
+    /// the reader — is the page one left, not one drawn again.
+    Q_PROPERTY(bool holdsSeries READ holdsSeries NOTIFY changed)
     /// « Étagère », « Série », … — `Words::destination(destination())`, kept on this
     /// singleton rather than a second one, the way `Theme` carries the two font families
     /// rather than exposing `Fonts` itself.
@@ -43,6 +47,7 @@ public:
     Destination destination() const { return m_stack.last().where; }
     QVariantMap parameters() const { return m_stack.last().with; }
     bool canGoBack() const { return m_stack.size() > 1; }
+    bool holdsSeries() const;
     QString label() const;
     QString backLabel() const;
 

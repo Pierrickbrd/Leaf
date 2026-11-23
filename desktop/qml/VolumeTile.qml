@@ -38,11 +38,24 @@ Item {
 
     signal opened()
     signal reimportAsked()
+    signal chapterAsked()
+    property int chapters: 0
 
     // Opening a file is reading it: the line and the cover both lead to the reader, at the
     // page where reading stopped. Here rather than where the tile is placed, so the list and
     // the grid cannot open one book two ways.
     onOpened: Navigation.open(Navigation.Reader, { "series": tile.seriesId, "entry": tile.entryId })
+
+    /// Picked with others, to be commanded together: see `Selection`.
+    readonly property bool picked: Selection.ids.includes(tile.entryId)
+
+    /// Opens, unless something is already picked: then it picks one more. See `SeriesTile`.
+    function activate() {
+        if (Selection.active)
+            Selection.toggle(tile.entryId, tile.seriesId)
+        else
+            tile.opened()
+    }
 
     objectName: "tile-volume-" + (entryId.length > 0 ? entryId : "missing-" + number)
     width: coverWidth
@@ -51,6 +64,7 @@ Item {
     Accessible.role: Accessible.ListItem
     Accessible.name: tile.number + " " + tile.title
     Accessible.description: tile.missing ? tile.title : tile.pages
+    Accessible.selected: tile.picked
 
     /// A stop of the page's walk — see `KeyWalk` — unless it is a hole, which opens nothing.
     readonly property bool keyStop: !tile.missing
@@ -58,7 +72,10 @@ Item {
     Keys.onPressed: event => {
         if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
                 || event.key === Qt.Key_Enter) {
-            tile.opened()
+            if (event.modifiers & (Qt.ControlModifier | Qt.ShiftModifier))
+                Selection.toggle(tile.entryId, tile.seriesId)
+            else
+                tile.activate()
             event.accepted = true
         } else if (event.key === Qt.Key_Menu
                    || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
@@ -87,8 +104,22 @@ Item {
 
     TapHandler {
         gesturePolicy: TapHandler.ReleaseWithinBounds
+        acceptedModifiers: Qt.NoModifier
         enabled: !tile.missing
-        onTapped: tile.opened()
+        onTapped: tile.activate()
+    }
+
+    PickHandler {
+        enabled: !tile.missing
+        onToggled: Selection.toggle(tile.entryId, tile.seriesId)
+    }
+
+    // The secondary button opens the same menu as the three dots, under the pointer.
+    TapHandler {
+        acceptedButtons: Qt.RightButton
+        gesturePolicy: TapHandler.ReleaseWithinBounds
+        enabled: !tile.missing
+        onTapped: point => commands.showAt(tile, point.position)
     }
 
     Item {
@@ -136,6 +167,7 @@ Item {
             Text {
                 anchors.centerIn: parent
                 width: parent.width - 16
+                textFormat: Text.PlainText
                 text: tile.title
                 color: Theme.alert
                 font.family: Theme.textFamily
@@ -151,6 +183,12 @@ Item {
         FocusRing {
             objectName: tile.objectName + "-focus"
             focused: tile.activeFocus
+        }
+
+        PickMark {
+            objectName: "picked-" + tile.entryId
+            picked: tile.picked
+            coverWidth: tile.coverWidth
         }
 
         ReadCheck {
@@ -177,7 +215,9 @@ Item {
             entryId: tile.entryId
             fileName: tile.fileName
             label: tile.title
+            chapters: tile.chapters
             onReimportAsked: tile.reimportAsked()
+            onChapterAsked: tile.chapterAsked()
         }
     }
 
@@ -189,6 +229,7 @@ Item {
         anchors.top: frame.bottom
         anchors.topMargin: 6
         height: Math.min(implicitHeight, 34)
+        textFormat: Text.PlainText
         text: tile.number + " · " + tile.title
         color: tile.missing ? Theme.inkFaint : Theme.ink
         font.family: Theme.displayFamily
@@ -207,6 +248,7 @@ Item {
         anchors.top: name.bottom
         anchors.topMargin: 2
         height: 16
+        textFormat: Text.PlainText
         text: tile.pages
         color: Theme.inkFaint
         font.family: Theme.textFamily

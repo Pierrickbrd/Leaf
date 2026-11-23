@@ -32,6 +32,19 @@ Item {
     readonly property Item button: action
 
     readonly property bool compact: Widths.band !== Widths.Band.Wide
+    /// Under 700 high, one line: at 800 × 560 the band of 120 took 145 pixels of the 502 the
+    /// shelf had, and left one row of covers cut in half (audit, 23/10/2026). A small cover,
+    /// the name and « T12 · p. 48/190 » side by side, and the round button.
+    readonly property bool oneLine: Widths.short
+    /// The paper left of the card, above it, and the gap under it: the page's gutter, the
+    /// page's top and one block, on the shelf, where the band is the first thing under the
+    /// bar and must stand where every page's first block stands — the owner compared it with
+    /// the search's tabs on 23/10/2026 and found them at 16 and 9. None of the three on the
+    /// series page, whose column has its margins already — inset twice there, the card's
+    /// edge matched neither the header above it nor the tabs below.
+    property int inset: Widths.space.gutter
+    property int above: Widths.space.top
+    property int below: Widths.space.block
     /// What the screen around the band already says went wrong. A trouble that only repeats
     /// it is not drawn: with no address configured, the shelf's card and this band carried
     /// the same sentence one above the other in the test of 22/10/2026.
@@ -42,10 +55,10 @@ Item {
 
     objectName: "resume-band"
     visible: showing
-    // The same 16 px the covers keep from the left edge, above the card; then the gap that
-    // separates it from the first row. A band that keeps its height while invisible would
-    // leave that hole above a grid with nothing in it.
-    height: showing ? Widths.shelfMargin + card.height + Widths.shelfGap : 0
+    // The page's top above the card; then the gap that separates it from what follows. A
+    // band that keeps its height while invisible would leave that hole above a grid with
+    // nothing in it.
+    height: showing ? band.above + card.height + band.below : 0
 
     /// Asks for its model on creation, which is right for the one band that is built once
     /// and wrong for the one the Loader rebuilds. `Main.qml` says it of the page already —
@@ -63,15 +76,23 @@ Item {
         id: card
 
         objectName: "resume-card"
-        x: Widths.shelfMargin
-        y: Widths.shelfMargin
-        width: Math.max(0, band.width - 2 * Widths.shelfMargin)
-        // The cover sets the height, and the padding is the artifact's 0.8rem at this scale.
-        height: cover.height + 2 * padding
+        x: band.inset
+        y: band.above
+        // The page's whole width inside its gutters, as the grid under it. Bounded to
+        // column(760) on 23/10/2026 so that the button stood nearer the name, it read at 1920
+        // as a card that had lost half its width and stopped short of the edge the covers
+        // keep on the right (owner, 25/10/2026).
+        width: Math.max(0, band.width - 2 * band.inset)
+        // The tallest of what it holds, and not the cover alone: words that follow the
+        // desktop's text size can outgrow a cover of 93, and a card held to it cut them.
+        height: (band.sourceModel.available
+                 ? Math.max(cover.height, said.implicitHeight, action.height)
+                 : Math.max(cover.height, troubleText.implicitHeight)) + 2 * padding
         radius: Theme.cardRadius
         color: Theme.surface
 
-        readonly property int padding: 14
+        // The artifact's 0.8rem at this scale.
+        readonly property int padding: Widths.scale.size(band.oneLine ? 7 : 14)
 
         // The same measured card elevation the covers carry, from the same nine-slice: its
         // middle is the part that stretches, so one texture serves a 2:3 cover and a band.
@@ -95,8 +116,8 @@ Item {
             // Two and a half times the name written beside it, which is the proportion the
             // design draws. At four times it was a poster with a caption, and the band is a
             // line about where one stopped — not a second header.
-            width: 62
-            height: 93
+            width: Widths.scale.size(band.oneLine ? 28 : 62)
+            height: Math.round(width * 1.5)
             visible: band.sourceModel.available
 
             CoverShadow {
@@ -123,27 +144,53 @@ Item {
 
             objectName: "resume-said"
             anchors.left: cover.right
-            anchors.leftMargin: 14
+            anchors.leftMargin: Widths.scale.room(14)
             anchors.right: action.left
-            anchors.rightMargin: 14
+            anchors.rightMargin: Widths.scale.room(14)
             anchors.verticalCenter: parent.verticalCenter
-            spacing: 4
+            spacing: Widths.scale.room(4)
             visible: band.sourceModel.available
 
-            Text {
-                id: seriesName
-
-                objectName: "resume-name"
+            // The name, and on a short window where one is beside it on the same line.
+            Item {
                 width: parent.width
-                text: band.sourceModel.seriesName
-                // The series' name and the chapter's are the files' words: a title such as
-                // « <b>x</b> » is shown as written, never drawn as markup.
-                textFormat: Text.PlainText
-                color: Theme.ink
-                font.family: Theme.displayFamily
-                font.pixelSize: 22
-                font.weight: Font.Bold
-                elide: Text.ElideRight
+                height: seriesName.implicitHeight
+
+                Text {
+                    id: seriesName
+
+                    objectName: "resume-name"
+                    width: band.oneLine
+                           ? Math.max(0, Math.min(implicitWidth, parent.width
+                                                  - besideName.implicitWidth
+                                                  - Widths.scale.room(10)))
+                           : parent.width
+                    text: band.sourceModel.seriesName
+                    // The series' name and the chapter's are the files' words: a title such as
+                    // « <b>x</b> » is shown as written, never drawn as markup.
+                    textFormat: Text.PlainText
+                    color: Theme.ink
+                    font.family: Theme.displayFamily
+                    font.pixelSize: Widths.scale.title(band.oneLine ? 18 : 22)
+                    font.weight: Font.Bold
+                    elide: Text.ElideRight
+                }
+
+                Text {
+                    id: besideName
+
+                    objectName: "resume-where-beside"
+                    x: seriesName.width + Widths.scale.room(10)
+                    width: Math.max(0, parent.width - x)
+                    anchors.baseline: seriesName.baseline
+                    text: band.sourceModel.whereShort
+                    textFormat: Text.PlainText
+                    color: Theme.inkSoft
+                    font.family: Theme.textFamily
+                    font.pixelSize: Widths.scale.body(15)
+                    elide: Text.ElideRight
+                    visible: band.oneLine
+                }
             }
 
             Text {
@@ -153,16 +200,17 @@ Item {
                 textFormat: Text.PlainText
                 color: Theme.inkSoft
                 font.family: Theme.textFamily
-                font.pixelSize: 15
+                font.pixelSize: Widths.scale.body(15)
                 elide: Text.ElideRight
+                visible: !band.oneLine
             }
 
             // The track hangs a little further below the line than the lines do from each
             // other, so the three do not read as one paragraph.
             Item {
                 width: 1
-                height: 6
-                visible: band.sourceModel.hasProgress
+                height: Widths.scale.room(6)
+                visible: track.visible
             }
 
             Rectangle {
@@ -170,13 +218,14 @@ Item {
 
                 objectName: "resume-progress"
                 // The artifact's 11 rem, and 7 at half a screen, against a 2.9 rem cover.
-                width: Math.min(band.compact ? 150 : 240, Math.max(0, said.width))
-                height: 4
+                width: Math.min(Widths.scale.size(band.compact ? 150 : 240),
+                                Math.max(0, said.width))
+                height: Widths.scale.size(4)
                 radius: height / 2
                 color: Theme.onBar
                 // Nothing started is not a bar at zero: `reason` is NEXT_UP and there is no
-                // progress to draw at all.
-                visible: band.sourceModel.hasProgress
+                // progress to draw at all. Nor on one line, where « p. 48/190 » says it.
+                visible: band.sourceModel.hasProgress && !band.oneLine
 
                 Rectangle {
                     objectName: "resume-progress-fill"
@@ -196,7 +245,10 @@ Item {
             anchors.rightMargin: card.padding
             anchors.verticalCenter: parent.verticalCenter
             label: band.sourceModel.action
-            compact: band.compact
+            compact: band.compact || band.oneLine
+            // Its word follows the window as the band's do; at its drawn 14 it stood beside a
+            // name that had shrunk to 19.
+            scaled: true
             visible: band.sourceModel.available
             // Out of Qt's own Tab traversal, because that traversal cannot express the order
             // this screen reads in — bar, band, chips, covers — and it consumes the key at
@@ -218,8 +270,10 @@ Item {
                 id: arrow
 
                 objectName: "resume-arrow"
-                width: 10
-                height: 12
+                width: Widths.scale.icon(10)
+                height: Widths.scale.icon(12)
+                onWidthChanged: requestPaint()
+                onHeightChanged: requestPaint()
 
                 onPaint: {
                     const ink = getContext("2d")
@@ -247,13 +301,16 @@ Item {
         // shelf has a trouble box of its own; a band that failed silently would be read as a
         // library with nothing started in it.
         Text {
+            id: troubleText
+
             objectName: "resume-trouble"
             anchors.fill: parent
             anchors.margins: card.padding
+            textFormat: Text.PlainText
             text: band.sourceModel.trouble
             color: Theme.inkSoft
             font.family: Theme.textFamily
-            font.pixelSize: 15
+            font.pixelSize: Widths.scale.body(15)
             wrapMode: Text.Wrap
             verticalAlignment: Text.AlignVCenter
             visible: !band.sourceModel.available && band.troubled

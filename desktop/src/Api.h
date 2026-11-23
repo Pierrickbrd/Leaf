@@ -27,7 +27,25 @@ namespace Api {
 
 enum class Medium { Manga, Bd, Comics, Manhwa, Manhua, Webtoon, Artbook, Other };
 enum class ReadingDirection { LeftToRight, RightToLeft, Vertical };
-enum class Run { Ongoing, Completed };
+enum class Run { Ongoing, Completed, Hiatus, Cancelled };
+
+/// The contract's word for a run, and the other way round: the client spelled the two it knew
+/// with a ternary at five places, and a third word would have been read as the second.
+inline QString spell(Run run)
+{
+    using enum Run;
+    switch (run) {
+    case Ongoing:
+        return QStringLiteral("ongoing");
+    case Completed:
+        return QStringLiteral("completed");
+    case Hiatus:
+        return QStringLiteral("hiatus");
+    case Cancelled:
+        break;
+    }
+    return QStringLiteral("cancelled");
+}
 enum class ReadStatus { Unread, InProgress, Read };
 /// The four the bar offers, in the order it offers them. `Name` is the contract's default and
 /// the fallback it applies to a word it does not know, so it is first here too.
@@ -125,7 +143,14 @@ struct Series {
     /// The prose about the work, shown as it stands — the one thing a description tab is
     /// opened for.
     std::optional<QString> summary;
+    /// The edition's own words, when it has some: the part of `summary` that is not the work's.
+    std::optional<QString> ownSummary;
+    /// Everybody the volumes are credited with, once each.
     Credits credits;
+    /// What `work.json` declares, and only that: who a volume that names nobody is credited
+    /// with. What « Modifier la série » starts from — starting from `credits` froze every
+    /// writer who ever took over into the default. `author` is never set here.
+    Credits declared;
     Publication publication;
     std::optional<Medium> medium;
     std::optional<ReadingDirection> readingDirection;
@@ -133,6 +158,9 @@ struct Series {
     /// défaut », not a direction: a screen shows which of the two is in force, and folding
     /// them into one field would hide that a choice exists to be undone.
     std::optional<ReadingDirection> readingDirectionChosen;
+    /// An image was chosen as this series' cover from the reader's disk; false for a `cover.jpg`
+    /// somebody placed in the folder, which is not ours to take back.
+    bool coverImage = false;
     std::optional<Run> run;
     QList<QString> genres;
     /// Beside `genres`, never folded into them.
@@ -141,6 +169,8 @@ struct Series {
     std::optional<QString> ageRating;
     /// Positive form, never `blackAndWhite`.
     std::optional<bool> colour;
+    /// The `number` of the volume chosen as the series' cover; absent when none was.
+    std::optional<double> coverVolume;
 
     Holding holding;
 };
@@ -151,6 +181,32 @@ struct Page {
     int total = 0;
     int page = 0;
     int size = 0;
+};
+
+/// One folder of the chain an export recreates, outermost first. The sidecar is the file that
+/// says what the folder *is*; both are absent when the disk has none, and the export says so
+/// rather than writing one from the index.
+struct ExportedFolder {
+    QString path;
+    QString level;
+    std::optional<QString> sidecar;
+    std::optional<QString> content;
+};
+
+/// One file an export carries. `entryId` names the volume it belongs to and is absent for the
+/// images of the series itself.
+struct ExportedFile {
+    QString path;
+    QString kind;
+    std::optional<QString> entryId;
+    qint64 size = 0;
+};
+
+/// What a series keeps on its disk: the folders it sits in and the files in them, in the order
+/// `/series/{id}/files/{index}` counts them.
+struct Tree {
+    QList<ExportedFolder> folders;
+    QList<ExportedFile> files;
 };
 
 /// How far through a series, as the fraction a tile draws. Nought when nothing is counted,
@@ -184,6 +240,10 @@ struct Health {
     /// nothing is said, by an older server or to a key it did not know: nothing said is
     /// nothing taken off the screen.
     bool relay = true;
+    /// The release that answers, said only to a key the server recognises. Empty when it is
+    /// not said — an older server, or a key it did not know — and the screen then shows no
+    /// line, rather than a version it made up.
+    QString version;
 };
 
 /// Where the scan is, and what the last one found.
@@ -252,6 +312,10 @@ struct Facets {
     QList<Facet> statuses;
     QList<Facet> languages;
     QList<Facet> publishers;
+    /// What an editing window suggests from; never a filter.
+    QList<Facet> tags;
+    QList<Facet> artists;
+    QList<Facet> collections;
 };
 
 /// Where the reader stands in one file.
@@ -287,6 +351,9 @@ struct Entry {
     int chapterCount = 0;
     /// The file name alone, never a path. What a deletion names, and all the client is told.
     QString file;
+    /// The name a copy is offered under, worked out by the server from where the file sits;
+    /// empty from a server that does not say, which leaves the file's own name.
+    QString downloadName;
     qint64 size = 0;
     std::optional<double> sortKey;
     /// What the side panel of a volume shows. Absent, never empty: most files carry none.
@@ -294,6 +361,21 @@ struct Entry {
     /// The contract's date as it came (« 2011-03-04 »), left to the screen to word.
     std::optional<QString> publishedOn;
     std::optional<QString> summary;
+    /// When it arrived, in milliseconds. Absent for a file recorded before the column existed.
+    std::optional<qint64> addedAt;
+    /// The page the volume's own file names as its cover, counted from 0 like the pages. Absent
+    /// when none was chosen: the cover is then a file beside the archive, or page 0.
+    std::optional<int> coverPage;
+    /// An image was chosen for the cover from the reader's own disk, which is what « Revenir par
+    /// défaut » can take back. False for an image placed beside the archive by hand.
+    bool coverImage = false;
+    /// Who wrote and who drew this volume: its own word, else its series' default. `author` is
+    /// never set here.
+    Credits credits;
+    /// Field by field, whether `credits` came from the series: what is shown as the series'
+    /// word, and what emptying the volume's own list returns it to.
+    bool authorsInherited = false;
+    bool artistsInherited = false;
 };
 
 /// One page of a book, as the reader needs to lay it out. Not `Page`, which is a page of the
@@ -598,6 +680,9 @@ struct Relocation {
     QString from;
     /// Where under the root it would go, the same way a `Creation` says it.
     QString at;
+    /// IDENTITY or TITLE: how the folder was known to be this work. A title two series can
+    /// share, so a move matched by it is one a reader confirms.
+    QString matched;
 };
 
 /// One file that would land on another, and what the library already holds there.
@@ -625,6 +710,143 @@ struct Declaration {
     /// What the library's own declaration calls itself. Empty when it names itself nothing.
     QString presentName;
     QList<QString> differs;
+    /// What the library's own declaration holds under each field of `differs`, as it stands
+    /// in the sidecar. A field it does not carry is not here: « non renseigné » and an empty
+    /// value are two facts.
+    QJsonObject present;
+};
+
+/// One step of the way down from a universe to what a reimport is aimed at.
+struct TrailStep {
+    QString kind;
+    QString id;
+    QString name;
+    /// What the level holds: works, editions, volumes or pages.
+    int count = 0;
+};
+
+/// The target as the server names it, with the way down to it.
+struct TargetPlace {
+    QString kind;
+    QString id;
+    QString name;
+    QList<TrailStep> trail;
+};
+
+/// A volume the library holds, shown beside the file that would take its place.
+struct HeldVolume {
+    QString entryId;
+    std::optional<double> number;
+    QString title;
+    QString file;
+    qint64 size = 0;
+    int pages = 0;
+    QList<double> chapters;
+    /// The asking profile's place in it.
+    std::optional<int> page;
+    bool finished = false;
+    /// How many other profiles have a place in it.
+    int others = 0;
+};
+
+/// What a file says of itself, for the comparison. Absent is unsaid.
+struct Arriving {
+    std::optional<int> pages;
+    std::optional<QString> title;
+    QList<double> chapters;
+};
+
+/// What a file does to the library. An unfamiliar word is `Other` and the item stands: the
+/// server may learn a word before the client does.
+enum class Outcome { Same, Replace, Update, Add, OtherNumber, OtherSeries, Unnumbered, Twice, Other };
+
+/// What one file of a reimport becomes.
+struct VolumeMatch {
+    QString path;
+    /// Where it is installed, relative to the edition's folder; empty where it lands nowhere.
+    QString lands;
+    Outcome outcome = Outcome::Other;
+    std::optional<double> number;
+    QString entryId;
+    /// The volume aimed at, when this file is another.
+    QString wanted;
+    std::optional<HeldVolume> present;
+    Arriving arriving;
+    /// What the file declares otherwise than `present`: pages, title, chapters.
+    QList<QString> differs;
+};
+
+/// A series of the universe aimed at that the drop does not bring. It stays.
+struct AbsentSeries {
+    QString workId;
+    QString seriesId;
+    QString name;
+    int volumes = 0;
+};
+
+/// A series the drop would create that is named like one the library holds.
+struct Resemblance {
+    /// Which folder of the drop; empty for the folder announced.
+    QString at;
+    QString seriesId;
+    QString name;
+    QString from;
+};
+
+/// What replacing a chapter does to one chapter of its volume. Pages count from 0.
+struct ChapterSplice {
+    QString id;
+    std::optional<double> number;
+    std::optional<QString> title;
+    int from = 0;
+    int to = 0;
+    int becomesFrom = 0;
+    int becomesTo = 0;
+    /// KEEP, REPLACE or SHIFT.
+    QString outcome;
+};
+
+/// What replacing a chapter does to its volume, said before a byte moves.
+struct SpliceOutcome {
+    int pagesBefore = 0;
+    int pagesAfter = 0;
+    QList<ChapterSplice> chapters;
+    std::optional<int> page;
+    std::optional<int> pageBecomes;
+};
+
+/// Where one announced file will be filed, and under what name.
+struct Landing {
+    QString path;
+    /// « Série › Édition », readable.
+    QString folder;
+    QString file;
+    QString wasCalled;
+};
+
+/// Two announced files that would be filed under one name: neither is.
+struct NamesMeet {
+    QString path;
+    QString with;
+};
+
+/// Volumes already held that the import moves into another edition.
+struct Reshelved {
+    QString edition;
+    int count = 0;
+};
+
+/// An edition the drop adds that needs a name; `@current` is the one the series holds.
+struct NeedsAName {
+    QString path;
+    bool current = false;
+};
+
+/// A name that cannot stand: EMPTY, or DUPLICATE of `with`.
+struct NameProblem {
+    QString path;
+    QString kind;
+    QString with;
 };
 
 struct Opened {
@@ -647,6 +869,23 @@ struct Opened {
     QList<QString> toSend;
     QList<QString> alreadyThere;
     qint64 bytesToSend = 0;
+    /// Absent without a target.
+    std::optional<TargetPlace> target;
+    /// What each archive is to the volumes of its edition, by the path it was announced under.
+    QList<VolumeMatch> volumes;
+    /// What the target holds and the drop does not bring. It stays.
+    QList<HeldVolume> absent;
+    QList<AbsentSeries> absentSeries;
+    QList<Resemblance> resembles;
+    /// Per file filed, where and under what name. Empty from a server that does not say.
+    QList<Landing> landsAs;
+    QList<NamesMeet> collisions;
+    QList<Reshelved> reshelved;
+    /// With a SERIES_NEW_EDITIONS target. Empty from a server that does not say.
+    QList<NeedsAName> editionsNeedingAName;
+    QList<NameProblem> problems;
+    /// Only with a CHAPTER target.
+    std::optional<SpliceOutcome> splice;
 };
 
 /// How much of one file the server now holds.
@@ -682,6 +921,16 @@ struct Session {
     QList<QString> missing;
 };
 
+/// An old file set aside by a replacement, and where it waits.
+struct ReplacedFile {
+    /// The path the announcement gave the file that replaced it.
+    QString path;
+    /// Absent for a file that is no volume.
+    QString entryId;
+    /// Relative to the inbox.
+    QString keptAt;
+};
+
 /// What a commit installed, and what it could not.
 struct Installed {
     QString root;
@@ -700,6 +949,8 @@ struct Installed {
     /// The works this commit filed under the folder it installed, by identity. Only the
     /// ones that were asked for.
     QList<QString> moved;
+    /// What this commit installed over a volume the library held. Nothing is destroyed.
+    QList<ReplacedFile> replaced;
 };
 
 /// A device, as the server keeps it: what it is called, in the case it was given.
@@ -825,6 +1076,9 @@ Read<Arc> arc(const QJsonObject &from);
 Read<ReadingStep> readingStep(const QJsonObject &from);
 Read<ReadingOrder> readingOrder(const QJsonObject &from);
 Read<Universe> universe(const QJsonObject &from);
+Read<ExportedFolder> exportedFolder(const QJsonObject &from);
+Read<ExportedFile> exportedFile(const QJsonObject &from);
+Read<Tree> tree(const QJsonObject &from);
 Read<Erased> erased(const QJsonObject &from);
 Read<Hit> hit(const QJsonObject &from);
 /// Both shapes, because both cross the wire: the envelope when a page was asked for, the bare

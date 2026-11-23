@@ -111,6 +111,7 @@ Rectangle {
         anchors.right: parent.right
         anchors.rightMargin: 13
         anchors.verticalCenter: parent.verticalCenter
+        textFormat: Text.PlainText
         text: "›"
         color: Theme.inkFaint
         font.family: Theme.textFamily

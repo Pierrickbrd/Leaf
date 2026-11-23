@@ -8,122 +8,18 @@
 
 #include "Cbz.h"
 #include "Words.h"
+#include "Zip.h"
 
-#include <QBuffer>
 #include <QByteArray>
 #include <QTemporaryDir>
-#include <QtEndian>
 #include <QTest>
-
-#include <zlib.h>
 
 using namespace Qt::StringLiterals;
 
 namespace {
 
-void appendTwo(QByteArray &to, quint16 value)
-{
-    char bytes[2];
-    qToLittleEndian(value, bytes);
-    to.append(bytes, 2);
-}
-
-void appendFour(QByteArray &to, quint32 value)
-{
-    char bytes[4];
-    qToLittleEndian(value, bytes);
-    to.append(bytes, 4);
-}
-
-QByteArray deflated(const QByteArray &whole)
-{
-    QByteArray out(compressBound(uLong(whole.size())) + 64, Qt::Uninitialized);
-    z_stream stream {};
-    deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -MAX_WBITS, 8,
-                 Z_DEFAULT_STRATEGY);
-    stream.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(whole.constData()));
-    stream.avail_in = uInt(whole.size());
-    stream.next_out = reinterpret_cast<Bytef *>(out.data());
-    stream.avail_out = uInt(out.size());
-    deflate(&stream, Z_FINISH);
-    out.resize(qsizetype(stream.total_out));
-    deflateEnd(&stream);
-    return out;
-}
-
-/// One member of the archive under construction.
-struct Member {
-    QByteArray name;
-    QByteArray content;
-    bool packed = true;
-    /// The local header's extra field. Deliberately its own: real archives put alignment
-    /// padding here and nowhere else, and a reader that takes the catalogue's length
-    /// instead lands in the middle of the data.
-    QByteArray localExtra;
-};
-
-/// A zip, written out by hand. Everything the reader relies on is a decision made here.
-QByteArray anArchive(const QList<Member> &members, const QByteArray &comment = {})
-{
-    QByteArray file;
-    QList<quint32> offsets;
-    QList<QByteArray> stored;
-
-    for (const Member &member : members) {
-        offsets << quint32(file.size());
-        const QByteArray body = member.packed ? deflated(member.content) : member.content;
-        stored << body;
-
-        appendFour(file, 0x04034b50);
-        appendTwo(file, 20);
-        appendTwo(file, 0);
-        appendTwo(file, member.packed ? 8 : 0);
-        appendTwo(file, 0);
-        appendTwo(file, 0);
-        appendFour(file, 0);
-        appendFour(file, quint32(body.size()));
-        appendFour(file, quint32(member.content.size()));
-        appendTwo(file, quint16(member.name.size()));
-        appendTwo(file, quint16(member.localExtra.size()));
-        file.append(member.name);
-        file.append(member.localExtra);
-        file.append(body);
-    }
-
-    const quint32 catalogueAt = quint32(file.size());
-    for (int i = 0; i < members.size(); ++i) {
-        appendFour(file, 0x02014b50);
-        appendTwo(file, 20);
-        appendTwo(file, 20);
-        appendTwo(file, 0);
-        appendTwo(file, members.at(i).packed ? 8 : 0);
-        appendTwo(file, 0);
-        appendTwo(file, 0);
-        appendFour(file, 0);
-        appendFour(file, quint32(stored.at(i).size()));
-        appendFour(file, quint32(members.at(i).content.size()));
-        appendTwo(file, quint16(members.at(i).name.size()));
-        appendTwo(file, 0);
-        appendTwo(file, 0);
-        appendTwo(file, 0);
-        appendTwo(file, 0);
-        appendFour(file, 0);
-        appendFour(file, offsets.at(i));
-        file.append(members.at(i).name);
-    }
-    const quint32 catalogueSize = quint32(file.size()) - catalogueAt;
-
-    appendFour(file, 0x06054b50);
-    appendTwo(file, 0);
-    appendTwo(file, 0);
-    appendTwo(file, quint16(members.size()));
-    appendTwo(file, quint16(members.size()));
-    appendFour(file, catalogueSize);
-    appendFour(file, catalogueAt);
-    appendTwo(file, quint16(comment.size()));
-    file.append(comment);
-    return file;
-}
+using Zip::anArchive;
+using Zip::Member;
 
 /// The four bytes that open a catalogue entry.
 const QByteArray CentralHeader("PK\x01\x02", 4);
@@ -143,6 +39,21 @@ QByteArray sayingMethod(QByteArray file, const QByteArray &name, quint16 method)
             continue;
         file[at + 10] = char(method & 0xFF);
         file[at + 11] = char((method >> 8) & 0xFF);
+        break;
+    }
+    return file;
+}
+
+/// The same archive, with one catalogue entry claiming `bytes` of compressed data — a figure
+/// the file's writer chooses, and not one the file has to hold.
+QByteArray sayingPackedSize(QByteArray file, const QByteArray &name, quint32 bytes)
+{
+    for (qsizetype at = 0; (at = file.indexOf(CentralHeader, at)) >= 0; at += 4) {
+        const int nameLength = quint8(file.at(at + 28)) | (quint8(file.at(at + 29)) << 8);
+        if (file.mid(at + 46, nameLength) != name)
+            continue;
+        for (int i = 0; i < 4; ++i)
+            file[at + 20 + i] = char((bytes >> (8 * i)) & 0xFF);
         break;
     }
     return file;
@@ -355,6 +266,18 @@ private slots:
         QCOMPARE(found.trouble, Words::sidecarTooBig());
     }
 
+    /// The compressed size is as free to lie as the whole one: a sidecar whose few bytes are
+    /// said to be four gigabytes is refused as too big, as one that says so of its whole size,
+    /// and not asked of the disk.
+    void a_sidecar_said_to_be_packed_past_any_sidecar_is_never_read()
+    {
+        const Cbz::Found found = Cbz::sidecarOf(wrote(sayingPackedSize(
+            anArchive({{"entry.json", Sidecar, true, {}}}), "entry.json", 0x7FFFFFFF)));
+
+        QVERIFY(found.sidecar.isEmpty());
+        QCOMPARE(found.trouble, Words::sidecarTooBig());
+    }
+
     /// A method this client does not know is named rather than guessed at.
     ///
     /// Stored and deflated are the two a comic archive is ever written with; the format
@@ -383,6 +306,141 @@ private slots:
 
         QVERIFY(found.sidecar.isEmpty());
         QCOMPARE(found.trouble, Words::sidecarCouldNotBeInflated());
+    }
+
+    /// A reimport compares page counts, and a second stream per archive was 115 000 seeks
+    /// over 57 686 pages: the images are counted in the pass that finds the sidecars, and
+    /// only those — a folder entry, an `entry.json` and a stray `.txt` are no page.
+    void the_pages_are_counted_in_the_pass_that_reads_the_members()
+    {
+        const QString path = wrote(anArchive({
+            {"entry.json", Sidecar, true, {}},
+            {"scans/", {}, false, {}},
+            {"scans/001.JPG", aPage(), false, {}},
+            {"scans/002.webp", aPage(), false, {}},
+            {"003.png", aPage(), false, {}},
+            {"004.jpeg", aPage(), false, {}},
+            {"005.gif", aPage(), false, {}},
+            {"006.avif", aPage(), false, {}},
+            {"notes.txt", "x", true, {}},
+            {"ComicInfo.xml", "<ComicInfo/>", true, {}},
+        }));
+
+        QCOMPARE(Cbz::membersOf(path).pages, 6);
+        QCOMPARE(Cbz::membersOf(wrote(anArchive({{"entry.json", Sidecar, true, {}}}))).pages, 0);
+        QCOMPARE(Cbz::membersOf(m_folder.filePath(u"absent.cbz"_s)).pages, -1);
+    }
+
+    /// The importer wants both members of a volume, and an archive's catalogue costs one
+    /// open and one read: asking twice would double both over every file of a folder.
+    void both_members_are_found_in_one_reading()
+    {
+        const QString path = wrote(anArchive({
+            {"001.jpg", aPage(), false, {}},
+            {"entry.json", Sidecar, true, {}},
+            {"scans/ComicInfo.XML", "<ComicInfo><Number>7</Number></ComicInfo>", true, {}},
+        }));
+
+        const Cbz::Members members = Cbz::membersOf(path);
+        QVERIFY(members.entry.opened());
+        QVERIFY(members.comicInfo.opened());
+        QCOMPARE(members.entry.sidecar, Sidecar);
+        QCOMPARE(members.comicInfo.sidecar,
+                 QByteArray("<ComicInfo><Number>7</Number></ComicInfo>"));
+    }
+
+    /// A member too large is that member's trouble: the other is a perfectly good sidecar
+    /// and refusing it too would throw away what the proposal could have rested on.
+    void a_comic_info_too_large_troubles_only_itself()
+    {
+        const Cbz::Members members = Cbz::membersOf(wrote(anArchive({
+            {"entry.json", Sidecar, true, {}},
+            {"ComicInfo.xml", QByteArray(Cbz::MostSidecarBytes + 1, 'x'), true, {}},
+        })));
+
+        QCOMPARE(members.comicInfo.trouble, Words::sidecarTooBig());
+        QVERIFY(members.comicInfo.sidecar.isEmpty());
+        QVERIFY(members.entry.opened());
+        QCOMPARE(members.entry.sidecar, Sidecar);
+    }
+
+    /// An archive that will not open has not opened for either member, and the screen says
+    /// so once for each, in the same words.
+    void an_archive_that_will_not_open_says_so_for_both()
+    {
+        const Cbz::Members members = Cbz::membersOf(wrote("Ceci n’est pas un zip"));
+
+        QCOMPARE(members.entry.trouble, Words::notAnArchive());
+        QCOMPARE(members.comicInfo.trouble, Words::notAnArchive());
+    }
+
+    /// The server takes the first row the catalogue lists; a second reading that took the
+    /// last would propose a different place than the server then files the volume in.
+    void the_first_comic_info_listed_wins_as_the_server_reads_it()
+    {
+        const Cbz::Members members = Cbz::membersOf(wrote(anArchive({
+            {"a/ComicInfo.xml", "<first/>", true, {}},
+            {"b/comicinfo.XML", "<second/>", true, {}},
+        })));
+
+        QCOMPARE(members.comicInfo.sidecar, QByteArray("<first/>"));
+        QVERIFY(members.entry.opened());
+        QVERIFY(members.entry.sidecar.isEmpty());
+    }
+
+    /// An archive declared a book by its own `oneshot.json` read as an ordinary volume,
+    /// because only two members were ever looked for: the third has to come out of the
+    /// same single reading as the other two, not out of a second open of the catalogue.
+    void a_one_shot_declaration_is_read_with_the_other_two_in_one_pass()
+    {
+        const QByteArray oneShot = R"({"leaf":1,"title":"Le Livre"})";
+        const Cbz::Members members = Cbz::membersOf(wrote(anArchive({
+            {"001.jpg", aPage(), false, {}},
+            {"entry.json", Sidecar, true, {}},
+            {"scans/OneShot.JSON", oneShot, true, {}},
+            {"ComicInfo.xml", "<ComicInfo/>", true, {}},
+        })));
+
+        QVERIFY(members.oneShot.opened());
+        QCOMPARE(members.oneShot.sidecar, oneShot);
+        QCOMPARE(members.entry.sidecar, Sidecar);
+        QCOMPARE(members.comicInfo.sidecar, QByteArray("<ComicInfo/>"));
+    }
+
+    /// A one-shot declaration past the ceiling is that member's trouble: the entry beside it
+    /// is a good sidecar and must not be thrown away with it.
+    void a_one_shot_too_large_troubles_only_itself()
+    {
+        const Cbz::Members members = Cbz::membersOf(wrote(anArchive({
+            {"entry.json", Sidecar, true, {}},
+            {"oneshot.json", QByteArray(Cbz::MostSidecarBytes + 1, 'x'), true, {}},
+        })));
+
+        QCOMPARE(members.oneShot.trouble, Words::sidecarTooBig());
+        QVERIFY(members.oneShot.sidecar.isEmpty());
+        QVERIFY(members.entry.opened());
+        QCOMPARE(members.entry.sidecar, Sidecar);
+    }
+
+    /// An archive that will not open has not opened for any of the three, and the screen
+    /// says so once for each, in the same words.
+    void an_archive_that_will_not_open_says_so_for_all_three()
+    {
+        const Cbz::Members members = Cbz::membersOf(wrote("Ceci n’est pas un zip"));
+
+        QCOMPARE(members.entry.trouble, Words::notAnArchive());
+        QCOMPARE(members.comicInfo.trouble, Words::notAnArchive());
+        QCOMPARE(members.oneShot.trouble, Words::notAnArchive());
+    }
+
+    /// The helper the next tests build their volumes with is itself read back whole.
+    void a_volume_built_for_the_tests_gives_back_what_it_was_given()
+    {
+        const Cbz::Members members =
+            Cbz::membersOf(wrote(Zip::volume(Sidecar, "<ComicInfo/>")));
+
+        QCOMPARE(members.entry.sidecar, Sidecar);
+        QCOMPARE(members.comicInfo.sidecar, QByteArray("<ComicInfo/>"));
     }
 };
 

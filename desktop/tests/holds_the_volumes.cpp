@@ -7,6 +7,7 @@
 #include "Pretend.h"
 #include "Server.h"
 #include "Settings.h"
+#include "Words.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -150,6 +151,44 @@ private slots:
         QVERIFY(m_pretend->heard.isEmpty());
     }
 
+    /// « Informations » on a file says who made it as the reader's card does, in the same
+    /// place: the people first, then the pages.
+    void the_file_information_says_the_same_lines()
+    {
+        QJsonObject one = volume(1, u"L’Ennui"_s);
+        one.insert(u"authors"_s, QJsonArray{u"Tsugumi Ōba"_s});
+        one.insert(u"artists"_s, QJsonArray{u"Takeshi Obata"_s});
+        serve(rows({one}), rows({}));
+        m_list->point(u"albums"_s);
+        settle();
+        const QVariantList lines = m_list->describe(u"v1"_s).value(u"lines"_s).toList();
+        QVERIFY(lines.size() >= 3);
+        QCOMPARE(lines.at(0).toMap().value(u"name"_s).toString(), u"Scénario"_s);
+        QCOMPARE(lines.at(0).toMap().value(u"value"_s).toString(), u"Tsugumi Ōba"_s);
+        QCOMPARE(lines.at(1).toMap().value(u"name"_s).toString(), u"Dessin"_s);
+        QCOMPARE(lines.at(2).toMap().value(u"name"_s).toString(),
+                 Words::readerFact(Words::ReaderFact::Pages));
+    }
+
+    /// The volume's window edits what the volume says of itself, and only shows what it draws
+    /// from its series: handed the names it inherits as its own, it sent them back as its own
+    /// on the first save, and the volume stopped following its series.
+    void the_volume_window_edits_its_own_credits_and_shows_its_series()
+    {
+        QJsonObject one = volume(1, u"La Mine d’or de Dick Digger"_s);
+        one.insert(u"authors"_s, QJsonArray{u"Morris"_s});
+        one.insert(u"artists"_s, QJsonArray{u"Morris"_s});
+        one.insert(u"artistsInherited"_s, true);
+        serve(rows({one}), rows({}));
+        m_list->point(u"albums"_s);
+        settle();
+        const QVariantMap editing = m_list->forEditing(u"v1"_s);
+        QCOMPARE(editing.value(u"authors"_s).toStringList(), QStringList{u"Morris"_s});
+        QVERIFY(editing.value(u"seriesAuthors"_s).toStringList().isEmpty());
+        QVERIFY(editing.value(u"artists"_s).toStringList().isEmpty());
+        QCOMPARE(editing.value(u"seriesArtists"_s).toStringList(), QStringList{u"Morris"_s});
+    }
+
     /// An entry carries no reading state at all, and the records are a second answer holding
     /// « one per entry that has been opened ». One request for thirty volumes, not thirty.
     void a_line_is_an_entry_and_the_record_beside_it()
@@ -225,6 +264,70 @@ private slots:
         QVERIFY2(m_pretend->heard.contains("/progress"), m_pretend->heard.constData());
         QVERIFY2(!m_pretend->heard.contains("/entries"), m_pretend->heard.constData());
         QVERIFY2(!m_pretend->heard.contains("/arcs"), m_pretend->heard.constData());
+    }
+
+    /// The list, the states and the arcs are three answers to one question, and the page drew
+    /// each as it came: every volume « Non lu », then the true states, then the separators —
+    /// three resets, three times every row torn down and built again, and the lines moving
+    /// under the eye. One list, once, when what it is made of is there.
+    void a_page_of_volumes_is_published_once_with_its_states_and_its_arcs()
+    {
+        serve(rows({volume(1, u"Un"_s), volume(2, u"Deux"_s), volume(3, u"Trois"_s)}),
+              rows({standing(u"v1"_s, 53, true, 1)}),
+              rows({anArc(u"a1"_s, u"Premier cycle"_s, 2, 3, u"VOLUME"_s)}));
+        QSignalSpy rebuilt(m_list, &Entries::modelAboutToBeReset);
+        m_list->point(u"albums"_s, {}, 1);
+        settle();
+
+        QCOMPARE(m_list->count(), 4);
+        QCOMPARE(at(0, "state").value<Entries::State>(), Entries::State::Read);
+        QCOMPARE(at(1, "kind").value<Entries::Kind>(), Entries::Kind::Arc);
+        QCOMPARE(rebuilt.count(), 1);
+    }
+
+    /// Asked again for the same series — a volume marked, a scan that came back — the list
+    /// has the same lines and the answer only moves what is written on them: the rows stay.
+    void the_same_page_asked_again_changes_its_rows_in_place()
+    {
+        serve(rows({volume(1, u"Un"_s), volume(2, u"Deux"_s), volume(3, u"Trois"_s)}), rows({}),
+              rows({anArc(u"a1"_s, u"Premier cycle"_s, 2, 3, u"VOLUME"_s)}));
+        m_list->point(u"albums"_s, {}, 1);
+        settle();
+        QCOMPARE(m_list->count(), 4);
+
+        QSignalSpy rebuilt(m_list, &Entries::modelAboutToBeReset);
+        QSignalSpy moved(m_list, &QAbstractItemModel::dataChanged);
+        serve(rows({volume(1, u"Un"_s), volume(2, u"Deux"_s), volume(3, u"Trois"_s)}),
+              rows({standing(u"v2"_s, 53, true, 1)}),
+              rows({anArc(u"a1"_s, u"Premier cycle"_s, 2, 3, u"VOLUME"_s)}));
+        m_list->point(u"albums"_s, {}, 1);
+        settle();
+
+        QCOMPARE(at(2, "state").value<Entries::State>(), Entries::State::Read);
+        QCOMPARE(rebuilt.count(), 0);
+        QVERIFY(!moved.isEmpty());
+    }
+
+    /// A volume deleted, a scan that found one: the header said so and the list kept the gaps
+    /// it was woven with. The page says its gaps again, and the list asks again only when
+    /// they are not the ones it holds.
+    void a_page_that_says_other_gaps_makes_the_list_ask_again_and_the_same_ones_do_not()
+    {
+        serve(rows({volume(1, u"Un"_s), volume(3, u"Trois"_s)}), rows({}));
+        m_list->point(u"albums"_s, {});
+        settle();
+        QCOMPARE(m_list->count(), 2);
+
+        m_pretend->heard.clear();
+        m_list->follow({}, 0);
+        settle();
+        QVERIFY2(!m_pretend->heard.contains("/entries"), m_pretend->heard.constData());
+
+        m_list->follow({2.0}, 0);
+        settle();
+        QVERIFY2(m_pretend->heard.contains("/entries"), m_pretend->heard.constData());
+        QCOMPARE(m_list->count(), 3);
+        QCOMPARE(at(1, "kind").value<Entries::Kind>(), Entries::Kind::Gap);
     }
 
     /// A gap has no file behind it, so it has no identifier either. Read like a volume it
@@ -396,6 +499,7 @@ private slots:
         settle();
 
         QSignalSpy rebuilt(m_list, &Entries::modelAboutToBeReset);
+        QSignalSpy dropped(m_list, &Entries::rowsAboutToBeRemoved);
         for (const QString &sofar : {u"c"_s, u"ce"_s, u"cen"_s, u"cend"_s})
             m_list->searchFor(sofar);
 
@@ -403,9 +507,12 @@ private slots:
         // not lag a key behind. Only the list waits.
         QCOMPARE(m_list->query(), u"cend"_s);
         QCOMPARE(rebuilt.count(), 0);
+        QCOMPARE(dropped.count(), 0);
 
+        // Narrowed once, and by the row that goes: the one that stays is not rebuilt.
         narrowed();
-        QCOMPARE(rebuilt.count(), 1);
+        QCOMPARE(dropped.count(), 1);
+        QCOMPARE(rebuilt.count(), 0);
         QCOMPARE(m_list->count(), 1);
         QCOMPARE(at(0, "title").toString(), u"Cendres"_s);
     }
@@ -538,6 +645,33 @@ private slots:
         // Finished is the whole of it, whatever page the record happens to hold.
         QCOMPARE(at(0, "howFarRead").toDouble(), 1.0);
         QCOMPARE(m_list->pointedAt(), u"albums"_s);
+    }
+
+    /// A chapter nobody titled is named by its place, « Chapitre 3 »: a webtoon downloaded as
+    /// `Chapitre 003.cbz` was a page of empty lines (test of 24/11/2026). A title given is
+    /// kept, and a volume with none is left as it was, its number beside it.
+    void a_chapter_with_no_title_is_named_by_its_place()
+    {
+        QJsonObject bare{{u"id"_s, u"c3"_s},
+                         {u"type"_s, u"CHAPTER"_s},
+                         {u"sortKey"_s, 3},
+                         {u"pageCount"_s, 29},
+                         {u"chapterCount"_s, 1},
+                         {u"file"_s, u"Chapitre 003.cbz"_s},
+                         {u"size"_s, 1000}};
+        QJsonObject titled = bare;
+        titled.insert(u"id"_s, u"c4"_s);
+        titled.insert(u"sortKey"_s, 4.5);
+        titled.insert(u"title"_s, u"Le réveil"_s);
+        QJsonObject untitled = volume(6, QString());
+        untitled.remove(u"title"_s);
+        serve(rows({bare, titled, untitled}), rows({}));
+        m_list->point(u"albums"_s);
+        settle();
+
+        QCOMPARE(at(0, "title").toString(), u"Chapitre 3"_s);
+        QCOMPARE(at(1, "title").toString(), u"Le réveil"_s);
+        QCOMPARE(at(2, "title").toString(), QString());
     }
 
     /// A row that is not there answers nothing rather than reaching past the list — a view

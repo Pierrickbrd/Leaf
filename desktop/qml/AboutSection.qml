@@ -78,6 +78,16 @@ Item {
                 value: Health.access
             }
 
+            // Said only to a key the server recognises: absent from an older server, and then
+            // no line, not an empty one.
+            SettingsLine {
+                objectName: "about-server-version"
+                width: parent.width
+                visible: Health.reachable && Health.version.length > 0
+                label: Profiles.words.labels.serverVersion
+                value: Health.version
+            }
+
             SettingsLine {
                 objectName: "about-api"
                 width: parent.width
@@ -145,6 +155,7 @@ Item {
                         anchors.right: row.left
                         anchors.rightMargin: 12
                         anchors.verticalCenter: parent.verticalCenter
+                        textFormat: Text.PlainText
                         text: line.modelData.what
                         color: Theme.ink
                         font.family: Theme.textFamily

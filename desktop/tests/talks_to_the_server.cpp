@@ -160,6 +160,49 @@ private slots:
         QVERIFY2(got.trouble.contains(QStringLiteral("900")), qPrintable(got.trouble));
     }
 
+    /// A server that redirects is not one of ours, and the key is on every request: followed
+    /// to another address, it would be handed to whoever the answer named. The answer is the
+    /// redirect itself, and nothing is sent anywhere else.
+    void a_redirect_is_not_followed_with_the_key()
+    {
+        Pretend elsewhere;
+        QVERIFY(elsewhere.listen(QHostAddress::LocalHost));
+        elsewhere.answers(200, "{}");
+        m_pretend->answer = "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:"
+                            + QByteArray::number(elsewhere.serverPort())
+                            + "/health\r\nContent-Length: 0\r\n\r\n";
+        const auto got = ask();
+        QVERIFY(!got.went());
+        QCOMPARE(got.status, 302);
+        QTest::qWait(100);
+        QVERIFY2(elsewhere.heard.isEmpty(), "the key went to the address the answer named");
+    }
+
+    /// A server that took the connection and never answers is a server that is not there, said
+    /// after a while — not a request pending for ever under a screen that waits for it.
+    void a_server_that_never_answers_is_given_up_on()
+    {
+        m_pretend->holdBack = [](const QByteArray &) { return true; };
+        m_server->setPatience(200);
+        const auto got = ask();
+        QVERIFY(!got.went());
+        QCOMPARE(got.status, 0);
+        QVERIFY2(got.trouble.startsWith(Words::unreachable(QString()).trimmed()),
+                 qPrintable(got.trouble));
+    }
+
+    /// The key is on every request: to an address that is not this machine, in plain http it
+    /// would cross the network in clear. Refused before anything is sent, for an address
+    /// written by hand as for one typed in the application.
+    void plain_http_to_another_machine_sends_nothing()
+    {
+        m_settings->setAddress(QStringLiteral("http://192.168.1.50:8081"));
+        const auto got = ask();
+        QVERIFY(!got.went());
+        QCOMPARE(got.status, 0);
+        QCOMPARE(got.trouble, Words::httpsElsewhere());
+    }
+
     void a_server_that_is_not_there_says_so_rather_than_nothing()
     {
         m_settings->setAddress(QStringLiteral("http://127.0.0.1:9"));

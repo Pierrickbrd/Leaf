@@ -705,6 +705,22 @@ private slots:
         QCOMPARE(m_profiles->readingPreferences().value(u"pages"_s).toInt(), 2);
     }
 
+    /// `readingHeard` is what the client applies preferences on, so it comes once per answer.
+    void the_reading_preferences_are_heard_once_when_the_server_answers()
+    {
+        serving(seating({principal(), reader()}, u"default"_s));
+        asked();
+        m_pretend->answerFor = [](const QByteArray &request) {
+            if (request.startsWith("GET /profile/reading "))
+                return reply(200, R"({"fit":"width"})");
+            return QByteArray();
+        };
+        QSignalSpy heard(m_profiles, &Profiles::readingHeard);
+        m_profiles->reading();
+        settle([&] { return !heard.isEmpty(); });
+        QCOMPARE(heard.size(), 1);
+    }
+
     void removing_a_profile_asks_again()
     {
         serving(seating({principal(), reader()}, u"default"_s));

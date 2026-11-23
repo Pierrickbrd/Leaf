@@ -47,7 +47,9 @@ Item {
     Keys.onPressed: event => {
         if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
                 || event.key === Qt.Key_Enter) {
-            lever.toggled(!lever.on)
+            // Once per press: held down, the switch flickered.
+            if (!event.isAutoRepeat)
+                lever.toggled(!lever.on)
             event.accepted = true
         }
     }

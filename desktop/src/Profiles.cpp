@@ -217,7 +217,8 @@ QVariantMap Profiles::words() const
                              {u"state"_s, Words::aboutFact(AboutFact::State)},
                              {u"access"_s, Words::aboutFact(AboutFact::Access)},
                              {u"api"_s, Words::aboutFact(AboutFact::Api)},
-                             {u"format"_s, Words::aboutFact(AboutFact::Format)}};
+                             {u"format"_s, Words::aboutFact(AboutFact::Format)},
+                             {u"serverVersion"_s, Words::aboutFact(AboutFact::ServerVersion)}};
     return {{u"whoReads"_s, Words::whoReads()},
             {u"wrongCode"_s, Words::wrongCode()},
             {u"cancel"_s, Words::cancel()},
@@ -382,6 +383,12 @@ QString Profiles::sayColourName(const QString &id, const QString &owner) const
 QString Profiles::sayOpensOn(const QString &name) const
 {
     return Words::opensOn(name);
+}
+
+QString Profiles::sayDeviceSeen(const QVariant &milliseconds) const
+{
+    return milliseconds.isValid() && !milliseconds.isNull()
+               ? Words::deviceSeen(milliseconds.toLongLong()) : QString();
 }
 
 QString Profiles::saySeriesForYou(int count) const
@@ -678,9 +685,14 @@ void Profiles::removeDevice(const QString &id)
 
 void Profiles::reading()
 {
-    ask(Verb::Get, u"/profile/reading"_s, {}, [this](const Server::Answer &answer) {
+    const QString asked = active().value(u"id"_s).toString();
+    ask(Verb::Get, u"/profile/reading"_s, {}, [this, asked](const Server::Answer &answer) {
+        // Another profile reads since: these are not its preferences.
+        if (active().value(u"id"_s).toString() != asked)
+            return;
         m_reading = answer.body.object().toVariantMap();
         emit changed();
+        emit readingHeard();
     });
 }
 

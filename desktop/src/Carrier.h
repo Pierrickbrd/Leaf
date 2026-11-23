@@ -17,8 +17,8 @@
 // Everything here is either the disk (walking a dropped folder, off the thread that draws
 // the window) or the server (announcing, sending by the chunk, committing, retrying). The
 // rule the whole thing turns on is still the one `Imports.h` states: there is exactly one
-// slot, pause yields it, and a paused card takes it back by itself — except one counting
-// seconds towards a retry, which `pump` steps over.
+// slot, pause yields it, and a paused card waits for its reader — except one counting
+// seconds towards a retry, which the timer sets going again.
 
 #include "Card.h"
 #include "Manifest.h"
@@ -30,7 +30,53 @@
 
 class Imports;
 
-class Carrier final : public QObject
+/// What a card's own fields say about it — whether it travels, is held back, can still be
+/// corrected — read off the card alone: no queue, no server, no model.
+///
+/// A base of `Carrier` and not a part of it because `cpp:S1448` counted forty-two methods on
+/// the carrier, and these seven are the ones that need none of its state. Public, so that
+/// `Carrier::travels` still names this one function from `Imports`, `Review` and the tests
+/// that read it: a second name for the same answer is how two callers drift apart.
+struct Cargo
+{
+    /// Whether a sheet will reach the library at all: false for a file the server said it
+    /// already holds, and for a container holding only such files whose own sidecar is not
+    /// written — neither created by the server nor a differing declaration a reader ticked. What decides that a card stops (`tookFolder`), what decides that
+    /// it is held back (`Imports::confirm`) and what the checking frame calls identical
+    /// (`Review`) read this one answer — read apart, a duplicate number on two files already
+    /// there kept a card in `Reviewing` that nothing could ever let go.
+    static bool travels(const Card &card, const Facts::Sheet &sheet);
+
+    /// The files of `tree.files` that `travels` has walked since the application started,
+    /// for a test to assert a cost on, as `Review::cost` does.
+    static qint64 looked();
+
+    /// Whether this card has started going up: a byte sent, a file finished. A correction
+    /// made after that could only reach the library by an upload nobody asked for.
+    static bool startedSending(const Card &card);
+
+    /// Whether a sheet of what the card would send holds it back (`Facts::blocks` on what
+    /// `travels`): the one filter `Imports::confirm` leaves a card in `Reviewing` by, and
+    /// the one the frame reads to say « Importer » can let it go.
+    static bool heldBack(const Card &card);
+
+    /// Whether a card may still be corrected: not yet sending, and not let go by
+    /// « Importer » to wait its turn — corrected there, it went back to `Reviewing` behind
+    /// a frame opened on the transfers, where nothing offers to import it again.
+    /// `Imports::edit` refuses by it and the frame draws its sheet read-only by it.
+    static bool correctable(const Card &card);
+
+    /// Reads a walked card's sheets from its node, its tree and its roles, then puts back each
+    /// of its corrections whose field still exists, forgetting the others. No disk: the walk
+    /// is already in `tree`. What `described` does once and a role change does again.
+    static void readSheets(Card &card);
+
+protected:
+    /// Whether a sheet of this card that will travel stops the checking step.
+    static bool asksToBeChecked(const Card &card);
+};
+
+class Carrier final : public QObject, public Cargo
 {
     Q_OBJECT
 
@@ -63,7 +109,18 @@ public:
     /// rather than starting every `describe` at once.
     void describeNext();
 
-    void pump();
+    /// Starts the next card that was let go (`Card::Road::released`), or `first` before the
+    /// others when it is one. Cards not let go stay where they are: it is what makes the
+    /// third step's lines wait for their button.
+    void pump(int first = -1);
+
+    /// Lets the card at `row` go, as the reader asked: ready if it was stopped or failed,
+    /// and — when `now` — before the others, whoever holds the slot stepping behind.
+    void release(int row, bool now);
+
+    /// Puts a card back to zero for `Imports::cancel`: its session dropped on the server and
+    /// the card announced again, still on the list.
+    void restart(int row);
 
     void settle(int row, Stage stage, const QString &trouble = {});
 
@@ -74,6 +131,11 @@ public:
     int holding() const;
 
     void announce(int row);
+
+    /// Drops the card's session and announces the folder again, carrying what was corrected
+    /// since. `DELETE /import/{id}` first: the server remembers the rewrites a session was
+    /// announced with. A refusal fails the card, as `abandon` does.
+    void reannounce(int row);
 
     // ——— And what it does with a card once it has one ——————————————————————
     //
@@ -111,6 +173,12 @@ private:
     void announceFolder(int row, const Manifest::Folder &tree);
 
     void tookFolder(const QString &path, const Server::Answer &answer);
+
+    /// A card whose session the server would not drop, put back as the failed row it now
+    /// is. `abandon` and `reannounce` both end here when their `DELETE` is refused and the
+    /// row is already gone: the session it named is still on the server, and a refusal said
+    /// to nobody is the box of bytes nothing afterwards would sweep up.
+    void cameBack(Card kept);
 
     void sendMoreOfFolder(int row);
 

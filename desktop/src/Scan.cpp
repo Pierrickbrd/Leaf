@@ -35,6 +35,16 @@ QString Scan::foundTitle() const
     return Words::whatItFound();
 }
 
+QString Scan::foldLabel() const
+{
+    return Words::foldFindings();
+}
+
+QString Scan::seeAllLabel(int count) const
+{
+    return Words::seeAllFindings(count);
+}
+
 QString Scan::stateLabel() const
 {
     switch (m_state) {
@@ -132,6 +142,23 @@ void Scan::ask()
 
 void Scan::start()
 {
+    startAt(u"/scan"_s);
+}
+
+void Scan::rescanSeries(const QString &seriesId)
+{
+    if (!seriesId.isEmpty())
+        startAt(u"/series/"_s + seriesId + u"/rescan"_s);
+}
+
+void Scan::rescanEntry(const QString &entryId)
+{
+    if (!entryId.isEmpty())
+        startAt(u"/entries/"_s + entryId + u"/rescan"_s);
+}
+
+void Scan::startAt(const QString &path)
+{
     // Two scans over one library is the same work done twice and a report nobody can
     // attribute to either. The button is not the only way in — the server may be scanning
     // because somebody asked it elsewhere.
@@ -140,7 +167,7 @@ void Scan::start()
 
     m_starting = true;
     emit changed();
-    m_server->post(u"/scan"_s, {}, this, [this](const Server::Answer &answer) {
+    m_server->post(path, {}, this, [this](const Server::Answer &answer) {
         m_starting = false;
         // The answer to a start is the state it left the scan in, read like any other.
         took(answer);

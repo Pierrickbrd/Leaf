@@ -30,7 +30,8 @@ Item {
 
     /// Asked for a re-import, of this edition or of one of its files. It travels to the
     /// window, because the import dialog belongs there and not to a row.
-    signal reimportAsked(string entryId)
+    signal reimportAsked(string kind, string id, string name, int volumes)
+    signal chapterAsked(string entryId, string name)
     /// The keys walked past the last stop of this page, or before its first: the shell
     /// carries the focus round to the bar, as it does from the shelf.
     signal navigationBoundary(bool forward)
@@ -83,12 +84,13 @@ Item {
     /// same header. Here and not in two places, because the switcher in the header and the
     /// last tab both do it and the day one of them learns something the other must too.
     function goToEdition(seriesId) {
+        // The list follows when the page has answered, with the gaps and the arcs of this
+        // edition: pointed now, it was woven with the last edition's and then with none.
         view.page.point(seriesId)
-        view.volumes.point(seriesId, [])
     }
 
     /// The shelf, narrowed to one genre: what pressing the universe does, for a genre. Here
-    /// once, because a genre is drawn in the header and again in the description.
+    /// and not in the header, beside what the universe does.
     function showGenre(genre) {
         Shelf.narrowTo({ "genre": [genre] })
         Navigation.open(Navigation.Shelf, {})
@@ -128,30 +130,71 @@ Item {
 
     property int current: view.volumesTab
 
-    // The way out, which the page carries because « a control that leaves a page belongs to
-    // it » — the bar keeps the brand and drops everything that acts on a shelf. The settings
-    // screen has had one since it was written; this page had nothing but Escape, which is an
-    // instruction nobody can see.
-    //
-    // Outside the flick and not the first row of it: a control that leaves the page cannot be
-    // something one has to scroll back up to find.
-    BarButton {
-        id: back
+    /// Which of the two drawings of the volumes the tab and the choice show. Their own
+    /// condition, and not the `visible` of the item that holds them: that one is false for as
+    /// long as the whole page is hidden under another screen, and the lists were emptied —
+    /// every row destroyed, the page shrunk and its scroll cut — and built again on the way
+    /// back.
+    readonly property bool listShown: view.current === view.volumesTab
+                                      && !Preferences.volumesAsGrid
+    readonly property bool gridShown: view.current === view.volumesTab
+                                      && Preferences.volumesAsGrid
 
-        objectName: "series-back"
-        x: Widths.shelfMargin
-        y: 12
+    /// What each tab was scrolled to when another one was chosen: a short tab shrinks the
+    /// page, the scroll is cut to fit, and the long one came back at its top.
+    property var offsets: ({})
+
+    function chooseTab(which) {
+        if (which === view.current)
+            return
+        const kept = view.offsets
+        kept[view.current] = scroll.contentY
+        view.offsets = kept
+        view.current = which
+        Qt.callLater(view.scrollTo, kept[which] ?? 0)
+    }
+
+    function scrollTo(offset) {
+        scroll.contentY = Math.max(0, Math.min(offset,
+                                               scroll.contentHeight - scroll.height))
+    }
+
+    /// Another series, on a page that was kept: its first tab, from its top.
+    function startOver() {
+        view.offsets = ({})
+        view.current = view.volumesTab
+        scroll.contentY = 0
+    }
+
+    Component.onCompleted: {
+        if (view.bare)
+            waited.restart()
+    }
+
+    // The way out, the page's own: the first thing under the bar, at the gutter, where the
+    // settings' strip begins with the same button. Outside the flick: a control that leaves
+    // the page cannot be one a reader has to scroll back up to find.
+    PageStrip {
+        id: head
+
+        objectName: "series-strip"
+        anchors.left: parent.left
+        anchors.right: parent.right
+        // The button's own condition and not `back.visible`, which is false for as long as this
+        // strip is hidden: a page built while it is out of sight, as one kept under another
+        // screen is, hid its strip for good and its way back with it.
         visible: Navigation.canGoBack
-        source: "assets/icons/arrow_back.svg"
-        label: Navigation.backLabel
-        onTriggered: Navigation.back()
+
+        BackButton {
+            id: back
+        }
     }
 
     Flickable {
         id: scroll
 
         anchors.fill: parent
-        anchors.topMargin: back.visible ? back.y + back.height : 0
+        anchors.topMargin: head.visible ? head.height : 0
         anchors.leftMargin: Widths.shelfMargin
         anchors.rightMargin: Widths.shelfMargin
         contentWidth: width
@@ -161,7 +204,9 @@ Item {
         Column {
             id: stack
 
-            y: 16
+            // Under the strip of the way back, which left its `block` already; at `top` under
+            // the bar, where every page starts, when there is no way back to lead it.
+            y: head.visible ? 0 : Widths.space.top
             width: parent.width
             spacing: 14
 
@@ -182,12 +227,13 @@ Item {
                 width: parent.width
                 visible: view.page.available
                 universe: view.page.universe
+                universeId: view.page.universeId
                 work: view.page.work
                 edition: view.page.edition
                 cover: view.page.cover
-                makers: view.page.makers
-                weights: view.page.weights
-                genres: view.page.genres
+                makers: view.page.description.makersLinked
+                weights: view.page.description.weights
+                genres: view.page.description.genres
                 editionsLabel: view.page.editionsLabel
                 editions: view.page.editions
                 seriesId: view.page.identifier
@@ -197,7 +243,21 @@ Item {
                 }
                 onGenreAsked: genre => view.showGenre(genre)
                 onEditionChosen: seriesId => view.goToEdition(seriesId)
-                onReimportAsked: view.reimportAsked("")
+                onReimportAsked: view.reimportAsked("SERIES", view.page.identifier, view.page.work,
+                                                    view.page.volumeCount)
+                onEditionsAddAsked: view.reimportAsked("SERIES_NEW_EDITIONS", view.page.identifier,
+                                                       view.page.work, 0)
+                onUniverseReimportAsked: view.reimportAsked("UNIVERSE", view.page.universeId,
+                                                            view.page.universe, 0)
+                onPeopleAsked: people.open()
+            }
+
+            PeopleDialog {
+                id: people
+
+                people: view.page.description.people
+                heading: view.page.description.peopleTitle
+                counted: view.page.description.peopleCount
             }
 
             ResumeBand {
@@ -206,6 +266,10 @@ Item {
                 // date since. This one is rebuilt every time the page is opened, so asking
                 // here is asking again for what is already held.
                 reloadOnCompleted: false
+                // In the page's column, which has its margin already.
+                inset: 0
+                above: 0
+                below: 0
                 // Absent, not empty: a grey band announcing « nothing started » would say the
                 // same thing and take the room of four volumes.
                 visible: Resume.available && Resume.seriesId === view.page.identifier
@@ -218,7 +282,7 @@ Item {
                 hasElsewhere: view.elsewhereHasAnything
                 asGrid: Preferences.volumesAsGrid
                 query: view.volumes.query
-                onChosen: which => view.current = which
+                onChosen: which => view.chooseTab(which)
                 onViewToggled: Preferences.volumesAsGrid = !Preferences.volumesAsGrid
                 onSearched: text => view.volumes.searchFor(text)
             }
@@ -230,12 +294,12 @@ Item {
 
                 width: parent.width
                 spacing: 0
-                visible: view.current === view.volumesTab && !Preferences.volumesAsGrid
+                visible: view.listShown
 
                 Repeater {
                     // Emptied rather than hidden: a repeater in an invisible column still
                     // builds every one of its delegates, and this page has two of them.
-                    model: asList.visible ? view.volumes : null
+                    model: view.listShown ? view.volumes : null
 
                     // A row is a file, a gap, a separator or a stretch of chapters, and
                     // the four are read in one column. A loader picks the shape rather than
@@ -259,8 +323,13 @@ Item {
                         required property string detail
                         required property int depth
                         required property string fileName
+                        required property int chapters
+                        required property string credits
 
                         width: parent.width
+                        // Above its neighbours while the keys are on it: a row hovered below
+                        // is drawn after the one above and its tint covered that one's ring.
+                        z: line.item && line.item.activeFocus ? 1 : 0
                         sourceComponent: kind === 2 ? arcSeparator
                                        : kind === 3 ? chapterStretch
                                                     : volumeLine
@@ -280,7 +349,10 @@ Item {
                                 seriesId: view.page.identifier
                                 fileName: line.fileName
                                 last: line.index === view.volumes.count - 1
-                                onReimportAsked: view.reimportAsked(line.entryId)
+                                chapters: line.chapters
+                                credits: line.credits
+                                onReimportAsked: view.reimportAsked("ENTRY", line.entryId, line.number, 0)
+                                onChapterAsked: view.chapterAsked(line.entryId, line.number)
                             }
                         }
 
@@ -304,6 +376,7 @@ Item {
 
                 Text {
                     width: parent.width
+                    textFormat: Text.PlainText
                     text: SeriesCaptions.nothingFound
                     visible: SeriesCaptions.narrowedToNothing
                     color: Theme.inkSoft
@@ -321,7 +394,7 @@ Item {
 
                 width: parent.width
                 spacing: Widths.shelfGap
-                visible: view.current === view.volumesTab && Preferences.volumesAsGrid
+                visible: view.gridShown
 
                 // The shelf's own columns, so a volume is drawn at the size a series is: the
                 // grid exists to show covers, and a fixed width had them at a third of the
@@ -330,7 +403,7 @@ Item {
                                              - spacing
 
                 Repeater {
-                    model: asGrid.visible ? view.volumes : null
+                    model: view.gridShown ? view.volumes : null
 
                     Loader {
                         id: cell
@@ -341,6 +414,7 @@ Item {
                         required property string pages
                         required property string cover
                         required property string fileName
+                        required property int chapters
                         required property int state
                         required property real howFarRead
                         required property int kind
@@ -367,7 +441,9 @@ Item {
                                 seriesId: view.page.identifier
                                 coverWidth: asGrid.side
                                 coverHeight: asGrid.side * 1.5
-                                onReimportAsked: view.reimportAsked(cell.entryId)
+                                chapters: cell.chapters
+                                onReimportAsked: view.reimportAsked("ENTRY", cell.entryId, cell.number, 0)
+                                onChapterAsked: view.chapterAsked(cell.entryId, cell.number)
                             }
                         }
                     }
@@ -376,11 +452,10 @@ Item {
 
             SeriesDescription {
                 width: parent.width
+                onPeopleAsked: people.open()
                 visible: view.current === view.descriptionTab
-                summary: view.page.summary
-                facts: view.page.facts
-                genres: view.page.genres
-                onGenreAsked: genre => view.showGenre(genre)
+                summary: view.page.description.summary
+                facts: view.page.description.facts
             }
 
             ElsewhereTab {

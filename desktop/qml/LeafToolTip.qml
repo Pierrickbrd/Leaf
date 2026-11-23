@@ -9,33 +9,47 @@ import Leaf
 ToolTip {
     id: tip
 
-    /// Auto by default, as every hint written by the application is: a bubble that says
-    /// something the library holds — a chapter's title in the reader — sets it to plain, so
-    /// that a title spelled with « < » is shown and not read as markup.
-    property int textFormat: Text.AutoText
+    /// Plain by default: a hint can carry text the library holds, and a title spelled
+    /// « <img src=… > » would be read as markup, and its address fetched. A hint that is
+    /// markup on purpose says so.
+    property int textFormat: Text.PlainText
 
+    // `compact` from what it points at, inside and to the window's edge, as every popup's;
+    // its sides a little wider than that, the words of one line wanting air either side.
     x: parent ? (parent.width - implicitWidth) / 2 : 0
-    y: parent ? parent.height + 8 : 0
+    y: parent ? parent.height + Widths.space.compact : 0
 
-    margins: 8
-    leftPadding: 12
-    rightPadding: 12
-    topPadding: 8
-    bottomPadding: 8
+    margins: Widths.space.compact
+    // The air at the sides is the content's own, not the popup's `leftPadding`: Qt 6.4 reports a
+    // binding loop on `implicitWidth` when a popup's side paddings follow the text size and the
+    // window is resized under it, which 6.10 lets pass.
+    leftPadding: 0
+    rightPadding: 0
+    topPadding: Widths.space.compact
+    bottomPadding: Widths.space.compact
     delay: 450
     timeout: 4000
 
     font.family: Theme.textFamily
-    font.pixelSize: 13
+    font.pixelSize: Widths.scale.body(13)
     font.weight: Font.Medium
 
-    contentItem: Text {
-        objectName: tip.objectName.length > 0 ? tip.objectName + "-text" : ""
-        text: tip.text
-        textFormat: tip.textFormat
-        color: Theme.ink
-        font: tip.font
-        wrapMode: Text.Wrap
+    contentItem: Item {
+        implicitWidth: label.implicitWidth + 2 * Widths.scale.size(12)
+        implicitHeight: label.implicitHeight
+
+        Text {
+            id: label
+
+            objectName: tip.objectName.length > 0 ? tip.objectName + "-text" : ""
+            x: Widths.scale.size(12)
+            width: parent.width - 2 * Widths.scale.size(12)
+            text: tip.text
+            textFormat: tip.textFormat
+            color: Theme.ink
+            font: tip.font
+            wrapMode: Text.Wrap
+        }
     }
 
     background: Item {

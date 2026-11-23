@@ -50,6 +50,28 @@ private slots:
         QCOMPARE(navigation.parameters().value(u"series"_s).toString(), u"berserk"_s);
     }
 
+    /// Opening what is already open stood in the stack as a second copy, and the Escape that
+    /// came back from it came back to what it had left and seemed to do nothing.
+    void opening_the_shelf_or_the_settings_where_one_already_is_pushes_nothing()
+    {
+        Navigation navigation;
+        QSignalSpy said(&navigation, &Navigation::changed);
+        QVERIFY(navigation.open(Navigation::Destination::Shelf, {}));
+        QVERIFY(!navigation.canGoBack());
+        QCOMPARE(said.count(), 0);
+
+        // A series is always a request: the page may be showing another edition than the one
+        // it was opened with.
+        QVERIFY(navigation.open(Navigation::Destination::Series, {{u"series"_s, u"a"_s}}));
+        QVERIFY(navigation.open(Navigation::Destination::Series, {{u"series"_s, u"a"_s}}));
+        QCOMPARE(said.count(), 2);
+        QVERIFY(navigation.open(Navigation::Destination::Settings, {}));
+        QVERIFY(navigation.open(Navigation::Destination::Settings, {}));
+        QCOMPARE(said.count(), 3);
+        navigation.back();
+        QCOMPARE(navigation.destination(), Navigation::Destination::Series);
+    }
+
     void going_back_from_the_root_does_nothing_rather_than_emptying_the_screen()
     {
         Navigation navigation;

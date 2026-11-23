@@ -33,6 +33,7 @@ class Preferences : public QObject
     /// and the palette it resolves to is the desktop's business.
     Q_PROPERTY(Appearance appearance READ appearance NOTIFY changed)
     Q_PROPERTY(QString appearanceTitle READ appearanceTitle CONSTANT)
+    Q_PROPERTY(QString readerDefaultsTitle READ readerDefaultsTitle CONSTANT)
     /// `[{ value, label, icon }]`, in the order they are offered.
     Q_PROPERTY(QVariantList appearances READ appearances CONSTANT)
 
@@ -73,10 +74,16 @@ class Preferences : public QObject
     Q_PROPERTY(QString cornerLabel READ cornerLabel NOTIFY changed)
     Q_PROPERTY(bool anythingBubbles READ anythingBubbles NOTIFY changed)
 
-    /// How the reader lays pages out and what it fits them to, kept per device like the rest:
-    /// a window and a screen are this machine's, not the library's.
+    /// How the reader lays pages out and what it fits them to. Kept on this machine and, once a
+    /// profile is reading, on the server under that profile (see `synced`).
     Q_PROPERTY(PageLayout pageLayout READ pageLayout NOTIFY changed)
     Q_PROPERTY(Fit fit READ fit NOTIFY changed)
+    /// A webtoon's own fit and zoom, apart from the books': a strip read at the width of a
+    /// laptop's window is a column of panels twice the size they were drawn at, and the
+    /// reader who wants a manga at the window's height does not want a webtoon that way.
+    /// « Original » until said otherwise; the zoom multiplies the column's width.
+    Q_PROPERTY(Fit stripFit READ stripFit NOTIFY changed)
+    Q_PROPERTY(double stripZoom READ stripZoom NOTIFY changed)
     /// What is behind the pages, and how a page that comes takes the place of the one that
     /// goes. The choice of 22/10/2026: a dark paper tires some eyes in a lit room, and
     /// a slide on every page is too much for some readers, so both are a reader's to say, on
@@ -130,6 +137,7 @@ public:
 
     Appearance appearance() const { return m_appearance; }
     QString appearanceTitle() const;
+    QString readerDefaultsTitle() const;
     QVariantList appearances() const;
 
     Q_INVOKABLE void chooseAppearance(Appearance wanted);
@@ -138,6 +146,10 @@ public:
     Q_INVOKABLE void choosePageLayout(PageLayout wanted);
     Fit fit() const { return m_fit; }
     Q_INVOKABLE void chooseFit(Fit wanted);
+    Fit stripFit() const { return m_stripFit; }
+    double stripZoom() const { return m_stripZoom; }
+    /// Both at once: a pill keeps the zoom, a pinch keeps the fit.
+    Q_INVOKABLE void chooseStrip(Fit fit, double zoom);
     Backdrop backdrop() const { return m_backdrop; }
     Q_INVOKABLE void chooseBackdrop(Backdrop wanted);
     Motion motion() const { return m_motion; }
@@ -152,6 +164,23 @@ public:
     /// Remembers where a picker was used. Takes the folder itself, or the folder a chosen
     /// file sits in — what a reader wants next time is the place, not the thing.
     Q_INVOKABLE void rememberPlace(const QUrl &place);
+    /// How the window stood when it was closed, `{width, height, maximized}`; empty before
+    /// it ever was. Written at the close and not at every resize: a harness that resizes its
+    /// window would otherwise hand the next window the size of the last.
+    Q_INVOKABLE QVariantMap windowFrame() const;
+    Q_INVOKABLE void rememberWindow(int width, int height, bool maximized);
+
+    /// The few choices that follow the reader rather than the machine, as the words they are
+    /// written under: `{layout, fit, backdrop, motion, volumesAsGrid}`. The window, the
+    /// appearance (a lit room is this desk's), the bubbles and the picker's place stay here:
+    /// they describe this machine and its desktop, and a profile that read on another one
+    /// would be handed a window it does not fit.
+    QVariantMap synced() const;
+    /// Takes what the server holds for the profile now reading. A key that is missing keeps
+    /// what this machine has — a profile that never chose is not reset to the defaults, which
+    /// is also how an existing install keeps its choices the first time — and a key this
+    /// version does not know is left alone. Said back to nobody: it is the server's own word.
+    void adopt(const QVariantMap &held);
 
     QVariantList warnings() const;
     QString warningsTitle() const;
@@ -183,8 +212,13 @@ signals:
     /// The choice moved. `Theme` listens: it is the one that knows what a palette is, and
     /// this is the one that knows what was asked for.
     void appearanceChosen(Appearance wanted);
+    /// One of `synced()`'s choices was made here, by the reader, and the server should hear
+    /// it. Not said for `adopt`: echoing the server's answer back to it is a write for nothing.
+    void syncedChanged(const QVariantMap &kept);
 
 private:
+    void announce();
+    bool m_adopting = false;
     /// Its own file, named here rather than in the constructor's list: one place says
     /// where Leaf's preferences live, and it is the line that declares the member.
     QSettings m_file{QSettings::IniFormat, QSettings::UserScope, QStringLiteral("Leaf"),
@@ -194,6 +228,8 @@ private:
     bool m_volumesAsGrid = false;
     PageLayout m_pageLayout = PageLayout::Auto;
     Fit m_fit = Fit::Height;
+    Fit m_stripFit = Fit::Original;
+    double m_stripZoom = 1.0;
     Backdrop m_backdrop = Backdrop::Black;
     Motion m_motion = Motion::Slide;
     /// Everything on, except the desktop for a download: a copy saved in two seconds wakes

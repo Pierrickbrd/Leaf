@@ -414,10 +414,13 @@ Read<Series> series(const QJsonObject &from)
     one.universeId = field.maybeText(u"universeId"_s);
     one.oneShotEntry = field.maybeText(u"oneShotEntry"_s);
     one.summary = field.maybeText(u"summary"_s);
+    one.ownSummary = field.maybeText(u"ownSummary"_s);
     one.edition = field.maybeText(u"edition"_s);
     one.credits.author = field.maybeText(u"author"_s);
     one.credits.authors = field.words(u"authors"_s);
     one.credits.artists = field.words(u"artists"_s);
+    one.declared.authors = field.words(u"declaredAuthors"_s);
+    one.declared.artists = field.words(u"declaredArtists"_s);
     one.publication.publisher = field.maybeText(u"publisher"_s);
     one.publication.collection = field.maybeText(u"collection"_s);
     one.publication.language = field.maybeText(u"language"_s);
@@ -426,6 +429,7 @@ Read<Series> series(const QJsonObject &from)
     one.tags = field.words(u"tags"_s);
     one.ageRating = field.maybeText(u"ageRating"_s);
     one.colour = field.maybeBool(u"colour"_s);
+    one.coverVolume = field.maybeReal(u"coverVolume"_s);
 
     one.holding.addedAt = field.maybeBig(u"addedAt"_s);
     one.holding.lastAddedAt = field.maybeBig(u"lastAddedAt"_s);
@@ -442,15 +446,21 @@ Read<Series> series(const QJsonObject &from)
     // Null is « par défaut »; an unfamiliar word is left absent too, because guessing a
     // direction would draw the book the wrong way round.
     one.readingDirectionChosen = directionNamed(field.maybeText(u"readingDirectionChosen"_s));
+    one.coverImage = field.maybeBool(u"coverImage"_s).value_or(false);
     if (const auto word = field.maybeText(u"status"_s)) {
         // Two words today; a third — hiatus, cancelled — is a thing the server may learn
         // first. Everything that was not "completed" used to come out as Ongoing, so a
         // series that had stopped was shown as still running. Left absent instead, like the
         // reading direction two lines up.
+        using enum Run;
         if (*word == u"completed"_s)
-            one.run = Run::Completed;
+            one.run = Completed;
         else if (*word == u"ongoing"_s)
-            one.run = Run::Ongoing;
+            one.run = Ongoing;
+        else if (*word == u"hiatus"_s)
+            one.run = Hiatus;
+        else if (*word == u"cancelled"_s)
+            one.run = Cancelled;
     }
     if (const auto word = field.maybeText(u"readStatus"_s))
         one.holding.readStatus = readStatus(*word);
@@ -608,6 +618,7 @@ Read<Health> health(const QJsonObject &from)
     said.localDrop = field.maybeBool(u"localDrop"_s).value_or(false);
     said.linked = field.maybeBool(u"linked"_s).value_or(true);
     said.relay = field.maybeBool(u"relay"_s).value_or(true);
+    said.version = field.maybeText(u"version"_s).value_or(QString());
     return {said, {}};
 }
 
@@ -904,6 +915,9 @@ Read<Facets> facets(const QJsonObject &from)
     all.statuses = facetsUnder(from, u"statuses"_s);
     all.languages = facetsUnder(from, u"languages"_s);
     all.publishers = facetsUnder(from, u"publishers"_s);
+    all.tags = facetsUnder(from, u"tags"_s);
+    all.artists = facetsUnder(from, u"artists"_s);
+    all.collections = facetsUnder(from, u"collections"_s);
     return {all, {}};
 }
 
@@ -969,10 +983,18 @@ Read<Entry> entry(const QJsonObject &from)
     one.number = field.maybeReal(u"number"_s);
     one.title = field.maybeText(u"title"_s);
     one.sortKey = field.maybeReal(u"sortKey"_s);
+    one.downloadName = field.maybeText(u"downloadName"_s).value_or(QString());
     one.size = field.maybeWhole(u"size"_s).value_or(0);
     one.isbn = field.maybeText(u"isbn"_s);
     one.publishedOn = field.maybeText(u"publishedOn"_s);
     one.summary = field.maybeText(u"summary"_s);
+    one.addedAt = field.maybeBig(u"addedAt"_s);
+    one.coverPage = field.maybeWhole(u"coverPage"_s);
+    one.coverImage = field.maybeBool(u"coverImage"_s).value_or(false);
+    one.credits.authors = field.words(u"authors"_s);
+    one.credits.artists = field.words(u"artists"_s);
+    one.authorsInherited = field.maybeBool(u"authorsInherited"_s).value_or(false);
+    one.artistsInherited = field.maybeBool(u"artistsInherited"_s).value_or(false);
     return {one, {}};
 }
 
@@ -1101,6 +1123,57 @@ Read<Universe> universe(const QJsonObject &from)
     if (field.broken())
         return refused<Universe>(QStringLiteral("universe"), field.trouble());
     return {one, {}};
+}
+
+Read<ExportedFolder> exportedFolder(const QJsonObject &from)
+{
+    Fields field(from);
+    ExportedFolder one;
+    one.path = field.text(u"path"_s);
+    one.level = field.text(u"level"_s);
+    if (field.broken())
+        return refused<ExportedFolder>(QStringLiteral("folder"), field.trouble());
+    one.sidecar = field.maybeText(u"sidecar"_s);
+    one.content = field.maybeText(u"content"_s);
+    return {one, {}};
+}
+
+Read<ExportedFile> exportedFile(const QJsonObject &from)
+{
+    Fields field(from);
+    ExportedFile one;
+    one.path = field.text(u"path"_s);
+    const QString kind = field.text(u"kind"_s);
+    one.size = field.big(u"size"_s);
+    if (field.broken())
+        return refused<ExportedFile>(QStringLiteral("file"), field.trouble());
+    one.kind = kind;
+    one.entryId = field.maybeText(u"entryId"_s);
+    return {one, {}};
+}
+
+Read<Tree> tree(const QJsonObject &from)
+{
+    Fields field(from);
+    const QJsonArray folders = field.array(u"folders"_s);
+    const QJsonArray files = field.array(u"files"_s);
+    if (field.broken())
+        return refused<Tree>(QStringLiteral("tree"), field.trouble());
+
+    Tree out;
+    for (const QJsonValue &one : folders) {
+        const Read<ExportedFolder> read = exportedFolder(one.toObject());
+        if (!read.ok())
+            return refused<Tree>(QStringLiteral("tree.folders"), read.trouble);
+        out.folders.append(*read.value);
+    }
+    for (const QJsonValue &one : files) {
+        const Read<ExportedFile> read = exportedFile(one.toObject());
+        if (!read.ok())
+            return refused<Tree>(QStringLiteral("tree.files"), read.trouble);
+        out.files.append(*read.value);
+    }
+    return {out, {}};
 }
 
 // ——— L'import ———————————————————————————————————————————————————————————————
@@ -1282,6 +1355,324 @@ Read<Collision> collision(const QJsonObject &from)
     return {said, {}};
 }
 
+namespace {
+
+Outcome outcomeOf(const QString &word)
+{
+    using enum Outcome;
+
+    if (word == u"SAME"_s)
+        return Same;
+    if (word == u"REPLACE"_s)
+        return Replace;
+    if (word == u"UPDATE"_s)
+        return Update;
+    if (word == u"ADD"_s)
+        return Add;
+    if (word == u"OTHER_NUMBER"_s)
+        return OtherNumber;
+    if (word == u"OTHER_SERIES"_s)
+        return OtherSeries;
+    if (word == u"UNNUMBERED"_s)
+        return Unnumbered;
+    if (word == u"TWICE"_s)
+        return Twice;
+    // Vocabulary is loose, structure is strict: a file the client cannot name is still a file
+    // the server compared, and it keeps its volume and its path on screen.
+    return Other;
+}
+
+Read<TrailStep> trailStep(const QJsonObject &from)
+{
+    Fields field(from);
+    TrailStep said;
+    said.kind = field.text(u"kind"_s);
+    said.id = field.text(u"id"_s);
+    said.name = field.text(u"name"_s);
+    said.count = field.whole(u"count"_s);
+    if (field.broken())
+        return refused<TrailStep>(QStringLiteral("trailStep"), field.trouble());
+    return {said, {}};
+}
+
+Read<TargetPlace> targetPlace(const QJsonObject &from)
+{
+    Fields field(from);
+    TargetPlace said;
+    said.kind = field.text(u"kind"_s);
+    said.id = field.text(u"id"_s);
+    said.name = field.text(u"name"_s);
+    const QJsonArray trail = field.array(u"trail"_s);
+    if (field.broken())
+        return refused<TargetPlace>(QStringLiteral("target"), field.trouble());
+    for (const QJsonValue &value : trail) {
+        const Read<TrailStep> step = trailStep(value.toObject());
+        if (!step.ok())
+            return refused<TargetPlace>(QStringLiteral("target"), step.trouble);
+        said.trail << *step.value;
+    }
+    return {said, {}};
+}
+
+Read<HeldVolume> heldVolume(const QJsonObject &from)
+{
+    Fields field(from);
+    HeldVolume said;
+    said.entryId = field.text(u"entryId"_s);
+    said.number = field.maybeReal(u"number"_s);
+    said.title = field.maybeText(u"title"_s).value_or(QString());
+    said.file = field.text(u"file"_s);
+    said.size = field.big(u"size"_s);
+    said.pages = field.whole(u"pages"_s);
+    said.chapters = field.reals(u"chapters"_s);
+    said.page = field.maybeWhole(u"page"_s);
+    said.finished = field.flag(u"finished"_s);
+    said.others = field.whole(u"others"_s);
+    if (field.broken())
+        return refused<HeldVolume>(QStringLiteral("heldVolume"), field.trouble());
+    return {said, {}};
+}
+
+Arriving arriving(const QJsonObject &from)
+{
+    Fields field(from);
+    Arriving said;
+    said.pages = field.maybeWhole(u"pages"_s);
+    said.title = field.maybeText(u"title"_s);
+    said.chapters = field.reals(u"chapters"_s);
+    return said;
+}
+
+Read<VolumeMatch> volumeMatch(const QJsonObject &from)
+{
+    Fields field(from);
+    VolumeMatch said;
+    said.path = field.text(u"path"_s);
+    said.lands = field.maybeText(u"lands"_s).value_or(QString());
+    said.outcome = outcomeOf(field.text(u"outcome"_s));
+    said.number = field.maybeReal(u"number"_s);
+    said.entryId = field.maybeText(u"entryId"_s).value_or(QString());
+    said.wanted = field.maybeText(u"wanted"_s).value_or(QString());
+    said.arriving = arriving(field.object(u"arriving"_s));
+    said.differs = field.words(u"differs"_s);
+    if (field.has(u"present"_s)) {
+        const Read<HeldVolume> held = heldVolume(field.object(u"present"_s));
+        if (!held.ok())
+            return refused<VolumeMatch>(QStringLiteral("volumeMatch"), held.trouble);
+        said.present = *held.value;
+    }
+    if (field.broken())
+        return refused<VolumeMatch>(QStringLiteral("volumeMatch"), field.trouble());
+    return {said, {}};
+}
+
+Read<AbsentSeries> absentSeries(const QJsonObject &from)
+{
+    Fields field(from);
+    AbsentSeries said;
+    said.workId = field.text(u"workId"_s);
+    said.seriesId = field.text(u"seriesId"_s);
+    said.name = field.text(u"name"_s);
+    said.volumes = field.whole(u"volumes"_s);
+    if (field.broken())
+        return refused<AbsentSeries>(QStringLiteral("absentSeries"), field.trouble());
+    return {said, {}};
+}
+
+Read<Resemblance> resemblance(const QJsonObject &from)
+{
+    Fields field(from);
+    Resemblance said;
+    said.at = field.text(u"at"_s);
+    said.seriesId = field.text(u"seriesId"_s);
+    said.name = field.text(u"name"_s);
+    said.from = field.text(u"from"_s);
+    if (field.broken())
+        return refused<Resemblance>(QStringLiteral("resemblance"), field.trouble());
+    return {said, {}};
+}
+
+Read<Landing> landing(const QJsonObject &from)
+{
+    Fields field(from);
+    Landing said;
+    said.path = field.text(u"path"_s);
+    said.folder = field.text(u"folder"_s);
+    said.file = field.text(u"file"_s);
+    said.wasCalled = field.text(u"wasCalled"_s);
+    if (field.broken())
+        return refused<Landing>(QStringLiteral("landing"), field.trouble());
+    return {said, {}};
+}
+
+Read<NamesMeet> namesMeet(const QJsonObject &from)
+{
+    Fields field(from);
+    NamesMeet said;
+    said.path = field.text(u"path"_s);
+    said.with = field.text(u"with"_s);
+    if (field.broken())
+        return refused<NamesMeet>(QStringLiteral("namesMeet"), field.trouble());
+    return {said, {}};
+}
+
+Read<NeedsAName> needsAName(const QJsonObject &from)
+{
+    Fields field(from);
+    NeedsAName said;
+    said.path = field.text(u"path"_s);
+    said.current = from.value(u"current"_s).toBool();
+    if (field.broken())
+        return refused<NeedsAName>(QStringLiteral("needsAName"), field.trouble());
+    return {said, {}};
+}
+
+Read<NameProblem> nameProblem(const QJsonObject &from)
+{
+    Fields field(from);
+    NameProblem said;
+    said.path = field.text(u"path"_s);
+    said.kind = field.text(u"kind"_s);
+    said.with = from.value(u"with"_s).toString();
+    if (field.broken())
+        return refused<NameProblem>(QStringLiteral("nameProblem"), field.trouble());
+    return {said, {}};
+}
+
+Read<Reshelved> reshelved(const QJsonObject &from)
+{
+    Fields field(from);
+    Reshelved said;
+    said.edition = field.text(u"edition"_s);
+    said.count = field.maybeBig(u"count"_s).value_or(0);
+    if (field.broken())
+        return refused<Reshelved>(QStringLiteral("reshelved"), field.trouble());
+    return {said, {}};
+}
+
+Read<ChapterSplice> chapterSplice(const QJsonObject &from)
+{
+    Fields field(from);
+    ChapterSplice said;
+    said.id = field.text(u"id"_s);
+    // `number` and `title` are nullable and required: a chapter with neither is a chapter.
+    said.number = field.maybeReal(u"number"_s);
+    said.title = field.maybeText(u"title"_s);
+    said.from = field.whole(u"from"_s);
+    said.to = field.whole(u"to"_s);
+    said.becomesFrom = field.whole(u"becomesFrom"_s);
+    said.becomesTo = field.whole(u"becomesTo"_s);
+    said.outcome = field.text(u"outcome"_s);
+    if (field.broken())
+        return refused<ChapterSplice>(QStringLiteral("chapterSplice"), field.trouble());
+    return {said, {}};
+}
+
+Read<SpliceOutcome> spliceOutcome(const QJsonObject &from)
+{
+    Fields field(from);
+    SpliceOutcome said;
+    said.pagesBefore = field.whole(u"pagesBefore"_s);
+    said.pagesAfter = field.whole(u"pagesAfter"_s);
+    said.page = field.maybeWhole(u"page"_s);
+    said.pageBecomes = field.maybeWhole(u"pageBecomes"_s);
+    const QJsonArray chapters = field.array(u"chapters"_s);
+    if (field.broken())
+        return refused<SpliceOutcome>(QStringLiteral("splice"), field.trouble());
+    for (const QJsonValue &value : chapters) {
+        const Read<ChapterSplice> chapter = chapterSplice(value.toObject());
+        if (!chapter.ok())
+            return refused<SpliceOutcome>(QStringLiteral("splice"), chapter.trouble);
+        said.chapters << *chapter.value;
+    }
+    return {said, {}};
+}
+
+Read<ReplacedFile> replacedFile(const QJsonObject &from)
+{
+    Fields field(from);
+    ReplacedFile said;
+    said.path = field.text(u"path"_s);
+    said.entryId = field.maybeText(u"entryId"_s).value_or(QString());
+    said.keptAt = field.text(u"keptAt"_s);
+    if (field.broken())
+        return refused<ReplacedFile>(QStringLiteral("replacedFile"), field.trouble());
+    return {said, {}};
+}
+
+// The four below answer with the bare trouble, not through `refused`: `opened` names itself
+// in front of it, as it did when these were loops inside it.
+Read<Creation> creation(const QJsonObject &one)
+{
+    Fields made(one);
+    Creation said;
+    said.kind = made.text(u"kind"_s);
+    said.name = made.text(u"name"_s);
+    said.at = made.text(u"at"_s);
+    if (made.broken())
+        return {std::nullopt, made.trouble()};
+    return {said, {}};
+}
+
+Read<Relocation> relocation(const QJsonObject &one)
+{
+    Fields filed(one);
+    Relocation said;
+    said.workId = filed.text(u"workId"_s);
+    said.name = filed.text(u"name"_s);
+    said.from = filed.text(u"from"_s);
+    said.at = filed.text(u"at"_s);
+    said.matched = filed.text(u"matched"_s);
+    if (filed.broken())
+        return {std::nullopt, filed.trouble()};
+    return {said, {}};
+}
+
+Read<Replacement> replacement(const QJsonObject &one)
+{
+    Fields held(one);
+    Replacement said;
+    said.path = held.text(u"path"_s);
+    said.size = held.maybeBig(u"size"_s).value_or(0);
+    said.presentSize = held.maybeBig(u"presentSize"_s).value_or(0);
+    said.presentTitle = one.value(u"presentTitle"_s).toString();
+    if (one.value(u"presentNumber"_s).isDouble())
+        said.presentNumber = one.value(u"presentNumber"_s).toDouble();
+    said.presentRead = one.value(u"presentRead"_s).toBool();
+    if (held.broken())
+        return {std::nullopt, held.trouble()};
+    return {said, {}};
+}
+
+Read<Declaration> declaration(const QJsonObject &one)
+{
+    Fields field(one);
+    Declaration said;
+    said.path = field.text(u"path"_s);
+    said.presentName = one.value(u"presentName"_s).toString();
+    said.differs = field.words(u"differs"_s);
+    said.present = field.object(u"present"_s);
+    if (field.broken())
+        return {std::nullopt, field.trouble()};
+    return {said, {}};
+}
+
+/// Every row of `rows` read by `read` into `into`, or the trouble of the first that fails:
+/// empty when all of them stood, since a refusal always says something.
+template <typename T, typename Reader>
+QString readEach(const QJsonArray &rows, Reader read, QList<T> &into)
+{
+    for (const QJsonValue &value : rows) {
+        const Read<T> one = read(value.toObject());
+        if (!one.ok())
+            return one.trouble;
+        into << *one.value;
+    }
+    return {};
+}
+
+} // namespace
+
 Read<Opened> opened(const QJsonObject &from)
 {
     Fields field(from);
@@ -1297,54 +1688,58 @@ Read<Opened> opened(const QJsonObject &from)
     if (field.broken())
         return refused<Opened>(QStringLiteral("opened"), field.trouble());
 
-    for (const QJsonValue &value : from.value(u"creates"_s).toArray()) {
-        const QJsonObject one = value.toObject();
-        Fields made(one);
-        Creation creation;
-        creation.kind = made.text(u"kind"_s);
-        creation.name = made.text(u"name"_s);
-        creation.at = made.text(u"at"_s);
-        if (made.broken())
-            return refused<Opened>(QStringLiteral("opened"), made.trouble());
-        said.creates << creation;
+    const auto list = [&from](const QString &name) { return from.value(name).toArray(); };
+    if (const QString trouble = readEach(list(u"creates"_s), creation, said.creates);
+        !trouble.isEmpty())
+        return refused<Opened>(QStringLiteral("opened"), trouble);
+    if (const QString trouble = readEach(list(u"moves"_s), relocation, said.moves);
+        !trouble.isEmpty())
+        return refused<Opened>(QStringLiteral("opened"), trouble);
+    if (const QString trouble = readEach(list(u"replaces"_s), replacement, said.replaces);
+        !trouble.isEmpty())
+        return refused<Opened>(QStringLiteral("opened"), trouble);
+    if (const QString trouble = readEach(list(u"declarations"_s), declaration, said.declarations);
+        !trouble.isEmpty())
+        return refused<Opened>(QStringLiteral("opened"), trouble);
+    if (field.has(u"target"_s)) {
+        const Read<TargetPlace> place = targetPlace(field.object(u"target"_s));
+        if (!place.ok())
+            return refused<Opened>(QStringLiteral("opened"), place.trouble);
+        said.target = *place.value;
     }
-    for (const QJsonValue &value : from.value(u"moves"_s).toArray()) {
-        const QJsonObject one = value.toObject();
-        Fields filed(one);
-        Relocation relocation;
-        relocation.workId = filed.text(u"workId"_s);
-        relocation.name = filed.text(u"name"_s);
-        relocation.from = filed.text(u"from"_s);
-        relocation.at = filed.text(u"at"_s);
-        if (filed.broken())
-            return refused<Opened>(QStringLiteral("opened"), filed.trouble());
-        said.moves << relocation;
-    }
-    for (const QJsonValue &value : from.value(u"replaces"_s).toArray()) {
-        const QJsonObject one = value.toObject();
-        Fields held(one);
-        Replacement replacement;
-        replacement.path = held.text(u"path"_s);
-        replacement.size = held.maybeBig(u"size"_s).value_or(0);
-        replacement.presentSize = held.maybeBig(u"presentSize"_s).value_or(0);
-        replacement.presentTitle = one.value(u"presentTitle"_s).toString();
-        if (one.value(u"presentNumber"_s).isDouble())
-            replacement.presentNumber = one.value(u"presentNumber"_s).toDouble();
-        replacement.presentRead = one.value(u"presentRead"_s).toBool();
-        if (held.broken())
-            return refused<Opened>(QStringLiteral("opened"), held.trouble());
-        said.replaces << replacement;
-    }
-    for (const QJsonValue &value : from.value(u"declarations"_s).toArray()) {
-        const QJsonObject one = value.toObject();
-        Fields said_(one);
-        Declaration declaration;
-        declaration.path = said_.text(u"path"_s);
-        declaration.presentName = one.value(u"presentName"_s).toString();
-        declaration.differs = said_.words(u"differs"_s);
-        if (said_.broken())
-            return refused<Opened>(QStringLiteral("opened"), said_.trouble());
-        said.declarations << declaration;
+    if (const QString trouble = readEach(list(u"volumes"_s), volumeMatch, said.volumes);
+        !trouble.isEmpty())
+        return refused<Opened>(QStringLiteral("opened"), trouble);
+    if (const QString trouble = readEach(list(u"absent"_s), heldVolume, said.absent);
+        !trouble.isEmpty())
+        return refused<Opened>(QStringLiteral("opened"), trouble);
+    if (const QString trouble = readEach(list(u"absentSeries"_s), absentSeries, said.absentSeries);
+        !trouble.isEmpty())
+        return refused<Opened>(QStringLiteral("opened"), trouble);
+    if (const QString trouble = readEach(list(u"resembles"_s), resemblance, said.resembles);
+        !trouble.isEmpty())
+        return refused<Opened>(QStringLiteral("opened"), trouble);
+    if (const QString trouble = readEach(list(u"landsAs"_s), landing, said.landsAs);
+        !trouble.isEmpty())
+        return refused<Opened>(QStringLiteral("opened"), trouble);
+    if (const QString trouble = readEach(list(u"collisions"_s), namesMeet, said.collisions);
+        !trouble.isEmpty())
+        return refused<Opened>(QStringLiteral("opened"), trouble);
+    if (const QString trouble = readEach(list(u"reshelved"_s), reshelved, said.reshelved);
+        !trouble.isEmpty())
+        return refused<Opened>(QStringLiteral("opened"), trouble);
+    if (const QString trouble =
+            readEach(list(u"editionsNeedingAName"_s), needsAName, said.editionsNeedingAName);
+        !trouble.isEmpty())
+        return refused<Opened>(QStringLiteral("opened"), trouble);
+    if (const QString trouble = readEach(list(u"problems"_s), nameProblem, said.problems);
+        !trouble.isEmpty())
+        return refused<Opened>(QStringLiteral("opened"), trouble);
+    if (field.has(u"splice"_s)) {
+        const Read<SpliceOutcome> spliced = spliceOutcome(field.object(u"splice"_s));
+        if (!spliced.ok())
+            return refused<Opened>(QStringLiteral("opened"), spliced.trouble);
+        said.splice = *spliced.value;
     }
     said.toSend = field.words(u"toSend"_s);
     said.alreadyThere = field.words(u"alreadyThere"_s);
@@ -1431,6 +1826,12 @@ Read<Installed> installed(const QJsonObject &from)
     // Defaulted in the contract: a server that leaves it out closed the session.
     said.open = field.maybeBool(u"open"_s).value_or(false);
     said.moved = field.words(u"moved"_s);
+    for (const QJsonValue &value : from.value(u"replaced"_s).toArray()) {
+        const Read<ReplacedFile> kept = replacedFile(value.toObject());
+        if (!kept.ok())
+            return refused<Installed>(QStringLiteral("installed"), kept.trouble);
+        said.replaced << *kept.value;
+    }
     return {said, {}};
 }
 

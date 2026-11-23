@@ -65,12 +65,12 @@ QString readAll(const QJsonDocument &body, Api::Read<T> (*one)(const QJsonObject
 /// The output is ASCII, so reading it as UTF-8 is exact.
 QString entryPath(const QString &id)
 {
-    return u"/entries/"_s + QString::fromUtf8(QUrl::toPercentEncoding(id));
+    return u"/entries/"_s + Server::segment(id);
 }
 
 QString seriesPath(const QString &id)
 {
-    return u"/series/"_s + QString::fromUtf8(QUrl::toPercentEncoding(id));
+    return u"/series/"_s + Server::segment(id);
 }
 
 QString entryName(const Api::Entry &one)
@@ -225,6 +225,13 @@ QVariantMap Reader::volume() const
         when(u"isbn"_s, m_entry->isbn);
     when(u"publishedOn"_s, m_entry->publishedOn);
     when(u"summary"_s, m_entry->summary);
+    // Who made this volume, a line a role, every name: the card said the series and never the
+    // people, and Takeshi Obata, who drew every page of Death Note, was nowhere on it.
+    QVariantList credits;
+    for (const Words::CreditLine &line :
+         Words::creditLines(m_entry->credits.authors, m_entry->credits.artists))
+        credits << QVariantMap{{u"name"_s, line.label}, {u"value"_s, line.names.join(u", "_s)}};
+    about.insert(u"credits"_s, credits);
 
     // The stretch the chapters cover, from their numbers: a chapter that names none says
     // nothing about it, and a volume none of whose chapters does has no stretch.

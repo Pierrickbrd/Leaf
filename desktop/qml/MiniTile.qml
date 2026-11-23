@@ -26,7 +26,9 @@ Item {
 
     objectName: "tile-" + seriesId
     width: side
-    height: side * 1.5 + 6 + words.implicitHeight
+    // The words' own height under the cover, so a name on two lines at a larger desktop
+    // text size is never cut by the next row of tiles.
+    height: side * 1.5 + words.anchors.topMargin + words.implicitHeight
 
     Accessible.role: Accessible.ListItem
     Accessible.name: name
@@ -106,15 +108,19 @@ Item {
         anchors.left: frame.left
         anchors.right: frame.right
         anchors.top: frame.bottom
-        anchors.topMargin: 6
+        anchors.topMargin: Widths.scale.room(6)
         spacing: 1
 
+        // Captions, both: 12 and 11 pixels fixed did not shrink at 800 nor follow the
+        // desktop's text size (audit, 23/10/2026).
         Text {
+            objectName: "mini-name-" + tile.seriesId
             width: parent.width
+            textFormat: Text.PlainText
             text: tile.name
             color: Theme.inkSoft
             font.family: Theme.textFamily
-            font.pixelSize: 12
+            font.pixelSize: Widths.scale.caption(12)
             lineHeight: 1.2
             lineHeightMode: Text.ProportionalHeight
             wrapMode: Text.Wrap
@@ -124,11 +130,13 @@ Item {
 
         Text {
             width: parent.width
+            textFormat: Text.PlainText
             text: tile.detail
+            objectName: "mini-detail-" + tile.seriesId
             visible: text.length > 0
             color: Theme.inkFaint
             font.family: Theme.textFamily
-            font.pixelSize: 11
+            font.pixelSize: Widths.scale.caption(11)
             elide: Text.ElideRight
         }
     }

@@ -1,29 +1,15 @@
-// A round button the keyboard reaches: `IconButton`, with a stop in the Tab order, Enter and
-// Space, and the ring.
+// A round button the keyboard reaches: `IconButton`, with a stop in the Tab order.
 //
 // `IconButton` is drawn on covers, where none of that is wanted; the pencils and the bins of
 // the settings are the only way to edit a profile or remove a device, and a keyboard could
-// neither reach nor press them. The reader's bar writes the same thing for its own buttons,
-// at the reader's scale.
+// neither reach nor press them. Enter, Space and the ring are `IconButton`'s own: written here
+// a second time, both handlers answered every key, and Space on « + » added two years
+// (audit, 25/10/2026).
 
 import QtQuick
 import Leaf
 
 IconButton {
-    id: stop
-
     activeFocusOnTab: visible
     Accessible.focusable: true
-
-    Keys.onPressed: event => {
-        if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
-                || event.key === Qt.Key_Enter) {
-            stop.press()
-            event.accepted = true
-        }
-    }
-
-    FocusRing {
-        cornerRadius: stop.radius
-    }
 }

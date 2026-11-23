@@ -3,6 +3,7 @@
 #include "Notifier.h"
 #include "Preferences.h"
 #include "Toasts.h"
+#include "Warnings.h"
 #include "Words.h"
 
 #include <QDBusConnection>
@@ -20,6 +21,7 @@ class WarnsOnce : public QObject
 
     Preferences *m_preferences = nullptr;
     Toasts *m_bubbles = nullptr;
+    Warnings *m_said = nullptr;
     bool m_awake = false;
 
     QString at(int row, const char *role) const
@@ -48,10 +50,12 @@ private slots:
         // lifetime is given rather than fixed, so this settles what it does and not how long
         // a test is willing to sit there.
         m_bubbles = new Toasts(m_preferences, [this] { return m_awake; }, 60);
+        m_said = new Warnings(m_bubbles);
     }
 
     void cleanup()
     {
+        delete m_said;
         delete m_bubbles;
         delete m_preferences;
     }
@@ -60,7 +64,7 @@ private slots:
     void an_import_that_landed_says_what_the_work_said()
     {
         QSignalSpy moved(m_bubbles, &Toasts::changed);
-        m_bubbles->importSettled(true, u"Elfes"_s, u"29 tomes envoyés · 1 encore à venir"_s);
+        m_said->importSettled(true, u"Elfes"_s, u"29 tomes envoyés · 1 encore à venir"_s);
 
         QCOMPARE(m_bubbles->count(), 1);
         QCOMPARE(at(0, "headline"), u"Elfes"_s);
@@ -71,7 +75,7 @@ private slots:
 
     void an_import_that_failed_names_it_and_offers_to_try_again()
     {
-        m_bubbles->importSettled(false, u"Tome 7 d’Elfes"_s, u"le serveur a répondu 500"_s);
+        m_said->importSettled(false, u"Tome 7 d’Elfes"_s, u"le serveur a répondu 500"_s);
 
         QCOMPARE(at(0, "headline"), u"Tome 7 d’Elfes n’a pas pu être envoyé"_s);
         QCOMPARE(at(0, "label"), u"Réessayer"_s);
@@ -82,8 +86,8 @@ private slots:
     /// 22/10/2026, a refusal long out of date still covered the page being read.
     void every_bubble_goes_by_itself_but_not_while_it_is_being_read()
     {
-        m_bubbles->scanFinished(u"21 séries"_s);
-        m_bubbles->scanFailed(u"le disque ne répond pas"_s);
+        m_said->scanFinished(u"21 séries"_s);
+        m_said->scanFailed(u"le disque ne répond pas"_s);
         QCOMPARE(m_bubbles->count(), 2);
         m_bubbles->hold(1, true);
 
@@ -109,7 +113,7 @@ private slots:
     void past_three_the_rest_are_a_count()
     {
         for (int i = 0; i < 6; ++i)
-            m_bubbles->scanFailed(u"raison %1"_s.arg(i));
+            m_said->scanFailed(u"raison %1"_s.arg(i));
 
         QCOMPARE(m_bubbles->count(), 3);
         QCOMPARE(m_bubbles->more(), 3);
@@ -122,9 +126,34 @@ private slots:
         QCOMPARE(at(0, "detail"), u"raison 1"_s);
     }
 
+    /// Two on a short window, the third waiting with the rest: at 800 × 560 three bubbles and
+    /// their count covered the right half of the shelf (23/10/2026).
+    void a_short_window_draws_two_and_counts_the_rest()
+    {
+        for (int i = 0; i < 4; ++i)
+            m_said->scanFailed(u"raison %1"_s.arg(i));
+
+        QSignalSpy reset(m_bubbles, &QAbstractItemModel::modelReset);
+        m_bubbles->setCramped(true);
+        QCOMPARE(reset.count(), 1);
+        QCOMPARE(m_bubbles->count(), 2);
+        QCOMPARE(m_bubbles->more(), 2);
+        QCOMPARE(m_bubbles->moreLabel(), u"2 autres"_s);
+
+        // The one waiting behind takes the place of one taken away, within the two.
+        m_bubbles->dismiss(0);
+        QCOMPARE(m_bubbles->count(), 2);
+        QCOMPARE(m_bubbles->more(), 1);
+        QCOMPARE(at(1, "detail"), u"raison 2"_s);
+
+        m_bubbles->setCramped(false);
+        QCOMPARE(m_bubbles->count(), 3);
+        QCOMPARE(m_bubbles->more(), 0);
+    }
+
     void the_one_thing_it_offers_is_done_and_the_bubble_goes()
     {
-        m_bubbles->copySaved(u"/home/quelqu’un/Tome 5.cbz"_s);
+        m_said->copySaved(u"/home/quelqu’un/Tome 5.cbz"_s);
         QCOMPARE(at(0, "headline"), Words::copyKept());
         // The file's own name, not the path it was written to: the client shows what was
         // chosen and not where it lives.
@@ -142,7 +171,7 @@ private slots:
     /// nothing but close it — the cross is the way out, not an action of its own.
     void a_bubble_with_nothing_to_offer_announces_nothing_when_it_closes()
     {
-        m_bubbles->scanFinished(u"21 séries"_s);
+        m_said->scanFinished(u"21 séries"_s);
         QVERIFY(at(0, "label").isEmpty());
 
         QSignalSpy done(m_bubbles, &Toasts::acted);
@@ -156,11 +185,11 @@ private slots:
     void a_family_switched_off_raises_nothing()
     {
         m_preferences->showBubble(Preferences::Warns::Scans, false);
-        m_bubbles->scanFinished(u"21 séries"_s);
+        m_said->scanFinished(u"21 séries"_s);
         QCOMPARE(m_bubbles->count(), 0);
 
         // And a failure is not a scan: turning that line off does not silence the other.
-        m_bubbles->scanFailed(u"le disque ne répond pas"_s);
+        m_said->scanFailed(u"le disque ne répond pas"_s);
         QCOMPARE(m_bubbles->count(), 1);
     }
 
@@ -170,11 +199,11 @@ private slots:
     {
         QSignalSpy reached(m_bubbles, &Toasts::escalated);
         m_awake = true;
-        m_bubbles->scanFinished(u"21 séries"_s);
+        m_said->scanFinished(u"21 séries"_s);
         QCOMPARE(reached.size(), 0);
 
         m_awake = false;
-        m_bubbles->scanFinished(u"21 séries"_s);
+        m_said->scanFinished(u"21 séries"_s);
         QCOMPARE(reached.size(), 1);
         QCOMPARE(reached.first().at(0).toString(), Words::scanEnded());
 
@@ -182,7 +211,7 @@ private slots:
         // that: the desktop without the bubble is a sensible thing to ask for.
         m_preferences->showBubble(Preferences::Warns::Scans, false);
         const int drawn = m_bubbles->count();
-        m_bubbles->scanFinished(u"21 séries"_s);
+        m_said->scanFinished(u"21 séries"_s);
         QCOMPARE(reached.size(), 2);
         QCOMPARE(m_bubbles->count(), drawn);
     }
@@ -195,12 +224,12 @@ private slots:
         m_preferences->concern(false, false, false);
         QSignalSpy reached(m_bubbles, &Toasts::escalated);
 
-        m_bubbles->scanFinished(u"21 séries"_s);
-        m_bubbles->copySaved(u"/tmp/Tome 5.cbz"_s);
+        m_said->scanFinished(u"21 séries"_s);
+        m_said->copySaved(u"/tmp/Tome 5.cbz"_s);
         QCOMPARE(m_bubbles->count(), 0);
         QCOMPARE(reached.size(), 0);
 
-        m_bubbles->scanFailed(u"le disque ne répond pas"_s);
+        m_said->scanFailed(u"le disque ne répond pas"_s);
         QCOMPARE(m_bubbles->count(), 1);
         QCOMPARE(reached.size(), 1);
     }
@@ -209,7 +238,7 @@ private slots:
     {
         m_preferences->reachTheDesktop(Preferences::Warns::Downloads, false);
         QSignalSpy reached(m_bubbles, &Toasts::escalated);
-        m_bubbles->copySaved(u"/tmp/Tome 5.cbz"_s);
+        m_said->copySaved(u"/tmp/Tome 5.cbz"_s);
 
         QCOMPARE(reached.size(), 0);
         QCOMPARE(m_bubbles->count(), 1);
@@ -225,7 +254,7 @@ private slots:
             m_preferences->reachTheDesktop(family, true);
         }
         QSignalSpy reached(m_bubbles, &Toasts::escalated);
-        m_bubbles->isbnCopied(u"9782505065333"_s);
+        m_said->isbnCopied(u"9782505065333"_s);
 
         QCOMPARE(m_bubbles->count(), 1);
         QCOMPARE(at(0, "headline"), u"ISBN copié"_s);
@@ -238,11 +267,11 @@ private slots:
     /// (22/10/2026). The startup names the package once — and says nothing when it is there.
     void a_qt_that_cannot_read_webp_names_the_package_once()
     {
-        m_bubbles->readsImages({"gif", "ico", "jpeg", "jpg", "png", "svg", "webp"});
+        m_said->readsImages({"gif", "ico", "jpeg", "jpg", "png", "svg", "webp"});
         QCOMPARE(m_bubbles->count(), 0);
 
-        m_bubbles->readsImages({"gif", "ico", "jpeg", "jpg", "png", "svg"});
-        m_bubbles->readsImages({"gif", "ico", "jpeg", "jpg", "png", "svg"});
+        m_said->readsImages({"gif", "ico", "jpeg", "jpg", "png", "svg"});
+        m_said->readsImages({"gif", "ico", "jpeg", "jpg", "png", "svg"});
         QCOMPARE(m_bubbles->count(), 1);
         QCOMPARE(at(0, "headline"), u"Il manque le module d’images WebP de Qt"_s);
         QCOMPARE(at(0, "detail"),
@@ -255,7 +284,7 @@ private slots:
     /// What is not said at all is not drawn at all.
     void it_says_nothing_about_nothing()
     {
-        m_bubbles->commandRefused(QString());
+        m_said->commandRefused(QString());
         QCOMPARE(m_bubbles->count(), 1);
         QCOMPARE(at(0, "headline"), Words::commandRefused());
         QVERIFY(at(0, "detail").isEmpty());
@@ -274,7 +303,7 @@ private slots:
         // A row that is not there, and a role a view asks about by habit: both are ordinary
         // questions with an empty answer, not cases that should never happen.
         QVERIFY(!m_bubbles->data(m_bubbles->index(0, 0), Qt::DisplayRole).isValid());
-        m_bubbles->scanFailed(u"une raison"_s);
+        m_said->scanFailed(u"une raison"_s);
         QVERIFY(!m_bubbles->data(m_bubbles->index(0, 0), Qt::DisplayRole).isValid());
         QVERIFY(!m_bubbles->data(m_bubbles->index(4, 0),
                                  qToUnderlying(Toasts::Role::Headline)).isValid());
@@ -306,6 +335,16 @@ private slots:
         QCOMPARE(said.at(7).toInt(), -1);
     }
 
+    /// A body may be read as markup by the daemon, and it can hold a folder's name: a series
+    /// called `<b>x</b>` is shown as that, and a link in it is not one.
+    void a_name_in_the_body_is_not_markup_to_the_daemon()
+    {
+        const QDBusMessage call =
+            Notifier::announcement(u"Scan terminé"_s, u"<b>Tome</b> & <a href=\"x\">y</a>"_s);
+        QCOMPARE(call.arguments().at(4).toString(),
+                 u"&lt;b&gt;Tome&lt;/b&gt; &amp; &lt;a href=&quot;x&quot;&gt;y&lt;/a&gt;"_s);
+    }
+
     /// And silent rather than noisy when there is nowhere to speak: a machine with no
     /// notification daemon is a machine that hears nothing, not a machine that breaks.
     void the_desktop_half_is_a_courtesy_and_never_a_failure()
@@ -322,10 +361,45 @@ private slots:
     void with_no_preferences_everything_warns()
     {
         Toasts loud(nullptr, [] { return true; }, 60);
-        loud.scanFinished(u"21 séries"_s);
+        Warnings(&loud).scanFinished(u"21 séries"_s);
 
         QCOMPARE(loud.count(), 1);
         QCOMPARE(loud.corner(), std::to_underlying(Preferences::Corner::BottomRight));
+    }
+
+    /// What was said is kept after the bubble is gone — newest first, twenty at most — and
+    /// kept for a family the reader has silenced too: it still happened.
+    void what_was_said_is_kept_after_the_bubble_is_gone()
+    {
+        QSignalSpy told(m_bubbles, &Toasts::historyChanged);
+        QVERIFY(m_bubbles->history().isEmpty());
+        m_said->scanFinished(u"21 séries"_s);
+        m_said->scanFailed(u"le disque ne répond pas"_s);
+        QCOMPARE(told.size(), 2);
+
+        QVariantList kept = m_bubbles->history();
+        QCOMPARE(kept.size(), 2);
+        QCOMPARE(kept.at(0).toMap().value(u"headline"_s).toString(), Words::scanStopped());
+        QVERIFY(kept.at(0).toMap().value(u"failed"_s).toBool());
+        QVERIFY(!kept.at(1).toMap().value(u"failed"_s).toBool());
+        QVERIFY(!kept.at(0).toMap().value(u"when"_s).toString().isEmpty());
+
+        QTRY_COMPARE_WITH_TIMEOUT(m_bubbles->count(), 0, 3000);
+        QCOMPARE(m_bubbles->history().size(), 2);
+
+        for (int i = 0; i < 30; ++i)
+            m_said->scanFailed(u"raison %1"_s.arg(i));
+        QCOMPARE(m_bubbles->history().size(), Toasts::Remembered);
+    }
+
+    /// Another profile sitting down must not read what the last one was told.
+    void the_history_is_forgotten_when_the_profile_changes()
+    {
+        m_said->scanFailed(u"le disque ne répond pas"_s);
+        QVERIFY(!m_bubbles->history().isEmpty());
+        m_bubbles->forget();
+        QVERIFY(m_bubbles->history().isEmpty());
+        QCOMPARE(m_bubbles->count(), 0);
     }
 };
 

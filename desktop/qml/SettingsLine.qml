@@ -28,6 +28,7 @@ Item {
         objectName: line.objectName.length > 0 ? line.objectName + "-label" : ""
         anchors.left: parent.left
         width: parent.width * 0.62
+        textFormat: Text.PlainText
         text: line.label
         color: line.muted ? Theme.inkFaint : Theme.ink
         font.family: Theme.textFamily
@@ -43,6 +44,7 @@ Item {
         anchors.right: parent.right
         anchors.left: left.right
         anchors.leftMargin: 12
+        textFormat: Text.PlainText
         text: line.value
         color: Theme.inkSoft
         font.family: Theme.textFamily

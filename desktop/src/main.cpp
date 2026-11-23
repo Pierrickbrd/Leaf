@@ -16,6 +16,7 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQuickStyle>
+#include <QQuickWindow>
 
 int main(int argc, char *argv[])
 {
@@ -38,6 +39,14 @@ int main(int argc, char *argv[])
     // light one and a dark one, both decided — and a style that paints its own controls
     // would fight it every time. Basic gets out of the way.
     QQuickStyle::setStyle(QStringLiteral("Basic"));
+
+    // Text drawn by the platform's own rasteriser and not from Qt's glyph atlas. At the
+    // fractional scale of a laptop screen (1.3333) the atlas draws two identical lines of 46
+    // logical pixels with a last row of anti-aliasing that is nearly invisible on one and dark
+    // on the next — 23 or 24 physical pixels of ink for the same phrase, measured over fourteen
+    // lines on a Wayland session; at 1.0 and 2.0 every line is identical, and so are they
+    // here. A trial: it costs the text that is scaled while it animates some sharpness.
+    QQuickWindow::setTextRenderType(QQuickWindow::NativeTextRendering);
 
     // A click on a `leaf://` link starts this program with the link as its argument. If a
     // Leaf is already open it is handed the link and this one leaves; otherwise this is the
