@@ -291,6 +291,8 @@ async fn only_the_principal_scans_and_links() {
             "/cleanup",
             Some(serde_json::json!({"root": "Petit", "files": []})),
         ),
+        ("DELETE", "/cache", None),
+        ("DELETE", "/cache", None),
         ("POST", "/link/codes", None),
         ("GET", "/link/codes/nothing", None),
         ("DELETE", "/link/codes/nothing", None),
@@ -328,6 +330,16 @@ async fn only_the_principal_scans_and_links() {
 
     let (status, said) = call(&server, "POST", "/scan", &household.principal, None).await;
     assert_eq!(StatusCode::ACCEPTED, status, "{said}");
+    let (status, said) = call(&server, "DELETE", "/cache", &household.principal, None).await;
+    assert_eq!(StatusCode::OK, status, "{said}");
+    // The scan before it warmed the covers: there was something to empty, and it says so.
+    assert!(
+        said["files"].as_u64().is_some() && said["bytes"].as_u64().is_some(),
+        "{said}"
+    );
+    let (status, said) = call(&server, "DELETE", "/cache", &household.principal, None).await;
+    assert_eq!(StatusCode::OK, status, "{said}");
+    assert!(said["files"].is_u64() && said["bytes"].is_u64(), "{said}");
     let (status, said) = call(
         &server,
         "PATCH",
@@ -612,4 +624,33 @@ async fn recognising_a_device_and_its_profile_is_one_question() {
     };
     assert_eq!(old_key + 1, principal, "the key, and its profile with it");
     assert_eq!(principal, child, "a ceiling costs no question of its own");
+}
+
+/// A profile exports its own shelf under its own ceiling: a child's file holds what the child
+/// sees, and a stranger without a key gets nothing at all.
+#[tokio::test]
+async fn a_profile_exports_the_shelf_it_may_see_and_no_other() {
+    let server = a_library();
+    let household = a_household(&server);
+
+    let (status, whole) = get(&server, "/profile/export", &household.reader).await;
+    assert_eq!(StatusCode::OK, status, "{whole}");
+    assert_eq!(2, whole["series"].as_array().unwrap().len(), "{whole}");
+
+    let (status, kid) = get(&server, "/profile/export", &household.child).await;
+    assert_eq!(StatusCode::OK, status, "{kid}");
+    let works: Vec<&str> = kid["series"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["work"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        vec!["Petit"],
+        works,
+        "the child's file leaves out what the child cannot see"
+    );
+
+    let (status, _) = get(&server, "/profile/export", "A".repeat(43).as_str()).await;
+    assert_eq!(StatusCode::FORBIDDEN, status);
 }

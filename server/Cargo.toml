@@ -10,7 +10,7 @@ description = "A reading server for a comics library."
 # outside both, see store::db.
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs", "io-util"] }
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.6", features = ["trace", "timeout"] }
 # Reading a request body frame by frame: an upload goes to the disk as it arrives rather
 # than being buffered whole, which at 130 MB a volume is the difference that matters.
 http-body-util = "0.1"
@@ -88,6 +88,9 @@ argon2 = "0.5"
 
 thiserror = "2"
 anyhow = "1"
+# The timer hyper needs for a header-read timeout, and the connection builder axum-server hands
+# back to be given one.
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "server-auto"] }
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rcgen = { version = "0.14.9", default-features = false, features = ["pem", "ring"] }

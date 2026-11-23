@@ -385,3 +385,25 @@ pub fn split_volumes(library: &Path, inbox: &Path) -> bool {
     };
     matches!((device(library), device(inbox)), (Some(a), Some(b)) if a != b)
 }
+
+/// Finishes the renames a cut left in the journal, before the first scan and before anything
+/// listens. Returns how many plans it took to their end.
+///
+/// A step that finds a state the plan did not expect touches nothing and is said in the log:
+/// the plan stays in the journal, and the next start tries it again.
+pub fn finish_interrupted_renames(
+    scanner: &crate::scan::scanner::Scanner,
+    db: &crate::store::Db,
+) -> Result<usize> {
+    let resumed = crate::store::renaming::resume(scanner, db)?;
+    if resumed.finished > 0 {
+        tracing::info!(
+            plans = resumed.finished,
+            "Finished a rename a cut had interrupted"
+        );
+    }
+    for why in &resumed.unexpected {
+        tracing::warn!(why, "A rename left in the journal was not touched");
+    }
+    Ok(resumed.finished)
+}

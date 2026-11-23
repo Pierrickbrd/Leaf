@@ -227,7 +227,9 @@ fn a_key_that_cannot_be_written_takes_its_device_back_with_it() {
 
     // The same name is free again, and a working output gets the key.
     let mut out = Vec::new();
-    enroll(
+    // The exit code is not what this checks: the key written and the device kept are, below.
+    // A newer toolchain than the one this was written on marks `ExitCode` must-use.
+    let _ = enroll(
         &config,
         "Phone",
         &mut Console {

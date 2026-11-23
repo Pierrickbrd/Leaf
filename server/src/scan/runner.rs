@@ -6,7 +6,8 @@
 //!
 //! One at a time. Two scans in the same transaction would deadlock on the writer; two in
 //! sequence would be work done twice. A second request while one is running is told so
-//! rather than queued: there is nothing to queue, since the second would read the same disk.
+//! rather than queued — for `/scan`, whose caller can ask again. A scan that follows an
+//! import is different: see `start_or_again`.
 
 use crate::scan::report::Findings;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,7 +48,15 @@ impl Default for ScanStatus {
 pub struct ScanRunner {
     status: Mutex<ScanStatus>,
     running: AtomicBool,
+    /// The one scan asked for while another ran. Also the lock that running is released
+    /// under, so a request cannot slip in between the last look and the release.
+    again: Mutex<Option<Job>>,
 }
+
+type Job = (
+    &'static str,
+    Box<dyn FnOnce() -> anyhow::Result<ScanReport> + Send>,
+);
 
 impl ScanRunner {
     pub fn status(&self) -> ScanStatus {
@@ -66,12 +75,59 @@ impl ScanRunner {
     where
         F: FnOnce() -> anyhow::Result<ScanReport> + Send + 'static,
     {
+        self.launch(label, Box::new(scan))
+    }
+
+    /// Starts a scan, or — when one is going — makes sure another follows it.
+    ///
+    /// A scan that has already read the library folder does not see what arrives after: an
+    /// import committed during one was installed on disk and never indexed, because the
+    /// commit's own request was told "already running" and the running one had passed that
+    /// folder. So the request is kept, once however many come (fifty commits in a row ask
+    /// for one pass, not fifty), and the last function received is the one that runs.
+    pub fn start_or_again<F>(self: &Arc<Self>, label: &'static str, scan: F)
+    where
+        F: FnOnce() -> anyhow::Result<ScanReport> + Send + 'static,
+    {
+        self.submit((label, Box::new(scan)));
+    }
+
+    /// Starts `job`, or keeps it for the scan that is running to follow with.
+    fn submit(self: &Arc<Self>, mut job: Job) {
+        loop {
+            // `launch` hands the job back when it is refused, so nothing is built twice.
+            match self.launch_or_return(job) {
+                None => return,
+                Some(back) => job = back,
+            }
+            let mut again = self
+                .again
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.running.load(Ordering::Acquire) {
+                *again = Some(job);
+                return;
+            }
+            // The scan ended between the refusal and the lock: start it ourselves.
+        }
+    }
+
+    fn launch(
+        self: &Arc<Self>,
+        label: &'static str,
+        scan: Box<dyn FnOnce() -> anyhow::Result<ScanReport> + Send>,
+    ) -> bool {
+        self.launch_or_return((label, scan)).is_none()
+    }
+
+    fn launch_or_return(self: &Arc<Self>, job: Job) -> Option<Job> {
+        let (label, scan) = job;
         if self
             .running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            return false;
+            return Some((label, scan));
         }
 
         let started_at = now();
@@ -91,38 +147,66 @@ impl ScanRunner {
                 // set for the life of the process: /scan answered RUNNING for ever and no
                 // scan could be started again. A destructor is the only thing an unwinding
                 // thread still runs.
-                let _release = Release(&runner);
-                let found = match scan() {
-                    Ok(report) => {
-                        tracing::info!(
-                            label,
-                            seconds = (now() - started_at) / 1000,
-                            "scan finished"
-                        );
-                        // The paragraph still goes to the log, where a paragraph belongs.
-                        tracing::info!(label, "{}", report.summary());
-                        report.findings()
-                    }
-                    Err(e) => {
-                        tracing::error!(label, error = format!("{e:#}"), "scan failed");
-                        // The failure reaches the client rather than only the log: a scan
-                        // that quietly did nothing is worse than one that says why.
-                        Findings {
-                            failure: Some(format!("{e:#}")),
-                            ..Findings::default()
+                let _release = Release(&runner, std::cell::Cell::new(false));
+                let mut label = label;
+                let mut scan = scan;
+                let mut started_at = started_at;
+                loop {
+                    let found = match scan() {
+                        Ok(report) => {
+                            tracing::info!(
+                                label,
+                                seconds = (now() - started_at) / 1000,
+                                "scan finished"
+                            );
+                            // The paragraph still goes to the log, where a paragraph belongs.
+                            tracing::info!(label, "{}", report.summary());
+                            report.findings()
                         }
+                        Err(e) => {
+                            tracing::error!(label, error = format!("{e:#}"), "scan failed");
+                            // The failure reaches the client rather than only the log: a scan
+                            // that quietly did nothing is worse than one that says why.
+                            Findings {
+                                failure: Some(format!("{e:#}")),
+                                ..Findings::default()
+                            }
+                        }
+                    };
+                    let mut again = runner
+                        .again
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if let Some((next_label, next)) = again.take() {
+                        // Still RUNNING for whoever polls: DONE here would end their wait
+                        // before the pass that matters.
+                        started_at = now();
+                        runner.set(ScanStatus {
+                            state: "RUNNING",
+                            started_at: Some(started_at),
+                            finished_at: None,
+                            report: None,
+                        });
+                        label = next_label;
+                        scan = next;
+                        continue;
                     }
-                };
-                runner.set(ScanStatus {
-                    state: "DONE",
-                    started_at: Some(started_at),
-                    finished_at: Some(now()),
-                    report: Some(found),
-                });
+                    runner.set(ScanStatus {
+                        state: "DONE",
+                        started_at: Some(started_at),
+                        finished_at: Some(now()),
+                        report: Some(found),
+                    });
+                    // Marked first, still under the lock of the kept request: the destructor
+                    // must find the flag already given back, not give it back again.
+                    _release.1.set(true);
+                    runner.running.store(false, Ordering::Release);
+                    break;
+                }
             })
             .expect("spawning the scan thread");
 
-        true
+        None
     }
 
     fn set(&self, status: ScanStatus) {
@@ -133,7 +217,11 @@ impl ScanRunner {
 }
 
 /// Hands the runner back, on the way out or on the way down.
-struct Release<'a>(&'a Arc<ScanRunner>);
+///
+/// The normal way out releases the flag itself, under the lock of the kept request, and
+/// says so here: released a second time by this destructor, a scan started in between had
+/// its flag cleared under it and a third could run beside it.
+struct Release<'a>(&'a Arc<ScanRunner>, std::cell::Cell<bool>);
 
 impl Drop for Release<'_> {
     fn drop(&mut self) {
@@ -151,7 +239,24 @@ impl Drop for Release<'_> {
             });
             tracing::error!("the scan thread panicked");
         }
-        self.0.running.store(false, Ordering::Release);
+        if !self.1.get() {
+            // Only a scan that died gets here still holding the flag.
+            let kept = {
+                let mut again = self
+                    .0
+                    .again
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                self.0.running.store(false, Ordering::Release);
+                again.take()
+            };
+            // The scan asked for while this one ran is still owed: the import it follows
+            // was installed on disk, and left unrun it stays out of the index until the
+            // next scan happens to start.
+            if let Some(job) = kept {
+                self.0.submit(job);
+            }
+        }
     }
 }
 

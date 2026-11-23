@@ -170,3 +170,23 @@ fn an_empty_label_means_the_title_stands_alone() {
     assert_eq!(Some(String::new()), entry.chapters[0].label);
     assert_eq!(None, entry.chapters[1].label);
 }
+
+/// A step that includes another order was dropped on its way back to disk when the type did
+/// not know the key, and the order it stood for silently lost a stretch.
+#[test]
+fn an_include_survives_being_read_and_written_back() {
+    let universe: sidecars::UniverseJson =
+        sidecars::read(br#"{"orders":[{"id":"a","steps":[{"include":"b"}]}]}"#).unwrap();
+    let written = serde_json::to_value(&universe).unwrap();
+    assert_eq!("b", written["orders"][0]["steps"][0]["include"]);
+}
+
+/// ComicInfo's `Penciller` is the drawing; reading only `Writer` left every illustrator of a
+/// legacy library uncredited.
+#[test]
+fn penciller_is_read_as_the_artist() {
+    let xml = br#"<?xml version="1.0"?><ComicInfo><Writer>Arleston</Writer><Penciller>Tarquin</Penciller></ComicInfo>"#;
+    let read = comic_info::read(xml).expect("readable");
+    assert_eq!(vec!["Tarquin".to_string()], read.artist);
+    assert_eq!(vec!["Arleston".to_string()], read.author);
+}

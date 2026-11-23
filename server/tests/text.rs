@@ -31,6 +31,15 @@ fn keeps_letters_of_any_script() {
     assert_eq!("γεια", search_key("ΓΕΙΑ"));
 }
 
+#[test]
+fn a_voiced_kana_folds_like_an_accented_letter_not_into_two_words() {
+    // NFD takes the voicing mark off ブ as it takes the accent off é; left behind as an
+    // unknown character, it split « ブルーピリオド » into « フ ルーヒ リオト », three words
+    // a prefix search for the title never reached.
+    assert_eq!("フルーヒリオト", search_key("ブルーピリオド"));
+    assert_eq!(search_key("ハ"), search_key("バ"));
+}
+
 /// Kept as letters, not kept as anything. An emoji is a symbol, and a title is no easier to
 /// find for carrying one.
 #[test]

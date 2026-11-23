@@ -173,6 +173,7 @@ mod filled {
                     edition: Some(String::new()),
                     from: Some(0.0),
                     to: Some(0.0),
+                    include: Some(String::new()),
                 }],
             }],
         }
@@ -195,6 +196,7 @@ mod filled {
             publisher: Some(String::new()),
             collection: Some(String::new()),
             colour: Some(false),
+            cover_volume: Some(0.0),
             volume_count: Some(0),
             format: Some(String::new()),
             language: Some(String::new()),
@@ -218,6 +220,7 @@ mod filled {
             language: Some(String::new()),
             chapter_label: Some(String::new()),
             colour: Some(false),
+            cover_volume: Some(0.0),
             arcs: vec![arc()],
         }
     }
@@ -259,7 +262,10 @@ mod filled {
             published_on: Some(String::new()),
             summary: Some(String::new()),
             volume: Some(0.0),
+            cover_page: Some(0),
             chapters: vec![chapter()],
+            authors: vec![String::new()],
+            artists: vec![String::new()],
         }
     }
 

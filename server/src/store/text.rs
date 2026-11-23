@@ -61,6 +61,23 @@ pub fn search_key(text: &str) -> String {
     out
 }
 
+/// A tag as the library shows it: trimmed, the first letter in capitals, the rest as written.
+///
+/// Display only. What makes two tags the same one is `search_key`, which ignores case and
+/// accents: « Horreur », « horreur » and « HORREUR » stay one entry of the filter and one
+/// suggestion, and only the spelling shown is chosen here. The rest is never lowered because
+/// the person who typed « BD », « LGBT » or « Fire Force » meant it; an all-capitals tag the
+/// editing window wrote earlier stays as it is for the same reason. The accent stays on the
+/// first letter (« éNIGME » becomes « ÉNIGME »).
+pub fn tag_case(name: &str) -> String {
+    let name = name.trim();
+    let mut letters = name.chars();
+    match letters.next() {
+        Some(first) => first.to_uppercase().chain(letters).collect(),
+        None => String::new(),
+    }
+}
+
 /// What one character becomes in a search key.
 enum Folded {
     /// Written as nothing, and joining what sits on either side of it.
@@ -99,12 +116,17 @@ fn folded(ch: char) -> Folded {
 /// The Unicode categories NFD leaves behind once a letter has been taken apart: Mn, Mc,
 /// Me. Recognised by range rather than by pulling in a category table — every combining
 /// mark lives in one of these blocks.
-fn is_combining_mark(ch: char) -> bool {
+///
+/// The kana voicing marks are among them: NFD takes ブ apart into フ and U+3099 as it takes
+/// é apart into e and U+0301. Missing from this list, the mark was read as a separator, and
+/// « ブルーピリオド » became three words, « フ ルーヒ リオト ».
+pub(crate) fn is_combining_mark(ch: char) -> bool {
     matches!(ch as u32,
         0x0300..=0x036F     // combining diacritical marks — the accents
         | 0x1AB0..=0x1AFF   // extended
         | 0x1DC0..=0x1DFF   // supplement
         | 0x20D0..=0x20FF   // for symbols
+        | 0x3099..=0x309A   // kana voicing marks, ゙ and ゚
         | 0xFE20..=0xFE2F   // half marks
     )
 }

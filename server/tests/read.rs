@@ -492,6 +492,92 @@ fn listing_the_series_does_not_ask_one_question_per_series() {
 }
 
 #[test]
+fn exporting_a_shelf_costs_one_question_whatever_it_holds() {
+    let library = Library::new();
+    let ask = |library: &Library| {
+        cost(&library.db, || {
+            library
+                .repository()
+                .reading_export("default", &Ceiling::NONE, 0)
+                .unwrap();
+        })
+    };
+    let three = ask(&library);
+    for i in 0..12 {
+        library.work(
+            &format!("w{i}"),
+            None,
+            &format!("Série {i}"),
+            "Auteur",
+            "manga",
+            &["Aventure"],
+        );
+        library.edition(&format!("e{i}"), &format!("w{i}"), None, "ongoing", 2);
+    }
+    let fifteen = ask(&library);
+    assert_eq!(
+        three, fifteen,
+        "the cost of an export must not follow the shelf"
+    );
+    assert_eq!(1, fifteen, "one statement, joined");
+}
+
+#[test]
+fn an_export_says_where_one_profile_stands_and_nothing_of_the_disk() {
+    let library = Library::new();
+    library.work("w", None, "Élfes", "Auteur", "manga", &["Aventure"]);
+    library.edition("e", "w", None, "ongoing", 3);
+    library
+        .db
+        .write(|cx| {
+            cx.execute(
+                "INSERT INTO progress (entry_id, edition_id, page, finished, times_finished, updated_at)
+                 VALUES ('e-v1', 'e', 10, 1, 2, 100)",
+                [],
+            )?;
+            cx.execute(
+                "INSERT INTO progress (entry_id, edition_id, page, finished, updated_at)
+                 VALUES ('e-v2', 'e', 4, 0, 200)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let export = library
+        .repository()
+        .reading_export("default", &Ceiling::NONE, 7)
+        .unwrap();
+    let said = serde_json::to_value(&export).unwrap();
+    assert_eq!(7, said["exportedAt"]);
+    let mine = said["series"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "e")
+        .expect("the edition just made");
+    let entries = mine["entries"].as_array().unwrap();
+    let states: Vec<&str> = entries
+        .iter()
+        .map(|e| e["readStatus"].as_str().unwrap())
+        .collect();
+    assert_eq!(vec!["READ", "IN_PROGRESS", "UNREAD"], states, "{said}");
+    assert_eq!(2, entries[0]["timesFinished"]);
+    // Another profile's places are not this one's.
+    let other = library
+        .repository()
+        .reading_export("nobody", &Ceiling::NONE, 0)
+        .unwrap();
+    assert!(serde_json::to_string(&other)
+        .unwrap()
+        .contains("\"UNREAD\""));
+    assert!(!serde_json::to_string(&other)
+        .unwrap()
+        .contains("IN_PROGRESS"));
+    let text = said.to_string();
+    assert!(!text.contains("/library"), "no path leaves with it: {text}");
+}
+
+#[test]
 fn one_series_does_not_cost_the_whole_library() {
     let library = Library::new();
     for i in 0..20 {

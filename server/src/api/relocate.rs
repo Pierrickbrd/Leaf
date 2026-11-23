@@ -52,6 +52,19 @@ pub struct Moved {
     /// — asking twice is how a retry looks — and saying so beats answering the same either
     /// way.
     pub moved: bool,
+    /// Where it was. Not part of the answer: the route that moved it needs it afterwards.
+    #[serde(skip)]
+    pub from: PathBuf,
+}
+
+/// What [`Relocate::check`] found.
+pub enum Check {
+    /// There is no such work.
+    NoWork,
+    /// It is already there, or has just arrived: nothing to move.
+    Nothing(PathBuf),
+    /// It can be moved from here.
+    Move(PathBuf),
 }
 
 pub struct Relocate<'a> {
@@ -64,18 +77,12 @@ impl<'a> Relocate<'a> {
         Relocate { db, roots }
     }
 
-    /// Moves the work's folder to `to`, which is the folder it will *be*, name included.
-    ///
-    /// The whole path and not a parent to join a name onto: an import can declare a work
-    /// under a different name than the one it currently has, and joining the old name would
-    /// quietly file it somewhere nobody named.
-    ///
-    /// `None` when there is no such work. The disk first and the index after: the files are
-    /// the truth, so the rescan the caller runs reads back what this did rather than being
-    /// told about it.
-    pub fn work(&self, work_id: &str, to: &Path) -> Result<Option<Moved>> {
+    /// Whether moving the work to `to` would be refused, said **before** anything is touched:
+    /// a caller that changes other things around the move asks first, so that a refusal
+    /// leaves nothing changed.
+    pub fn check(&self, work_id: &str, to: &Path) -> Result<Check> {
         let Some(from) = self.folder_of(work_id)? else {
-            return Ok(None);
+            return Ok(Check::NoWork);
         };
         let to = to.to_path_buf();
         let name = to
@@ -83,11 +90,7 @@ impl<'a> Relocate<'a> {
             .ok_or_else(|| anyhow::anyhow!("{} has no name", to.display()))?
             .to_os_string();
         if to == from {
-            return Ok(Some(Moved {
-                work_id: work_id.to_string(),
-                path: to.to_string_lossy().to_string(),
-                moved: false,
-            }));
+            return Ok(Check::Nothing(from));
         }
         // A destination inside the work being moved would make the work its own parent, and
         // the rename would take the destination away with the source.
@@ -107,18 +110,38 @@ impl<'a> Relocate<'a> {
             // does. Told apart by the identity in the sidecar and not by the folder being
             // occupied, because another work sitting there is a real collision.
             if !from.exists() && arrived(&to, work_id) {
-                return Ok(Some(Moved {
-                    work_id: work_id.to_string(),
-                    path: to.to_string_lossy().to_string(),
-                    moved: false,
-                }));
+                return Ok(Check::Nothing(from));
             }
             return Err(crate::api::invalid(format!(
                 "\"{}\" is already there — rename one of the two first",
                 name.to_string_lossy()
             )));
         }
+        Ok(Check::Move(from))
+    }
 
+    /// Moves the work's folder to `to`, which is the folder it will *be*, name included.
+    ///
+    /// The whole path and not a parent to join a name onto: an import can declare a work
+    /// under a different name than the one it currently has, and joining the old name would
+    /// quietly file it somewhere nobody named.
+    ///
+    /// `None` when there is no such work. The disk first and the index after: the files are
+    /// the truth, so the rescan the caller runs reads back what this did rather than being
+    /// told about it.
+    pub fn work(&self, work_id: &str, to: &Path) -> Result<Option<Moved>> {
+        let (from, to) = match self.check(work_id, to)? {
+            Check::NoWork => return Ok(None),
+            Check::Nothing(from) => {
+                return Ok(Some(Moved {
+                    work_id: work_id.to_string(),
+                    path: to.to_string_lossy().to_string(),
+                    moved: false,
+                    from,
+                }))
+            }
+            Check::Move(from) => (from, to.to_path_buf()),
+        };
         if let Some(parent) = to.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("making {}", parent.display()))?;
@@ -129,6 +152,7 @@ impl<'a> Relocate<'a> {
             work_id: work_id.to_string(),
             path: to.to_string_lossy().to_string(),
             moved: true,
+            from,
         }))
     }
 

@@ -33,7 +33,9 @@ pub const SCHEMA: &[&str] = &[
       reading_direction TEXT,
       summary           TEXT,
       age_rating        TEXT,
-      age               INTEGER
+      age               INTEGER,
+      declared_authors  TEXT,
+      declared_artists  TEXT
     )
     "#,
     // One row per genre, and the only record of one. A comma-joined column beside this
@@ -74,6 +76,28 @@ pub const SCHEMA: &[&str] = &[
     )
     "#,
     "CREATE INDEX IF NOT EXISTS work_artist_key ON work_artist(key)",
+    // Who wrote and who drew one volume — its own word, or its series' default when it says
+    // nothing. Kept per volume because the series alone hid every hand-over: Lucky Luke
+    // credited to Goscinny showed nobody for the volumes Jul wrote, and no volume could be
+    // found by the people who made it.
+    r#"
+    CREATE TABLE IF NOT EXISTS entry_author (
+      entry_id TEXT NOT NULL REFERENCES entry(id) ON DELETE CASCADE,
+      name     TEXT NOT NULL,
+      key      TEXT NOT NULL,
+      PRIMARY KEY (entry_id, key)
+    )
+    "#,
+    "CREATE INDEX IF NOT EXISTS entry_author_key ON entry_author(key)",
+    r#"
+    CREATE TABLE IF NOT EXISTS entry_artist (
+      entry_id TEXT NOT NULL REFERENCES entry(id) ON DELETE CASCADE,
+      name     TEXT NOT NULL,
+      key      TEXT NOT NULL,
+      PRIMARY KEY (entry_id, key)
+    )
+    "#,
+    "CREATE INDEX IF NOT EXISTS entry_artist_key ON entry_artist(key)",
     // Beside work_genre, never merged into it: measured, Les Terres d'Arran carries one
     // genre and seven tags with nothing in common between the two lists.
     r#"
@@ -107,6 +131,7 @@ pub const SCHEMA: &[&str] = &[
       status       TEXT,
       medium       TEXT,
       cover_file   TEXT,
+      cover_volume REAL,
       reading_direction TEXT,
       volume_count INTEGER,
       format       TEXT,
@@ -140,13 +165,16 @@ pub const SCHEMA: &[&str] = &[
       modified_at   INTEGER NOT NULL,
       added_at      INTEGER,
       cover_file    TEXT,
+      cover_page    INTEGER,
       volume_number REAL,
       title         TEXT,
       sort_key      REAL,
       page_count    INTEGER NOT NULL DEFAULT 0,
       isbn          TEXT,
       published_on  TEXT,
-      summary       TEXT
+      summary       TEXT,
+      authors_inherited INTEGER NOT NULL DEFAULT 0,
+      artists_inherited INTEGER NOT NULL DEFAULT 0
     )
     "#,
     // A number is unique within an edition, whether it comes from a CHAPTER entry or
@@ -219,6 +247,35 @@ pub const SCHEMA: &[&str] = &[
     )
     "#,
     "INSERT OR IGNORE INTO household (id) VALUES (1)",
+    // The file an archive was rewritten from; see migration 37.
+    r#"
+    CREATE TABLE IF NOT EXISTS import_origin (
+      path            TEXT PRIMARY KEY,
+      kept_size       INTEGER NOT NULL,
+      origin_size     INTEGER NOT NULL,
+      origin_checksum TEXT,
+      rewrite         TEXT
+    )
+    "#,
+    // What a reimport replaced; see migration 38. No foreign key to `entry`: the record is
+    // there for the day the entry is gone.
+    r#"
+    CREATE TABLE IF NOT EXISTS replaced_file (
+      import_id   TEXT NOT NULL,
+      path        TEXT NOT NULL,
+      entry_id    TEXT NOT NULL,
+      kept_at     TEXT NOT NULL,
+      replaced_at INTEGER NOT NULL,
+      profile_id  TEXT NOT NULL,
+      old_size    INTEGER NOT NULL,
+      new_size    INTEGER NOT NULL,
+      old_pages   INTEGER,
+      new_pages   INTEGER,
+      positions   TEXT NOT NULL CHECK (positions IN ('KEPT','RESET','SPLICED')),
+      PRIMARY KEY (import_id, path)
+    )
+    "#,
+    "CREATE INDEX IF NOT EXISTS ix_replaced_entry ON replaced_file(entry_id)",
     // A linked device. Only the SHA-256 of its key is kept, so a copy of the index cannot
     // be used to read the library.
     r#"
@@ -313,6 +370,30 @@ pub const SCHEMA: &[&str] = &[
     "#,
     "CREATE INDEX IF NOT EXISTS ix_order_step ON reading_order_step(order_id, position)",
     "CREATE INDEX IF NOT EXISTS ix_order_universe ON reading_order(universe_id, position)",
+    // The intention of a rename, written before its first move and crossed off step by step:
+    // a cut leaves the plan on the disk of the index, and the start of the server finishes it.
+    r#"
+    CREATE TABLE IF NOT EXISTS rename_plan (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at INTEGER NOT NULL,
+      done_at    INTEGER,
+      works      TEXT NOT NULL
+    )
+    "#,
+    r#"
+    CREATE TABLE IF NOT EXISTS rename_step (
+      plan_id     INTEGER NOT NULL REFERENCES rename_plan(id) ON DELETE CASCADE,
+      seq         INTEGER NOT NULL,
+      kind        TEXT NOT NULL CHECK (kind IN ('REWRITE','FOLDER','FILE')),
+      folder_kind TEXT,
+      subject     TEXT,
+      from_path   TEXT NOT NULL,
+      to_path     TEXT,
+      content     BLOB,
+      done        INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (plan_id, seq)
+    )
+    "#,
 ];
 
 /// The search index, as an FTS5 table.
@@ -768,6 +849,103 @@ pub const MIGRATIONS: &[&[&str]] = &[
     // way at all on a host nobody sits at. The recovery code is a second secret, drawn by the
     // server, shown once and kept only as a digest, like the code it stands in for.
     &["ALTER TABLE household ADD COLUMN recovery_phc TEXT"],
+    // 35 — the page a volume shows as its cover, when `entry.json` names one. Beside
+    // `cover_file` and not instead of it: the two have different owners (the archive and the
+    // folder), and serving prefers the archive's own word over the file beside it.
+    &["ALTER TABLE entry ADD COLUMN cover_page INTEGER"],
+    // 36 — the volume a series shows as its cover, when its sidecar names one. A number and
+    // not an entry id: the number is what the sidecar holds and what survives a rename.
+    &["ALTER TABLE edition ADD COLUMN cover_volume REAL"],
+    // 37 — the file an archive was rewritten from. A rewritten archive no longer has the size
+    // or the checksum of the file the client announced, so the next import would take it for
+    // a different file and send it again, every time. The origin is kept beside the size the
+    // rewrite left, by path relative to the library, so an announced file can be recognised.
+    // `rewrite` is a digest of what the rewrite was asked to do: the same file sent with a
+    // corrected `entry.json` is another request, not the same one. Also in SCHEMA, which is
+    // a no-op on a database that already has it.
+    &["CREATE TABLE IF NOT EXISTS import_origin (
+        path TEXT PRIMARY KEY,
+        kept_size INTEGER NOT NULL,
+        origin_size INTEGER NOT NULL,
+        origin_checksum TEXT,
+        rewrite TEXT
+    )"],
+    // 38 — what a reimport replaced. A replacement destroys the old file in the library
+    // — it is set aside, not kept in place — and a person who finds a volume changed asks
+    // afterwards what was replaced, where the old one is waiting, and what became of the
+    // places people had reached in it. Nothing else holds those answers: the entry keeps its
+    // identity through the replacement, so the index alone cannot say it ever happened.
+    // `entry_id` has no foreign key, so the record outlives the entry it is about, and
+    // `(import_id, path)` is the key so that a session committed twice records once. Also in
+    // SCHEMA, which is a no-op on a database that already has it.
+    &[
+        "CREATE TABLE IF NOT EXISTS replaced_file (
+            import_id   TEXT NOT NULL,
+            path        TEXT NOT NULL,
+            entry_id    TEXT NOT NULL,
+            kept_at     TEXT NOT NULL,
+            replaced_at INTEGER NOT NULL,
+            profile_id  TEXT NOT NULL,
+            old_size    INTEGER NOT NULL,
+            new_size    INTEGER NOT NULL,
+            old_pages   INTEGER,
+            new_pages   INTEGER,
+            positions   TEXT NOT NULL CHECK (positions IN ('KEPT','RESET','SPLICED')),
+            PRIMARY KEY (import_id, path)
+        )",
+        "CREATE INDEX IF NOT EXISTS ix_replaced_entry ON replaced_file(entry_id)",
+    ],
+    // 39 — who wrote and who drew each volume, and whether it took that from its series.
+    // A series' credits went up from its volumes and never came down: « Oda » typed once in
+    // `work.json` left a hundred volumes credited with nobody, and `work.json` naming the
+    // original team hid every hand-over after it. Nothing to convert — the next scan fills
+    // them. Also in SCHEMA, which is a no-op on a database that already has them.
+    &[
+        "CREATE TABLE IF NOT EXISTS entry_author (
+            entry_id TEXT NOT NULL REFERENCES entry(id) ON DELETE CASCADE,
+            name     TEXT NOT NULL,
+            key      TEXT NOT NULL,
+            PRIMARY KEY (entry_id, key)
+        )",
+        "CREATE INDEX IF NOT EXISTS entry_author_key ON entry_author(key)",
+        "CREATE TABLE IF NOT EXISTS entry_artist (
+            entry_id TEXT NOT NULL REFERENCES entry(id) ON DELETE CASCADE,
+            name     TEXT NOT NULL,
+            key      TEXT NOT NULL,
+            PRIMARY KEY (entry_id, key)
+        )",
+        "CREATE INDEX IF NOT EXISTS entry_artist_key ON entry_artist(key)",
+        "ALTER TABLE entry ADD COLUMN authors_inherited INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE entry ADD COLUMN artists_inherited INTEGER NOT NULL DEFAULT 0",
+        // What `work.json` itself declares, apart from everybody the series is credited
+        // with: « Modifier la série » was filled with the union, and saving it froze every
+        // writer who ever took over into the default. A JSON list, read whole with the
+        // series row, because nothing filters on it — `work_author` is what is searched.
+        "ALTER TABLE work ADD COLUMN declared_authors TEXT",
+        "ALTER TABLE work ADD COLUMN declared_artists TEXT",
+    ],
+    // 40 — the journal of renames: what a rename means to do, and how far it got. Also in
+    // SCHEMA, which is a no-op on a database that already has them.
+    &[
+        "CREATE TABLE IF NOT EXISTS rename_plan (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at INTEGER NOT NULL,
+            done_at    INTEGER,
+            works      TEXT NOT NULL
+        )",
+        "CREATE TABLE IF NOT EXISTS rename_step (
+            plan_id     INTEGER NOT NULL REFERENCES rename_plan(id) ON DELETE CASCADE,
+            seq         INTEGER NOT NULL,
+            kind        TEXT NOT NULL CHECK (kind IN ('REWRITE','FOLDER','FILE')),
+            folder_kind TEXT,
+            subject     TEXT,
+            from_path   TEXT NOT NULL,
+            to_path     TEXT,
+            content     BLOB,
+            done        INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (plan_id, seq)
+        )",
+    ],
 ];
 
 /// The statement that adds `work.age`. `db::after` follows the migration holding it with the

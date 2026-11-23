@@ -123,7 +123,8 @@ fn digits_end(chars: &[char], from: usize) -> usize {
 ///
 /// "Chap.{n:000}" with 99 gives "Chap.099", "Level.{n}" with 56.5 gives "Level.56.5".
 /// Padding applies to the integer part only, and a negative number keeps its sign in front
-/// of the padding.
+/// of the padding. A pattern without `{n` is followed by the number: typed « Level » where
+/// « Level {n} » was meant, every chapter of a series was called « Level ».
 pub fn compose(pattern: Option<&str>, number: Option<f64>) -> Option<String> {
     let pattern = pattern?.trim();
     let number = number?;
@@ -136,6 +137,10 @@ pub fn compose(pattern: Option<&str>, number: Option<f64>) -> Option<String> {
     } else {
         format!("{number}")
     };
+
+    if !pattern.contains("{n") {
+        return Some(format!("{pattern}\u{a0}{plain}"));
+    }
 
     let mut out = String::with_capacity(pattern.len() + plain.len());
     let mut rest = pattern;

@@ -88,6 +88,21 @@ fn renders_a_bare_placeholder_as_written() {
 }
 
 #[test]
+fn a_pattern_without_a_placeholder_is_followed_by_the_number() {
+    // Typed « Level » where « Level {n} » was meant, every chapter of the series was called
+    // « Level », told apart by nothing. The number follows it, held to it by a no-break space
+    // as in the default.
+    assert_eq!(
+        Some("Level\u{a0}13".to_string()),
+        compose(Some("Level"), Some(13.0))
+    );
+    assert_eq!(
+        Some("Chap.\u{a0}56.5".to_string()),
+        compose(Some("  Chap. "), Some(56.5))
+    );
+}
+
+#[test]
 fn keeps_the_sign_in_front_of_the_padding() {
     assert_eq!(
         Some("Chap.-108".to_string()),

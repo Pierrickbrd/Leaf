@@ -44,6 +44,23 @@ fn archive(path: &Path, pages: usize, sidecar: Option<(&str, &str)>) {
     zip.finish().unwrap();
 }
 
+/// An archive holding several sidecars at once.
+fn archive_with(path: &Path, sidecars: &[(&str, &str)]) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+    let options = zip::write::SimpleFileOptions::default();
+    for i in 0..2 {
+        zip.start_file::<_, ()>(format!("{i:03}.jpg"), options)
+            .unwrap();
+        zip.write_all(&jpeg(100, 140)).unwrap();
+    }
+    for (name, body) in sidecars {
+        zip.start_file::<_, ()>(*name, options).unwrap();
+        zip.write_all(body.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap();
+}
+
 struct Library {
     dir: tempfile::TempDir,
     db: Arc<Db>,
@@ -277,6 +294,35 @@ fn an_archive_that_declares_itself_a_whole_book_is_lifted_out_of_the_folder_it_s
     assert!(!names.contains(&"BD".to_string()));
 }
 
+/// The shelf is unmade, and so is what the scan had already said about it. It was recorded
+/// as a work before its archives could speak, and its implicit edition was checked against a
+/// `work.json` nobody was ever going to write: « Death Note - One-Shot/work.json: status,
+/// volumeCount » was reported for a folder that is not a work.
+#[test]
+fn a_shelf_of_whole_books_is_not_reported_as_a_work_missing_its_sidecar() {
+    let library = Library::new();
+    let shelf = library.folder("BD");
+    archive(
+        &shelf.join("Blast.cbz"),
+        4,
+        Some((
+            "oneshot.json",
+            r#"{"leaf":1,"title":"Blast","authors":["Manu Larcenet"]}"#,
+        )),
+    );
+
+    let report = library.scan();
+
+    assert!(
+        !report
+            .missing_required
+            .iter()
+            .any(|line| line.starts_with("BD")),
+        "{:?}",
+        report.missing_required
+    );
+}
+
 /// An album inside a series it belongs to stays a volume of it. The declaration is what
 /// lifts a file out, so an artbook you want filed with the work is filed with it by saying
 /// nothing.
@@ -309,6 +355,136 @@ fn a_volume_that_declares_nothing_stays_where_it_sits() {
                  (SELECT id FROM edition WHERE one_shot = 0)"
             )
             .unwrap()
+    );
+}
+
+const BLAST: &str = r#"{"leaf":1,"title":"Blast","authors":["Manu Larcenet"]}"#;
+
+/// A book of a universe that is no series of it had to be put in a folder of its own, made
+/// for nothing but holding it: dropped beside the universe's works, it was not read at all,
+/// and nothing said so.
+#[test]
+fn a_whole_book_sitting_directly_in_a_universe_folder_is_a_book_of_that_universe() {
+    let library = Library::new();
+    library.write("Larcenet/universe.json", r#"{"leaf":1,"name":"Larcenet"}"#);
+    let universe = library.folder("Larcenet");
+    archive(
+        &universe.join("Blast.cbz"),
+        3,
+        Some(("oneshot.json", BLAST)),
+    );
+
+    let first = library.scan();
+
+    assert_eq!(1, library.count("work"));
+    assert_eq!(1, library.count("entry"));
+    assert_eq!(
+        Some(1),
+        library.one::<i64>("SELECT one_shot FROM edition"),
+        "its own edition, as a book lifted out of a work folder has"
+    );
+    assert_eq!(
+        library.one::<String>("SELECT id FROM universe"),
+        library.one::<String>("SELECT universe_id FROM work"),
+        "the book belongs to the universe it sits in"
+    );
+    assert_eq!(
+        Some("Blast".to_string()),
+        library.one::<String>("SELECT title FROM work")
+    );
+    assert!(first.disregarded.is_empty(), "{:?}", first.disregarded);
+
+    // And a second scan finds it where the first left it, reading position and all.
+    let ids = library.all("SELECT id FROM entry");
+    library.stopped_at(2);
+    library.scan();
+    assert_eq!(ids, library.all("SELECT id FROM entry"));
+    assert_eq!(1, library.count("work"));
+    assert_eq!(1, library.count("edition"));
+    assert_eq!(Some(2), library.place());
+}
+
+/// A volume dropped in a universe belongs to no work, and guessing one would be inventing a
+/// series. It is still not read — but it used to be skipped in silence, the archive on the
+/// disk and nowhere in the library.
+#[test]
+fn an_archive_in_a_universe_folder_that_is_not_a_whole_book_is_reported_not_read() {
+    let library = Library::new();
+    library.write("Larcenet/universe.json", r#"{"leaf":1,"name":"Larcenet"}"#);
+    let universe = library.folder("Larcenet");
+    archive(&universe.join("Loose.cbz"), 2, None);
+    archive(&universe.join("Retour à la terre/Tome 1.cbz"), 2, None);
+
+    let report = library.scan();
+
+    assert_eq!(1, library.count("entry"), "only the volume of the work");
+    assert!(
+        report
+            .disregarded
+            .iter()
+            .any(|d| d.contains("Larcenet/Loose.cbz") && d.contains("oneshot.json")),
+        "{:?}",
+        report.disregarded
+    );
+    // Reported once, as what it is, and not also as a volume that lacks its metadata.
+    assert!(
+        !report
+            .entries_without_metadata
+            .contains(&"Loose.cbz".to_string()),
+        "{:?}",
+        report.entries_without_metadata
+    );
+}
+
+#[test]
+fn a_whole_book_moved_out_of_its_universe_folder_leaves_the_universe() {
+    let library = Library::new();
+    library.write("Larcenet/universe.json", r#"{"leaf":1,"name":"Larcenet"}"#);
+    let universe = library.folder("Larcenet");
+    archive(
+        &universe.join("Blast.cbz"),
+        3,
+        Some(("oneshot.json", BLAST)),
+    );
+    library.scan();
+
+    let shelf = library.folder("BD");
+    std::fs::rename(universe.join("Blast.cbz"), shelf.join("Blast.cbz")).unwrap();
+    library.scan();
+
+    assert_eq!(1, library.count("work"));
+    assert_eq!(1, library.count("edition"));
+    assert_eq!(1, library.count("entry"));
+    assert_eq!(None, library.one::<String>("SELECT universe_id FROM work"));
+}
+
+#[test]
+fn a_book_in_a_universe_folder_that_stops_declaring_itself_whole_is_no_longer_filed() {
+    let library = Library::new();
+    library.write("Larcenet/universe.json", r#"{"leaf":1,"name":"Larcenet"}"#);
+    let universe = library.folder("Larcenet");
+    archive(
+        &universe.join("Blast.cbz"),
+        3,
+        Some(("oneshot.json", BLAST)),
+    );
+    archive(&universe.join("Retour à la terre/Tome 1.cbz"), 2, None);
+    library.scan();
+    assert_eq!(2, library.count("work"));
+
+    archive(&universe.join("Blast.cbz"), 3, None);
+    let report = library.scan();
+
+    assert_eq!(1, library.count("work"));
+    assert_eq!(1, library.count("edition"));
+    assert_eq!(1, library.count("entry"));
+    assert!(
+        report
+            .disregarded
+            .iter()
+            .any(|d| d.contains("Larcenet/Blast.cbz")),
+        "{:?}",
+        report.disregarded
     );
 }
 
@@ -1144,8 +1320,8 @@ fn every_field_the_server_advertises_is_one_a_sidecar_reads_back() {
 /// Something each field will accept: they are strings, numbers, or lists of either.
 fn placeholder(field: &str) -> serde_json::Value {
     match field {
-        "leaf" | "startPage" | "volumeCount" => serde_json::json!(1),
-        "number" | "volume" | "after" | "from" | "to" => serde_json::json!(1.0),
+        "leaf" | "startPage" | "volumeCount" | "coverPage" => serde_json::json!(1),
+        "number" | "volume" | "after" | "from" | "to" | "coverVolume" => serde_json::json!(1.0),
         "genres" | "authors" | "artists" | "tags" => serde_json::json!([""]),
         "colour" => serde_json::json!(true),
         "arcs" => serde_json::json!([{"name": "", "unit": "VOLUME", "from": 1.0, "to": 1.0}]),
@@ -1514,6 +1690,57 @@ fn comic_info_answers_for_a_work_that_declares_nothing() {
     assert!(genres.contains(&"Shonen".to_string()), "{genres:?}");
 }
 
+/// A tag is shown with a capital first and the rest as the sidecar wrote it, and « horreur »
+/// beside « HORREUR » is one tag: the key ignores case, only the spelling shown is chosen.
+#[test]
+fn a_tag_is_shown_with_a_first_capital_and_counted_once_whatever_its_case() {
+    let library = Library::new();
+    library.write(
+        "Bleach/work.json",
+        r#"{"leaf":1,"title":"Bleach","tags":["banane","BD","horreur","HORREUR","éNIGME"]}"#,
+    );
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 2, None);
+    library.scan();
+
+    assert_eq!(
+        library.all("SELECT name FROM work_tag ORDER BY name"),
+        vec!["BD", "Banane", "Horreur", "ÉNIGME"]
+    );
+}
+
+/// A row written in capitals by an index built before the spelling changed is put right by
+/// the next scan, with no migration: the rows are rebuilt from the sidecars every time.
+#[test]
+fn a_scan_rewrites_tags_an_older_index_stored_in_capitals() {
+    let library = Library::new();
+    library.write(
+        "Bleach/work.json",
+        r#"{"leaf":1,"title":"Bleach","tags":["Combustion humaine"]}"#,
+    );
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 2, None);
+    library.scan();
+    library
+        .db
+        .write(|cx| {
+            cx.execute("UPDATE work_tag SET name = UPPER(name)", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        library.all("SELECT name FROM work_tag"),
+        vec!["COMBUSTION HUMAINE"]
+    );
+
+    library.scan();
+
+    assert_eq!(
+        library.all("SELECT name FROM work_tag"),
+        vec!["Combustion humaine"]
+    );
+}
+
+/// Genres only: a volume's ComicInfo still speaks for that volume's credits before the series
+/// does, on a library never imported — see the test of that name below.
 #[test]
 fn what_the_work_declares_wins_over_what_comic_info_says() {
     let library = Library::new();
@@ -1531,7 +1758,6 @@ fn what_the_work_declares_wins_over_what_comic_info_says() {
     );
     library.scan();
 
-    assert_eq!(library.all("SELECT name FROM work_author"), vec!["Kubo"]);
     assert_eq!(library.all("SELECT name FROM work_genre"), vec!["Shonen"]);
 }
 
@@ -1562,6 +1788,542 @@ fn an_illustrator_credited_nowhere_else_is_still_searchable() {
     assert!(
         !hits.is_empty(),
         "searching the illustrator's name must find the series"
+    );
+}
+
+// ------------------------------------------------------- credits, volume by volume
+
+/// A volume carrying its own `entry.json` credits.
+fn credited_volume(library: &Library, at: &str, authors: &str, artists: &str) {
+    let (folder, file) = at.rsplit_once('/').unwrap();
+    archive(
+        &library.folder(folder).join(file),
+        2,
+        Some((
+            "entry.json",
+            &format!(r#"{{"leaf":1,"authors":{authors},"artists":{artists}}}"#),
+        )),
+    );
+}
+
+/// The first volume that said a `Writer` named the whole series, so a series whose script
+/// changed hands at volume 2 was credited to the first writer only — and an illustrator was
+/// never credited at all.
+#[test]
+fn a_series_whose_volumes_credit_different_people_is_credited_to_all_of_them() {
+    let library = Library::new();
+    library.write("Lanfeust/work.json", r#"{"leaf":1,"title":"Lanfeust"}"#);
+    credited_volume(&library, "Lanfeust/Tome 1.cbz", r#"["A"]"#, r#"["B"]"#);
+    credited_volume(&library, "Lanfeust/Tome 2.cbz", r#"["C"]"#, r#"["D"]"#);
+    library.scan();
+
+    assert_eq!(
+        vec!["A", "C"],
+        library.all("SELECT name FROM work_author ORDER BY rowid")
+    );
+    assert_eq!(
+        vec!["B", "D"],
+        library.all("SELECT name FROM work_artist ORDER BY rowid")
+    );
+}
+
+/// `work.json` used to replace what the volumes said. It is now what a volume that says
+/// nothing is credited with, so a default no volume falls back on credits nobody.
+#[test]
+fn a_default_every_volume_overrides_is_not_among_the_series_credits() {
+    let library = Library::new();
+    library.write(
+        "Lanfeust/work.json",
+        r#"{"leaf":1,"title":"Lanfeust","authors":["Collectif"]}"#,
+    );
+    credited_volume(&library, "Lanfeust/Tome 1.cbz", r#"["A"]"#, r#"["B"]"#);
+    credited_volume(&library, "Lanfeust/Tome 2.cbz", r#"["C"]"#, r#"["D"]"#);
+    library.scan();
+
+    assert_eq!(
+        vec!["A", "C"],
+        library.all("SELECT name FROM work_author ORDER BY rowid")
+    );
+    assert_eq!(
+        vec!["B", "D"],
+        library.all("SELECT name FROM work_artist ORDER BY rowid")
+    );
+}
+
+/// The singular `author` of the first format is a default like `authors`.
+#[test]
+fn the_legacy_singular_author_is_the_default_a_silent_volume_inherits() {
+    let library = Library::new();
+    library.write(
+        "Lanfeust/work.json",
+        r#"{"leaf":1,"title":"Lanfeust","author":"Arleston"}"#,
+    );
+    archive(&library.folder("Lanfeust").join("Tome 1.cbz"), 2, None);
+    library.scan();
+
+    assert_eq!(
+        vec!["Arleston"],
+        library.all("SELECT name FROM work_author")
+    );
+    assert_eq!(
+        vec!["Arleston"],
+        library.all("SELECT name FROM entry_author")
+    );
+}
+
+#[test]
+fn a_volume_without_entry_json_is_credited_from_its_comicinfo_writer_and_penciller() {
+    let library = Library::new();
+    archive(
+        &library.folder("Lanfeust").join("Tome 1.cbz"),
+        2,
+        Some((
+            "ComicInfo.xml",
+            &comic_info(&[("Writer", "Arleston"), ("Penciller", "Tarquin")]),
+        )),
+    );
+    library.scan();
+
+    assert_eq!(
+        vec!["Arleston"],
+        library.all("SELECT name FROM work_author")
+    );
+    assert_eq!(vec!["Tarquin"], library.all("SELECT name FROM work_artist"));
+}
+
+/// « Arleston » in one volume and « ARLESTON » in the next are one person; counted twice the
+/// series showed two authors and a search listed it twice.
+#[test]
+fn the_same_person_spelled_twice_is_credited_once() {
+    let library = Library::new();
+    library.write("Lanfeust/work.json", r#"{"leaf":1,"title":"Lanfeust"}"#);
+    credited_volume(&library, "Lanfeust/Tome 1.cbz", r#"["Arleston"]"#, r#"[]"#);
+    credited_volume(&library, "Lanfeust/Tome 2.cbz", r#"["ARLESTON"]"#, r#"[]"#);
+    library.scan();
+
+    assert_eq!(
+        vec!["Arleston"],
+        library.all("SELECT name FROM work_author")
+    );
+}
+
+// ------------------------------------------- credits a series hands down to its volumes
+
+/// The names a volume is credited with, as the index holds them, in the order they were met.
+fn credited(library: &Library, table: &str, file: &str) -> Vec<String> {
+    library.all(&format!(
+        "SELECT c.name FROM {table} c JOIN entry x ON x.id = c.entry_id
+         WHERE x.file LIKE '%/{file}' ORDER BY c.rowid"
+    ))
+}
+
+fn inherited(library: &Library, column: &str, file: &str) -> i64 {
+    library
+        .one::<i64>(&format!(
+            "SELECT {column} FROM entry WHERE file LIKE '%/{file}'"
+        ))
+        .expect("the volume is indexed")
+}
+
+/// One Piece: « Oda » typed once in `work.json` left a hundred volumes credited with nobody,
+/// because a credit went up from the volumes and never came down.
+#[test]
+fn a_volume_that_credits_nobody_is_credited_with_its_series_default() {
+    let library = Library::new();
+    library.write(
+        "One Piece/work.json",
+        r#"{"leaf":1,"title":"One Piece","authors":["Eiichirō Oda"],"artists":["Eiichirō Oda"]}"#,
+    );
+    archive(&library.folder("One Piece").join("Tome 01.cbz"), 2, None);
+    archive(&library.folder("One Piece").join("Tome 02.cbz"), 2, None);
+    library.scan();
+
+    for file in ["Tome 01.cbz", "Tome 02.cbz"] {
+        assert_eq!(
+            vec!["Eiichirō Oda"],
+            credited(&library, "entry_author", file)
+        );
+        assert_eq!(
+            vec!["Eiichirō Oda"],
+            credited(&library, "entry_artist", file)
+        );
+        assert_eq!(1, inherited(&library, "authors_inherited", file));
+        assert_eq!(1, inherited(&library, "artists_inherited", file));
+    }
+}
+
+/// Lucky Luke: the script changed hands, the drawing did not. A volume naming its writer
+/// replaces the writer it would have inherited and keeps the drawer — field by field.
+fn lucky_luke(library: &Library) {
+    library.write(
+        "Lucky Luke/work.json",
+        r#"{"leaf":1,"title":"Lucky Luke","authors":["René Goscinny"],"artists":["Morris"]}"#,
+    );
+    archive(&library.folder("Lucky Luke").join("Tome 01.cbz"), 2, None);
+    archive(
+        &library.folder("Lucky Luke").join("Tome 02.cbz"),
+        2,
+        Some(("entry.json", r#"{"leaf":1,"authors":["Jul"]}"#)),
+    );
+}
+
+#[test]
+fn a_volume_that_names_its_writer_keeps_the_series_drawer() {
+    let library = Library::new();
+    lucky_luke(&library);
+    library.scan();
+
+    assert_eq!(
+        vec!["Jul"],
+        credited(&library, "entry_author", "Tome 02.cbz")
+    );
+    assert_eq!(0, inherited(&library, "authors_inherited", "Tome 02.cbz"));
+    assert_eq!(
+        vec!["Morris"],
+        credited(&library, "entry_artist", "Tome 02.cbz")
+    );
+    assert_eq!(1, inherited(&library, "artists_inherited", "Tome 02.cbz"));
+}
+
+/// `work.json` naming someone used to replace the union outright, and the series hid every
+/// writer who took over.
+#[test]
+fn the_series_is_credited_with_the_union_of_what_its_volumes_are_credited_with() {
+    let library = Library::new();
+    lucky_luke(&library);
+    library.scan();
+
+    assert_eq!(
+        vec!["René Goscinny", "Jul"],
+        library.all("SELECT name FROM work_author ORDER BY rowid")
+    );
+    assert_eq!(vec!["Morris"], library.all("SELECT name FROM work_artist"));
+}
+
+#[test]
+fn a_series_whose_volumes_all_speak_for_themselves_is_credited_with_them() {
+    let library = Library::new();
+    library.write("Duos/work.json", r#"{"leaf":1,"title":"Duos"}"#);
+    credited_volume(&library, "Duos/Tome 1.cbz", r#"["A"]"#, r#"["B"]"#);
+    credited_volume(&library, "Duos/Tome 2.cbz", r#"["C"]"#, r#"["D"]"#);
+    library.scan();
+
+    assert_eq!(vec!["A"], credited(&library, "entry_author", "Tome 1.cbz"));
+    assert_eq!(vec!["D"], credited(&library, "entry_artist", "Tome 2.cbz"));
+    assert_eq!(0, inherited(&library, "authors_inherited", "Tome 1.cbz"));
+    assert_eq!(
+        vec!["A", "C"],
+        library.all("SELECT name FROM work_author ORDER BY rowid")
+    );
+}
+
+/// A library never passed through the import still has its ComicInfo, and the volume's own
+/// file says more about the volume than the series does.
+#[test]
+fn a_comicinfo_still_comes_before_the_series_default_on_a_library_never_imported() {
+    let library = Library::new();
+    library.write(
+        "Lanfeust/work.json",
+        r#"{"leaf":1,"title":"Lanfeust","authors":["A"]}"#,
+    );
+    archive(
+        &library.folder("Lanfeust").join("Tome 1.cbz"),
+        2,
+        Some(("ComicInfo.xml", &comic_info(&[("Writer", "B")]))),
+    );
+    library.scan();
+
+    assert_eq!(vec!["B"], credited(&library, "entry_author", "Tome 1.cbz"));
+    assert_eq!(0, inherited(&library, "authors_inherited", "Tome 1.cbz"));
+}
+
+/// Not one volume moves when only `work.json` changes, and an edition whose files are all
+/// as they were is skipped wholesale — which must not skip what its volumes inherit.
+#[test]
+fn a_default_changed_in_work_json_recredits_volumes_that_did_not_move() {
+    let library = Library::new();
+    library.write(
+        "One Piece/work.json",
+        r#"{"leaf":1,"title":"One Piece","authors":["Oda"]}"#,
+    );
+    archive(&library.folder("One Piece").join("Tome 01.cbz"), 2, None);
+    library.scan();
+
+    // Edited in place, so the identity the scan stamped into it stays.
+    let path = library.folder("One Piece").join("work.json");
+    let stamped = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, stamped.replace("\"Oda\"", "\"Eiichirō Oda\"")).unwrap();
+    library.scan();
+
+    assert_eq!(1, library.count("entry"));
+    assert_eq!(
+        vec!["Eiichirō Oda"],
+        credited(&library, "entry_author", "Tome 01.cbz")
+    );
+}
+
+/// Bleach bought twice: the old volumes at the root of the series, the Perfect Edition in a
+/// folder beside them. Both read the same `work.json`.
+#[test]
+fn volumes_beside_and_below_a_series_inherit_the_same_default() {
+    let library = Library::new();
+    library.write(
+        "Bleach/work.json",
+        r#"{"leaf":1,"title":"Bleach","authors":["Tite Kubo"]}"#,
+    );
+    archive(&library.folder("Bleach").join("Tome 01.cbz"), 2, None);
+    archive(
+        &library.folder("Bleach/Perfect").join("Perfect 01.cbz"),
+        2,
+        None,
+    );
+    library.scan();
+
+    assert_eq!(
+        vec!["Tite Kubo"],
+        credited(&library, "entry_author", "Tome 01.cbz")
+    );
+    assert_eq!(
+        vec!["Tite Kubo"],
+        credited(&library, "entry_author", "Perfect 01.cbz")
+    );
+    assert_eq!(
+        vec!["Tite Kubo"],
+        library.all("SELECT name FROM work_author")
+    );
+}
+
+/// A whole book dropped in a series folder is its own work: it was never one of the series'
+/// volumes, so the series' writer is not its writer.
+#[test]
+fn a_book_standing_alone_in_a_series_folder_does_not_inherit_its_default() {
+    let library = Library::new();
+    library.write(
+        "Lucky Luke/work.json",
+        r#"{"leaf":1,"title":"Lucky Luke","authors":["Morris"]}"#,
+    );
+    archive(&library.folder("Lucky Luke").join("Tome 01.cbz"), 2, None);
+    archive(
+        &library.folder("Lucky Luke").join("Hommage.cbz"),
+        2,
+        Some(("oneshot.json", r#"{"leaf":1,"title":"Hommage"}"#)),
+    );
+    library.scan();
+
+    assert!(credited(&library, "entry_author", "Hommage.cbz").is_empty());
+    assert!(library
+        .all(
+            "SELECT a.name FROM work_author a JOIN work w ON w.id = a.work_id
+             WHERE w.name = 'Hommage'"
+        )
+        .is_empty());
+}
+
+/// A volume was found by its title and nothing else: the people who made it were indexed on
+/// its edition only.
+#[test]
+fn a_volume_is_found_by_the_name_it_is_credited_with() {
+    let library = Library::new();
+    library.write(
+        "One Piece/work.json",
+        r#"{"leaf":1,"title":"One Piece","authors":["Oda"]}"#,
+    );
+    archive(&library.folder("One Piece").join("Tome 01.cbz"), 2, None);
+    library.scan();
+
+    let hits = leaf_server::store::Repository::new(&library.db)
+        .search(
+            "Oda",
+            10,
+            &["ENTRY".to_string()],
+            &leaf_server::api::dto::SeriesFilter::default(),
+            "default",
+            &Ceiling::NONE,
+        )
+        .expect("searching");
+    assert_eq!(
+        1,
+        hits.len(),
+        "{:?}",
+        hits.iter().map(|h| &h.label).collect::<Vec<_>>()
+    );
+    assert_eq!("ENTRY", hits[0].kind);
+}
+
+/// A series of a hundred volumes inheriting two names would rewrite four hundred rows on
+/// every scan if credits were rewritten whole: a rescan of what did not change costs the
+/// same whether the volumes inherit names or have none.
+#[test]
+fn crediting_an_unchanged_edition_costs_nothing_per_volume() {
+    let rescan = |work: &str, volumes: usize| {
+        let library = Library::new();
+        library.write("Série/work.json", work);
+        for n in 1..=volumes {
+            archive(
+                &library.folder("Série").join(format!("Tome {n}.cbz")),
+                2,
+                None,
+            );
+        }
+        library.scan();
+        let before = library.db.statements();
+        library.scan();
+        library.db.statements() - before
+    };
+    let named = r#"{"leaf":1,"title":"Série","authors":["A","B"],"artists":["C"]}"#;
+    let silent = r#"{"leaf":1,"title":"Série"}"#;
+    assert_eq!(
+        rescan(named, 6) - rescan(named, 3),
+        rescan(silent, 6) - rescan(silent, 3)
+    );
+}
+
+/// One volume credited and its neighbour credited by nobody: the series was not reported,
+/// because somebody somewhere was credited.
+#[test]
+fn a_series_with_one_volume_credited_by_nobody_is_reported() {
+    let library = Library::new();
+    library.write("Duos/work.json", r#"{"leaf":1,"title":"Duos"}"#);
+    credited_volume(&library, "Duos/Tome 1.cbz", r#"["A"]"#, r#"["B"]"#);
+    archive(&library.folder("Duos").join("Tome 2.cbz"), 2, None);
+    let report = library.scan();
+
+    let said = report
+        .missing_required
+        .iter()
+        .find(|m| m.contains("Duos/work.json"))
+        .expect("the series is reported");
+    assert!(said.contains("authors"), "{said}");
+    assert!(said.contains("artists"), "{said}");
+}
+
+/// Obata drew one volume of a collective series and is credited nowhere in `work.json`:
+/// searching his name found nothing.
+#[test]
+fn a_search_for_the_artist_of_one_volume_finds_the_series() {
+    let library = Library::new();
+    library.write("Death Note/work.json", r#"{"leaf":1,"title":"Death Note"}"#);
+    credited_volume(
+        &library,
+        "Death Note/Tome 1.cbz",
+        r#"["Ōba"]"#,
+        r#"["Obata"]"#,
+    );
+    library.scan();
+
+    let hits = leaf_server::store::Repository::new(&library.db)
+        .search(
+            "Obata",
+            10,
+            &[],
+            &leaf_server::api::dto::SeriesFilter::default(),
+            "default",
+            &Ceiling::NONE,
+        )
+        .expect("searching");
+    assert!(
+        !hits.is_empty(),
+        "the artist of a volume must find its series"
+    );
+}
+
+/// An album lifted out of a folder is its own work: its credits are its own, and crediting
+/// the series it stood beside would give a collection the author of one of its neighbours.
+#[test]
+fn a_book_lifted_out_of_a_folder_does_not_credit_the_series() {
+    let library = Library::new();
+    library.write("Lanfeust/work.json", r#"{"leaf":1,"title":"Lanfeust"}"#);
+    credited_volume(&library, "Lanfeust/Tome 1.cbz", r#"["A"]"#, r#"[]"#);
+    archive_with(
+        &library.folder("Lanfeust").join("Hors-série.cbz"),
+        &[
+            ("oneshot.json", r#"{"leaf":1,"title":"Hors-série"}"#),
+            (
+                "entry.json",
+                r#"{"leaf":1,"authors":["Ailleurs"],"artists":["Autre"]}"#,
+            ),
+        ],
+    );
+    library.scan();
+
+    assert_eq!(
+        vec!["A"],
+        library.all(
+            "SELECT a.name FROM work_author a JOIN work w ON w.id = a.work_id
+             WHERE w.title = 'Lanfeust'"
+        )
+    );
+    assert!(library
+        .all("SELECT name FROM work_artist")
+        .iter()
+        .all(|name| name != "Autre"));
+}
+
+/// ComicInfo writes several people in one field, as it does for genres.
+#[test]
+fn a_comicinfo_writer_naming_two_people_credits_both() {
+    let library = Library::new();
+    library.write("Lanfeust/work.json", r#"{"leaf":1,"title":"Lanfeust"}"#);
+    for (volume, writer) in [(1, "Arleston"), (2, "Arleston, Tarquin")] {
+        archive(
+            &library
+                .folder("Lanfeust")
+                .join(format!("Tome {volume}.cbz")),
+            2,
+            Some(("ComicInfo.xml", &comic_info(&[("Writer", writer)]))),
+        );
+    }
+    library.scan();
+
+    assert_eq!(
+        vec!["Arleston", "Tarquin"],
+        library.all("SELECT name FROM work_author ORDER BY rowid")
+    );
+}
+
+/// A shelf of books standing alone is not a work, and its `work.json` is not missing: it
+/// was reported before the files were read, and the work was unmade afterwards.
+#[test]
+fn a_shelf_of_standalone_books_does_not_report_a_missing_work_json() {
+    let library = Library::new();
+    for name in ["Blast", "Le Combat Ordinaire"] {
+        archive(
+            &library.folder("BD").join(format!("{name}.cbz")),
+            2,
+            Some(("oneshot.json", r#"{"leaf":1,"title":"Un livre"}"#)),
+        );
+    }
+    let report = library.scan();
+    assert!(
+        !report
+            .missing_required
+            .iter()
+            .any(|line| line.contains("BD/work.json missing")),
+        "{:?}",
+        report.missing_required
+    );
+}
+
+/// The work.json check asked for authors the volumes already carried, and reported them
+/// missing for every series whose credits were written volume by volume.
+#[test]
+fn credits_found_in_the_volumes_are_not_reported_missing() {
+    let library = Library::new();
+    library.write(
+        "Lanfeust/work.json",
+        r#"{"leaf":1,"title":"Lanfeust","medium":"manga","status":"completed",
+            "readingDirection":"LEFT_TO_RIGHT"}"#,
+    );
+    credited_volume(&library, "Lanfeust/Tome 1.cbz", r#"["A"]"#, r#"["B"]"#);
+    let report = library.scan();
+
+    assert!(
+        !report
+            .missing_required
+            .iter()
+            .any(|line| line.contains("authors") || line.contains("artists")),
+        "{:?}",
+        report.missing_required
     );
 }
 
@@ -2247,6 +3009,331 @@ fn an_order_becomes_steps_in_the_order_they_were_written() {
     );
 }
 
+/// The names of the works of one order, in the order they are read.
+fn works_of_order(library: &Library, declared: &str) -> Vec<String> {
+    library.all(&format!(
+        "SELECT w.name FROM reading_order_step s
+         JOIN work w ON w.id = s.work_id
+         JOIN reading_order o ON o.id = s.order_id
+         WHERE o.declared_id = '{declared}' ORDER BY s.position"
+    ))
+}
+
+/// « Tout l'univers » was written by copying the steps of a shorter order into it, and the
+/// copy went stale the first time the shorter one changed.
+#[test]
+fn an_included_order_is_read_in_its_place() {
+    let library = Library::new();
+    an_universe_with_two_works(&library, "Arran");
+    archive(
+        &library.folder("Arran/Series C").join("Tome 1.cbz"),
+        3,
+        None,
+    );
+    library.write(
+        "Arran/universe.json",
+        r#"{"leaf": 1, "orders": [
+            {"id": "whole", "steps": [
+                {"work": "Series A", "unit": "CHAPTER", "from": 1, "to": 4},
+                {"include": "part"},
+                {"work": "Series A", "unit": "CHAPTER", "from": 5, "to": 8}
+            ]},
+            {"id": "part", "steps": [{"work": "Series B"}, {"work": "Series C"}]}
+        ]}"#,
+    );
+
+    let report = library.scan();
+    assert!(report.disregarded.is_empty(), "{:?}", report.disregarded);
+    assert_eq!(
+        vec!["Series A", "Series B", "Series C", "Series A"],
+        works_of_order(&library, "whole")
+    );
+    assert_eq!(2, works_of_order(&library, "part").len());
+}
+
+#[test]
+fn an_order_without_an_id_is_included_by_its_name() {
+    let library = Library::new();
+    an_universe_with_two_works(&library, "Arran");
+    library.write(
+        "Arran/universe.json",
+        r#"{"leaf": 1, "orders": [
+            {"id": "whole", "steps": [{"include": "Series B order"}, {"work": "Series A"}]},
+            {"name": "Series B order", "steps": [{"work": "Series B"}]}
+        ]}"#,
+    );
+
+    let report = library.scan();
+    assert!(report.disregarded.is_empty(), "{:?}", report.disregarded);
+    assert_eq!(
+        vec!["Series B", "Series A"],
+        works_of_order(&library, "whole")
+    );
+}
+
+/// Reading a loop from whichever end one enters it gave `a` half of `b` and `b` half of
+/// `a`: the same file answering one question twice, differently.
+#[test]
+fn an_order_that_includes_itself_through_another_is_refused_in_both() {
+    let library = Library::new();
+    an_universe_with_two_works(&library, "Arran");
+    library.write(
+        "Arran/universe.json",
+        r#"{"leaf": 1, "orders": [
+            {"id": "a", "steps": [{"work": "Series A"}, {"include": "b"}]},
+            {"id": "b", "steps": [{"include": "a"}, {"work": "Series B"}]}
+        ]}"#,
+    );
+
+    let report = library.scan();
+    assert_eq!(vec!["Series A"], works_of_order(&library, "a"));
+    assert_eq!(vec!["Series B"], works_of_order(&library, "b"));
+    assert_eq!(2, report.disregarded.len(), "{:?}", report.disregarded);
+    assert!(report
+        .disregarded
+        .iter()
+        .any(|one| one.contains("order \"a\", step 2") && one.contains("loop")));
+    assert!(report
+        .disregarded
+        .iter()
+        .any(|one| one.contains("order \"b\", step 1") && one.contains("loop")));
+}
+
+#[test]
+fn an_include_naming_no_order_is_left_out_and_said() {
+    let library = Library::new();
+    an_universe_with_two_works(&library, "Arran");
+    library.write(
+        "Arran/universe.json",
+        r#"{"leaf": 1, "orders": [
+            {"id": "a", "steps": [{"work": "Series A"}, {"include": "nowhere"}, {"work": "Series B"}]}
+        ]}"#,
+    );
+
+    let report = library.scan();
+    assert_eq!(vec!["Series A", "Series B"], works_of_order(&library, "a"));
+    assert_eq!(1, report.disregarded.len(), "{:?}", report.disregarded);
+    assert!(report.disregarded[0].contains("step 2"));
+    assert!(report.disregarded[0].contains("nowhere"));
+}
+
+#[test]
+fn an_include_that_also_names_a_work_is_refused() {
+    let library = Library::new();
+    an_universe_with_two_works(&library, "Arran");
+    library.write(
+        "Arran/universe.json",
+        r#"{"leaf": 1, "orders": [
+            {"id": "a", "steps": [{"include": "b", "work": "Series A"}]},
+            {"id": "b", "steps": [{"work": "Series B"}]}
+        ]}"#,
+    );
+
+    let report = library.scan();
+    assert!(works_of_order(&library, "a").is_empty());
+    assert_eq!(vec!["Series B"], works_of_order(&library, "b"));
+    assert_eq!(1, report.disregarded.len(), "{:?}", report.disregarded);
+    assert!(report.disregarded[0].contains("carries nothing else"));
+}
+
+/// A step pointing at a work the universe does not hold was said once by the order that
+/// wrote it, then again by every order that included that one.
+#[test]
+fn a_broken_step_of_an_included_order_is_reported_once() {
+    let library = Library::new();
+    an_universe_with_two_works(&library, "Arran");
+    library.write(
+        "Arran/universe.json",
+        r#"{"leaf": 1, "orders": [
+            {"id": "whole", "steps": [{"include": "part"}, {"work": "Series A"}]},
+            {"id": "again", "steps": [{"include": "part"}]},
+            {"id": "part", "steps": [{"work": "Series Z"}, {"work": "Series B"}]}
+        ]}"#,
+    );
+
+    let report = library.scan();
+    assert_eq!(
+        vec!["Series B", "Series A"],
+        works_of_order(&library, "whole")
+    );
+    assert_eq!(1, report.disregarded.len(), "{:?}", report.disregarded);
+    assert!(report.disregarded[0].contains("order \"part\", step 1"));
+}
+
+/// Fourteen orders each reading the next twice are 8 192 steps from a file of a few
+/// hundred bytes; the database must not be the thing that finds out.
+#[test]
+fn an_include_that_doubles_at_every_level_stops_at_the_ceiling() {
+    let library = Library::new();
+    an_universe_with_two_works(&library, "Arran");
+    let mut orders = Vec::new();
+    for level in 0..14 {
+        let steps = if level == 13 {
+            r#"{"work": "Series A"}"#.to_string()
+        } else {
+            let next = format!(r#"{{"include": "level-{}"}}"#, level + 1);
+            format!("{next}, {next}")
+        };
+        orders.push(format!(r#"{{"id": "level-{level}", "steps": [{steps}]}}"#));
+    }
+    library.write(
+        "Arran/universe.json",
+        &format!(r#"{{"leaf": 1, "orders": [{}]}}"#, orders.join(",")),
+    );
+
+    let report = library.scan();
+    assert!(works_of_order(&library, "level-0").is_empty());
+    assert_eq!(4096, works_of_order(&library, "level-1").len());
+    let most: i64 = library
+        .one("SELECT MAX(n) FROM (SELECT COUNT(*) AS n FROM reading_order_step GROUP BY order_id)")
+        .unwrap();
+    assert!(most <= 4096, "{most}");
+    assert!(
+        report
+            .contradictions
+            .iter()
+            .any(|one| one.contains("level-0") && one.contains("4096")),
+        "{:?}",
+        report.contradictions
+    );
+}
+
+/// A chain of ten thousand orders, each including the next, was ten thousand frames of
+/// recursion for a file that fits in a few hundred kilobytes.
+#[test]
+fn a_ten_thousand_deep_include_chain_does_not_crash_and_is_reported() {
+    let library = Library::new();
+    an_universe_with_two_works(&library, "Arran");
+    let depth = 10_000;
+    let orders: Vec<String> = (0..depth)
+        .map(|level| {
+            let step = if level + 1 == depth {
+                r#"{"work": "Series A"}"#.to_string()
+            } else {
+                format!(r#"{{"include": "o{}"}}"#, level + 1)
+            };
+            format!(r#"{{"id": "o{level}", "steps": [{step}]}}"#)
+        })
+        .collect();
+    library.write(
+        "Arran/universe.json",
+        &format!(r#"{{"leaf": 1, "orders": [{}]}}"#, orders.join(",")),
+    );
+
+    let report = library.scan();
+    assert!(report.disregarded.is_empty(), "{:?}", report.disregarded);
+    assert_eq!(depth as i64, library.count("reading_order"));
+    assert!(
+        library.count("reading_order_step") <= 16_384,
+        "{}",
+        library.count("reading_order_step")
+    );
+    // Said once for the universe, and once for its order count: not once per order cut.
+    assert_eq!(
+        2,
+        report.contradictions.len(),
+        "{:?}",
+        report.contradictions
+    );
+    assert!(report
+        .contradictions
+        .iter()
+        .any(|one| one.contains("together")));
+    assert!(report
+        .contradictions
+        .iter()
+        .any(|one| one.contains("1024 orders")));
+}
+
+/// Two hundred orders each including the one before, plus a step of their own, are each
+/// under the ceiling of one order and twenty thousand rows together.
+#[test]
+fn two_hundred_orders_each_including_the_previous_stay_within_the_universe_budget() {
+    let library = Library::new();
+    an_universe_with_two_works(&library, "Arran");
+    let orders: Vec<String> = (0..200)
+        .map(|level| {
+            let mut steps = Vec::new();
+            if level > 0 {
+                steps.push(format!(r#"{{"include": "o{}"}}"#, level - 1));
+            }
+            steps.push(r#"{"work": "Series B"}"#.to_string());
+            format!(r#"{{"id": "o{level}", "steps": [{}]}}"#, steps.join(","))
+        })
+        .collect();
+    library.write(
+        "Arran/universe.json",
+        &format!(r#"{{"leaf": 1, "orders": [{}]}}"#, orders.join(",")),
+    );
+
+    let report = library.scan();
+    let rows = library.count("reading_order_step");
+    assert!(rows <= 16_384, "{rows}");
+    assert_eq!(
+        1,
+        report.contradictions.len(),
+        "{:?}",
+        report.contradictions
+    );
+    assert!(works_of_order(&library, "o199").is_empty());
+    // What fits is complete: the first orders are whole.
+    assert_eq!(60, works_of_order(&library, "o59").len());
+}
+
+/// Forty thousand orders in a file of a few megabytes: each was compared with the ones
+/// before it, and each got its rows. The excess is kept without steps, and said once.
+#[test]
+fn a_universe_with_a_great_many_orders_keeps_the_excess_without_steps_and_says_so_once() {
+    let library = Library::new();
+    an_universe_with_two_works(&library, "Arran");
+    let count = 20_000;
+    let orders: Vec<String> = (0..count)
+        .map(|n| format!(r#"{{"id":"o{n}","steps":[{{"work":"Series A"}}]}}"#))
+        .collect();
+    library.write(
+        "Arran/universe.json",
+        &format!(r#"{{"leaf": 1, "orders": [{}]}}"#, orders.join(",")),
+    );
+
+    let report = library.scan();
+    assert_eq!(count as i64, library.count("reading_order"));
+    assert_eq!(
+        leaf_server::scan::orders::MOST_ORDERS as i64,
+        library.count("reading_order_step")
+    );
+    assert_eq!(
+        1,
+        report.contradictions.len(),
+        "{:?}",
+        report.contradictions
+    );
+    assert!(report.contradictions[0].contains("orders"));
+}
+
+/// The scan drops the second of two orders under one identifier; an include by name must
+/// not read the order the scan dropped.
+#[test]
+fn an_include_cannot_reach_an_order_dropped_for_sharing_an_identifier() {
+    let library = Library::new();
+    an_universe_with_two_works(&library, "Arran");
+    library.write(
+        "Arran/universe.json",
+        r#"{"leaf": 1, "orders": [
+            {"id": "x", "name": "Alpha", "steps": [{"work": "Series A"}]},
+            {"id": "x", "name": "Beta", "steps": [{"work": "Series B"}]},
+            {"id": "whole", "steps": [{"include": "Beta"}]}
+        ]}"#,
+    );
+
+    let report = library.scan();
+    assert!(works_of_order(&library, "whole").is_empty());
+    assert!(
+        report.disregarded.iter().any(|one| one.contains("Beta")),
+        "{:?}",
+        report.disregarded
+    );
+}
+
 /// Volume ranges name their edition and chapter ranges must not, because « volumes 1 to 7 »
 /// is different content in a 42-volume edition and a 34-volume one.
 #[test]
@@ -2299,6 +3386,106 @@ fn a_volume_range_names_its_edition_and_a_chapter_range_may_not() {
         "{:?}",
         report.disregarded
     );
+}
+
+/// « Lanfeust de Troy · Tomes 1 à 4 » was refused for not naming an edition, when the work
+/// has one and the edition beside its archives has no name to write.
+#[test]
+fn a_volume_range_needs_no_edition_when_the_work_has_only_one() {
+    let library = Library::new();
+    let folder = library.folder("Arran/Lanfeust de Troy");
+    for v in 1..=4 {
+        archive(&folder.join(format!("Tome {v}.cbz")), 3, None);
+    }
+    library.write(
+        "Arran/universe.json",
+        r#"{"leaf": 1, "orders": [{"id": "main", "steps": [
+            {"work": "Lanfeust de Troy", "unit": "VOLUME", "from": 1, "to": 4}
+        ]}]}"#,
+    );
+
+    let report = library.scan();
+    assert!(report.disregarded.is_empty(), "{:?}", report.disregarded);
+    assert_eq!(1, library.count("reading_order_step"));
+    assert_eq!(
+        library.one::<String>("SELECT id FROM edition"),
+        library.one::<String>("SELECT edition_id FROM reading_order_step")
+    );
+}
+
+/// The ambiguity the rule protects exists from two editions on: a file that was fine with
+/// one must say which the day a second arrives, and not silently pick one of them.
+#[test]
+fn a_volume_range_without_edition_is_refused_again_once_a_second_edition_arrives() {
+    let library = Library::new();
+    let folder = library.folder("Arran/Lanfeust de Troy");
+    archive(&folder.join("Tome 1.cbz"), 3, None);
+    library.write(
+        "Arran/universe.json",
+        r#"{"leaf": 1, "orders": [{"id": "main", "steps": [
+            {"work": "Lanfeust de Troy", "unit": "VOLUME", "from": 1, "to": 4}
+        ]}]}"#,
+    );
+    assert!(library.scan().disregarded.is_empty());
+    assert_eq!(1, library.count("reading_order_step"));
+
+    // The archives stay where they are and ONE edition folder joins them: two editions.
+    archive(&folder.join("Deluxe").join("Tome 1.cbz"), 3, None);
+    let report = library.scan();
+    assert_eq!(0, library.count("reading_order_step"));
+    assert_eq!(1, report.disregarded.len(), "{:?}", report.disregarded);
+    assert!(report.disregarded[0].contains("VOLUME range must name its edition"));
+}
+
+/// Moving the archives into an edition folder leaves the work with one edition. The row of
+/// the implicit edition is only pruned after the orders are written, and was counted as a
+/// second edition: the step vanished until the following scan.
+#[test]
+fn a_volume_range_follows_the_archives_into_an_edition_folder_at_once() {
+    let library = Library::new();
+    let folder = library.folder("Arran/Lanfeust de Troy");
+    archive(&folder.join("Tome 1.cbz"), 3, None);
+    library.write(
+        "Arran/universe.json",
+        r#"{"leaf": 1, "orders": [{"id": "main", "steps": [
+            {"work": "Lanfeust de Troy", "unit": "VOLUME", "from": 1, "to": 4}
+        ]}]}"#,
+    );
+    assert!(library.scan().disregarded.is_empty());
+
+    std::fs::remove_file(folder.join("Tome 1.cbz")).unwrap();
+    archive(&folder.join("Deluxe").join("Tome 1.cbz"), 3, None);
+    let report = library.scan();
+    assert!(report.disregarded.is_empty(), "{:?}", report.disregarded);
+    assert_eq!(1, library.count("reading_order_step"));
+    assert_eq!(
+        Some("Deluxe".to_string()),
+        library
+            .one("SELECT e.name FROM reading_order_step s JOIN edition e ON e.id = s.edition_id")
+    );
+}
+
+/// Finding the only edition costs one question per such step and none for any other step:
+/// a lookup that ran for every step would cost a large universe a question per step it
+/// never needed to ask.
+#[test]
+fn the_edition_of_a_volume_range_costs_one_question_per_such_step() {
+    let cost = |step: &str| {
+        let library = Library::new();
+        let folder = library.folder("Arran/Lanfeust de Troy");
+        archive(&folder.join("Tome 1.cbz"), 3, None);
+        let steps = [step; 5].join(",");
+        library.write(
+            "Arran/universe.json",
+            &format!(r#"{{"leaf": 1, "orders": [{{"id": "main", "steps": [{steps}]}}]}}"#),
+        );
+        let before = library.db.statements();
+        library.scan();
+        library.db.statements() - before
+    };
+    let whole = cost(r#"{"work": "Lanfeust de Troy"}"#);
+    let ranged = cost(r#"{"work": "Lanfeust de Troy", "unit": "VOLUME", "from": 1}"#);
+    assert_eq!(5, ranged - whole);
 }
 
 /// A step naming something the universe does not hold is reported and skipped; the steps
@@ -2559,18 +3746,18 @@ fn moving_a_work_into_a_universe_keeps_it() {
     );
 }
 
-/// And a file renamed is another file. Written down rather than left implicit: following a
-/// file through its rename would mean identifying it by its contents, and the same volume
-/// scanned twice is not byte for byte the same file.
+/// A file renamed *and* changed has nothing left to be recognised by: it is another file, and
+/// its position is counted as lost rather than hushed.
 #[test]
-fn renaming_a_file_loses_it_and_that_is_what_it_means() {
+fn a_volume_renamed_and_rewritten_loses_its_place_and_says_so() {
     let library = Library::new();
     let folder = library.folder("Bleach");
     archive(&folder.join("Tome 1.cbz"), 3, None);
     library.scan();
     library.stopped_at(30);
 
-    std::fs::rename(folder.join("Tome 1.cbz"), folder.join("Tome 01.cbz")).unwrap();
+    std::fs::remove_file(folder.join("Tome 1.cbz")).unwrap();
+    archive(&folder.join("Tome 01.cbz"), 5, None);
     let report = library.scan();
 
     assert_eq!(1, library.count("entry"));
@@ -2792,6 +3979,52 @@ fn a_second_scan_has_nothing_left_to_carry() {
     assert_eq!(Some(42), library.place());
 }
 
+/// 190 volumes renamed to fix their titles: a file is « this file, in this edition », so each
+/// was a new entry and the prune took its position with the old one. Found again by its size,
+/// which a rename does not change.
+#[test]
+fn a_volume_renamed_keeps_the_place_its_reader_stopped_at() {
+    let library = Library::new();
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 3, None);
+    library.scan();
+    library.stopped_at(42);
+
+    std::fs::rename(
+        library.folder("Bleach").join("Tome 1.cbz"),
+        library.folder("Bleach").join("Bleach - T01.cbz"),
+    )
+    .unwrap();
+    let report = library.scan();
+
+    assert_eq!(1, library.count("entry"));
+    assert_eq!(1, report.progress_carried);
+    assert_eq!(0, report.progress_lost);
+    assert_eq!(Some(42), library.place());
+}
+
+/// Two volumes of the same size renamed together cannot be told apart, and a position carried
+/// onto the wrong volume is worse than one reported lost.
+#[test]
+fn two_volumes_of_one_size_renamed_together_are_not_guessed() {
+    let library = Library::new();
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 3, None);
+    archive(&library.folder("Bleach").join("Tome 2.cbz"), 3, None);
+    library.scan();
+    library.stopped_at(42);
+
+    for (from, to) in [("Tome 1.cbz", "A.cbz"), ("Tome 2.cbz", "B.cbz")] {
+        std::fs::rename(
+            library.folder("Bleach").join(from),
+            library.folder("Bleach").join(to),
+        )
+        .unwrap();
+    }
+    let report = library.scan();
+
+    assert_eq!(0, report.progress_carried);
+    assert_eq!(None, library.place());
+}
+
 /// A field nobody here understands survives the stamping — the whole reason a sidecar is
 /// edited as a document and never as a type.
 #[test]
@@ -2899,4 +4132,194 @@ fn an_identity_that_is_not_a_string_is_left_alone_and_said() {
         "{:?}",
         report.contradictions
     );
+}
+
+/// Reading the credits of an edition's volumes one volume at a time would make the list of a
+/// hundred-volume series a hundred questions longer than the list of a two-volume one.
+#[test]
+fn the_entries_of_an_edition_bring_their_credits_in_a_fixed_number_of_questions() {
+    let cost = |volumes: usize| {
+        let library = Library::new();
+        library.write(
+            "Série/work.json",
+            r#"{"leaf":1,"title":"Série","authors":["A"],"artists":["B"]}"#,
+        );
+        for n in 1..=volumes {
+            archive(
+                &library.folder("Série").join(format!("Tome {n}.cbz")),
+                2,
+                None,
+            );
+        }
+        library.scan();
+        let edition = library.one::<String>("SELECT id FROM edition").unwrap();
+        let repository = leaf_server::store::Repository::new(&library.db);
+        let before = library.db.statements();
+        let entries = repository
+            .entries(&edition, &Ceiling::NONE)
+            .unwrap()
+            .expect("the series");
+        assert!(entries.iter().all(|e| e.authors == vec!["A".to_string()]));
+        library.db.statements() - before
+    };
+    assert_eq!(cost(2), cost(20));
+}
+
+/// The server renames a file and moves `entry.file` in the same step, so the scan that comes
+/// next finds the row **by its file**. Before this the identity was « this file, in this
+/// edition » and a row found under another name was carried over as `stale`: it worked, but
+/// only because the position was moved, and every table hanging off the old id (bookmarks,
+/// chosen cover, pages) had to be carried too.
+#[test]
+fn a_volume_found_by_its_file_keeps_its_identity_whatever_its_name_would_give() {
+    let library = Library::new();
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 3, None);
+    library.scan();
+    library.stopped_at(42);
+    let before: String = library.one("SELECT id FROM entry").unwrap();
+
+    let renamed = library.folder("Bleach").join("bleach_tome-001.cbz");
+    std::fs::rename(library.folder("Bleach").join("Tome 1.cbz"), &renamed).unwrap();
+    library
+        .db
+        .write(|cx| {
+            cx.execute(
+                "UPDATE entry SET file = ?1",
+                [renamed.to_string_lossy().as_ref()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let report = library.scan();
+
+    assert_eq!(1, library.count("entry"));
+    assert_eq!(Some(before), library.one::<String>("SELECT id FROM entry"));
+    assert_eq!(Some(42), library.place());
+    assert_eq!(0, report.progress_lost);
+}
+
+#[test]
+fn a_new_volume_is_given_a_drawn_identity_that_a_second_scan_keeps() {
+    let library = Library::new();
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 3, None);
+    library.scan();
+    let first: String = library.one("SELECT id FROM entry").unwrap();
+    let edition: String = library.one("SELECT edition_id FROM entry").unwrap();
+
+    assert_ne!(
+        first,
+        leaf_server::scan::identity::under(&edition, "Tome 1.cbz"),
+        "an identity drawn once, not derived from the name"
+    );
+    library.scan();
+    assert_eq!(Some(first), library.one::<String>("SELECT id FROM entry"));
+}
+
+#[test]
+fn existing_volumes_keep_the_identity_they_have() {
+    let library = Library::new();
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 3, None);
+    library.scan();
+    let edition: String = library.one("SELECT edition_id FROM entry").unwrap();
+    let old = leaf_server::scan::identity::under(&edition, "Tome 1.cbz");
+    library
+        .db
+        .write(|cx| {
+            // A row filed under the identity the name gives, as every library indexed before
+            // identities were drawn holds it: the children follow the key.
+            cx.execute("PRAGMA defer_foreign_keys = ON", [])?;
+            cx.execute("UPDATE entry SET id = ?1", [old.as_str()])?;
+            for child in ["entry_author", "entry_artist", "chapter", "page"] {
+                cx.execute(&format!("UPDATE {child} SET entry_id = ?1"), [old.as_str()])?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    library.scan();
+
+    assert_eq!(1, library.count("entry"));
+    assert_eq!(Some(old), library.one::<String>("SELECT id FROM entry"));
+}
+
+/// A rename moves files and rewrites sidecars, and a scan reading the same folders at that
+/// moment sees half of it: a volume gone from its old place and not yet at its new one is a
+/// volume to prune, with its reading position. The two never run together.
+#[test]
+fn a_scan_waits_for_the_rename_that_is_running_and_two_renames_do_not_overlap() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    let library = Library::new();
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 3, None);
+    let root = library.dir.path().join("library");
+    let scanner = Arc::new(Scanner::new(Arc::clone(&library.db), true));
+
+    let (entered_tx, entered) = channel();
+    let (release, release_rx) = channel::<()>();
+    let holder = {
+        let scanner = Arc::clone(&scanner);
+        std::thread::spawn(move || {
+            scanner.exclusive(|_held| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+        })
+    };
+    entered.recv().unwrap();
+
+    let scanned = Arc::new(AtomicBool::new(false));
+    let second_rename = Arc::new(AtomicBool::new(false));
+    let waiting_scan = {
+        let (scanner, scanned, root) = (Arc::clone(&scanner), Arc::clone(&scanned), root.clone());
+        std::thread::spawn(move || {
+            scanner.scan(&[root]).unwrap();
+            scanned.store(true, Ordering::SeqCst);
+        })
+    };
+    let waiting_rename = {
+        let (scanner, flag) = (Arc::clone(&scanner), Arc::clone(&second_rename));
+        std::thread::spawn(move || scanner.exclusive(|_held| flag.store(true, Ordering::SeqCst)))
+    };
+
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !scanned.load(Ordering::SeqCst),
+        "the scan ran during a rename"
+    );
+    assert!(
+        !second_rename.load(Ordering::SeqCst),
+        "two renames overlapped"
+    );
+
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    waiting_scan.join().unwrap();
+    waiting_rename.join().unwrap();
+    assert!(scanned.load(Ordering::SeqCst) && second_rename.load(Ordering::SeqCst));
+    assert_eq!(1, library.count("entry"));
+}
+
+/// A folder renamed by hand moves every volume's `file` at once, and the row is no longer
+/// found by it. Two volumes of one size cannot be told apart by their size — but they can by
+/// their name, which the rename of a folder leaves alone. Before identities were drawn this
+/// was exact, the identity being the name: it must not become a guess.
+#[test]
+fn a_folder_renamed_by_hand_keeps_the_places_even_when_volumes_are_of_one_size() {
+    let library = Library::new();
+    archive(&library.folder("Bleach").join("Tome 1.cbz"), 3, None);
+    archive(&library.folder("Bleach").join("Tome 2.cbz"), 3, None);
+    library.scan();
+    library.stopped_at(42);
+    std::fs::rename(
+        library.dir.path().join("library/Bleach"),
+        library.dir.path().join("library/Bleach (VF)"),
+    )
+    .unwrap();
+    let report = library.scan();
+
+    assert_eq!(2, library.count("entry"));
+    assert_eq!(0, report.progress_lost);
+    assert_eq!(2, report.progress_carried);
+    assert_eq!(2, library.count("progress"));
 }

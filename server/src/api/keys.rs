@@ -9,7 +9,10 @@
 //! everything.
 //!
 //! And keys do not carry the same rights: the desktop imports, the phone only reads. Lose
-//! the phone and whoever finds it gets to look at comics, not to write to the disk.
+//! the phone and whoever finds it gets to look at comics, not to choose what is written to the
+//! disk. One write follows a read all the same: the first download of a volume stamps its
+//! identity into the file (`Records::stamp_entry`), so that it can find its way home. It is
+//! the library's own write, always the same one, and not something the key decides.
 //!
 //! ```text
 //! LEAF_KEYS="desktop:8f3a92c1…:read,import,delete  phone:2b71ef04…:read"
@@ -166,11 +169,10 @@ fn careful_equals(a: &[u8; 32], b: &[u8; 32]) -> bool {
 fn one_key(line: &str) -> Result<Option<Key>> {
     let parts: Vec<&str> = line.split(':').collect();
     if parts.len() < 2 {
-        // By characters, not bytes: `&line[..12]` lands mid-character on anything
-        // accented and takes the server down at startup with a slice panic, which
-        // is a poor way to report a typo in a configuration file.
-        let shown: String = line.chars().take(12).collect();
-        tracing::warn!(key = %shown, "malformed key, ignored");
+        // Said without its text: a secret pasted without its `name:` is a malformed line, and
+        // twelve characters of it in the journal are twelve characters of a key. Its length is
+        // enough to recognise it in the file.
+        tracing::warn!(length = line.chars().count(), "malformed key, ignored");
         return Ok(None);
     }
     let (name, secret) = (parts[0], parts[1]);

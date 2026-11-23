@@ -130,15 +130,19 @@ pub async fn link(
     Address(address): Address,
     Json(request): Json<LinkRequest>,
 ) -> Result<(StatusCode, Json<LinkedDto>), Answer> {
-    if let Some(wait) = state.link_throttle.blocked_for(&address) {
-        return Err(Refused::TooMany(wait.as_secs().max(1)).into());
-    }
+    // Counted as it begins, not after the answer: the allowance was only looked at before the
+    // check, so a burst of requests sent together all passed it and all were answered. A guess
+    // in flight holds its place (`Throttle::attempt`), as the code of a restricted profile does.
+    let attempt = state
+        .link_throttle
+        .attempt(&address)
+        .map_err(|wait| Answer::from(Refused::TooMany(wait.as_secs().max(1))))?;
     let devices = Arc::clone(&state.devices);
     let now = now_in_millis();
     let outcome = blocking(move || devices.exchange(&request.code, &request.name, now)).await?;
     match outcome {
         Ok(linked) => {
-            state.link_throttle.record_success(&address);
+            attempt.succeeded();
             Ok((
                 StatusCode::CREATED,
                 Json(LinkedDto {
@@ -152,15 +156,18 @@ pub async fn link(
         }
         // Something was guessed — a code, or a name that cannot be one — and it is counted.
         Err(Refusal::CodeNotValid) => {
-            state.link_throttle.record_failure(&address);
+            attempt.failed();
             Err(say(StatusCode::GONE, "code"))
         }
         Err(refusal @ (Refusal::NameEmpty | Refusal::NameTooLong | Refusal::NameInvalid)) => {
-            state.link_throttle.record_failure(&address);
+            attempt.failed();
             Err(bad_name(refusal))
         }
         // Not counted: the name is only told to someone who held a valid code.
-        Err(refusal) => Err(bad_name(refusal)),
+        Err(refusal) => {
+            attempt.void();
+            Err(bad_name(refusal))
+        }
     }
 }
 

@@ -42,6 +42,35 @@ pub fn enforce(root: &Path, max_bytes: u64) {
     );
 }
 
+/// What emptying the cache took: files, and what they cost the disk.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Purged {
+    pub files: u64,
+    pub bytes: u64,
+}
+
+/// Deletes every file of the cache and nothing outside it.
+///
+/// Files one by one rather than the folder: the warming threads write here while this runs,
+/// and a folder removed under them is a page they fail to store for no reason worth a
+/// warning. The fan-out folders stay, so the next write finds them. Only what was removed is
+/// counted — a file that would not go is still there, and is not claimed.
+pub fn purge(root: &Path) -> Purged {
+    let mut files = Vec::new();
+    let mut total = 0u64;
+    if collect(root, &mut files, &mut total).is_err() {
+        return Purged::default();
+    }
+    let mut done = Purged::default();
+    for (path, cost, _) in files {
+        if std::fs::remove_file(&path).is_ok() {
+            done.files += 1;
+            done.bytes += cost;
+        }
+    }
+    done
+}
+
 /// The smallest a file costs, whatever it holds: one block of the filesystem.
 pub const FLOOR: u64 = 4096;
 

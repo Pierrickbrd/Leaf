@@ -2,9 +2,12 @@
 
 pub mod bulk_import;
 pub mod cache_budget;
+pub mod canonical;
+pub mod cover_choice;
 pub mod dto;
 pub mod erase;
 pub mod flight;
+pub mod folders;
 pub mod format;
 pub mod intake;
 pub mod keys;
@@ -14,7 +17,9 @@ pub mod pages;
 pub mod profiles;
 pub mod progress;
 pub mod records;
+pub mod reimport;
 pub mod relocate;
+pub mod renames;
 pub mod routes;
 pub mod throttle;
 
@@ -33,6 +38,17 @@ pub struct Invalid(pub String);
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct Absent(pub String);
+
+/// What was asked cannot be done to the library as it is now, and nothing was changed: a
+/// name taken by a file that is not the library's, a disk that will not take a rename. A
+/// `409`, with the reason said in words a person can act on.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct Conflict(pub String);
+
+pub fn conflict(what: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(Conflict(what.into()))
+}
 
 pub fn invalid(what: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(Invalid(what.into()))

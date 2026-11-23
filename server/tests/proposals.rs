@@ -525,7 +525,7 @@ fn a_collision_says_whether_the_two_files_are_byte_for_byte_the_same() {
     let described = format!("{collision:?}");
     assert!(described.contains("identical: true"), "{described}");
     // And it names what it would be called if both were kept.
-    assert!(described.contains("Tome 1 (2).cbz"), "{described}");
+    assert!(described.contains("bleach_tome_001.cbz"), "{described}");
 }
 
 #[test]

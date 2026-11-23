@@ -9,6 +9,7 @@
 //! of this library is a round trip, a file that names a work is a new volume, a file that
 //! names nothing is a question.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -16,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::bulk_import::{BadOffset, ReceiveError};
 use crate::api::records::{read_entry_json, Records};
+use crate::api::reimport::free_name_among;
 use crate::api::{absent, invalid};
 use crate::metadata::sidecars::EntryJson;
 use crate::store::Db;
@@ -273,12 +275,19 @@ pub struct Intake {
 }
 
 /// Where a series lives, and what it says about its own length.
-struct Series {
+pub struct Series {
     path: PathBuf,
     status: Option<String>,
     volume_count: Option<i32>,
     edition_name: Option<String>,
     work_name: String,
+    /// The title and universe the rename engine names volumes from, which are not always the
+    /// folder's name: a volume is called the same whichever door it came through.
+    naming_title: String,
+    universe_name: Option<String>,
+    /// How many editions the work holds: the edition is only said in a name when there is
+    /// another to tell it from.
+    editions: i64,
 }
 
 impl Intake {
@@ -620,8 +629,11 @@ impl Intake {
             .read(|cx| {
                 cx.query_one(
                     "SELECT e.path, e.status, e.volume_count, e.name AS edition_name,
-                            w.name AS work_name
-                     FROM edition e JOIN work w ON w.id = e.work_id WHERE e.id = ?1",
+                            w.name AS work_name,
+                            (SELECT COUNT(*) FROM edition x WHERE x.work_id = e.work_id),
+                            COALESCE(NULLIF(TRIM(w.title), ''), w.name), u.name
+                     FROM edition e JOIN work w ON w.id = e.work_id
+                     LEFT JOIN universe u ON u.id = w.universe_id WHERE e.id = ?1",
                     [request.series_id.as_str()],
                     |r| {
                         Ok(Series {
@@ -630,6 +642,9 @@ impl Intake {
                             volume_count: r.get(2)?,
                             edition_name: r.get(3)?,
                             work_name: r.get(4)?,
+                            editions: r.get(5)?,
+                            naming_title: r.get(6)?,
+                            universe_name: r.get(7)?,
                         })
                     },
                 )
@@ -663,12 +678,33 @@ impl Intake {
         let target = match previous {
             Some(path) => path,
             None => {
-                let wanted = source
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                let occupied = series.path.join(&wanted);
+                let wanted = canonical_target(&series, &source);
+                let mut occupied = series.path.join(&wanted);
+                // A volume is not only a name: the same number in the same edition is the
+                // same place, however the file holding it was called when it was filed. A
+                // library imported before names were canonical is full of such files.
+                if !occupied.exists() {
+                    let read = read_entry_json(&source);
+                    let chapter = read
+                        .as_ref()
+                        .is_some_and(|r| r.kind.eq_ignore_ascii_case("chapter"));
+                    let holder = match read.and_then(|r| r.number) {
+                        Some(number) if chapter => self.db.read(|cx| {
+                            cx.query_one(
+                                "SELECT entry_id FROM chapter WHERE edition_id = ?1 AND number = ?2",
+                                rusqlite::params![request.series_id, number],
+                                |r| r.get::<_, String>(0),
+                            )
+                        })?,
+                        Some(number) => self.entry_at_number(&request.series_id, number)?,
+                        None => None,
+                    };
+                    if let Some(held) = holder {
+                        if let Some(path) = self.entry_path_within(&held, &request.series_id)? {
+                            occupied = path;
+                        }
+                    }
+                }
                 match (occupied.exists(), request.on_collision) {
                     (false, _) => occupied,
                     (true, Some(OnCollision::Replace)) => {
@@ -795,7 +831,7 @@ impl Intake {
             self.records().patch_series(
                 series_id,
                 &crate::api::records::SeriesPatch {
-                    volume_count: Some(number),
+                    volume_count: Some(Some(number)),
                     ..Default::default()
                 },
             )?;
@@ -1086,33 +1122,11 @@ fn digest(file: &Path) -> std::io::Result<[u8; 32]> {
     Ok(hasher.finalize().into())
 }
 
-/// A path in `folder` that no file occupies, starting from `wanted`.
-///
-/// " (2)", " (3)" and so on, before the extension — the shape a browser uses, because it is
-/// the shape a person recognises. Bounded: past a hundred, something else is wrong and
-/// hunting for a hundred and first name is not the answer.
+/// A path in `folder` that no file occupies, starting from `wanted` — the one naming rule a
+/// reimport's additions follow too, so a file sent alone and the same file in a drop are
+/// filed under the same name.
 fn free_name(folder: &Path, wanted: &str) -> PathBuf {
-    let first = folder.join(wanted);
-    if !first.exists() {
-        return first;
-    }
-    let path = Path::new(wanted);
-    let stem = path
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let extension = path
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
-    for n in 2..=100 {
-        let candidate = folder.join(format!("{stem} ({n}){extension}"));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    folder.join(format!("{stem} ({}){extension}", token()))
+    folder.join(free_name_among(folder, wanted, &HashSet::new()))
 }
 
 /// A rename when both sides share a filesystem, a copy when they do not.
@@ -1163,4 +1177,36 @@ fn short(value: f64) -> String {
 
 fn is_zero(value: &usize) -> bool {
     *value == 0
+}
+
+/// The name a staged file is filed under: the one the library gives a volume, whichever door
+/// it came through. A file that says neither a number nor a title keeps the name it had, as
+/// an import does — there is nothing to build a name from.
+pub fn canonical_target(series: &Series, source: &Path) -> String {
+    let had = source
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let Some(read) = read_entry_json(source) else {
+        return had;
+    };
+    let title = read.title.as_deref().filter(|t| !t.trim().is_empty());
+    if read.number.is_none() && title.is_none() {
+        return had;
+    }
+    let file = match had.rsplit_once('.') {
+        Some((stem, ext)) if ext.eq_ignore_ascii_case("zip") => format!("{stem}.cbz"),
+        _ => had,
+    };
+    crate::store::naming::file_name(&crate::store::naming::Parts {
+        universe: series.universe_name.as_deref(),
+        work: &series.naming_title,
+        edition: series.edition_name.as_deref(),
+        editions: series.editions,
+        chapter: read.kind.eq_ignore_ascii_case("chapter"),
+        number: read.number,
+        title,
+        file: &file,
+    })
 }
