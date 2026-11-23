@@ -23,6 +23,7 @@ import one_file_owns_it as owns
 import requests_stay_on_http1 as http1
 import taps_stay_where_they_land as taps
 import tests_stay_off_the_bus as bus
+import text_stays_plain as plain
 import words_stay_french
 
 
@@ -234,11 +235,28 @@ Read<Page> page(const QJsonObject &from)
 
 
 class KeepsFrenchTypography(unittest.TestCase):
-    def against(self, source: str):
-        """`main`, reading a `Words.cpp` written for the occasion."""
+    # A header promising one separator, and the function keeping it: what every case below
+    # stands on unless it is about the promise itself.
+    HEADER = ("/// « a · b ». The space before « · » does not break.\n"
+              "QString promised(const QString &a, const QString &b);\n")
+    KEPT = '\nQString promised(const QString &a, const QString &b)\n{\n' \
+           '    return a + Nbsp + u"· "_s + b;\n}\n'
+
+    def against(self, source: str, beside: dict[str, str] | None = None,
+                header: str | None = None, alone: bool = False):
+        """`main`, reading a `Words.cpp` written for the occasion — with the function the
+        default header promises, unless `header` is given — its `Words.h`, and the other
+        sources `beside` names, by file name: one innocuous source unless `alone`."""
         with tempfile.TemporaryDirectory() as folder:
             folder = pathlib.Path(folder)
-            (folder / "Words.cpp").write_text(source, encoding="utf-8")
+            (folder / "Words.cpp").write_text(source + (self.KEPT if header is None else ""),
+                                              encoding="utf-8")
+            (folder / "Words.h").write_text(self.HEADER if header is None else header,
+                                            encoding="utf-8")
+            if not alone:
+                (folder / "Other.cpp").write_text('auto k = u"key"_s;\n', encoding="utf-8")
+            for name, text in (beside or {}).items():
+                (folder / name).write_text(text, encoding="utf-8")
             was = (words_stay_french.SOURCE, words_stay_french.ROOT)
             try:
                 words_stay_french.SOURCE = folder / "Words.cpp"
@@ -305,7 +323,8 @@ class KeepsFrenchTypography(unittest.TestCase):
         # `u"…"_s`); the first time, a guard's pattern was not renamed with it and matched
         # nothing while reporting everything as fine. This is that case, caught before it
         # can repeat.
-        code, said = self.against('QString empty() { return QString(); }\n')
+        code, said = self.against('QString empty() { return QString(); }\n',
+                                  header=self.HEADER)
         self.assertEqual(code, 2)
         self.assertIn("this guard is broken, not", said)
 
@@ -324,11 +343,100 @@ class KeepsFrenchTypography(unittest.TestCase):
         self.assertIn("this guard is broken, not", said)
         self.assertIn("joined no literal ending in `_s`", said)
 
+    def test_a_separator_drawn_outside_words_is_refused(self):
+        # The line that shipped: a file's detail in the checking frame, written in
+        # `Review.cpp` with an ordinary space before the separator.
+        code, said = self.against('auto a = u"fine"_s;\n',
+                                  {"Review.cpp": 'auto d = u"%1 · %2"_s.arg(a, b);\n'})
+        self.assertEqual(code, 1)
+        self.assertIn("Review.cpp:1", said)
+        self.assertIn("drawn outside Words.cpp", said)
+
+    def test_what_is_not_drawn_outside_words_goes_through(self):
+        code, said = self.against('auto a = u"Tome · 1"_s;\n',
+                                  {"Review.cpp": 'auto k = u"readingDirection"_s;\n',
+                                   "Review.h": '// « un · commentaire »\n'})
+        self.assertEqual(code, 0, said)
+
+    def test_a_guard_that_reads_no_other_source_says_so_about_itself(self):
+        # Moved or renamed, the folder holds Words.cpp alone, every separator outside it
+        # goes unread, and a guard that said nothing would read as a client that has none.
+        code, said = self.against('auto a = u"fine"_s;\n', alone=True)
+        self.assertEqual(code, 2)
+        self.assertIn("this guard is broken, not the client", said)
+
+    def test_an_ordinary_space_before_a_promised_separator_is_refused(self):
+        code, said = self.against(
+            'auto a = u"fine"_s;\n',
+            header=self.HEADER,
+        )
+        self.assertEqual(code, 2)  # the promise names a function Words.cpp lacks
+        code, said = self.against(
+            'auto a = u"fine"_s;\n'
+            'QString promised(const QString &a, const QString &b)\n{\n'
+            '    return u"%1 · %2"_s.arg(a, b);\n}\n',
+            header=self.HEADER,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("promised()", said)
+        self.assertIn("does not break", said)
+
+    def test_a_separator_nothing_promises_is_left_alone(self):
+        code, said = self.against('auto a = u"Tome · 1"_s;\n')
+        self.assertEqual(code, 0, said)
+
+    def test_a_header_promising_nothing_says_the_guard_is_broken(self):
+        code, said = self.against('auto a = u"fine"_s;\n', header="QString nothing();\n")
+        self.assertEqual(code, 2)
+        self.assertIn("this guard is broken", said)
+
     def test_the_client_as_it_stands_keeps_its_french_typography(self):
         said = io.StringIO()
         with contextlib.redirect_stdout(said):
             self.assertEqual(words_stay_french.main(), 0)
         self.assertIn("keeps its French typography", said.getvalue())
+
+
+class TextStaysPlain(unittest.TestCase):
+    """The guard that exists because a title typed as markup was read as markup."""
+
+    def test_a_text_with_no_format_is_refused_with_its_line(self):
+        source = "Item {\n    Text {\n        text: title\n    }\n}\n"
+        self.assertEqual([(2, "Text")], plain.unformatted(source))
+
+    def test_a_text_that_says_how_it_is_read_is_left_alone(self):
+        for format_ in ("Text.PlainText", "Text.StyledText", "Text.RichText"):
+            source = f"Text {{\n    textFormat: {format_}\n    text: title\n}}\n"
+            self.assertEqual([], plain.unformatted(source), format_)
+
+    def test_a_label_and_a_text_edit_are_texts_too(self):
+        source = "Label {\n    text: a\n}\nTextEdit {\n    text: b\n}\n"
+        self.assertEqual([(1, "Label"), (4, "TextEdit")], plain.unformatted(source))
+
+    def test_the_format_of_a_nested_block_is_not_the_outer_ones(self):
+        source = ("Text {\n    text: a\n    Text {\n        textFormat: Text.PlainText\n"
+                  "        text: b\n    }\n}\n")
+        # The outer block holds the inner's format in its span, so it passes: a limit of the
+        # rule, taken for the simplicity of reading one block as one span.
+        self.assertEqual([], plain.unformatted(source))
+
+    def test_the_real_tree_is_read_and_is_clean(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, plain.main())
+
+    def test_a_tree_with_no_text_is_a_broken_guard_not_a_clean_one(self):
+        with tempfile.TemporaryDirectory() as folder:
+            was = (plain.ROOT, plain.QML)
+            try:
+                plain.ROOT = pathlib.Path(folder)
+                plain.QML = pathlib.Path(folder) / "desktop" / "qml"
+                plain.QML.mkdir(parents=True)
+                (plain.QML / "A.qml").write_text("Item { }\n", encoding="utf-8")
+                with contextlib.redirect_stderr(io.StringIO()) as said:
+                    self.assertEqual(2, plain.main())
+                self.assertIn("this guard is broken", said.getvalue())
+            finally:
+                plain.ROOT, plain.QML = was
 
 
 class NothingTalksToTheConsole(unittest.TestCase):

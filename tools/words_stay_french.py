@@ -51,6 +51,19 @@ nothing — every field read as covered while the guard actually read none of th
     dropping that token. This is the narrower form of the same failure, and the one this
     round actually found: not every literal invisible, just a fragment of two of them.
 
+**And a sentence written outside `Words.cpp` escapes all three.** The checking frame's list
+wrote a file's line as `u"%1 · %2"_s` in `Review.cpp`, an ordinary space before « · », and
+nothing here read that file. So every other source of the client is read too, for the one
+sign no message to a developer carries: a literal holding « · » is something drawn, and what
+is drawn is written in `Words.cpp`. Reading no other source at all, this part says the guard
+is broken rather than that the client is clean.
+
+**And a separator `Words.h` promises is held to the promise.** Most « · » in `Words.cpp`
+join two halves with an ordinary space, and that is allowed; but a function whose comment in
+`Words.h` says « The space before « · » does not break » is checked: no literal of its body
+may hold an ordinary space before « · ». A header promising nothing, or a promise naming a
+function `Words.cpp` does not define, is a guard reading nothing, and says so.
+
 Neither check can see a literal written in a form that does not start with `u"` at all — a
 wholesale move to some other way of quoting a string would need a first fault to slip
 through unrecombined before this guard could say so, the same way `client_knows_the_contract.py`
@@ -145,6 +158,52 @@ RULES = (
 )
 
 
+def separators_elsewhere(folder: Path, words: Path):
+    """Every `u"…"_s` literal holding « · » in a source of `folder` other than `words` and
+    its header, as `(path, line, text)`, and how many sources were read: a separator drawn
+    between two things is French on screen, and French on screen is written in `Words.cpp`,
+    the one file whose typography `Words.h` states and this guard holds it to."""
+    found = []
+    read = 0
+    for path in sorted(folder.glob("*.cpp")) + sorted(folder.glob("*.h")):
+        if path in (words, words.with_suffix(".h")):
+            continue
+        read += 1
+        literals, _ = literals_in(path.read_text(encoding="utf-8"))
+        found += [(path, line, text) for line, text in literals if "·" in text]
+    return found, read
+
+
+PROMISE = "space before « · » does not break"
+DECLARED = re.compile(r"^QString (\w+)\(", re.M)
+
+
+def promised(header: str):
+    """The functions whose comment in `Words.h` promises a separator that does not break."""
+    names = []
+    comment = []
+    for line in header.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("///"):
+            comment.append(stripped[3:].strip())
+            continue
+        declared = DECLARED.match(stripped)
+        if declared and PROMISE in " ".join(comment):
+            names.append(declared.group(1))
+        comment = []
+    return names
+
+
+def body_of(source: str, name: str):
+    """The body of `QString name(…)` in `source`, up to the brace closing it at the start of
+    a line — `Words.cpp`'s layout — or None."""
+    start = re.search(rf"^QString {re.escape(name)}\(", source, re.M)
+    if not start:
+        return None
+    end = source.find("\n}", start.end())
+    return source[start.start():end if end >= 0 else len(source)]
+
+
 def main() -> int:
     source = SOURCE.read_text(encoding="utf-8")
     literals, orphaned = literals_in(source)
@@ -179,6 +238,40 @@ def main() -> int:
     if found:
         print(f"\n{len(found)} literal(s) breaking a rule Words.h states and nothing else "
               "enforced.")
+        return 1
+
+    header_path = SOURCE.with_suffix(".h")
+    names = promised(header_path.read_text(encoding="utf-8")) if header_path.exists() else []
+    if not names:
+        print(f"✗ this guard is broken, not {SOURCE.relative_to(ROOT)}: "
+              f"{header_path.relative_to(ROOT)} promises no separator that does not break.\n"
+              f"  « {PROMISE} » no longer matches how a promise is written there.")
+        return 2
+    broken = []
+    for name in names:
+        body = body_of(source, name)
+        if body is None:
+            print(f"✗ this guard is broken, not {SOURCE.relative_to(ROOT)}: {name}() is "
+                  f"promised in {header_path.name} and defined nowhere here.")
+            return 2
+        literals, _ = literals_in(body)
+        broken += [(name, text) for _, text in literals if " ·" in text]
+    for name, text in broken:
+        print(f"✗ {SOURCE.relative_to(ROOT)} — {name}(): an ordinary space before « · », "
+              f"which {header_path.name} says does not break\n    {text}")
+    if broken:
+        return 1
+
+    elsewhere, read = separators_elsewhere(SOURCE.parent, SOURCE)
+    if read == 0:
+        print(f"✗ this guard is broken, not the client: it read no source beside "
+              f"{SOURCE.name}, so no separator drawn elsewhere could be seen.")
+        return 2
+    for path, line, text in elsewhere:
+        print(f"✗ {path.relative_to(ROOT)}:{line} — a « · » drawn outside "
+              f"{SOURCE.name}, where nothing checks its typography\n    {text}")
+    if elsewhere:
+        print(f"\n{len(elsewhere)} literal(s) to move into {SOURCE.relative_to(ROOT)}.")
         return 1
 
     print(f"Every literal in {SOURCE.relative_to(ROOT)} keeps its French typography.")

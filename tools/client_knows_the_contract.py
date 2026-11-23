@@ -58,8 +58,28 @@ WATCHED = {
     # And the bulk path, which crosses it four more times: announced, sent, followed,
     # committed.
     "ImportOpened": ("whole", ["opened"]),
-    "Creation": ("whole", ["opened"]),
-    "Relocation": ("whole", ["opened"]),
+    "Creation": ("whole", ["creation"]),
+    "Relocation": ("whole", ["relocation"]),
+    # What a reimport says of the volumes it meets. `whole`: each is a fact a reader decides
+    # on — a number, a page count, a place in the volume — and one the client stopped reading
+    # is a replacement shown with less than the server knew.
+    "TargetPlace": ("whole", ["targetPlace"]),
+    "TrailStep": ("whole", ["trailStep"]),
+    "HeldVolume": ("whole", ["heldVolume"]),
+    "Arriving": ("whole", ["arriving"]),
+    "VolumeMatch": ("whole", ["volumeMatch"]),
+    "AbsentSeries": ("whole", ["absentSeries"]),
+    "Resemblance": ("whole", ["resemblance"]),
+    # Where the server will file each volume, and under which name: the screen that says so
+    # before sending is only as true as these four fields.
+    "Landing": ("whole", ["landing"]),
+    "NamesMeet": ("whole", ["namesMeet"]),
+    "Reshelved": ("whole", ["reshelved"]),
+    "NeedsAName": ("whole", ["needsAName"]),
+    "NameProblem": ("whole", ["nameProblem"]),
+    "SpliceOutcome": ("whole", ["spliceOutcome"]),
+    "ChapterSplice": ("whole", ["chapterSplice"]),
+    "ReplacedFile": ("whole", ["replacedFile"]),
     "Received": ("whole", ["received"]),
     "BadOffset": ("whole", ["badOffset"]),
     "ImportState": ("whole", ["session"]),

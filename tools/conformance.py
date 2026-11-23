@@ -198,6 +198,7 @@ def reading(run):
     entries = run.check("series entries", f"/series/{series}/entries", "/series/{id}/entries")
     run.check("series chapters", f"/series/{series}/chapters", "/series/{id}/chapters")
     run.check("series arcs", f"/series/{series}/arcs", "/series/{id}/arcs")
+    run.check("series folders", f"/series/{series}/folders", "/series/{id}/folders")
     run.check("series progress", f"/series/{series}/progress", SERIES_PROGRESS)
     run.check("unknown series", "/series/nope", ONE_SERIES)
     entry = entries[0]["id"]
