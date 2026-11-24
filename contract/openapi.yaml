@@ -1510,15 +1510,21 @@ paths:
         It is decoded in full before anything is written, and refused with a 400 unless it
         is a JPEG, PNG or WebP of at most 20 MB and 64 million pixels.
 
-        It is written beside the archive (`Tome 1.leaf-cover.png` for `Tome 1.cbz`), atomically, under the name `leaf-cover` — `leaf-cover.png`,
-        `leaf-cover.jpg` or `leaf-cover.webp` — and the scan looks for that name before any
-        other, so it is the cover at once, with no scan to wait for, and it survives a rebuilt
-        index. An image sent in another format replaces the first; **a file somebody put
-        there by hand (`cover.jpg`, `Tome 1.jpg`) is never overwritten or removed**: it loses
-        to the chosen image while that exists.
+        **It becomes the volume's page `000`, inside the archive** — the cover the format
+        names, which travels with the file. A volume that has a `000` has it replaced, under
+        the new image's extension, and nothing else moves. A volume numbered from `001` has
+        none: the page is added before the first, and everything that counts pages moves down
+        one place in the same operation — each profile's place in the volume, the first page
+        of every chapter, including those a ComicInfo declares, which `entry.json` then holds.
+        The new archive is read back before it replaces the old one. **The cover it replaces
+        is not kept**, and `DELETE` cannot bring it back.
 
-        The image replaces a page chosen before it: `coverPage` is cleared, since a page
-        would otherwise keep winning. Choosing a page afterwards wins over the image again.
+        `coverPage` is cleared, since a page chosen before would otherwise keep winning;
+        choosing a page afterwards wins over the image again. **An image somebody placed
+        beside the archive (`Tome 1.jpg`) is read before page 0 and is never removed**, so a
+        volume that has one refuses the cover with a 400 rather than answer that it is done
+        and show nothing. An image an earlier version wrote beside the archive
+        (`leaf-cover.*`) is taken back.
       requestBody:
         required: true
         content:
@@ -1542,8 +1548,10 @@ paths:
       tags: [records]
       summary: Go back to the default cover.
       description: |
-        Removes the image the server wrote, and **only that one**: a cover somebody put in
-        the folder stays, and speaks again. The chosen `coverPage` is cleared as well. Nothing to remove is not an error.
+        Removes the image an earlier version wrote beside the archive, and **only that one**:
+        a cover somebody put in the folder stays, and speaks again. The chosen `coverPage` is
+        cleared as well. Nothing to remove is not an error. A cover sent now is written into
+        the archive as its page `000`, which this does not undo.
       responses:
         "204": { description: The default cover is back. }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -3488,6 +3496,14 @@ components:
             `/entries/{id}/pages/{number}`. Null when none was chosen: the cover is then an
             image beside the archive (`ownCover`), otherwise page 0. Which of the three wins
             is written under `/entries/{id}/cover`.
+        borrowedCover:
+          type: boolean
+          default: false
+          description: |
+            Whether the volume has no cover of its own — no `coverPage`, no image beside the
+            archive, and a first page named `001` — so that `/entries/{id}/cover` serves its
+            series' cover in its place. A tile showing a borrowed cover writes the volume's
+            number over it: a shelf of chapters is otherwise one picture many times over.
         authors:
           type: array
           items: { type: string }

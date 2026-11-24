@@ -991,6 +991,7 @@ Read<Entry> entry(const QJsonObject &from)
     one.addedAt = field.maybeBig(u"addedAt"_s);
     one.coverPage = field.maybeWhole(u"coverPage"_s);
     one.coverImage = field.maybeBool(u"coverImage"_s).value_or(false);
+    one.borrowedCover = field.maybeBool(u"borrowedCover"_s).value_or(false);
     one.credits.authors = field.words(u"authors"_s);
     one.credits.artists = field.words(u"artists"_s);
     one.authorsInherited = field.maybeBool(u"authorsInherited"_s).value_or(false);

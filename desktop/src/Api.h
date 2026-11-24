@@ -369,6 +369,9 @@ struct Entry {
     /// An image was chosen for the cover from the reader's own disk, which is what « Revenir par
     /// défaut » can take back. False for an image placed beside the archive by hand.
     bool coverImage = false;
+    /// No cover of its own: the series' is served in its place, and the tile writes the
+    /// volume's number over it so that a shelf of chapters is not one picture many times.
+    bool borrowedCover = false;
     /// Who wrote and who drew this volume: its own word, else its series' default. `author` is
     /// never set here.
     Credits credits;
@@ -377,6 +380,18 @@ struct Entry {
     bool authorsInherited = false;
     bool artistsInherited = false;
 };
+
+/// The number a volume is called by: its own, else — a chapter — the chapter it is, which
+/// is what `sortKey` holds for a file of one chapter. A webtoon's chapters arrive with no
+/// `number` at all, and a tile that went by it alone wrote no number on any of them.
+///
+/// In the header, because `Words` calls it and several tests link `Words` without `Api.cpp`.
+inline std::optional<double> numberOf(const Entry &file)
+{
+    if (file.number.has_value() || file.kind != Entry::Kind::Chapter)
+        return file.number;
+    return file.sortKey;
+}
 
 /// One page of a book, as the reader needs to lay it out. Not `Page`, which is a page of the
 /// shelf; the contract calls both « Page » and only one of them can keep the word here.

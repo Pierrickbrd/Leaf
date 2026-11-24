@@ -22,6 +22,26 @@ private slots:
 
     /// The machine's « part: field is missing » is said as a sentence for whoever reads the
     /// card, with the part and the field still named; a line that already was one is left alone.
+    /// What a series holds is counted in what it holds: a webtoon is chapters and no volume,
+    /// and « 0 tome » was written under it (test of 24/11/2026).
+    void a_series_of_chapters_is_counted_in_chapters()
+    {
+        Api::Series webtoon;
+        webtoon.medium = Api::Medium::Webtoon;
+        webtoon.counts.entries = 2;
+        QCOMPARE(Words::holdings(webtoon), u"2 chapitres"_s);
+        webtoon.counts.entries = 1;
+        QCOMPARE(Words::holdings(webtoon), u"1 chapitre"_s);
+
+        Api::Series manga;
+        manga.medium = Api::Medium::Manga;
+        manga.holding.ownedVolumes = 7;
+        manga.counts.entries = 9;
+        QCOMPARE(Words::holdings(manga), u"7 tomes"_s);
+        // Nothing at all is still a volume count: there is nothing else to say.
+        QCOMPARE(Words::holdings(Api::Series{}), u"0 tome"_s);
+    }
+
     void a_field_the_server_left_out_is_said_in_plain_words()
     {
         QCOMPARE(Words::answerNotUnderstood(u"opened: present is missing"_s),

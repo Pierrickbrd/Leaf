@@ -38,17 +38,6 @@ use crate::store::Db;
 /// Above this, a "width" is a client bug rather than a request.
 const MAX_WIDTH: u32 = 4096;
 
-/// Whether an archive opens on a page named `001`, with any extension, wherever it sits in
-/// the archive. A library's pages are numbered from `000`, the cover, or from `001` when the
-/// file has none; any other first name is a file from elsewhere, whose first page stays its
-/// cover because nothing says it is not one.
-fn opens_without_cover(first: Option<&str>) -> bool {
-    first
-        .and_then(|n| n.rsplit('/').next())
-        .and_then(|n| n.split('.').next())
-        .is_some_and(|stem| stem == "001")
-}
-
 /// What a cover is asked for at when nobody says. Small: it is a tile on a shelf.
 ///
 /// A step of `WIDTH_STEP`, and said as one: it was 300, which is served at 400 since widths
@@ -436,7 +425,10 @@ impl Pages {
         // A file numbered from `001` has no cover of its own, chapter or volume: its first page
         // is a page of the story. 120 chapters each showing their opening panel made a shelf of
         // identical-looking tiles with nothing to tell the series by.
-        if inherit && page.is_none() && file.is_none() && opens_without_cover(first_page.as_deref())
+        if inherit
+            && page.is_none()
+            && file.is_none()
+            && crate::archive::opens_without_cover(first_page.as_deref())
         {
             return self.series_cover_or_unchanged(&edition, width, held, ceiling);
         }

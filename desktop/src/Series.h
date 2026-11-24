@@ -48,6 +48,9 @@ class Series : public QObject
     Q_PROPERTY(QString work READ work NOTIFY changed)
     Q_PROPERTY(QString edition READ edition NOTIFY changed)
     Q_PROPERTY(QString cover READ cover NOTIFY changed)
+    /// A webtoon's tiles say how far through in per cent, not how many pages: a chapter is one
+    /// strip, and « 312 p. » under each one counts nothing a reader goes by.
+    Q_PROPERTY(bool webtoon READ webtoon NOTIFY changed)
 
     /// Who made it, what it weighs, its genres, its summary and the four columns of the
     /// description: everything that words the answer and asks nothing (`Description.h`).
@@ -88,6 +91,7 @@ public:
     QString work() const;
     QString edition() const;
     QString cover() const;
+    bool webtoon() const;
     Description *description() const { return m_description; }
     QVariantList editions() const;
     QString editionsLabel() const;

@@ -107,6 +107,7 @@ QColor Theme::onEmerald() const    { return pick(m_dark, 0xF0ECE3u, 0x08110Du); 
 QColor Theme::emeraldLip() const   { return pick(m_dark, 0x054537u, 0x1A7558u); }
 // The dark values are `emerald`, `onEmerald` and `emeraldLip` as approved; the light ones a
 // paler emerald under a near-black, the lip the same step down. 7,69:1 and 8,54:1.
+QColor Theme::coverEmerald() const { return QColor::fromRgb(0x2FB98Bu); }
 QColor Theme::barcodeFace() const  { return pick(m_dark, 0x4CC59Bu, 0x2FB98Bu); }
 QColor Theme::barcodeInk() const   { return pick(m_dark, 0x0A1712u, 0x08110Du); }
 QColor Theme::barcodeLip() const   { return pick(m_dark, 0x2B8F6Cu, 0x1A7558u); }

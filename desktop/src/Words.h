@@ -50,6 +50,10 @@ QString chapterName(const QString &label, const QString &title);
 /// "21 tomes", "7 albums", "1 tome". A BD comes in albums and everything else in volumes —
 /// which is a fact about the medium, so it is read from the medium and not from the shelf.
 QString volumes(int count, std::optional<Api::Medium> medium);
+/// What a series holds, under its tile: « 12 tomes », or « 120 chapitres » when it holds
+/// no volume and files that are all chapters — a webtoon is downloaded as chapters and read
+/// « 0 tome » for as long as the line counted volumes only (test of 24/11/2026).
+QString holdings(const Api::Series &one);
 
 /// The pills, left to right: « Non lues », « En cours », « Terminées ».
 QString readStatus(Api::ReadStatus status);
@@ -2511,6 +2515,18 @@ QString volumeNumbered(const QString &number);
 /// « Chapitre 12 », what a chapter file is called when nobody gave it a title: a webtoon is
 /// downloaded as `Chapitre 012.cbz` and a list of empty lines names nothing to open.
 QString chapterNamed(double number);
+/// The name under a volume's tile: « 12 · Le Titre » when it has a title worth reading,
+/// « Tome 12 » or « Chapitre 12 » when it has none, the title or the file's name when it has no
+/// number. Its number alone was « 12 · » over every untitled volume, and « 12 · Chapitre 12 »
+/// over every chapter a webtoon is downloaded as.
+QString tileCaption(const Api::Entry &file);
+/// The word over the number a borrowed cover carries, in an edition that mixes volumes and
+/// chapters: « TOME », « CHAPITRE ». Written in capitals and not raised by a `toUpper`, for
+/// the reason the header gives: a word is spelled here, once.
+QString coverWord(Api::Entry::Kind kind);
+/// « 42 % » under a webtoon chapter being read, rounded down: its pages are one long strip
+/// and their count says nothing; 100 is for what is finished.
+QString percentRead(double fraction);
 /// The chips of the lines: Remplacer, Mettre à jour, Ajouter, Garder, Autre tome, Autre
 /// série, Sans numéro, Deux fois.
 enum class Aim { Replace, Update, Add, Keep, OtherNumber, OtherSeries, Unnumbered, Twice, Same };

@@ -1048,7 +1048,7 @@ impl<'a> Repository<'a> {
         let sql = format!(
             "SELECT x.id AS present, x.*,
                     (SELECT COUNT(*) FROM chapter c WHERE c.entry_id = x.id) AS chapter_count,
-                    {NAMING}, {}
+                    {NAMING}, {}, {}
              FROM edition ed
              JOIN work w ON w.id = ed.work_id
              LEFT JOIN universe u ON u.id = w.universe_id
@@ -1056,6 +1056,7 @@ impl<'a> Repository<'a> {
              WHERE ed.id = ?1{}
              ORDER BY x.sort_key, x.file",
             credits_of("x"),
+            opening_of("x"),
             ceiling.and_work("w")
         );
         let rows = self
@@ -1147,13 +1148,14 @@ impl<'a> Repository<'a> {
     pub fn entry(&self, id: &str, ceiling: &Ceiling) -> Result<Option<EntryDto>> {
         let sql = format!(
             "SELECT e.*, (SELECT COUNT(*) FROM chapter c WHERE c.entry_id = e.id) AS chapter_count,
-                    {NAMING}, {}
+                    {NAMING}, {}, {}
              FROM entry e
              JOIN edition ed ON ed.id = e.edition_id
              JOIN work w ON w.id = ed.work_id
              LEFT JOIN universe u ON u.id = w.universe_id
              WHERE e.id = ?1{}",
             credits_of("e"),
+            opening_of("e"),
             ceiling.and_edition("e.edition_id")
         );
         self.db.read(|cx| cx.query_one(&sql, [id], to_entry))
@@ -1347,6 +1349,17 @@ fn credits_of(alias: &str) -> String {
     )
 }
 
+/// The name the first page of the entry under `alias` has inside its archive, read in the
+/// statement that reads it: whether the volume has a cover of its own is written in it
+/// (`archive::opens_without_cover`), and a list asking that once per volume would ask a
+/// hundred times for a hundred volumes.
+fn opening_of(alias: &str) -> String {
+    format!(
+        "(SELECT p.entry_name FROM page p WHERE p.entry_id = {alias}.id AND p.number = 0)
+            AS first_page_name"
+    )
+}
+
 /// A list of names kept as JSON — a series' declared default, or a volume's credits.
 /// Nothing, or something unreadable, is nobody.
 fn names(json: Option<String>) -> Vec<String> {
@@ -1395,6 +1408,13 @@ fn to_entry(r: &Row<'_>) -> rusqlite::Result<EntryDto> {
             .get::<_, Option<String>>("cover_file")?
             .is_some_and(|f| crate::scan::covers::is_own(&f)),
         cover_page: r.get("cover_page")?,
+        // What `/entries/{id}/cover` does with the same three columns: nothing chosen and
+        // a first page numbered `001` is the series' cover, shown in this volume's place.
+        borrowed_cover: r.get::<_, Option<i64>>("cover_page")?.is_none()
+            && r.get::<_, Option<String>>("cover_file")?.is_none()
+            && crate::archive::opens_without_cover(
+                r.get::<_, Option<String>>("first_page_name")?.as_deref(),
+            ),
         authors: names(r.get("c_authors")?),
         artists: names(r.get("c_artists")?),
         authors_inherited: r.get("authors_inherited")?,
@@ -1835,13 +1855,14 @@ impl Repository<'_> {
             cx.query(
                 &format!(
                     "SELECT e.*, (SELECT COUNT(*) FROM chapter c WHERE c.entry_id = e.id) AS chapter_count,
-                            {NAMING}, {}
+                            {NAMING}, {}, {}
                      FROM entry e
                      JOIN edition ed ON ed.id = e.edition_id
                      JOIN work w ON w.id = ed.work_id
                      LEFT JOIN universe u ON u.id = w.universe_id
                      WHERE e.id IN ({}){visible}",
                     credits_of("e"),
+                    opening_of("e"),
                     marks(part.len())
                 ),
                 rusqlite::params_from_iter(part.iter()),

@@ -1118,6 +1118,48 @@ fn committing_installs_what_arrived_and_leaves_what_did_not() {
     assert!(bulk.state(&opened.id).unwrap().is_none());
 }
 
+/// An image named for the series, sent with the volumes, is the series' cover: it lands in
+/// the work's folder and the scan reads it from there (`cover.jpg` is one of the names it
+/// takes for the whole series), with nothing to say about it in the announcement.
+#[test]
+fn a_cover_image_sent_with_the_volumes_becomes_the_series_cover() {
+    let world = World::new();
+    let bulk = BulkImport::new(&world.inbox(), &world.library(), Arc::clone(&world.db));
+    let volume = {
+        let held = world.dir.path().join("held.cbz");
+        archive(&held, None);
+        std::fs::read(held).unwrap()
+    };
+    let picture = jpeg();
+    let opened = bulk
+        .open(
+            &manifest(
+                &[
+                    ("Nains 01.cbz", volume.len() as u64),
+                    ("cover.jpg", picture.len() as u64),
+                ],
+                Scope::Addition,
+            ),
+            DEFAULT_PROFILE,
+            &Ceiling::NONE,
+        )
+        .expect("opening");
+    bulk.receive(&opened.id, "Nains 01.cbz", 0, &volume, CEILING)
+        .expect("the volume");
+    bulk.receive(&opened.id, "cover.jpg", 0, &picture, CEILING)
+        .expect("the cover");
+    bulk.commit(&opened.id, &[], &[], &[], DEFAULT_PROFILE)
+        .expect("committing");
+    assert!(world.library().join("Terres d'Arran/cover.jpg").exists());
+
+    world.scan();
+    let chosen: Option<String> = world.one("SELECT cover_file FROM edition");
+    assert!(
+        chosen.is_some_and(|file| file.ends_with("cover.jpg")),
+        "the series' cover is the image that arrived with it"
+    );
+}
+
 #[test]
 fn a_file_that_travelled_wrong_is_left_aside_rather_than_installed() {
     let world = World::new();

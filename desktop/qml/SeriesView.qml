@@ -389,6 +389,14 @@ Item {
             // The same list, in covers. No separators here: a full-width marker would cut the
             // grid into blocks of uneven height, and the grid exists to show covers. Arcs are
             // a linear reading and they live in the list.
+            // Every borrowed cover of the grid is this series' picture: measured once here, for
+            // the colour of every number written on it (`CoverTone`).
+            CoverTone {
+                id: tone
+
+                source: view.gridShown ? view.page.cover : ""
+            }
+
             Flow {
                 id: asGrid
 
@@ -411,6 +419,11 @@ Item {
                         required property string entryId
                         required property string number
                         required property string title
+                        required property string caption
+                        required property bool borrowed
+                        required property string coverNumber
+                        required property string kindWord
+                        required property string readPercent
                         required property string pages
                         required property string cover
                         required property string fileName
@@ -433,6 +446,13 @@ Item {
                                 entryId: cell.entryId
                                 number: cell.number
                                 title: cell.title
+                                caption: cell.caption
+                                borrowed: cell.borrowed
+                                coverNumber: cell.coverNumber
+                                kindWord: cell.kindWord
+                                readPercent: cell.readPercent
+                                webtoon: view.page.webtoon
+                                numberLight: tone.light
                                 pages: cell.pages
                                 cover: cell.cover
                                 fileName: cell.fileName

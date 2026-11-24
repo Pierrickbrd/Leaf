@@ -313,11 +313,17 @@ impl<'a> Records<'a> {
     fn write_entry_json(&self, file: &Path, entry: &EntryJson) -> Result<()> {
         let was = std::fs::metadata(file).map(|m| m.len()).ok();
         cbz_writer::replace_sidecar(file, ENTRY_JSON, &sidecars::write(entry)?)?;
+        self.follow_origin(file, was);
+        Ok(())
+    }
+
+    /// See [`Self::write_entry_json`]: `was` is the archive's size before Leaf rewrote it.
+    fn follow_origin(&self, file: &Path, was: Option<u64>) {
         let (Some(library), Some(was)) = (self.library, was) else {
-            return Ok(());
+            return;
         };
         let Some(key) = crate::api::bulk_import::origin_key_of(library, file) else {
-            return Ok(());
+            return;
         };
         let followed = std::fs::metadata(file)
             .map_err(anyhow::Error::from)
@@ -325,7 +331,118 @@ impl<'a> Records<'a> {
         if let Err(e) = followed {
             tracing::warn!(file = %file.display(), error = %e, "could not follow the origin");
         }
-        Ok(())
+    }
+
+    /// Makes `image` the volume's page `000`, the cover the format names: replacing the one
+    /// it has, or — a volume numbered from `001` has none — adding it before the first page.
+    ///
+    /// Adding one moves every page a place down, and everything that counts pages moves with
+    /// it **in the same operation**: each profile's place in the volume, and the first page of
+    /// every chapter and the cover page `entry.json` names. A chosen `coverPage` is cleared,
+    /// since it would go on outranking the page 0 just written. Chapters a volume only
+    /// declares in its ComicInfo are moved too: they are read the way a patch reads them, and
+    /// written into `entry.json`, which wins over the ComicInfo from then on.
+    ///
+    /// The new archive is written beside the old one and read back — its first page must be
+    /// the image, and it must hold the pages expected — before it replaces the volume. The
+    /// cover it replaces is **not kept**: the archive is the volume, and it holds the cover
+    /// now. `false` when there is no such volume.
+    pub fn set_cover_page(&self, entry_id: &str, extension: &str, image: &[u8]) -> Result<bool> {
+        let row = self.db.read(|cx| {
+            cx.query_one(
+                "SELECT file, edition_id FROM entry WHERE id = ?1",
+                [entry_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+        })?;
+        let Some((file, edition_id)) = row else {
+            return Ok(false);
+        };
+        let Some(where_) = self.places(&edition_id)? else {
+            return Ok(false);
+        };
+        let file = PathBuf::from(file);
+        let held = cbz::read(&file, false)?.pages;
+        let Some(first) = held.first() else {
+            return Err(crate::api::invalid("the volume has no pages"));
+        };
+        // Where the page goes: over the one it replaces, in its folder and under the new
+        // extension, or at the root of an archive that has none.
+        let replaced = crate::archive::page_number(&first.name) == Some(0);
+        let folder = if replaced {
+            first.name.rsplit_once('/').map(|(f, _)| f)
+        } else {
+            None
+        };
+        // Named as its siblings are: a file numbered `01`, `02`… gets `00`, one numbered `1`,
+        // `2`… gets `0`, and anything else the three digits a library writes.
+        let width = crate::archive::page_stem(&first.name)
+            .filter(|stem| crate::archive::page_number(stem).is_some())
+            .map_or(3, str::len);
+        let stem = format!("{:0width$}", 0);
+        let name = match folder {
+            Some(folder) => format!("{folder}/{stem}.{extension}"),
+            None => format!("{stem}.{extension}"),
+        };
+        let shifted = !replaced;
+
+        let mut current = read_entry_json(&file).unwrap_or_default();
+        let changes_json = shifted || current.cover_page.is_some();
+        let json = if changes_json {
+            current.leaf = Some(FORMAT_VERSION);
+            current.work = Some(where_.work_name);
+            current.edition = where_.edition_name;
+            current.id = Some(entry_id.to_string());
+            current.cover_page = None;
+            if shifted {
+                for chapter in &mut current.chapters {
+                    chapter.start_page = chapter.start_page.map(|p| p + 1);
+                }
+            }
+            Some(sidecars::write(&current)?)
+        } else {
+            None
+        };
+
+        let mut add: Vec<(&str, &[u8])> = vec![(name.as_str(), image)];
+        if let Some(json) = &json {
+            add.push((ENTRY_JSON, json));
+        }
+        let remove: Vec<&str> = if replaced && first.name != name {
+            vec![first.name.as_str()]
+        } else {
+            Vec::new()
+        };
+        let was = std::fs::metadata(&file).map(|m| m.len()).ok();
+        let temporary = crate::store::files::beside(&file, "leaf-tmp");
+        cbz_writer::rewrite_into(&file, &temporary, &add, &remove)?;
+        // Read back before it replaces anything: a page that does not sort first would be a
+        // cover nobody sees, and the pages shifted for it would be shifted for nothing.
+        let written = cbz::read(&temporary, false).map(|c| c.pages);
+        let expected = held.len() + usize::from(shifted);
+        let sound = written.as_ref().is_ok_and(|pages| {
+            pages.len() == expected && pages.first().is_some_and(|p| p.name == name)
+        });
+        if !sound {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(crate::api::invalid(
+                "the volume cannot be given that cover: its pages would not read in order",
+            ));
+        }
+        std::fs::rename(&temporary, &file)
+            .map_err(|e| anyhow!("replacing {}: {e}", file.display()))?;
+        tracing::info!(file = %file.display(), "cover page written");
+        if shifted {
+            self.db.write(|cx| {
+                cx.execute(
+                    "UPDATE progress SET page = page + 1 WHERE entry_id = ?1",
+                    [entry_id],
+                )?;
+                Ok(())
+            })?;
+        }
+        self.follow_origin(&file, was);
+        Ok(true)
     }
 
     pub fn patch_series(&self, edition_id: &str, patch: &SeriesPatch) -> Result<bool> {

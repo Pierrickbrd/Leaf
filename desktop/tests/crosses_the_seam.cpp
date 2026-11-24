@@ -11,6 +11,7 @@
 #include "Boot.h"
 #include "CardCaptions.h"
 #include "Commands.h"
+#include "CoverTone.h"
 #include "DesktopText.h"
 #include "ImportCaptions.h"
 #include "ImportOffers.h"
@@ -4017,6 +4018,122 @@ private slots:
             QTRY_VERIFY2(itemNamed(window->contentItem(), name), qPrintable(name));
             QCOMPARE_EQ(shownNamed(window->contentItem(), name), offered.contains(entry));
         }
+    }
+
+    /// A volume with no cover of its own carries its number on the series' picture, with the
+    /// word for its kind in an edition holding both, and every tile has its veil; the check
+    /// of a finished one sits beside the words and no longer on the cover, where it shared a
+    /// corner with the number and the bar (decision of 24/11/2026).
+    void a_borrowed_cover_carries_its_number_and_the_check_leaves_the_cover()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+
+        const QByteArray one = QJsonDocument(QJsonObject{
+            {u"id"_s, u"colorist"_s},
+            {u"workId"_s, u"colorist"_s},
+            {u"name"_s, u"Colorist"_s},
+            {u"work"_s, u"Colorist"_s},
+            {u"medium"_s, u"webtoon"_s},
+            {u"ownedVolumes"_s, 2},
+            {u"entryCount"_s, 2},
+            {u"chapterCount"_s, 1},
+            {u"arcCount"_s, 0},
+        }).toJson(QJsonDocument::Compact);
+        const QByteArray files = QJsonDocument(QJsonArray{
+            QJsonObject{{u"id"_s, u"c1"_s}, {u"type"_s, u"CHAPTER"_s}, {u"sortKey"_s, 1},
+                        {u"pageCount"_s, 40}, {u"chapterCount"_s, 1},
+                        {u"file"_s, u"Chapitre 001.cbz"_s}, {u"size"_s, 1000},
+                        {u"borrowedCover"_s, true}},
+            QJsonObject{{u"id"_s, u"v2"_s}, {u"type"_s, u"VOLUME"_s}, {u"number"_s, 2},
+                        {u"title"_s, u"Le Pinceau"_s}, {u"pageCount"_s, 40},
+                        {u"chapterCount"_s, 0}, {u"file"_s, u"Tome 2.cbz"_s},
+                        {u"size"_s, 1000}}}).toJson(QJsonDocument::Compact);
+        const QByteArray states = QJsonDocument(QJsonArray{QJsonObject{
+            {u"entryId"_s, u"c1"_s}, {u"page"_s, 39}, {u"pageCount"_s, 40},
+            {u"finished"_s, true}}}).toJson(QJsonDocument::Compact);
+        const QByteArray shelf = QJsonDocument(QJsonObject{
+            {u"items"_s, QJsonArray{}}, {u"total"_s, 0}, {u"page"_s, 0}, {u"size"_s, 0},
+        }).toJson(QJsonDocument::Compact);
+        const auto reply = [](const QByteArray &body) {
+            return "HTTP/1.1 200 .\r\nContent-Type: application/json\r\nContent-Length: "
+                   + QByteArray::number(body.size()) + "\r\n\r\n" + body;
+        };
+        pretend.answerFor = [=](const QByteArray &request) -> QByteArray {
+            if (request.contains("/entries "))
+                return reply(files);
+            if (request.contains("/progress "))
+                return reply(states);
+            if (request.contains("/cover"))
+                return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+            if (request.startsWith("GET /series/"))
+                return reply(one);
+            return reply(shelf);
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->showVolumesAsGrid(true);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation->open(Navigation::Destination::Series,
+                                 {{u"series"_s, u"colorist"_s}}));
+
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QQuickItem *borrowed = nullptr;
+        QTRY_VERIFY((borrowed = itemNamed(page, u"tile-volume-c1"_s)));
+        QQuickItem *own = nullptr;
+        QTRY_VERIFY((own = itemNamed(page, u"tile-volume-v2"_s)));
+
+        QQuickItem *number = itemNamed(borrowed, u"cover-number"_s);
+        QVERIFY(number);
+        QTRY_VERIFY(number->isVisible());
+        QCOMPARE(number->property("text").toString(), u"1"_s);
+        QQuickItem *word = itemNamed(borrowed, u"cover-word"_s);
+        QVERIFY(word && word->isVisible());
+        QCOMPARE(word->property("text").toString(), u"CHAPITRE"_s);
+        QVERIFY(!itemNamed(own, u"cover-number"_s)->isVisible());
+
+        // A webtoon says nothing of the pages of a finished chapter, and the check is out of
+        // the cover, below it, at its right.
+        QTRY_VERIFY(itemNamed(borrowed, u"finished-c1"_s)->isVisible());
+        QQuickItem *check = itemNamed(borrowed, u"finished-c1"_s);
+        QVERIFY(check->mapToItem(borrowed, QPointF(0, 0)).y() >= borrowed->width() * 1.5);
+        QCOMPARE(itemNamed(borrowed, u"count-c1"_s)->property("text").toString(), QString());
+    }
+
+    /// The colour of a borrowed cover's number is chosen from the foot of the picture, as it
+    /// is drawn under its veil: white over a dark foot, dark over a pale one — whatever the
+    /// top of the cover is, which the number never stands on.
+    void the_number_on_a_borrowed_cover_reads_the_foot_of_the_picture()
+    {
+        QImage dark(150, 224, QImage::Format_RGB32);
+        dark.fill(Qt::black);
+        QVERIFY(!CoverTone::lightUnderVeil(dark));
+        QImage pale(150, 224, QImage::Format_RGB32);
+        pale.fill(Qt::white);
+        QVERIFY(CoverTone::lightUnderVeil(pale));
+
+        QImage paleFoot = dark.copy();
+        for (int y = 112; y < 224; ++y)
+            for (int x = 0; x < 150; ++x)
+                paleFoot.setPixel(x, y, qRgb(255, 255, 255));
+        QVERIFY(CoverTone::lightUnderVeil(paleFoot));
+        QImage darkFoot = pale.copy();
+        for (int y = 112; y < 224; ++y)
+            for (int x = 0; x < 150; ++x)
+                darkFoot.setPixel(x, y, qRgb(20, 20, 20));
+        QVERIFY(!CoverTone::lightUnderVeil(darkFoot));
+        QVERIFY(!CoverTone::lightUnderVeil(QImage()));
     }
 
     /// The list becomes a wall of covers, and the three dots reach the one confirmation in
@@ -9887,7 +10004,7 @@ private slots:
         // volumes has nothing to tick: neither is required.
         const QStringList zones{u"review-filter-"_s, u"review-node-"_s, u"role-chip-"_s,
                                 u"review-next"_s, u"review-tick-all"_s, u"review-line-"_s,
-                                u"review-field-"_s, u"review-arcs-edit"_s, u"review-back"_s,
+                                u"review-cover-"_s, u"review-field-"_s, u"review-arcs-edit"_s, u"review-back"_s,
                                 u"review-import"_s};
         QStringList walked;
         int reached = 0;
@@ -9957,6 +10074,18 @@ private slots:
         drop.review()->view()->select(drop.nodeId(u"Vrac"_s));
         QQuickItem *title = nullptr;
         QTRY_VERIFY((title = drop.named(u"review-field-title"_s)) && title->isVisible());
+        QVERIFY(laidOut(drop.window));
+        // The sheet's cover block sits above the fields, so in this window the title lies on the
+        // fold: a hand scrolls to it before it clicks, and the click is no more a click on what
+        // the foot of the sheet covers.
+        for (QQuickItem *up = title->parentItem(); up; up = up->parentItem()) {
+            if (!up->property("contentY").isValid() || !up->property("contentHeight").isValid())
+                continue;
+            const qreal over = title->mapToItem(up, QPointF(0, title->height())).y() - up->height();
+            if (over > 0)
+                up->setProperty("contentY", up->property("contentY").toReal() + over + 40);
+            break;
+        }
         QVERIFY(laidOut(drop.window));
         clickOn(drop.window, title);
         QTRY_VERIFY(title->hasActiveFocus());

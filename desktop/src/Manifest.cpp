@@ -158,11 +158,59 @@ bool isHidden(const QString &name)
     return name.startsWith(u'.');
 }
 
+/// Whether a file is the image a series' folder keeps as its cover — the stems and extensions
+/// of `scan/covers.rs`, which is where the server decides what a cover is. Announced beside
+/// the archives and never counted among them: `isArchive` exists because a `cover.jpg` once
+/// became a volume, and it never reached the server at all, so a series imported from a
+/// folder holding one came up with no cover.
+bool isCover(const QFileInfo &about)
+{
+    static const QStringList stems{u"cover"_s, u"default"_s, u"folder"_s, u"poster"_s,
+                                   u"series"_s};
+    static const QStringList suffixes{u"png"_s, u"jpeg"_s, u"jpg"_s, u"webp"_s, u"gif"_s,
+                                      u"tbn"_s};
+    return stems.contains(about.completeBaseName().toLower())
+           && suffixes.contains(about.suffix().toLower());
+}
+
 bool holdsArchives(const QString &at)
 {
     const QDir here(at);
     return std::ranges::any_of(here.entryInfoList(QDir::Files | QDir::NoDotAndDotDot),
                                isArchive);
+}
+
+/// A cover is announced only where something declares a series or an edition: an image
+/// beside loose volumes belongs to no one the server could give it to.
+void addCover(const QFileInfo &about, const QString &relative, bool withChecksums,
+              Manifest::Folder &into)
+{
+    Manifest::Entry cover;
+    cover.path = relative;
+    cover.size = about.size();
+    if (withChecksums)
+        cover.checksum = Manifest::checksumOf(about.absoluteFilePath());
+    into.covers.append(cover);
+}
+
+void addArchive(const QFileInfo &about, const QString &relative, bool withChecksums,
+                const Manifest::Progress &onward, Manifest::Folder &into)
+{
+    Manifest::Entry entry;
+    entry.path = relative;
+    entry.size = about.size();
+    // Every archive is opened, whether or not its bytes are hashed: what it says about
+    // itself is what the import's first screen shows, and it cost nothing more to read
+    // here than to ask for later. The checksum alone is the minutes-long part.
+    entry.members = Cbz::membersOf(about.absoluteFilePath(), withChecksums);
+    entry.title = titleIn(entry.members.entry.sidecar);
+    if (withChecksums)
+        entry.checksum = Manifest::checksumOf(about.absoluteFilePath());
+    into.files.append(entry);
+    // The running total, not the file just read: a caller counts against the volumes
+    // `found()` already told it about, and has no use for which one this was.
+    if (onward)
+        onward(into.files.size());
 }
 
 void walk(const QString &at, const QString &root, int left, Manifest::Folder &into,
@@ -199,29 +247,14 @@ void walk(const QString &at, const QString &root, int left, Manifest::Folder &in
         if (declares(about.fileName())) {
             if (QFile file(about.absoluteFilePath()); file.open(QIODevice::ReadOnly))
                 into.sidecars.append({relative, file.readAll()});
-            continue;
+        } else if (isCover(about) && declaredHere(at)) {
+            addCover(about, relative, withChecksums, into);
+        } else if (isArchive(about)) {
+            // Only what the server would call an archive: `scan/layout.rs` never treats a
+            // `cover.jpg` or any other non-`.cbz`/`.zip` file as one, and this walk used to
+            // count every file all the same.
+            addArchive(about, relative, withChecksums, onward, into);
         }
-        // Only what the server would call an archive: `scan/layout.rs` never treats a
-        // `cover.jpg` or any other non-`.cbz`/`.zip` file as one, and this walk used to
-        // count every file all the same.
-        if (!isArchive(about))
-            continue;
-
-        Manifest::Entry entry;
-        entry.path = relative;
-        entry.size = about.size();
-        // Every archive is opened, whether or not its bytes are hashed: what it says about
-        // itself is what the import's first screen shows, and it cost nothing more to read
-        // here than to ask for later. The checksum alone is the minutes-long part.
-        entry.members = Cbz::membersOf(about.absoluteFilePath(), withChecksums);
-        entry.title = titleIn(entry.members.entry.sidecar);
-        if (withChecksums)
-            entry.checksum = Manifest::checksumOf(about.absoluteFilePath());
-        into.files.append(entry);
-        // The running total, not the file just read: a caller counts against the volumes
-        // `found()` already told it about, and has no use for which one this was.
-        if (onward)
-            onward(into.files.size());
     }
 }
 
@@ -300,6 +333,8 @@ qint64 Folder::bytes() const
     qint64 total = 0;
     for (const Entry &one : files)
         total += one.size;
+    for (const Entry &one : covers)
+        total += one.size;
     return total;
 }
 
@@ -359,14 +394,14 @@ Folder of(const QString &path, bool withChecksums, const Progress &onward)
 {
     const QFileInfo about(path);
     if (!about.isDir())
-        return {{}, {}, {}, Words::notAFolder()};
+        return {{}, {}, {}, Words::notAFolder(), {}};
 
     Folder found;
     found.root = about.fileName();
     walk(about.absoluteFilePath(), about.absoluteFilePath(), DeepestFolders, found,
          withChecksums, onward);
     if (!found.read())
-        return {{}, {}, {}, found.trouble};
+        return {{}, {}, {}, found.trouble, {}};
     return found;
 }
 
@@ -374,7 +409,7 @@ Folder single(const QString &file, bool withChecksums)
 {
     const QFileInfo about(file);
     if (!about.isFile() || !isArchive(about))
-        return {{}, {}, {}, Words::notAnArchive()};
+        return {{}, {}, {}, Words::notAnArchive(), {}};
 
     Folder found;
     found.root = about.completeBaseName();

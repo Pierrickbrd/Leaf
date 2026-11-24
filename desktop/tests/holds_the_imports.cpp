@@ -3319,6 +3319,42 @@ private slots:
                  "the same name again asks nothing");
     }
 
+    /// The measured gap: a cover could only be the one a folder happened to hold. One chosen
+    /// from the reader's disk is announced as `cover.<extension>` in the folder it covers, in
+    /// place of the one the folder holds, and going back announces the folder's own again.
+    void a_cover_chosen_from_the_disk_travels_in_place_of_the_folders()
+    {
+        const QString folder = aFolder();
+        {
+            QFile held(folder + u"/cover.jpg"_s);
+            QVERIFY(held.open(QIODevice::WriteOnly));
+            held.write(QByteArray(9, 'h'));
+        }
+        const QString chosen = m_folder.filePath(u"elsewhere.PNG"_s);
+        {
+            QFile file(chosen);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write(QByteArray(7, 'c'));
+        }
+        m_pretend->answerFor = reimportAnswering(aMatch("Tome 1.cbz", "ADD"));
+        m_offers->reimport(u"SERIES_NEW_EDITIONS"_s, u"ed-1"_s, u"Koro Quest"_s, {folder});
+        QTRY_COMPARE(stageOf(0), int(Imports::Stage::Reviewing));
+        const quint64 token = m_imports->cards().constFirst().token;
+        QVERIFY(filesOf(announcementOf(u"Koro"_s)).contains(u"cover.jpg"_s));
+
+        QVERIFY(m_imports->setCover(token, QString(), chosen));
+        QTRY_VERIFY(filesOf(announcementOf(u"Koro"_s)).contains(u"cover.png"_s));
+        const QStringList sent = filesOf(announcementOf(u"Koro"_s));
+        QVERIFY2(!sent.contains(u"cover.jpg"_s), "two covers in a folder leave the pick to the server");
+        QVERIFY(m_imports->cards().constFirst().coverPicked(QString()));
+        QCOMPARE(m_imports->cards().constFirst().coverOf(QString()), chosen);
+
+        QVERIFY(m_imports->setCover(token, QString(), QString()));
+        QTRY_VERIFY(filesOf(announcementOf(u"Koro"_s)).contains(u"cover.jpg"_s));
+        QVERIFY(!filesOf(announcementOf(u"Koro"_s)).contains(u"cover.png"_s));
+        QVERIFY2(!m_imports->setCover(token, QString(), QString()), "nothing chosen, nothing to undo");
+    }
+
     /// A name accepted is no longer asked for by the server, and its row stays: a typo is
     /// corrected where it was typed.
     void an_accepted_name_keeps_its_row()

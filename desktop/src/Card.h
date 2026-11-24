@@ -162,6 +162,20 @@ public:
         QHash<QString, QString> namesSent;
     };
 
+    /// An image the reader chose from their disk as the cover of a series or an edition, by
+    /// the folder it is the cover of (`""` for the card's own). `entry.path` is where it is
+    /// announced — `cover.<extension>` in that folder, which is the name the server reads a
+    /// cover by — and `source` where its bytes are read from, which is nowhere in the folder.
+    struct CoverPick {
+        QString source;
+        Manifest::Entry entry;
+    };
+    struct Covers {
+        QHash<QString, CoverPick> picked;
+        /// `picked` as the last announcement carried it, for the reason `namesSent` exists.
+        QString coversSent;
+    };
+
     /// What the announcement's answer said of the folder, beyond names: what it would send,
     /// create, move, replace and declare, and what the library already holds. Replaced whole
     /// by each answer.
@@ -250,7 +264,7 @@ public:
     /// parts are bases rather than members so that a field keeps its one name everywhere it
     /// is read: the queue and its carrier read them in over two hundred places, and none of
     /// those is about which part holds it.
-    struct Road : Aim, Names, Answer, Walk {
+    struct Road : Aim, Names, Answer, Walk, Covers {
         /// Where in `toSend` the sending is.
         int at = 0;
         /// How much of the file at `at` has gone up. `sent` counts the whole folder, so
@@ -342,6 +356,16 @@ public:
     /// it never did is not one to read from the disk.
     bool walked(const QString &relative) const;
     qint64 sizeOf(const QString &relative) const;
+    /// Where the bytes of `relative` are read from when it is an image the reader chose,
+    /// empty for anything the folder holds.
+    QString pickedSource(const QString &relative) const;
+    /// What covers the folder `at` of the card: the image chosen for it, or else the one the
+    /// folder holds. Empty when there is none. An absolute path, for a screen to draw.
+    QString coverOf(const QString &at) const;
+    /// Whether the reader chose the cover of the folder `at`.
+    bool coverPicked(const QString &at) const;
+    /// What `road.picked` says, as one string: equal strings, equal announcements.
+    QString coversSaid() const;
 
     /// Whether committing this card would move a byte or write a line.
     ///

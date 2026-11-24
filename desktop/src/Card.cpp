@@ -2,6 +2,7 @@
 
 #include "Words.h"
 
+#include <QDir>
 #include <QFileInfo>
 #include <QVariantMap>
 
@@ -439,9 +440,44 @@ QVariantMap Card::progress(quint64 walking) const
 
 bool Card::walked(const QString &relative) const
 {
-    return std::ranges::any_of(road.tree.files, [&relative](const Manifest::Entry &entry) {
-        return entry.path == relative;
-    });
+    const auto named = [&relative](const Manifest::Entry &entry) { return entry.path == relative; };
+    return std::ranges::any_of(road.tree.files, named)
+           || std::ranges::any_of(road.tree.covers, named) || !pickedSource(relative).isEmpty();
+}
+
+QString Card::pickedSource(const QString &relative) const
+{
+    for (const CoverPick &one : road.picked) {
+        if (one.entry.path == relative)
+            return one.source;
+    }
+    return {};
+}
+
+bool Card::coverPicked(const QString &at) const
+{
+    return road.picked.contains(at);
+}
+
+QString Card::coverOf(const QString &at) const
+{
+    if (const auto one = road.picked.constFind(at); one != road.picked.cend())
+        return one->source;
+    for (const Manifest::Entry &cover : road.tree.covers) {
+        const qsizetype slash = cover.path.lastIndexOf(u'/');
+        if ((slash < 0 ? QString() : cover.path.left(slash)) == at)
+            return QDir(path).filePath(cover.path);
+    }
+    return {};
+}
+
+QString Card::coversSaid() const
+{
+    QStringList said;
+    for (const auto &[at, one] : road.picked.asKeyValueRange())
+        said << at + u'\n' + one.source;
+    said.sort();
+    return said.join(u'\n');
 }
 
 qint64 Card::sizeOf(const QString &relative) const
@@ -449,6 +485,14 @@ qint64 Card::sizeOf(const QString &relative) const
     for (const Manifest::Entry &entry : road.tree.files) {
         if (entry.path == relative)
             return entry.size;
+    }
+    for (const Manifest::Entry &entry : road.tree.covers) {
+        if (entry.path == relative)
+            return entry.size;
+    }
+    for (const CoverPick &one : road.picked) {
+        if (one.entry.path == relative)
+            return one.entry.size;
     }
     return 0;
 }

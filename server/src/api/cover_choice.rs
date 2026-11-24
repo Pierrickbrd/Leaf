@@ -117,14 +117,39 @@ impl<'a> CoverChoice<'a> {
         Ok(())
     }
 
-    /// Makes `bytes` the cover of a volume, and forgets a page chosen before: the later
-    /// choice wins, and a page would otherwise keep winning over the image just given.
+    /// Makes `bytes` the cover of a volume: its page `000`, written into the archive (see
+    /// [`Records::set_cover_page`]). A cover once chosen beside the archive by an earlier
+    /// version is taken back, or it would go on outranking the page just written; one placed
+    /// by hand is not the server's to remove. `false` when there is no such volume.
     pub fn set_entry(&self, entry_id: &str, bytes: &[u8]) -> Result<bool> {
         let Some(place) = self.entry_place(entry_id)? else {
             return Ok(false);
         };
-        write_choice(&place, bytes)?;
-        self.forget_page(entry_id)?;
+        let extension = validated(bytes)?;
+        // An image somebody placed beside the archive is read before the archive's own page 0
+        // and is never the server's to remove: a cover written under it would be written for
+        // nothing, and the answer would say it was done.
+        let beside: Option<Option<String>> = self.db.read(|cx| {
+            cx.query_one(
+                "SELECT cover_file FROM entry WHERE id = ?1",
+                [entry_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+        })?;
+        if beside.flatten().is_some_and(|file| !covers::is_own(&file)) {
+            return Err(crate::api::invalid(
+                "an image placed beside this file already covers it: remove it first",
+            ));
+        }
+        let records = Records::new(self.db);
+        let records = match self.library {
+            Some(library) => records.in_library(library),
+            None => records,
+        };
+        if !records.set_cover_page(entry_id, extension, bytes)? {
+            return Ok(false);
+        }
+        remove_own(&place, None)?;
         Ok(true)
     }
 

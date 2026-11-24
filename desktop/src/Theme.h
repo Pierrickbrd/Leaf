@@ -61,6 +61,10 @@ class Theme : public QObject
     /// they drew light bars on a dark ground, a code a scanner reads inverted or not at all
     /// (ruling of 22/10/2026). Dark bars on a light emerald in both themes; the dark values are
     /// the approved key's, the light ones a paler emerald.
+    /// How far through, along the foot of a cover: the vivid emerald in both themes. The light
+    /// theme's own emerald sank into the veil every cover now has (ruling of 24/11/2026), and
+    /// what lies under it is an illustration, which has no theme.
+    Q_PROPERTY(QColor coverEmerald READ coverEmerald CONSTANT)
     Q_PROPERTY(QColor barcodeFace READ barcodeFace NOTIFY changed)
     Q_PROPERTY(QColor barcodeInk READ barcodeInk NOTIFY changed)
     Q_PROPERTY(QColor barcodeLip READ barcodeLip NOTIFY changed)
@@ -147,6 +151,7 @@ public:
     QColor emeraldWash() const;
     QColor onEmerald() const;
     QColor emeraldLip() const;
+    QColor coverEmerald() const;
     QColor barcodeFace() const;
     QColor barcodeInk() const;
     QColor barcodeLip() const;

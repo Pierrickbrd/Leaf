@@ -499,6 +499,25 @@ void Carrier::announceFolder(int row, const Manifest::Folder &tree)
             continue;
         files.append(announcedFile(entry, composed, m_of->m_rows.at(row).road));
     }
+    // The series' cover travels with its volumes: path, size and checksum, nothing a volume
+    // would be asked.
+    // The one a folder holds gives way to the one the reader chose for that folder: two
+    // covers in a folder would leave the server to pick between them.
+    const auto announcedCover = [&files](const Manifest::Entry &cover) {
+        QJsonObject one{{u"path"_s, cover.path}, {u"size"_s, double(cover.size)}};
+        if (!cover.checksum.isEmpty())
+            one.insert(u"checksum"_s, cover.checksum);
+        files.append(one);
+    };
+    const Card::Road &chosen = m_of->m_rows.at(row).road;
+    for (const Manifest::Entry &cover : tree.covers) {
+        const qsizetype slash = cover.path.lastIndexOf(u'/');
+        if (!chosen.picked.contains(slash < 0 ? QString() : cover.path.left(slash)))
+            announcedCover(cover);
+    }
+    for (const Card::CoverPick &one : chosen.picked)
+        announcedCover(one.entry);
+    m_of->m_rows[row].road.coversSent = m_of->m_rows.at(row).coversSaid();
     QJsonArray sidecars;
     const Card::Road &aimed = m_of->m_rows.at(row).road;
     // The names typed for the editions an import adds are written into their `edition.json`,
@@ -555,6 +574,59 @@ void Carrier::announceFolder(int row, const Manifest::Folder &tree)
                    [this, path](const Server::Answer &answer) { tookFolder(path, answer); });
 }
 
+namespace {
+
+/// What the server's answer says of the road a folder travels, copied onto it: the steps of
+/// `tookFolder` read as steps, and none of the fields they are made of.
+void takeRoadFrom(Card::Road &road, const Api::Opened &opened)
+{
+    road.toSend = opened.toSend;
+    road.replaces = opened.replaces;
+    // Cleared with the announcement for `filing`'s own reason: a re-announced folder may
+    // answer differently, and a tick against a volume it no longer names would overwrite
+    // something for a reason nobody could see.
+    road.replacing.clear();
+    road.declarations = opened.declarations;
+    road.declaring.clear();
+    road.alreadyThere = QSet<QString>(opened.alreadyThere.cbegin(), opened.alreadyThere.cend());
+    indexTravelling(road);
+    road.creates = opened.creates;
+    road.moves = opened.moves;
+    road.volumes = opened.volumes;
+    road.absent = opened.absent;
+    road.absentSeries = opened.absentSeries;
+    road.resembles = opened.resembles;
+    road.landsAs = opened.landsAs;
+    road.collisions = opened.collisions;
+    road.reshelved = opened.reshelved;
+    road.editionsNeedingAName = opened.editionsNeedingAName;
+    for (const Api::NeedsAName &one : road.editionsNeedingAName) {
+        if (!road.editionOrder.contains(one.path))
+            road.editionOrder << one.path;
+    }
+    road.problems = opened.problems;
+}
+
+/// A chapter the source did not place was announced at the pages of the whole file; now that
+/// the server has said where the chapter sits, the proposal is its own pages, and the answer
+/// is asked for again once with them. True when it was, and the folder must be announced again.
+bool proposedItsOwnPages(Card::Road &answered)
+{
+    if (!answered.target || answered.target->kind != u"CHAPTER"_s || answered.splice
+        || !answered.spliced || answered.sheets.isEmpty())
+        return false;
+    const Facts::Sheet &source = answered.sheets.constFirst();
+    const Facts::ProposedSplice proposal = chapterRange(answered, source.at, source.contents.pages);
+    const auto aimed = std::ranges::find(answered.spliced->chapters, u"REPLACE"_s,
+                                         &Api::ChapterSplice::outcome);
+    if (!proposal.guessed || aimed == answered.spliced->chapters.cend())
+        return false;
+    answered.splice = Card::Road::Splice{aimed->from, aimed->to};
+    return true;
+}
+
+} // namespace
+
 void Carrier::tookFolder(const QString &path, const Server::Answer &answer)
 {
     const int row = rowOf(path);
@@ -572,55 +644,20 @@ void Carrier::tookFolder(const QString &path, const Server::Answer &answer)
 
     m_of->m_rows[row].id = read.value->id;
     m_of->remember(read.value->id);
-    m_of->m_rows[row].road.toSend = read.value->toSend;
-    m_of->m_rows[row].road.replaces = read.value->replaces;
-    // Cleared with the announcement for `filing`'s own reason: a re-announced folder may
-    // answer differently, and a tick against a volume it no longer names would overwrite
-    // something for a reason nobody could see.
-    m_of->m_rows[row].road.replacing.clear();
-    m_of->m_rows[row].road.declarations = read.value->declarations;
-    m_of->m_rows[row].road.declaring.clear();
-    m_of->m_rows[row].road.alreadyThere =
-        QSet<QString>(read.value->alreadyThere.cbegin(), read.value->alreadyThere.cend());
-    indexTravelling(m_of->m_rows[row].road);
-    m_of->m_rows[row].road.creates = read.value->creates;
-    m_of->m_rows[row].road.moves = read.value->moves;
     Card::Road &answered = m_of->m_rows[row].road;
-    answered.volumes = read.value->volumes;
-    answered.absent = read.value->absent;
-    answered.absentSeries = read.value->absentSeries;
-    answered.resembles = read.value->resembles;
-    answered.landsAs = read.value->landsAs;
-    answered.collisions = read.value->collisions;
-    answered.reshelved = read.value->reshelved;
-    answered.editionsNeedingAName = read.value->editionsNeedingAName;
-    for (const Api::NeedsAName &one : answered.editionsNeedingAName) {
-        if (!answered.editionOrder.contains(one.path))
-            answered.editionOrder << one.path;
-    }
-    answered.problems = read.value->problems;
+    takeRoadFrom(answered, *read.value);
     // A name typed while this answer was awaited is not in it: the folder is announced again
     // with it, and what was typed is not lost.
-    if (answered.editionNames != answered.namesSent) {
+    if (answered.editionNames != answered.namesSent
+        || m_of->m_rows.at(row).coversSaid() != answered.coversSent) {
         reannounce(row);
         return;
     }
     answered.place = read.value->target;
     answered.spliced = read.value->splice;
-    // A chapter the source did not place was announced at the pages of the whole file; now
-    // that the server has said where the chapter sits, the proposal is its own pages, and
-    // the answer is asked for again once with them.
-    if (answered.target && answered.target->kind == u"CHAPTER"_s && !answered.splice
-        && answered.spliced && !answered.sheets.isEmpty()) {
-        const Facts::Sheet &source = answered.sheets.constFirst();
-        const Facts::ProposedSplice proposal = chapterRange(answered, source.at, source.contents.pages);
-        const auto aimed = std::ranges::find(answered.spliced->chapters, u"REPLACE"_s,
-                                             &Api::ChapterSplice::outcome);
-        if (proposal.guessed && aimed != answered.spliced->chapters.cend()) {
-            answered.splice = Card::Road::Splice{aimed->from, aimed->to};
-            reannounce(row);
-            return;
-        }
+    if (proposedItsOwnPages(answered)) {
+        reannounce(row);
+        return;
     }
     for (const Api::Declaration &one : read.value->declarations)
         answered.held.insert(one.path, one.present);
@@ -1039,7 +1076,10 @@ void Carrier::sendMoreOfFolder(int row)
     // The folder the paths are relative to: a file dropped on a volume is its own tree
     // (`Manifest::single`), and its card's path is the file, which has nothing under it.
     const QFileInfo about(one.path);
-    QFile file((about.isFile() ? about.absolutePath() : one.path) + u'/' + relative);
+    // An image the reader chose is read from where it is, which is not in the folder.
+    const QString chosenAt = one.pickedSource(relative);
+    const QString folder = about.isFile() ? about.absolutePath() : one.path;
+    QFile file(!chosenAt.isEmpty() ? chosenAt : folder + u'/' + relative);
     if (!file.open(QIODevice::ReadOnly) || !file.seek(one.road.sentInFile)) {
         settle(row, Stage::Failed, Words::couldNotBeRead(relative));
         pump();

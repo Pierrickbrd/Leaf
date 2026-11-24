@@ -110,6 +110,14 @@ QString volumes(int count, std::optional<Api::Medium> medium)
     return u"%1 %2"_s.arg(count).arg(many ? u"tomes"_s : u"tome"_s);
 }
 
+QString holdings(const Api::Series &one)
+{
+    if (one.holding.ownedVolumes > 0 || one.counts.entries <= 0)
+        return volumes(one.holding.ownedVolumes, one.medium);
+    return u"%1 %2"_s.arg(one.counts.entries)
+        .arg(one.counts.entries >= 2 ? u"chapitres"_s : u"chapitre"_s);
+}
+
 QString readStatus(Api::ReadStatus status)
 {
     using enum Api::ReadStatus;
@@ -1052,6 +1060,7 @@ QVariantMap editing()
             {u"previousYear"_s, u"Année précédente"_s},
             {u"nextYear"_s, u"Année suivante"_s},
             {u"cover"_s, u"Couverture"_s},
+            {u"noCover"_s, u"Aucune couverture"_s},
             {u"chooseImage"_s, u"Choisir une image…"_s},
             {u"choosePage"_s, u"Choisir une page…"_s},
             {u"chooseVolume"_s, u"Choisir un tome…"_s},
@@ -5915,6 +5924,31 @@ QString volumeNumbered(const QString &number)
 QString chapterNamed(double number)
 {
     return u"Chapitre "_s + Words::number(number);
+}
+
+QString tileCaption(const Api::Entry &file)
+{
+    const QString title = file.title.value_or(QString()).trimmed();
+    const std::optional<double> shown = Api::numberOf(file);
+    if (!shown.has_value())
+        return title.isEmpty() ? file.file : title;
+    const QString number = Words::number(*shown);
+    // « Tome 3 » titled « Tome 3 » is untitled; « 3 · Tome 3 » was the same word twice.
+    if (const QString named = file.kind == Api::Entry::Kind::Chapter ? chapterNamed(*shown)
+                                                                     : volumeNumbered(number);
+        title.isEmpty() || titled(named, title) == named)
+        return named;
+    return titled(number, title);
+}
+
+QString coverWord(Api::Entry::Kind kind)
+{
+    return kind == Api::Entry::Kind::Chapter ? u"CHAPITRE"_s : u"TOME"_s;
+}
+
+QString percentRead(double fraction)
+{
+    return percentSent(fraction);
 }
 
 QString aimChip(Aim which)

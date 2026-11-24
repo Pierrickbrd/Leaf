@@ -106,7 +106,7 @@ QVariant Shelf::data(const QModelIndex &index, int role) const
         // taught, not the answer for a medium nobody recorded.
         return one.medium ? Words::medium(*one.medium) : QString();
     case Volumes:
-        return Words::volumes(one.holding.ownedVolumes, one.medium);
+        return Words::holdings(one);
     case HowFarRead:
         // A fraction and not two numbers: a tile draws a bar, and the width of a bar is the
         // one thing it needs. `Api` works it out, because the universe block of a series page

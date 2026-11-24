@@ -272,6 +272,8 @@ Item {
             // How far through the series, drawn as the fraction it is — and full, with the
             // check below, once it is finished. It drew nothing then, which is what a series
             // never opened looks like too.
+            CoverVeil { }
+
             ReadBar {
                 key: tile.seriesId
                 started: tile.inProgress
@@ -302,12 +304,6 @@ Item {
             border.width: 2
             opacity: tile.ring
             visible: opacity > 0
-        }
-
-        ReadCheck {
-            key: tile.seriesId
-            finished: tile.finished
-            coverWidth: tile.coverWidth
         }
 
         PickMark {
@@ -363,7 +359,8 @@ Item {
         objectName: "title-" + tile.seriesId
         opacity: tile.lineFade
         anchors.left: coverFrame.left
-        anchors.right: coverFrame.right
+        anchors.right: tile.finished ? check.left : coverFrame.right
+        anchors.rightMargin: tile.finished ? lines.between * 3 : 0
         anchors.top: coverFrame.bottom
         anchors.topMargin: lines.above
         // No height of its own: two lines at most, and as tall as they came out. Held to a
@@ -380,10 +377,12 @@ Item {
     }
 
     Text {
+        id: count
+
         objectName: "volumes-" + tile.seriesId
         opacity: tile.lineFade
         anchors.left: coverFrame.left
-        anchors.right: coverFrame.right
+        anchors.right: title.right
         anchors.top: title.bottom
         anchors.topMargin: lines.between
         textFormat: Text.PlainText
@@ -391,5 +390,16 @@ Item {
         color: Theme.inkFaint
         font: lines.countFont
         elide: Text.ElideRight
+    }
+
+    // At the right of the words, centred on the two lines they make, and fading with them.
+    ReadCheck {
+        id: check
+
+        key: tile.seriesId
+        finished: tile.finished
+        opacity: tile.lineFade
+        anchors.right: coverFrame.right
+        y: title.y + (count.y + count.height - title.y - height) / 2
     }
 }

@@ -64,7 +64,7 @@ QVariantMap Elsewhere::tileOf(const Api::Series *one, const QString &name,
             {u"name"_s, name},
             {u"detail"_s, !detail.isEmpty() || one == nullptr
                               ? detail
-                              : Words::volumes(one->holding.ownedVolumes, one->medium)},
+                              : Words::holdings(*one)},
             {u"cover"_s, identifier.isEmpty() || m_server == nullptr
                              ? QString()
                              : m_server->address() + u"/series/"_s + Server::segment(identifier) + u"/cover"_s},

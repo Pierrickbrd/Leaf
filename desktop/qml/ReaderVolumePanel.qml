@@ -297,7 +297,7 @@ Rectangle {
 
                             ReadBar {
                                 key: Reader.entryId
-                                shaded: false
+                                onCover: false
                                 started: !!card.about.started
                                 finished: !!card.about.finished
                                 howFarRead: card.about.howFarRead || 0

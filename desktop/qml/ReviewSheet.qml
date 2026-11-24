@@ -8,6 +8,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Dialogs
 import Leaf
 
 Item {
@@ -164,6 +165,86 @@ Item {
                         font.family: Theme.textFamily
                         font.pixelSize: Widths.scale.caption(12)
                         wrapMode: Text.WordWrap
+                    }
+                }
+            }
+
+            // The cover of the series or the edition: the one its folder holds, or the one
+            // chosen from the disk, and the way to change it before anything is sent. The
+            // file chosen is announced as `cover.<extension>` in that folder, which is the
+            // name the server reads a cover by.
+            Row {
+                id: cover
+
+                readonly property var said: panel.sheet.cover ?? ({})
+                objectName: "review-cover"
+                width: column.width
+                visible: cover.said.at !== undefined
+                spacing: Widths.space.card
+                bottomPadding: visible ? Widths.space.row : 0
+
+                Item {
+                    width: Widths.scale.fit(72)
+                    height: Widths.scale.fit(108)
+
+                    RoundedCover {
+                        objectName: "review-cover-image"
+                        anchors.fill: parent
+                        visible: (cover.said.url ?? "").length > 0
+                        source: cover.said.url ?? ""
+                        radius: Widths.scale.size(6)
+                    }
+
+                    Rectangle {
+                        anchors.fill: parent
+                        visible: (cover.said.url ?? "").length === 0
+                        radius: Widths.scale.size(6)
+                        color: "transparent"
+                        border.width: 1
+                        border.color: Theme.rule
+
+                        Text {
+                            anchors.fill: parent
+                            anchors.margins: Widths.space.compact
+                            textFormat: Text.PlainText
+                            text: Editing.words.noCover
+                            color: Theme.inkSoft
+                            font.family: Theme.textFamily
+                            font.pixelSize: Widths.scale.caption(12)
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                }
+
+                Column {
+                    spacing: Widths.space.compact
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    Text {
+                        textFormat: Text.PlainText
+                        text: Editing.words.cover
+                        color: Theme.ink
+                        font.family: Theme.textFamily
+                        font.pixelSize: Widths.scale.body(13)
+                        font.weight: Font.DemiBold
+                    }
+
+                    CardAction {
+                        objectName: "review-cover-change"
+                        visible: cover.said.editable === true && !panel.readOnly
+                        activeFocusOnTab: visible
+                        label: Editing.words.changeCover
+                        onTriggered: coverFinder.open()
+                    }
+
+                    CardAction {
+                        objectName: "review-cover-revert"
+                        visible: cover.said.picked === true && !panel.readOnly
+                        activeFocusOnTab: visible
+                        label: Editing.words.backToDefault
+                        onTriggered: Review.edits.setCover(cover.said.at, "")
                     }
                 }
             }
@@ -360,6 +441,15 @@ Item {
 
         active: false
         sourceComponent: (panel.sheet.editEntryId ?? "").length > 0 ? entryEditor : seriesEditor
+    }
+
+    FileDialog {
+        id: coverFinder
+
+        objectName: "review-cover-dialog"
+        title: Editing.words.chooseImageTitle
+        nameFilters: [Editing.words.imageFiles]
+        onAccepted: Review.edits.setCover(panel.sheet.cover?.at ?? "", coverFinder.selectedFile.toString())
     }
 
     Component { id: seriesEditor; SeriesEditDialog {} }

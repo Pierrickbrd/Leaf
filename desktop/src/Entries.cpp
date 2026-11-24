@@ -65,17 +65,55 @@ QVariant gapRow(double number, Entries::Role role)
         return QVariant::fromValue(Entries::State::Missing);
     case Kind_:
         return QVariant::fromValue(Entries::Kind::Gap);
+    case Caption:
+        return Words::titled(Words::number(number), Words::missingLabel(1));
     default:
         return {};
     }
 }
 
+/// The title a file shows: its own, or for a chapter that has none the chapter's number.
+QString titleShown(const Api::Entry &file)
+{
+    if (!file.title.has_value() && file.kind == Api::Entry::Kind::Chapter
+        && file.sortKey.has_value())
+        return Words::chapterNamed(*file.sortKey);
+    return file.title.value_or(QString());
+}
+
+Entries::State stateRead(const std::optional<Api::Progress> &read)
+{
+    using enum Entries::State;
+    if (!read.has_value())
+        return NeverRead;
+    // `finished` says where the reader stands now; a volume being read again is in
+    // progress, whatever it has been before.
+    if (read->finished)
+        return Read;
+    return read->page > 0 ? InProgress : NeverRead;
+}
+
+qreal fractionRead(const std::optional<Api::Progress> &read)
+{
+    if (!read.has_value() || read->pageCount <= 0)
+        return 0.0;
+    if (read->finished)
+        return 1.0;
+    return std::clamp(qreal(read->page) / qreal(read->pageCount), qreal(0), qreal(1));
+}
+
+QString percentShown(const std::optional<Api::Progress> &read)
+{
+    if (!read.has_value() || read->finished || read->page <= 0 || read->pageCount <= 0)
+        return QString();
+    return Words::percentRead(qreal(read->page) / qreal(read->pageCount));
+}
+
 /// A file, and the record that may or may not stand beside it.
 QVariant fileRow(const Api::Entry &file, const std::optional<Api::Progress> &read,
-                 const QString &address, Entries::Role role)
+                 const QString &address, bool mixed, Entries::Role role)
 {
     using enum Entries::Role;
-    using enum Entries::State;
     switch (role) {
     case EntryId:
         return file.id;
@@ -91,32 +129,31 @@ QVariant fileRow(const Api::Entry &file, const std::optional<Api::Progress> &rea
     case Number:
         return file.number.has_value() ? Words::number(*file.number) : QString();
     case Title:
-        if (!file.title.has_value() && file.kind == Api::Entry::Kind::Chapter
-            && file.sortKey.has_value())
-            return Words::chapterNamed(*file.sortKey);
-        return file.title.value_or(QString());
+        return titleShown(file);
     case Pages:
         return pagesOf(file.pageCount);
     case Weight:
         return QVariant::fromValue(file.size);
     case State_:
-        if (!read.has_value())
-            return QVariant::fromValue(NeverRead);
-        // `finished` says where the reader stands now; a volume being read again is in
-        // progress, whatever it has been before.
-        if (read->finished)
-            return QVariant::fromValue(Read);
-        return QVariant::fromValue(read->page > 0 ? InProgress : NeverRead);
+        return QVariant::fromValue(stateRead(read));
     case HowFarRead:
-        if (!read.has_value() || read->pageCount <= 0)
-            return 0.0;
-        if (read->finished)
-            return 1.0;
-        return std::clamp(qreal(read->page) / qreal(read->pageCount), qreal(0), qreal(1));
+        return fractionRead(read);
     case TimesFinished:
         return read.has_value() ? Words::timesFinished(read->timesFinished) : QString();
     case Kind_:
         return QVariant::fromValue(Entries::Kind::File);
+    case Caption:
+        return Words::tileCaption(file);
+    case Borrowed:
+        return file.borrowedCover;
+    case CoverNumber: {
+        const std::optional<double> shown = Api::numberOf(file);
+        return shown.has_value() ? Words::number(*shown) : QString();
+    }
+    case KindWord:
+        return mixed ? Words::coverWord(file.kind) : QString();
+    case ReadPercent:
+        return percentShown(read);
     case Detail:
     case Depth:
         return {};
@@ -288,7 +325,7 @@ QVariant Entries::data(const QModelIndex &index, int role) const
     if (line.missingNumber.has_value())
         return gapRow(*line.missingNumber, which);
     return fileRow(line.file, line.read, m_server == nullptr ? QString() : m_server->address(),
-                   which);
+                   m_mixed, which);
 }
 
 QHash<int, QByteArray> Entries::roleNames() const
@@ -312,6 +349,11 @@ QHash<int, QByteArray> Entries::roleNames() const
     named.insert(qToUnderlying(FileName), "fileName");
     named.insert(qToUnderlying(Chapters), "chapters");
     named.insert(qToUnderlying(Credits), "credits");
+    named.insert(qToUnderlying(Caption), "caption");
+    named.insert(qToUnderlying(Borrowed), "borrowed");
+    named.insert(qToUnderlying(CoverNumber), "coverNumber");
+    named.insert(qToUnderlying(KindWord), "kindWord");
+    named.insert(qToUnderlying(ReadPercent), "readPercent");
     return named;
 }
 
@@ -362,6 +404,7 @@ void Entries::forget()
     m_arcs.clear();
     m_arcCount = 0;
     m_files.clear();
+    m_mixed = false;
     beginResetModel();
     m_all.clear();
     m_shown.clear();
@@ -449,6 +492,13 @@ void Entries::tookEntries(const Server::Answer &answer)
     }
 
     m_files = fresh;
+    // A gap is no kind of file and decides nothing.
+    const auto holds = [this](Api::Entry::Kind kind) {
+        return std::ranges::any_of(m_files, [kind](const Line &line) {
+            return !line.missingNumber.has_value() && line.file.kind == kind;
+        });
+    };
+    m_mixed = holds(Api::Entry::Kind::Volume) && holds(Api::Entry::Kind::Chapter);
     m_trouble.clear();
 
     // The reading states and the arcs are asked for together and the list is drawn when both

@@ -516,6 +516,11 @@ pub struct EntryDto {
     /// The page chosen as the cover, counted from 0; absent when none was chosen.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cover_page: Option<i64>,
+    /// No cover of its own — nothing chosen, and a first page numbered `001` — so its tile
+    /// shows the series' cover, which the client marks with the volume's number: without it,
+    /// 120 chapters were 120 copies of one picture.
+    #[serde(skip_serializing_if = "is_false")]
+    pub borrowed_cover: bool,
     /// Who wrote and who drew this volume: its own word, else its series' default.
     pub authors: Vec<String>,
     pub artists: Vec<String>,

@@ -13,6 +13,7 @@
 
 #include <QDebug>
 #include <QFileInfo>
+#include <QUrl>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -2497,6 +2498,15 @@ QString Review::editionNameHelp() const
     return Words::editionNameHelp();
 }
 
+bool ReviewEdits::setCover(const QString &at, const QString &fileUrl)
+{
+    const Card *card = m_frame->aimed();
+    if (!card)
+        card = itemOf(cardsOf(m_frame->imports), m_frame->focus).card;
+    return card && m_frame->imports
+           && m_frame->imports->setCover(card->token, at, QUrl(fileUrl).toLocalFile());
+}
+
 bool ReviewEdits::setEditionName(const QString &path, const QString &name)
 {
     const Card *card = m_frame->aimed();
@@ -2814,6 +2824,34 @@ QVariantList resemblanceChoices(const Api::Resemblance &like)
     return choices;
 }
 
+/// The sheet of what is not a card: the whole apport, or what sits under no universe. It
+/// edits nothing and says nothing more than its name.
+QVariantMap openingSheet(const QVariantMap &shape, const QString &focus)
+{
+    const QString title = focus == WholeNode ? Words::wholeApport() : Words::withoutUniverse();
+    return withShape(shape, {{u"id"_s, focus},
+                             {u"title"_s, title},
+                             {u"subtitle"_s, QString()},
+                             {u"editable"_s, false},
+                             {u"fields"_s, QVariantList{}},
+                             {u"notes"_s, QVariantList{}}});
+}
+
+/// The cover of a series or an edition: what the folder holds or the reader chose, and the
+/// way to change it. A volume has its own, and a file no folder.
+void coverInto(QVariantMap &out, const Item &item, const Sheet &sheet, bool writable)
+{
+    if (!item.card->folder || (sheet.level != Level::Work && sheet.level != Level::Edition))
+        return;
+    const QString shown = item.card->coverOf(sheet.at);
+    out.insert(u"cover"_s,
+               QVariantMap{{u"at"_s, sheet.at},
+                           {u"url"_s, shown.isEmpty() ? QString()
+                                                      : QUrl::fromLocalFile(shown).toString()},
+                           {u"picked"_s, item.card->coverPicked(sheet.at)},
+                           {u"editable"_s, writable}});
+}
+
 } // namespace
 
 QVariantMap Review::sheet() const
@@ -2829,16 +2867,8 @@ QVariantMap Review::sheet() const
                       {u"ordersNote"_s, QString()},    {u"ordersEditable"_s, false},
                       {u"removable"_s, false}};
 
-    if (m_frame->focus == WholeNode || m_frame->focus == Loose) {
-        const QString title =
-            m_frame->focus == WholeNode ? Words::wholeApport() : Words::withoutUniverse();
-        return withShape(shape, {{u"id"_s, m_frame->focus},
-                                 {u"title"_s, title},
-                                 {u"subtitle"_s, QString()},
-                                 {u"editable"_s, false},
-                                 {u"fields"_s, QVariantList{}},
-                                 {u"notes"_s, QVariantList{}}});
-    }
+    if (m_frame->focus == WholeNode || m_frame->focus == Loose)
+        return openingSheet(shape, m_frame->focus);
     if (const auto shelf = shelfOf(m_frame->focus))
         return shelfSheet(m_frame->imports, *shelf, shape, m_frame->focus);
     const Item item = itemOf(cardsOf(m_frame->imports), m_frame->focus);
@@ -2889,6 +2919,7 @@ QVariantMap Review::sheet() const
                                         {u"editable"_s, writable},
                                         {u"fields"_s, fields},
                                         {u"notes"_s, notesOf(item)}});
+    coverInto(out, item, sheet, writable);
     if (const Api::Resemblance *like = resemblanceAt(*item.card, sheet.at)) {
         out.insert(u"alarming"_s, QVariantMap{{u"title"_s, Words::alreadyInLibrary(like->name)},
                                               {u"text"_s, QString()}});

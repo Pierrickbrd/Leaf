@@ -9,7 +9,7 @@ use std::path::Path;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use leaf_server::api::routes::{can_be_aimed_at, AppState};
-use leaf_server::metadata::sidecars::EntryJson;
+use leaf_server::metadata::sidecars::{self, ChapterJson, EntryJson};
 
 mod common;
 use common::{a_volume, archive_bytes, json_body, request, Server, ERASER, IMPORTER, READ_ONLY};
@@ -2847,9 +2847,11 @@ async fn a_cover_sent_for_something_unknown_is_a_404() {
     }
 }
 
+/// The cover of a volume is its page `000`: sending an image writes it into the archive,
+/// and a page chosen before it no longer outranks it. `three_pages` numbers its pages from
+/// `000`, so the page is replaced and nothing moves.
 #[tokio::test]
-async fn an_image_sent_for_a_volume_wins_over_a_page_chosen_before_and_delete_gives_the_default_back(
-) {
+async fn an_image_sent_for_a_volume_replaces_its_page_000_and_beats_a_page_chosen_before() {
     let (server, _, entry) = three_pages();
     let uri = format!("/entries/{entry}/cover");
     let default = cover(&server, &uri).await;
@@ -2865,38 +2867,167 @@ async fn an_image_sent_for_a_volume_wins_over_a_page_chosen_before_and_delete_gi
         page, image,
         "the image sent later beats the page chosen earlier"
     );
-    assert!(server
-        .library()
-        .join("Bleach/Tome 1.leaf-cover.png")
-        .exists());
-
-    // A page chosen after the image beats it: page, then image, then page zero.
-    choose_cover(&server, &entry, serde_json::json!({"coverPage": 1})).await;
-    assert_ne!(image, cover(&server, &uri).await);
-
-    let gone = send_cover(&server, &uri, "DELETE", IMPORTER, vec![]).await;
-    assert_eq!(StatusCode::NO_CONTENT, gone);
-    assert_eq!(default, cover(&server, &uri).await);
+    // In the archive, and not beside it: it travels with the volume.
     assert!(!server
         .library()
         .join("Bleach/Tome 1.leaf-cover.png")
         .exists());
+    let held = leaf_server::archive::cbz::read(&server.library().join("Bleach/Tome 1.cbz"), false)
+        .unwrap()
+        .pages;
+    assert_eq!(3, held.len());
+    assert_eq!("000.png", held[0].name);
+
+    // A page chosen after the image beats it: page, then image beside, then page zero.
+    choose_cover(&server, &entry, serde_json::json!({"coverPage": 1})).await;
+    assert_ne!(image, cover(&server, &uri).await);
+}
+
+/// A file numbered `01`, `02`… is numbered as a library numbers a dozen pages: its cover is
+/// `00`, not the `000` of a file of hundreds, so that the names still read as one series and
+/// the archive does not carry two widths of the same count.
+#[tokio::test]
+async fn a_cover_for_a_volume_numbered_from_01_is_named_00() {
+    let server = Server::new();
+    let folder = server.library().join("Webtoon");
+    std::fs::create_dir_all(&folder).unwrap();
+    let archive = folder.join("Chapitre 1.cbz");
+    {
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        for seed in 1..=2u8 {
+            zip.start_file::<_, ()>(format!("{seed:02}.jpg"), options)
+                .unwrap();
+            std::io::Write::write_all(&mut zip, &common::coloured_jpeg(seed)).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+    server.scan();
+    let entry = server.entry();
+    let uri = format!("/entries/{entry}/cover");
+
+    assert_eq!(
+        StatusCode::NO_CONTENT,
+        send_cover(&server, &uri, "PUT", IMPORTER, a_png()).await
+    );
+
+    let held = leaf_server::archive::cbz::read(&archive, false)
+        .unwrap()
+        .pages;
+    let names: Vec<&str> = held.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(vec!["00.png", "01.jpg", "02.jpg"], names);
+}
+
+/// A volume numbered from `001` has no cover page: giving it one adds the page, and every
+/// page after it is a place further down — the reader's own place, the first page of each
+/// chapter, the cover page a profile had chosen. All of it moves in the one operation, or a
+/// chapter would begin on the page before its own and a reader be put back a page.
+#[tokio::test]
+async fn a_cover_for_a_volume_numbered_from_001_adds_the_page_and_moves_what_counts_pages() {
+    let server = Server::new();
+    let folder = server.library().join("Webtoon");
+    std::fs::create_dir_all(&folder).unwrap();
+    let declared = EntryJson {
+        leaf: Some(1),
+        work: Some("Webtoon".into()),
+        number: Some(1.0),
+        chapters: vec![
+            ChapterJson {
+                number: Some(1.0),
+                start_page: Some(0),
+                ..Default::default()
+            },
+            ChapterJson {
+                number: Some(2.0),
+                start_page: Some(2),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let archive = folder.join("Chapitre 1.cbz");
+    {
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        for seed in 1..=3u8 {
+            zip.start_file::<_, ()>(format!("{seed:03}.jpg"), options)
+                .unwrap();
+            std::io::Write::write_all(&mut zip, &common::coloured_jpeg(seed)).unwrap();
+        }
+        zip.start_file::<_, ()>("entry.json", options).unwrap();
+        std::io::Write::write_all(&mut zip, &sidecars::write(&declared).unwrap()).unwrap();
+        zip.finish().unwrap();
+    }
+    server.scan();
+    let entry = server.entry();
+    let uri = format!("/entries/{entry}/cover");
+    let (status, _) = server
+        .send(
+            request("PATCH", &format!("/entries/{entry}/progress"), IMPORTER)
+                .header("Content-Type", "application/json")
+                .body(json_body(serde_json::json!({"page": 2})))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::OK, status);
+    let borrowed = cover(&server, &uri).await;
+
+    assert_eq!(
+        StatusCode::NO_CONTENT,
+        send_cover(&server, &uri, "PUT", IMPORTER, a_png()).await
+    );
+
+    let held = leaf_server::archive::cbz::read(&archive, false)
+        .unwrap()
+        .pages;
+    let names: Vec<&str> = held.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(vec!["000.png", "001.jpg", "002.jpg", "003.jpg"], names);
+    let declared = leaf_server::api::records::read_entry_json(&archive).unwrap();
+    let starts: Vec<Option<i32>> = declared.chapters.iter().map(|c| c.start_page).collect();
+    assert_eq!(vec![Some(1), Some(3)], starts);
+    assert_eq!(None, declared.cover_page);
+    // The reader is still on the page they were on: it is a place further down.
+    let (status, progress) = server
+        .send(
+            request("GET", &format!("/entries/{entry}/progress"), IMPORTER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(StatusCode::OK, status);
+    assert_eq!(3, progress["page"], "{progress}");
+    assert_eq!(4, progress["pageCount"], "{progress}");
+    // And the volume has a cover of its own now: not the series', not its first page.
+    assert_ne!(borrowed, cover(&server, &uri).await);
+    let (_, shown) = server
+        .send(
+            request("GET", &format!("/entries/{entry}"), IMPORTER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert!(shown.get("borrowedCover").is_none(), "{shown}");
 }
 
 #[tokio::test]
-async fn deleting_a_volume_cover_leaves_an_image_somebody_put_beside_it() {
+async fn an_image_placed_beside_a_volume_by_hand_refuses_a_cover_that_it_would_hide() {
     let (server, _, entry) = three_pages();
     let beside = server.library().join("Bleach/Tome 1.jpg");
     std::fs::write(&beside, common::coloured_jpeg(2)).unwrap();
     server.scan();
     let uri = format!("/entries/{entry}/cover");
     let theirs = cover(&server, &uri).await;
+    let archive = std::fs::read(server.library().join("Bleach/Tome 1.cbz")).unwrap();
 
-    send_cover(&server, &uri, "PUT", IMPORTER, a_png()).await;
-    assert_ne!(theirs, cover(&server, &uri).await);
-    send_cover(&server, &uri, "DELETE", IMPORTER, vec![]).await;
+    let sent = send_cover(&server, &uri, "PUT", IMPORTER, a_png()).await;
+    assert_eq!(StatusCode::BAD_REQUEST, sent);
+    // Neither theirs nor the archive was touched.
     assert!(beside.exists());
     assert_eq!(theirs, cover(&server, &uri).await);
+    assert_eq!(
+        archive,
+        std::fs::read(server.library().join("Bleach/Tome 1.cbz")).unwrap()
+    );
 }
 
 // ------------------------------------- a volume chosen, an image sent: the last choice wins

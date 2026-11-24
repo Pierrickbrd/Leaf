@@ -430,6 +430,9 @@ public:
     Q_INVOKABLE bool setSwitch(const QString &id, bool on);
     /// Types the name of an edition the import adds; the folder is announced again with it.
     Q_INVOKABLE bool setEditionName(const QString &path, const QString &name);
+    /// The image at `fileUrl` as the cover of the folder `at` of the sheet's card; an empty
+    /// url goes back to the one the folder holds.
+    Q_INVOKABLE bool setCover(const QString &at, const QString &fileUrl);
     /// Whether the value the library holds under `key` of the declaration at `id` stays over
     /// the one the drop brings.
     Q_INVOKABLE bool setKeep(const QString &id, const QString &key, bool keep);

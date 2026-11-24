@@ -46,6 +46,11 @@ QString Series::edition() const
     return m_one && m_one->edition ? *m_one->edition : QString();
 }
 
+bool Series::webtoon() const
+{
+    return m_one && m_one->medium == Api::Medium::Webtoon;
+}
+
 QString Series::cover() const
 {
     if (!m_one || !m_server)
@@ -70,7 +75,7 @@ QVariantList Series::editions() const
             // An implicit edition has no name of its own — nothing would ever show it — so
             // the work's name stands in rather than a blank pill.
             {u"name"_s, one.edition.value_or(one.work)},
-            {u"detail"_s, Words::volumes(one.holding.ownedVolumes, one.medium)},
+            {u"detail"_s, Words::holdings(one)},
             {u"cover"_s, m_server == nullptr
                              ? QString()
                              : m_server->address() + u"/series/"_s + Server::segment(one.id) + u"/cover"_s},

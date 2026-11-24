@@ -8,7 +8,7 @@ mod common;
 use common::{read_only, writable};
 
 use leaf_server::api::pages::Pages;
-use leaf_server::store::repository::Ceiling;
+use leaf_server::store::repository::{Ceiling, Repository};
 use leaf_server::store::Db;
 
 /// A CBZ with pages of a known size, so "was it resized" has an answer.
@@ -946,6 +946,40 @@ fn a_volume_opening_on_001_shows_its_series_cover() {
     assert_eq!(volume.tag, series.tag);
 }
 
+/// The list of an edition says which volumes show the series' cover in their place, by the
+/// rule the cover itself is served by: the tile writes the number over a borrowed picture,
+/// and a client guessing it from the picture would guess wrong on every series of one.
+#[test]
+fn the_list_says_which_volumes_borrow_the_series_cover() {
+    let f = Fixture::new();
+    add_entry(&f, "c1", "webtoon", "CHAPTER", 1.0, &["001.jpg", "002.jpg"]);
+    add_entry(&f, "c2", "webtoon", "CHAPTER", 2.0, &["000.jpg", "001.jpg"]);
+    add_entry(&f, "c3", "webtoon", "CHAPTER", 3.0, &["01.jpg", "02.jpg"]);
+    add_entry(&f, "c4", "webtoon", "CHAPTER", 4.0, &["001.jpg", "002.jpg"]);
+    f.db.write(|cx| {
+        cx.execute("UPDATE entry SET cover_page = 1 WHERE id = 'c4'", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let listed = Repository::new(&f.db)
+        .entries("webtoon", &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    let borrowed = |id: &str| listed.iter().find(|e| e.id == id).unwrap().borrowed_cover;
+    assert!(borrowed("c1"));
+    assert!(!borrowed("c2"), "a page 000 is the volume's own cover");
+    assert!(
+        borrowed("c3"),
+        "01 is page 1 as 001 is: the width follows the page count, not the meaning"
+    );
+    assert!(!borrowed("c4"), "a page chosen as the cover is its own");
+    let one = Repository::new(&f.db)
+        .entry("c1", &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    assert!(one.borrowed_cover);
+}
+
 #[test]
 fn a_file_named_outside_the_library_format_keeps_its_first_page() {
     let f = Fixture::new();
@@ -957,9 +991,14 @@ fn a_file_named_outside_the_library_format_keeps_its_first_page() {
         .page("c1", 0, Some(300), &Ceiling::NONE)
         .unwrap()
         .unwrap();
-    // Only `001` says « no cover here »: an archive from elsewhere opening on `01.jpg` may
-    // well open on its cover, and losing it for the series' would be a guess.
-    assert_eq!(chapter.tag, first.tag);
+    // `01.jpg` is page 1 as `001.jpg` is: a webtoon from elsewhere counting with two digits
+    // had its first page of reading drawn as its cover while the series held one.
+    let series = pages
+        .series_cover("webtoon", None, &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    assert_eq!(chapter.tag, series.tag);
+    assert_ne!(chapter.tag, first.tag);
 }
 
 #[test]

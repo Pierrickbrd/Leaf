@@ -84,7 +84,7 @@ LeafDialog {
 
                     ReadBar {
                         key: "file-info"
-                        shaded: false
+                        onCover: false
                         started: !!info.about.started
                         finished: !!info.about.finished
                         howFarRead: info.about.howFarRead || 0

@@ -132,6 +132,9 @@ struct Folder {
     QList<Sidecar> sidecars;
     /// Empty when the folder was read.
     QString trouble;
+    /// The images kept as a series' cover beside its declaration: sent with the volumes,
+    /// never counted among them.
+    QList<Entry> covers;
 
     bool read() const { return trouble.isEmpty(); }
     qint64 bytes() const;

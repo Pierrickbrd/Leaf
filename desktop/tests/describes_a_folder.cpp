@@ -644,6 +644,30 @@ private slots:
         QCOMPARE(pathsOf(found), QStringList({u"Tome 1.cbz"_s}));
     }
 
+    /// The measured defect: a `cover.jpg` beside `work.json` was walked past, so it never
+    /// left the PC and the series came up with no cover. It is announced beside the volumes
+    /// and still counted among none of them; one beside loose volumes has no one to be the
+    /// cover of, and one that is not named like a cover is not one.
+    void a_cover_beside_a_declaration_is_announced_and_is_not_a_volume()
+    {
+        wrote(u"Colorist/work.json"_s, R"({"leaf":1,"title":"Colorist"})");
+        wrote(u"Colorist/Chapitre 001.cbz"_s, QByteArray(9, 'a'));
+        wrote(u"Colorist/Cover.JPG"_s, QByteArray(9, 'b'));
+        wrote(u"Colorist/notes.jpg"_s, QByteArray(9, 'c'));
+        wrote(u"Loose/Tome 1.cbz"_s, QByteArray(9, 'a'));
+        wrote(u"Loose/cover.jpg"_s, QByteArray(9, 'b'));
+
+        const Manifest::Folder declared = Manifest::of(m_folder.filePath(u"Colorist"_s), false);
+        QVERIFY2(declared.read(), qPrintable(declared.trouble));
+        QCOMPARE(pathsOf(declared), QStringList({u"Chapitre 001.cbz"_s}));
+        QCOMPARE(declared.covers.size(), 1);
+        QCOMPARE(declared.covers.constFirst().path, u"Cover.JPG"_s);
+        QCOMPARE(declared.covers.constFirst().size, qint64(9));
+
+        const Manifest::Folder loose = Manifest::of(m_folder.filePath(u"Loose"_s), false);
+        QVERIFY(loose.covers.isEmpty());
+    }
+
     /// Same rule, `found()`'s tree and not only `of()`'s flat list: a `cover.jpg` sitting
     /// beside a work's declaration counted in `Node::volumes()` too, so the card itself —
     /// not only the checking line — said "2 tomes" for a series that holds one.

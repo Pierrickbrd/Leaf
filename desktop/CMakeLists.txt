@@ -201,6 +201,8 @@ qt_add_executable(leaf-desktop
     src/Notifier.cpp
     src/Covers.h
     src/Covers.cpp
+    src/CoverTone.h
+    src/CoverTone.cpp
 )
 
 # Every QML file is addressed under the module by its path below `qml/`, so the tree on disk
@@ -216,6 +218,8 @@ set(LEAF_QML
     qml/Pill.qml
     qml/ReadBar.qml
     qml/ReadCheck.qml
+    qml/CoverVeil.qml
+    qml/CoverNumber.qml
     qml/FollowsFocus.qml
     qml/ScrollVeil.qml
     qml/ActionButton.qml
@@ -633,7 +637,7 @@ add_test(NAME finds-its-way-back COMMAND finds-its-way-back)
 qt_add_executable(crosses-the-seam
     tests/crosses_the_seam.cpp tests/Pretend.h
     src/Boot.h src/Boot.cpp
-    src/Covers.h src/Covers.cpp
+    src/Covers.h src/Covers.cpp src/CoverTone.h src/CoverTone.cpp
     src/Card.h src/Card.cpp src/Carrier.h src/Carrier.cpp
     src/Facts.h src/Facts.cpp src/Orders.h src/Orders.cpp src/ComicInfo.h src/ComicInfo.cpp src/Shape.h src/Shape.cpp
     src/Fold.h src/Fold.cpp

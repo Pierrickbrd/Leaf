@@ -114,6 +114,17 @@ public:
         /// its series' default: sixty grey lines saying the same two names hid the three where
         /// the team changed.
         Credits,
+        /// The name under a tile: see `Words::tileCaption`.
+        Caption,
+        /// No cover of its own: the tile shows the series' and writes its number over it.
+        Borrowed,
+        /// The number written over a borrowed cover: `Api::numberOf`, a chapter's included.
+        CoverNumber,
+        /// « TOME » or « CHAPITRE » over that number, in an edition that holds both kinds;
+        /// empty in one that holds one, where the word would only repeat itself on every tile.
+        KindWord,
+        /// « 42 % », how far through: what a webtoon's tile says in place of its pages.
+        ReadPercent,
     };
     Q_ENUM(Role)
 
@@ -197,6 +208,8 @@ private:
     /// The files alone, before any separator is woven in. Kept apart so a second answer can
     /// be woven again without asking for the first one twice.
     QList<Line> m_files;
+    /// Whether the files hold volumes and chapters both: see `Role::KindWord`.
+    bool m_mixed = false;
     QList<Line> m_all;
     QList<Line> m_shown;
     /// The pause a search waits for, exactly as the shelf's field waits for it. Filtering

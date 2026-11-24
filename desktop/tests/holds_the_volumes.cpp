@@ -674,6 +674,57 @@ private slots:
         QCOMPARE(at(2, "title").toString(), QString());
     }
 
+    /// What a tile is drawn from (decision of 24/11/2026). Its name: the number and the
+    /// title, or the kind and the number when there is no title — « 6 · » over an untitled
+    /// volume and « 3 · Chapitre 3 » over a chapter said nothing twice. A borrowed cover and
+    /// the number written on it, a chapter's too, which has no `number`. The word over that
+    /// number in an edition holding both kinds. And how far through, in per cent.
+    void a_tile_says_its_name_its_borrowed_cover_and_how_far()
+    {
+        QJsonObject chapter{{u"id"_s, u"c3"_s},
+                            {u"type"_s, u"CHAPTER"_s},
+                            {u"sortKey"_s, 3},
+                            {u"pageCount"_s, 54},
+                            {u"chapterCount"_s, 1},
+                            {u"file"_s, u"Chapitre 003.cbz"_s},
+                            {u"size"_s, 1000},
+                            {u"borrowedCover"_s, true}};
+        QJsonObject untitled = volume(6, QString());
+        untitled.remove(u"title"_s);
+        serve(rows({chapter, volume(2, u"L'Honneur"_s), untitled, volume(7, u"Tome 7"_s)}),
+              rows({standing(u"c3"_s, 12, false), standing(u"v2"_s, 53, true)}));
+        m_list->point(u"albums"_s);
+        settle();
+        QCOMPARE(m_list->count(), 4);
+
+        QCOMPARE(at(0, "caption").toString(), u"Chapitre 3"_s);
+        QVERIFY(at(0, "borrowed").toBool());
+        QCOMPARE(at(0, "coverNumber").toString(), u"3"_s);
+        QCOMPARE(at(0, "kindWord").toString(), u"CHAPITRE"_s);
+        QCOMPARE(at(0, "readPercent").toString(), u"22"_s + Words::Nbsp + u"%"_s);
+
+        QCOMPARE(at(1, "caption").toString(), u"2"_s + Words::Nbsp + u"· L'Honneur"_s);
+        QVERIFY(!at(1, "borrowed").toBool());
+        QCOMPARE(at(1, "kindWord").toString(), u"TOME"_s);
+        // Finished is not a share of the way: the check says it.
+        QCOMPARE(at(1, "readPercent").toString(), QString());
+
+        QCOMPARE(at(2, "caption").toString(), u"Tome 6"_s);
+        QCOMPARE(at(3, "caption").toString(), u"Tome 7"_s);
+        QCOMPARE(at(2, "readPercent").toString(), QString());
+    }
+
+    /// An edition of one kind writes no word over its numbers: « CHAPITRE » on each of a
+    /// hundred and twenty chapters would say the one thing every tile already says.
+    void an_edition_of_one_kind_writes_no_word_over_its_numbers()
+    {
+        serve(rows({volume(1, u"Le Crystal"_s), volume(2, u"L'Honneur"_s)}), rows({}));
+        m_list->point(u"albums"_s);
+        settle();
+        QCOMPARE(at(0, "kindWord").toString(), QString());
+        QCOMPARE(at(1, "kindWord").toString(), QString());
+    }
+
     /// A row that is not there answers nothing rather than reaching past the list — a view
     /// asks for one while it is being replaced, and an index is a promise nobody keeps.
     void a_row_that_is_not_there_answers_nothing()

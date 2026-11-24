@@ -113,6 +113,10 @@ public:
     /// series holds): kept on the card, and the folder announced again with it.
     bool setEditionName(quint64 token, const QString &path, const QString &name);
 
+    /// The image the reader chose as the cover of the folder `at` of the card, from their
+    /// disk; empty to go back to the one the folder holds. Announced again with it.
+    bool setCover(quint64 token, const QString &at, const QString &source);
+
     /// Aims the card at another `{kind, id}` — a series that `resembles` the one the drop
     /// would create, another chapter of the same volume — from the walk already made: the
     /// session is dropped and the folder announced again, the files not read a second time.

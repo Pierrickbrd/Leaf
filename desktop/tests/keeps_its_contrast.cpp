@@ -186,10 +186,17 @@ private slots:
         // size catches a token dropped from the class or a `metaType().id()` filter that
         // stopped matching — neither of which the key comparison could ever see.
         QVERIFY(!pale.isEmpty());
-        QCOMPARE(pale.size(), 22);
-        for (auto it = pale.constBegin(); it != pale.constEnd(); ++it)
+        QCOMPARE(pale.size(), 23);
+        for (auto it = pale.constBegin(); it != pale.constEnd(); ++it) {
+            // The one token that is meant to be the same in both themes: it is drawn on an
+            // illustration, which has no theme (`Theme.h`, `coverEmerald`).
+            if (it.key() == u"coverEmerald"_s) {
+                QCOMPARE(it.value(), deep.value(it.key()));
+                continue;
+            }
             QVERIFY2(it.value() != deep.value(it.key()),
                      qPrintable(u"%1 is the same colour in both themes"_s.arg(it.key())));
+        }
     }
 
     /// The one token in the palette that is not read against the page: the resume band's

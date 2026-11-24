@@ -3,10 +3,10 @@
 // drew nothing once a series was finished, which is what « never opened » looks like too.
 // The design says a full bar for finished precisely so that the two stop reading the same.
 //
-// Placed inside the rounded cover, which clips it to the corners it runs along.
+// Placed inside the rounded cover, which clips it to the corners it runs along, over the
+// cover's veil (`CoverVeil`), which is its ground: the bar's own shade went with it.
 
 import QtQuick
-import Qt5Compat.GraphicalEffects
 import Leaf
 
 Item {
@@ -17,28 +17,12 @@ Item {
     required property bool started
     required property bool finished
     required property real howFarRead
-    /// The shade under the track, for a bar laid on a cover. On paper it only darkens the
-    /// track, so the volume panel — the one bar not on a cover — turns it off.
-    property bool shaded: true
+    /// On a cover, the vivid emerald of both themes (`Theme.coverEmerald`); on paper — the
+    /// volume panel, the file's details — the theme's own.
+    property bool onCover: true
 
     anchors.fill: parent
     visible: bar.started || bar.finished
-
-    // A green cover would swallow the emerald laid on it. The shade is invisible on a dark
-    // one and saves the bar on every other.
-    LinearGradient {
-        visible: bar.shaded
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        height: 15
-        start: Qt.point(0, 0)
-        end: Qt.point(0, height)
-        gradient: Gradient {
-            GradientStop { position: 0.0; color: "#00000000" }
-            GradientStop { position: 1.0; color: "#73000000" }
-        }
-    }
 
     Rectangle {
         objectName: "in-progress-" + bar.key
@@ -60,7 +44,7 @@ Item {
             // Full when finished whatever the count says, and never so short it cannot be
             // seen when merely started: a first page turned is still « started ».
             width: parent.width * (bar.finished ? 1 : Math.max(0.04, bar.howFarRead))
-            color: Theme.emerald
+            color: bar.onCover ? Theme.coverEmerald : Theme.emerald
         }
     }
 }

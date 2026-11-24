@@ -373,6 +373,43 @@ bool Imports::setEditionName(quint64 token, const QString &path, const QString &
     return false;
 }
 
+bool Imports::setCover(quint64 token, const QString &at, const QString &source)
+{
+    for (int row = 0; row < m_rows.size(); ++row) {
+        Card &card = m_rows[row];
+        if (card.token != token)
+            continue;
+        if (source.isEmpty() ? !card.road.picked.contains(at)
+                             : !QFileInfo(source).isFile())
+            return false;
+        const bool waiting = card.stage == Card::Stage::Asking;
+        if (!waiting && !Carrier::correctable(card))
+            return false;
+        if (source.isEmpty()) {
+            card.road.picked.remove(at);
+        } else {
+            Card::CoverPick pick;
+            pick.source = source;
+            pick.entry.path = (at.isEmpty() ? QString() : at + u'/') + u"cover."_s
+                              + QFileInfo(source).suffix().toLower();
+            pick.entry.size = QFileInfo(source).size();
+            pick.entry.checksum = Manifest::checksumOf(source);
+            card.road.picked.insert(at, pick);
+        }
+        // While the answer is awaited it arrives and announces the folder again
+        // (`Carrier::tookFolder`), as for a name typed meanwhile.
+        if (waiting) {
+            emit changed();
+            return true;
+        }
+        card.road.edited = true;
+        card.road.confirmed = false;
+        m_carrier->reannounce(row);
+        return true;
+    }
+    return false;
+}
+
 bool Imports::askAgain(quint64 token)
 {
     for (int row = 0; row < m_rows.size(); ++row) {
