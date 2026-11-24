@@ -116,3 +116,13 @@ fn composes_nothing_without_a_pattern_or_without_a_number() {
     assert_eq!(None, compose(Some("Chap.{n}"), None));
     assert_eq!(None, compose(Some("   "), Some(99.0)));
 }
+
+/// A hyphen between a word and a number is a hyphen: `death-note_one-shot-2020` was read as
+/// minus 2020 and shown as « Tome -2020 ». A minus held by nothing alphanumeric still is one.
+#[test]
+fn a_hyphen_joined_to_a_word_is_not_a_minus_sign() {
+    assert_eq!(Some(2020.0), parse("death-note_one-shot-2020").number);
+    assert_eq!(Some(-108.0), parse("Chap.-108").number);
+    assert_eq!(Some(-3.0), parse("Prologue -3").number);
+    assert_eq!(Some(12.0), parse("Tome 12").number);
+}

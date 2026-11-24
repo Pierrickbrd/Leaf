@@ -82,7 +82,11 @@ fn last_number(label: &str) -> Option<f64> {
     let mut found: Option<f64> = None;
     let mut i = 0;
     while i < chars.len() {
-        let Some(end) = number_end(&chars, i) else {
+        // A minus is a sign when nothing alphanumeric holds it: `Chap.-108` is minus 108, and
+        // `one-shot-2020` is a hyphen and then 2020 — it was read as −2020, and « Tome -2020 »
+        // was written over a one-shot (test of 24/11/2026).
+        let joined = chars[i] == '-' && i > 0 && chars[i - 1].is_alphanumeric();
+        let Some(end) = number_end(&chars, i).filter(|_| !joined) else {
             i += 1;
             continue;
         };
