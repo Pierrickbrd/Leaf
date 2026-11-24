@@ -22,6 +22,15 @@ on:
       - 'tools/**'
   workflow_dispatch:
 
+# A push to a pull request replaces the one before it: the earlier run answers for a commit
+# nobody will merge, and went on to the end all the same — on the day this was written, two
+# pushes five minutes apart ran two complete analyses side by side, 26 and 37 minutes. A branch of
+# `main` is never cancelled: its run is the record of what main held, and `run_id` keeps
+# every one in a group of its own.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 defaults:
   run:
     working-directory: server
@@ -39,7 +48,7 @@ jobs:
       run:
         working-directory: .
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: the tools hold their own tests
         run: python3 -m unittest discover -s tools -p 'test_*.py'
@@ -47,7 +56,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -78,7 +87,7 @@ jobs:
       run:
         working-directory: .
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

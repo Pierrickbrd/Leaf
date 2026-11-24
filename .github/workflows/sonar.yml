@@ -12,13 +12,22 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A push to a pull request replaces the one before it: the earlier run answers for a commit
+# nobody will merge, and went on to the end all the same — on the day this was written, two
+# pushes five minutes apart ran two complete analyses side by side, 26 and 37 minutes. A branch of
+# `main` is never cancelled: its run is the record of what main held, and `run_id` keeps
+# every one in a group of its own.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   scan:
     # Pinned, like the desktop workflow: the C++ below is built against this
     # distribution's Qt packages, and "latest" moving would change what is measured.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Sonar assigns findings to commits and computes "new code" from history.
           # A shallow clone leaves it guessing at both.
@@ -60,20 +69,12 @@ jobs:
           python3 -m coverage xml -o coverage.xml
 
       - name: install Qt 6 and the QML modules
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build qt6-base-dev qt6-declarative-dev libqt6svg6-dev \
-            qml6-module-qtquick qml6-module-qtquick-controls \
-            qml6-module-qtquick-dialogs \
-            qml6-module-qtquick-layouts qml6-module-qtquick-templates \
-            qml6-module-qtqml qml6-module-qtqml-models qml6-module-qtqml-workerscript \
-            qml6-module-qt5compat-graphicaleffects qt6-image-formats-plugins \
-            xauth xvfb qtkeychain-qt6-dev
-          # Ubuntu 24.04 carries gcovr 7.0, which can calculate source decisions but cannot
-          # yet write them into the SonarQube format. Pin the version this report is verified
-          # against instead of letting the distribution choose what "condition" means.
-          python3 -m pip install --quiet gcovr==8.6 pyyaml
+        uses: ./.github/actions/qt
+
+      # Ubuntu 24.04 carries gcovr 7.0, which can calculate source decisions but cannot
+      # yet write them into the SonarQube format. Pin the version this report is verified
+      # against instead of letting the distribution choose what "condition" means.
+      - run: python3 -m pip install --quiet gcovr==8.6 pyyaml
 
       # The client's own tests already walk this code — the analyser was simply not being
       # told. Without an instrumented build it counted all 384 lines as reached by nothing,
@@ -81,12 +82,35 @@ jobs:
       #
       # A build of its own, beside the one the desktop workflow makes: `--coverage` changes
       # the object files, and a coverage build is not what anybody should be shipping.
-      - name: coverage, C++
+      #
+      # Its compiler's work is kept as the desktop workflow keeps its own, under a key of its
+      # own: instrumented objects are not the desktop's, and sharing one cache would let
+      # each build evict the other's. Building and testing took 1 249 s, the longest step
+      # of the slowest job, the one every pull request waits for.
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/ccache
+          key: ccache-coverage-${{ github.sha }}
+          restore-keys: ccache-coverage-
+
+      # Zeroed for the reason the desktop workflow gives: the counters ride in the cache.
+      - run: ccache --zero-stats
+
+      - name: coverage, C++, built
         run: |
           cmake -S desktop -B desktop/coverage -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_FLAGS="--coverage -O0" -DCMAKE_EXE_LINKER_FLAGS="--coverage"
           cmake --build desktop/coverage
-          xvfb-run -a ctest --test-dir desktop/coverage --output-on-failure
+          ccache --show-stats
+
+      - uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/ccache
+          key: ccache-coverage-${{ github.sha }}
+
+      - name: coverage, C++
+        run: xvfb-run -a ctest --test-dir desktop/coverage --output-on-failure
 
       # From inside the build tree, because that is where gcov may write its intermediates.
       # `--fail-under-line` is not a coverage target — the quality gate is that. It is a
