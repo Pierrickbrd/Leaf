@@ -723,6 +723,21 @@ QString readerOutOf(int count);
 /// 2 for 200 %; a pinch stops anywhere, and is said to the nearest whole percent.
 QString readerZoom(qreal level);
 
+/// « Zoom temporaire · Échap » — said in the bar at the foot while a pinch magnifies a strip:
+/// nothing of it is kept, and the reader is told so, and how to leave it.
+QString readerLoupe();
+
+/// « sur 120 », under « Chapitre 12 » in a webtoon's band: how many chapters the series has.
+QString readerAmong(int count);
+
+/// « Agrandir », « Réduire » — the zoom steps of a webtoon's band, for the bubble and for
+/// whoever reads the screen aloud.
+QString readerZoomStep(bool larger);
+
+/// « Lecture automatique », and « Arrêter la lecture automatique » while it runs: the A of a
+/// webtoon's band.
+QString readerAutoRead(bool running);
+
 /// « 98 à 106 » — the chapters a volume holds, by their numbers; one number alone when the
 /// stretch is a single chapter. The word « Chapitres » is the line's, not this.
 QString readerChapterSpan(double from, double to);
@@ -791,11 +806,13 @@ QString readerMotion(Preferences::Motion which);
 /// The two halves of « Sur cet appareil », each over its rows: « Pages », what the book looks
 /// like, and « Confort », what is around it. The critique of 22/10/2026 was four
 /// anonymous rows of pills, which a reader had to try to learn what each one was about.
-enum class ReaderDeskGroup { Pages, Comfort };
+/// A webtoon's card has « Défilement » and « Commandes » instead of « Pages ».
+enum class ReaderDeskGroup { Pages, Comfort, Scrolling, Controls };
 QString readerDeskGroup(ReaderDeskGroup which);
 /// What each of those rows chooses, written beside its pills: « Mise en page »,
-/// « Ajustement », « Fond », « Changement de page ».
-enum class ReaderSetting { Layout, Fit, Backdrop, Motion };
+/// « Ajustement », « Fond », « Changement de page » — and a webtoon's « Sensibilité »,
+/// « Lecture automatique », « Commandes ».
+enum class ReaderSetting { Layout, Fit, Backdrop, Motion, Sensitivity, AutoSpeed, Controls };
 QString readerSetting(ReaderSetting which);
 /// « La série déclare : **droite → gauche**. Ce que vous choisissez ici ne vaut que pour cette
 /// série, mais sur tous vos appareils. » The bold is `<b>…</b>` for a `Text` in styled-text
@@ -804,6 +821,18 @@ QString readerSetting(ReaderSetting which);
 QString readerDeclares(std::optional<Api::ReadingDirection> declared);
 /// « Pour tous les livres, sur ce bureau seulement. »
 QString readerDeskNote();
+/// « Pour tous les webtoons, sur ce bureau seulement. »
+QString readerStripDeskNote();
+/// The words at either end of a webtoon's two sliders: « Douce » to « Vive » for how far the
+/// wheel moves the strip, « Lente » to « Rapide » for its A.
+enum class StepEnd { Gentle, Lively, Slow, Fast };
+QString readerStepEnd(StepEnd which);
+/// « Discrètes », « En remontant », « Au clic » — when a webtoon's bars go and come back.
+QString readerStripControls(Preferences::StripControls which);
+/// The line under those pills, saying what the one chosen does.
+QString readerStripControlsHint(Preferences::StripControls which);
+/// « Reviennent aussi à l’arrêt, après 5 s sans défiler ».
+QString readerStripAtRest();
 
 /// « Raccourcis » — the card of the reader's keys: its title, and what the bar's button that
 /// opens it says under the pointer.
@@ -821,11 +850,16 @@ enum class ShortcutDoes {
     TurnByArrow,
     TurnByArrowRightToLeft,
     TurnBySpace,
+    ScrollByArrow,
+    ScrollBySpace,
+    ToTheEndsOfChapter,
+    AutoRead,
     ToTheEnds,
     ToTheEndsRightToLeft,
     BackAPage,
     FullScreen,
     VolumeInfo,
+    ReaderSettings,
     TheseShortcuts,
     ZoomByKey,
     BackToWhole,
@@ -841,7 +875,7 @@ QString shortcutDoes(ShortcutDoes which);
 /// What is written on a key. A letter and a function key are words of the card like the
 /// others, and kept here with them: « Échap », not « Esc », is a decision about French.
 enum class KeyName { Space, Shift, Ctrl, Alt, Escape, F, F11, I, Question, F1, Zero, W, Enter, Tab,
-                     Menu, F10, Slash };
+                     Menu, F10, Slash, A, Home, End, S };
 QString keyName(KeyName which);
 
 /// « + » between the keys of one combination, « / » and « ou » between two that do the same,

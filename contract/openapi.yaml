@@ -3086,11 +3086,10 @@ components:
     ReadingPreferences:
       type: object
       description: |
-        The client's own, kept as they were sent. The desktop client writes seven keys:
+        The client's own, kept as they were sent. The desktop client writes five keys:
         `layout` (`single`, `double`, `auto`), `fit` (`height`, `width`, `original`),
-        `stripFit` (`width`, `original`, a webtoon's own), `stripZoom` (a number, from a third
-        to three), `backdrop` (`black`, `grey`, `white`), `motion` (`slide`, `fade`,
-        `instant`) and `volumesAsGrid` (boolean). A key it does not know is kept and left alone.
+        `backdrop` (`black`, `grey`, `white`), `motion` (`slide`, `fade`, `instant`) and
+        `volumesAsGrid` (boolean). A key it does not know is kept and left alone.
       additionalProperties: true
 
     DeviceEntry:

@@ -925,6 +925,26 @@ QString readerZoom(qreal level)
     return QString::number(qRound(level * 100)) + NarrowNbsp + u"%"_s;
 }
 
+QString readerLoupe()
+{
+    return u"Zoom temporaire · Échap"_s;
+}
+
+QString readerAmong(int count)
+{
+    return u"sur"_s + Nbsp + QString::number(count);
+}
+
+QString readerZoomStep(bool larger)
+{
+    return larger ? u"Agrandir"_s : u"Réduire"_s;
+}
+
+QString readerAutoRead(bool running)
+{
+    return running ? u"Arrêter la lecture automatique"_s : u"Lecture automatique"_s;
+}
+
 QString readerChapterSpan(double from, double to)
 {
     if (std::abs(to - from) < 0.0001)
@@ -1207,7 +1227,18 @@ QString readerMotion(Preferences::Motion which)
 
 QString readerDeskGroup(ReaderDeskGroup which)
 {
-    return which == ReaderDeskGroup::Pages ? u"Pages"_s : u"Confort"_s;
+    using enum ReaderDeskGroup;
+    switch (which) {
+    case Pages:
+        return u"Pages"_s;
+    case Scrolling:
+        return u"Défilement"_s;
+    case Controls:
+        return u"Commandes"_s;
+    case Comfort:
+        break;
+    }
+    return u"Confort"_s;
 }
 
 QString readerSetting(ReaderSetting which)
@@ -1219,6 +1250,12 @@ QString readerSetting(ReaderSetting which)
         return u"Ajustement"_s;
     case ReaderSetting::Backdrop:
         return u"Fond"_s;
+    case ReaderSetting::Sensitivity:
+        return u"Sensibilité"_s;
+    case ReaderSetting::AutoSpeed:
+        return u"Lecture automatique"_s;
+    case ReaderSetting::Controls:
+        return u"Commandes"_s;
     case ReaderSetting::Motion:
         break;
     }
@@ -1252,6 +1289,60 @@ QString readerDeskNote()
     return u"Pour tous les livres, sur ce bureau seulement."_s;
 }
 
+QString readerStripDeskNote()
+{
+    return u"Pour tous les webtoons, sur ce bureau seulement."_s;
+}
+
+QString readerStepEnd(StepEnd which)
+{
+    using enum StepEnd;
+    switch (which) {
+    case Gentle:
+        return u"Douce"_s;
+    case Lively:
+        return u"Vive"_s;
+    case Slow:
+        return u"Lente"_s;
+    case Fast:
+        break;
+    }
+    return u"Rapide"_s;
+}
+
+QString readerStripControls(Preferences::StripControls which)
+{
+    using enum Preferences::StripControls;
+    switch (which) {
+    case OnTheWayUp:
+        return u"En remontant"_s;
+    case OnClick:
+        return u"Au clic"_s;
+    case Discreet:
+        break;
+    }
+    return u"Discrètes"_s;
+}
+
+QString readerStripControlsHint(Preferences::StripControls which)
+{
+    using enum Preferences::StripControls;
+    switch (which) {
+    case OnTheWayUp:
+        return u"En descendant. Reviennent en remontant d’un quart d’écran, au clic ou à Tab."_s;
+    case OnClick:
+        return u"Au clic ou à Tab seulement. Défiler ne les touche pas."_s;
+    case Discreet:
+        break;
+    }
+    return u"En descendant. Reviennent au clic ou à Tab."_s;
+}
+
+QString readerStripAtRest()
+{
+    return u"Reviennent aussi à l’arrêt, après 5"_s + Nbsp + u"s sans défiler"_s;
+}
+
 QString readerShortcuts()
 {
     return u"Raccourcis"_s;
@@ -1282,6 +1373,14 @@ QString shortcutDoes(ShortcutDoes which)
         return u"Page suivante, précédente"_s;
     case TurnBySpace:
         return u"Page suivante, précédente"_s;
+    case ScrollByArrow:
+        return u"Défiler"_s;
+    case ScrollBySpace:
+        return u"Descendre, remonter d’un écran"_s;
+    case ToTheEndsOfChapter:
+        return u"Début, fin du chapitre"_s;
+    case AutoRead:
+        return u"Lecture automatique"_s;
     case ToTheEnds:
         return u"Première, dernière page"_s;
     case ToTheEndsRightToLeft:
@@ -1292,6 +1391,8 @@ QString shortcutDoes(ShortcutDoes which)
         return u"Plein écran"_s;
     case VolumeInfo:
         return u"Les infos du tome"_s;
+    case ReaderSettings:
+        return u"Les réglages de lecture"_s;
     case TheseShortcuts:
         return u"Ces raccourcis"_s;
     case ZoomByKey:
@@ -1353,6 +1454,14 @@ QString keyName(KeyName which)
         return u"F10"_s;
     case Slash:
         return u"/"_s;
+    case A:
+        return u"A"_s;
+    case Home:
+        return u"Début"_s;
+    case End:
+        return u"Fin"_s;
+    case S:
+        return u"S"_s;
     }
     return {};
 }

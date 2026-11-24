@@ -140,13 +140,12 @@ QString spell(Preferences::Fit which)
     return u"height"_s;
 }
 
-/// A zoom between a third and three times: below, a column of thumbnails nobody reads;
-/// above, one panel cut by both edges. Nothing that is not a number is a zoom.
-double stripZoomed(double zoom)
+/// A width read back from the file: nothing that is not a positive number is one.
+double aWidth(const QVariant &held)
 {
-    if (!std::isfinite(zoom) || zoom <= 0)
-        return 1.0;
-    return std::clamp(zoom, 1.0 / 3.0, 3.0);
+    bool number = false;
+    const double width = held.toDouble(&number);
+    return number && std::isfinite(width) && width > 0 ? width : 0;
 }
 
 Preferences::Fit readFit(const QString &word)
@@ -207,6 +206,38 @@ Preferences::Motion readMotion(const QString &word)
     return Slide;
 }
 
+QString spell(Preferences::StripControls which)
+{
+    using enum Preferences::StripControls;
+    switch (which) {
+    case OnTheWayUp:
+        return u"up"_s;
+    case OnClick:
+        return u"click"_s;
+    case Discreet:
+        break;
+    }
+    return u"discreet"_s;
+}
+
+Preferences::StripControls readStripControls(const QString &word)
+{
+    using enum Preferences::StripControls;
+    for (const Preferences::StripControls which : {Discreet, OnTheWayUp, OnClick}) {
+        if (spell(which) == word)
+            return which;
+    }
+    return Discreet;
+}
+
+/// One of the eleven steps, from what the file holds; anything else is `fallback`.
+int aStep(const QVariant &held, int fallback)
+{
+    bool number = false;
+    const int step = held.toInt(&number);
+    return number ? std::clamp(step, 0, Preferences::LastStep) : fallback;
+}
+
 } // namespace
 
 Preferences *Preferences::create(QQmlEngine *, QJSEngine *)
@@ -235,13 +266,12 @@ Preferences::Preferences(QObject *parent)
     }
     m_pageLayout = readLayout(m_file.value(u"reader/layout"_s).toString());
     m_fit = readFit(m_file.value(u"reader/fit"_s).toString());
-    // Height means nothing to a column with no end: anything but « Largeur » is the file.
-    m_stripFit = readFit(m_file.value(u"reader/stripFit"_s).toString()) == Fit::Width
-                     ? Fit::Width
-                     : Fit::Original;
-    m_stripZoom = stripZoomed(m_file.value(u"reader/stripZoom"_s, 1.0).toDouble());
     m_backdrop = readBackdrop(m_file.value(u"reader/backdrop"_s).toString());
     m_motion = readMotion(m_file.value(u"reader/motion"_s).toString());
+    m_stripSensitivity = aStep(m_file.value(u"strip/sensitivity"_s), MiddleStep);
+    m_stripAutoSpeed = aStep(m_file.value(u"strip/autoSpeed"_s), AutoStep);
+    m_stripControls = readStripControls(m_file.value(u"strip/controls"_s).toString());
+    m_stripAtRest = m_file.value(u"strip/atRest"_s, false).toBool();
     m_corner = readCorner(m_file.value(u"corner"_s).toString());
 }
 
@@ -466,20 +496,25 @@ void Preferences::chooseFit(Fit wanted)
     announce();
 }
 
-void Preferences::chooseStrip(Fit fit, double zoom)
+Preferences::Strip Preferences::strip(const QString &series, const QString &entry) const
 {
-    using enum Preferences::Fit;
-    const Fit kept = fit == Width ? Width : Original;
-    const double held = stripZoomed(zoom);
-    if (kept == m_stripFit && qFuzzyCompare(held, m_stripZoom))
+    const QString at = u"strips/"_s + series;
+    return {aWidth(m_file.value(at + u"/width"_s)), aWidth(m_file.value(at + u"/base"_s)),
+            aWidth(m_file.value(at + u"/chapters/"_s + entry))};
+}
+
+void Preferences::keepStrip(const QString &series, const QString &entry, const Strip &kept)
+{
+    if (series.isEmpty())
         return;
-    m_stripFit = kept;
-    m_stripZoom = held;
-    m_file.setValue(u"reader/stripFit"_s, spell(kept));
-    m_file.setValue(u"reader/stripZoom"_s, held);
+    const QString at = u"strips/"_s + series;
+    m_file.setValue(at + u"/width"_s, kept.width);
+    m_file.setValue(at + u"/base"_s, kept.base);
+    if (kept.chapter > 0 && !entry.isEmpty())
+        m_file.setValue(at + u"/chapters/"_s + entry, kept.chapter);
+    else if (!entry.isEmpty())
+        m_file.remove(at + u"/chapters/"_s + entry);
     m_file.sync();
-    emit changed();
-    announce();
 }
 
 void Preferences::chooseBackdrop(Backdrop wanted)
@@ -491,6 +526,48 @@ void Preferences::chooseBackdrop(Backdrop wanted)
     m_file.sync();
     emit changed();
     announce();
+}
+
+void Preferences::chooseStripSensitivity(int step)
+{
+    const int kept = std::clamp(step, 0, LastStep);
+    if (kept == m_stripSensitivity)
+        return;
+    m_stripSensitivity = kept;
+    keepHere(u"strip/sensitivity"_s, kept);
+}
+
+void Preferences::chooseStripAutoSpeed(int step)
+{
+    const int kept = std::clamp(step, 0, LastStep);
+    if (kept == m_stripAutoSpeed)
+        return;
+    m_stripAutoSpeed = kept;
+    keepHere(u"strip/autoSpeed"_s, kept);
+}
+
+void Preferences::chooseStripControls(StripControls wanted)
+{
+    if (wanted == m_stripControls)
+        return;
+    m_stripControls = wanted;
+    keepHere(u"strip/controls"_s, spell(wanted));
+}
+
+void Preferences::chooseStripAtRest(bool wanted)
+{
+    if (wanted == m_stripAtRest)
+        return;
+    m_stripAtRest = wanted;
+    keepHere(u"strip/atRest"_s, wanted);
+}
+
+void Preferences::keepHere(const QString &key, const QVariant &value)
+{
+    // Not `announce`d: these follow the desk, not the profile.
+    m_file.setValue(key, value);
+    m_file.sync();
+    emit changed();
 }
 
 void Preferences::chooseMotion(Motion wanted)
@@ -508,8 +585,6 @@ QVariantMap Preferences::synced() const
 {
     return {{u"layout"_s, spell(m_pageLayout)},
             {u"fit"_s, spell(m_fit)},
-            {u"stripFit"_s, spell(m_stripFit)},
-            {u"stripZoom"_s, m_stripZoom},
             {u"backdrop"_s, spell(m_backdrop)},
             {u"motion"_s, spell(m_motion)},
             {u"volumesAsGrid"_s, m_volumesAsGrid}};
@@ -532,9 +607,6 @@ void Preferences::adopt(const QVariantMap &held)
         choosePageLayout(readLayout(held.value(u"layout"_s).toString()));
     if (held.contains(u"fit"_s))
         chooseFit(readFit(held.value(u"fit"_s).toString()));
-    if (held.contains(u"stripFit"_s) || held.contains(u"stripZoom"_s))
-        chooseStrip(readFit(held.value(u"stripFit"_s, spell(m_stripFit)).toString()),
-                    held.value(u"stripZoom"_s, m_stripZoom).toDouble());
     if (held.contains(u"backdrop"_s))
         chooseBackdrop(readBackdrop(held.value(u"backdrop"_s).toString()));
     if (held.contains(u"motion"_s))

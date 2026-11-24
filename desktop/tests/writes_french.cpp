@@ -483,12 +483,22 @@ private slots:
         QCOMPARE(Words::shortcutDoes(TurnByArrow), u"Page précédente, suivante"_s);
         QCOMPARE(Words::shortcutDoes(TurnBySpace), u"Page suivante, précédente"_s);
         QCOMPARE(Words::shortcutDoes(ToTheEnds), u"Première, dernière page"_s);
+        // A strip is scrolled, not turned.
+        QCOMPARE(Words::shortcutDoes(ScrollByArrow), u"Défiler"_s);
+        QCOMPARE(Words::shortcutDoes(ScrollBySpace), u"Descendre, remonter d’un écran"_s);
+        QCOMPARE(Words::shortcutDoes(ToTheEndsOfChapter), u"Début, fin du chapitre"_s);
+        QCOMPARE(Words::shortcutDoes(AutoRead), u"Lecture automatique"_s);
+        QCOMPARE(Words::keyName(Words::KeyName::A), u"A"_s);
+        QCOMPARE(Words::keyName(Words::KeyName::Home), u"Début"_s);
+        QCOMPARE(Words::keyName(Words::KeyName::End), u"Fin"_s);
         // In a book read right to left ← goes on: the arrows' lines read the other way round.
         QCOMPARE(Words::shortcutDoes(TurnByArrowRightToLeft), u"Page suivante, précédente"_s);
         QCOMPARE(Words::shortcutDoes(ToTheEndsRightToLeft), u"Dernière, première page"_s);
         QCOMPARE(Words::shortcutDoes(BackAPage), u"Page précédente"_s);
         QCOMPARE(Words::shortcutDoes(FullScreen), u"Plein écran"_s);
         QCOMPARE(Words::shortcutDoes(VolumeInfo), u"Les infos du tome"_s);
+        QCOMPARE(Words::shortcutDoes(ReaderSettings), u"Les réglages de lecture"_s);
+        QCOMPARE(Words::keyName(Words::KeyName::S), u"S"_s);
         QCOMPARE(Words::shortcutDoes(TheseShortcuts), u"Ces raccourcis"_s);
         QCOMPARE(Words::shortcutDoes(ZoomByKey), u"Zoomer, dézoomer"_s);
         QCOMPARE(Words::shortcutDoes(BackToWhole), u"Revenir à 100\u202F%"_s);

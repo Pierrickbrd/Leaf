@@ -42,6 +42,8 @@ Item {
     property bool open: false
     /// The book open is read right to left: ← and Ctrl ← go on, and are worded so.
     property bool rightToLeft: false
+    /// A strip, whose keys are not a book's: it scrolls, goes to its ends and reads by itself.
+    property bool webtoon: false
     readonly property bool narrow: Widths.band !== Widths.Band.Wide
     /// The card, so the view can tell a click on it from a click beside it.
     readonly property Item card: face
@@ -299,7 +301,7 @@ Item {
                 // In twos: the left column then the right, or one after the other.
                 Repeater {
                     model: {
-                        const all = ReaderCaptions.shortcutGroups(shortcuts.rightToLeft)
+                        const all = ReaderCaptions.shortcutGroups(shortcuts.rightToLeft, shortcuts.webtoon)
                         return [all.slice(0, 2), all.slice(2)]
                     }
 

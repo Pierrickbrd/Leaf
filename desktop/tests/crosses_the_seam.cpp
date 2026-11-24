@@ -18,6 +18,7 @@
 #include "ImportTally.h"
 #include "Imports.h"
 #include "Preferences.h"
+#include "ReaderCaptions.h"
 #include "Profiles.h"
 #include "Reader.h"
 #include "Carrier.h"
@@ -45,6 +46,7 @@
 #include "Words.h"
 
 #include <QAccessible>
+#include <cmath>
 #include <QBuffer>
 #include <QClipboard>
 #include <QColor>
@@ -71,6 +73,8 @@
 #include <QStandardPaths>
 #include <QTcpServer>
 #include <QMutex>
+#include <QNativeGestureEvent>
+#include <QPointingDevice>
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTest>
@@ -98,6 +102,49 @@ void wheel(QWindow *window, const QPoint &at, const QPoint &angle, const QPoint 
     QWheelEvent event(QPointF(at), QPointF(window->mapToGlobal(at)), pixels, angle,
                       Qt::NoButton, modifiers, phase, false);
     QGuiApplication::sendEvent(window, &event);
+}
+
+/// Two fingers on a touchpad as the desktop sends them: the updates are « synthesized by the
+/// system », a hundred or so a swipe of two or three pixels, between a begin and an end that
+/// are not. A `WheelHandler` never heard these; the strip's own list scrolled by itself.
+void swipe(QWindow *window, const QPoint &at, int updates, int pixels)
+{
+    static const QPointingDevice pad(u"touchpad"_s, 4243, QInputDevice::DeviceType::TouchPad,
+                                     QPointingDevice::PointerType::Finger,
+                                     QInputDevice::Capability::Position
+                                         | QInputDevice::Capability::PixelScroll
+                                         | QInputDevice::Capability::Scroll,
+                                     1, 0);
+    const auto send = [&](Qt::ScrollPhase phase, const QPoint &px, const QPoint &angle,
+                          Qt::MouseEventSource source) {
+        QWheelEvent event(QPointF(at), QPointF(window->mapToGlobal(at)), px, angle, Qt::NoButton,
+                          Qt::NoModifier, phase, false, source, &pad);
+        QGuiApplication::sendEvent(window, &event);
+    };
+    send(Qt::ScrollBegin, {}, {}, Qt::MouseEventNotSynthesized);
+    for (int i = 0; i < updates; ++i) {
+        send(Qt::ScrollUpdate, QPoint(0, pixels), QPoint(0, pixels * 12),
+             Qt::MouseEventSynthesizedBySystem);
+        QTest::qWait(4);
+    }
+    send(Qt::ScrollEnd, {}, {}, Qt::MouseEventNotSynthesized);
+}
+
+/// Two fingers of a touchpad pinching by `value` at `at`, from begin to end, as the desktop
+/// sends them: the gesture is the window's, which handles it before this returns. A touchpad
+/// of the test's own, since a pinch from a mouse is no pinch to a `PinchHandler`.
+void pinch(QWindow *window, const QPointF &at, qreal value)
+{
+    static const QPointingDevice pad(u"touchpad"_s, 4242, QInputDevice::DeviceType::TouchPad,
+                                     QPointingDevice::PointerType::Finger,
+                                     QInputDevice::Capability::Position, 2, 0);
+    const QPointF global = window->mapToGlobal(at);
+    for (const auto &[type, step] : {std::pair{Qt::BeginNativeGesture, 0.0},
+                                     std::pair{Qt::ZoomNativeGesture, value},
+                                     std::pair{Qt::EndNativeGesture, 0.0}}) {
+        QNativeGestureEvent event(type, &pad, 2, at, at, global, step, {});
+        QGuiApplication::sendEvent(window, &event);
+    }
 }
 
 /// Puts the process-wide palette back on scope exit, failed assertion included — see
@@ -10943,14 +10990,14 @@ private slots:
         QTRY_COMPARE(navigation->destination(), Navigation::Destination::Series);
     }
 
-    /// A webtoon is scrolled and not turned, yet it ends like any book: forward at the bottom
-    /// of the strip raises the card instead of scrolling a strip that has no more to give.
-    void the_bottom_of_a_webtoon_raises_the_card_on_the_next_forward()
+    /// A webtoon is scrolled and not turned, yet its last chapter ends like any book: forward
+    /// at the bottom of the strip raises the card instead of scrolling a strip that has no
+    /// more to give — and not the offer, which has nothing to offer.
+    void the_bottom_of_a_last_webtoon_chapter_raises_the_card_on_the_next_forward()
     {
         Pretend pretend;
         QVERIFY(pretend.listen(QHostAddress::LocalHost));
         BookExtras extras;
-        extras.followed = true;
         pretend.answerFor = [&extras](const QByteArray &request) {
             return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s, nullptr,
                                 nullptr, &extras);
@@ -10983,9 +11030,7 @@ private slots:
         QTest::keyClick(window, Qt::Key_Space);
         QTRY_VERIFY(reader->atTheEnd());
         QTRY_VERIFY(card->isVisible());
-        QTRY_COMPARE(reader->next().value(u"entryId"_s).toString(), u"e13"_s);
-        QTest::keyClick(window, Qt::Key_Space);
-        QTRY_COMPARE(reader->entryId(), u"e13"_s);
+        QVERIFY(!itemNamed(view, u"reader-next-offer"_s)->isVisible());
     }
 
     /// A turn back with the card up puts it away in a book, on the same page.
@@ -11019,13 +11064,13 @@ private slots:
         QCOMPARE(reader->entryId(), u"e12"_s);
     }
 
-    /// And in a webtoon, whose turn back used to scroll the strip and leave the card up.
+    /// And in a webtoon, whose turn back used to scroll the strip and leave the card up. The
+    /// last chapter: before one that has a next, the card never comes.
     void turning_back_closes_the_card_in_a_webtoon()
     {
         Pretend pretend;
         QVERIFY(pretend.listen(QHostAddress::LocalHost));
         BookExtras extras;
-        extras.followed = true;
         pretend.answerFor = [&extras](const QByteArray &request) {
             return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s, nullptr,
                                 nullptr, &extras);
@@ -12459,10 +12504,10 @@ private slots:
         QCOMPARE(itemNamed(view, u"reader-settings-button"_s)->property("held").toBool(), false);
     }
 
-    /// A strip has no sense and no pair: the card keeps only the fit, and of the fit only the
-    /// two that mean something for an endless column — « Hauteur » would be the height of
-    /// a thing with none. « Original » draws each page at the width of its file, centred.
-    void a_webtoon_offers_only_the_fit()
+    /// A strip has no sense, no pair and no fit: the card keeps the paper, and a strip opens
+    /// the first time at its files' own width, centred, which the series keeps as its 100 %.
+    /// « Largeur » drew a laptop's strip at twice the size its panels were drawn at.
+    void a_webtoon_offers_no_fit_and_opens_at_its_files_width()
     {
         Pretend pretend;
         QVERIFY(pretend.listen(QHostAddress::LocalHost));
@@ -12481,10 +12526,9 @@ private slots:
         QVERIFY(preferences);
         const auto putBack = qScopeGuard([&] {
             preferences->chooseFit(Preferences::Fit::Height);
-            preferences->chooseStrip(Preferences::Fit::Original, 1.0);
+            window->resize(1100, 760);
         });
         preferences->chooseFit(Preferences::Fit::Height);
-        preferences->chooseStrip(Preferences::Fit::Original, 1.0);
         Reader *reader = readerOpenOnTheBook(engine);
         QVERIFY(reader);
         QQuickItem *view = nullptr;
@@ -12503,35 +12547,26 @@ private slots:
         QVERIFY(!shown(u"reader-direction-1"_s));
         QVERIFY(!shown(u"reader-layout"_s));
         QVERIFY(!shown(u"reader-declares"_s));
-        QVERIFY(!shown(u"reader-fit-height"_s));
-        QVERIFY(shown(u"reader-fit-width"_s));
-        QVERIFY(shown(u"reader-fit-original"_s));
-        // A strip's fit is its own, « Original » until chosen: the books' « Hauteur » does
-        // not reach it.
-        QVERIFY(itemNamed(card, u"reader-fit-original"_s)->property("lit").toBool());
+        QVERIFY(!shown(u"reader-fit"_s));
+        QVERIFY(!shown(u"reader-fit-original"_s));
+        QVERIFY(!shown(u"reader-pages"_s));
+        QVERIFY(shown(u"reader-backdrop"_s));
 
-        // « Original » is the file's own width — 1000 in a window of 1100 — centred.
+        // The file's own width — 1000 in a window of 1100 — centred, and kept as the series'.
         QTRY_VERIFY(itemNamed(strip, u"strip-image-46"_s));
         QQuickItem *image = itemNamed(strip, u"strip-image-46"_s);
         QTRY_COMPARE(image->width(), 1000.0);
         QCOMPARE(image->x(), (strip->width() - 1000) / 2);
         QCOMPARE(image->height(), 1500.0);
+        QTRY_COMPARE(reader->stripWidth(), 1000.0);
+        QCOMPARE(reader->stripBase(), 1000.0);
 
-        // « Largeur » is every page the width of the window — and the books keep theirs.
-        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
-                          centreOf(itemNamed(card, u"reader-fit-width"_s)));
-        QTRY_COMPARE(preferences->stripFit(), Preferences::Fit::Width);
-        QCOMPARE(preferences->fit(), Preferences::Fit::Height);
-        QTRY_COMPARE(itemNamed(strip, u"strip-image-46"_s)->width(), strip->width());
-
-        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
-                          centreOf(itemNamed(card, u"reader-fit-original"_s)));
-        QTRY_COMPARE(preferences->stripFit(), Preferences::Fit::Original);
-        QTRY_COMPARE(itemNamed(strip, u"strip-image-46"_s)->width(), 1000.0);
-        // A file wider than the window is held to the window, not cut by it.
+        // A file wider than the window is held to the window, not cut by it, and what the
+        // series keeps is not the window's.
         window->resize(800, window->height());
         QTRY_COMPARE(strip->width(), 800.0);
         QTRY_COMPARE(itemNamed(strip, u"strip-image-46"_s)->width(), 800.0);
+        QCOMPARE(reader->stripWidth(), 1000.0);
         QCOMPARE(preferences->fit(), Preferences::Fit::Height);
     }
 
@@ -13358,10 +13393,6 @@ private slots:
         auto *preferences =
             engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
         QVERIFY(preferences);
-        const auto putBack = qScopeGuard([&] {
-            preferences->chooseStrip(Preferences::Fit::Original, 1.0);
-        });
-        preferences->chooseStrip(Preferences::Fit::Original, 1.0);
         Reader *reader = nullptr;
         QQuickItem *view = aReaderAtHand(engine, reader);
         QVERIFY(view);
@@ -13383,18 +13414,843 @@ private slots:
         // the page at the middle.
         wheel(window, across(view, 0.5), QPoint(0, -120), QPoint(0, 0), Qt::ControlModifier);
         QTRY_COMPARE(width46(), double(qRound(1000 / 1.1)));
-        QVERIFY(qAbs(preferences->stripZoom() - 1 / 1.1) < 0.001);
+        QVERIFY(qAbs(reader->stripWidth() - 1000 / 1.1) < 0.001);
+        QVERIFY(!reader->stripOwn());
         QCOMPARE(stripPageAt(strip, strip->property("contentY").toReal() + strip->height() / 2),
                  read);
 
-        // Ctrl 0 puts it back; Ctrl + twice is held to the window.
+        // Ctrl 0 puts it back at its 100 %. Ctrl + past the files' own width is this
+        // chapter's alone, and twice is held to the window; Ctrl 0 forgets it.
         QTest::keyClick(window, Qt::Key_0, Qt::ControlModifier);
         QTRY_COMPARE(width46(), 1000.0);
         QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
         QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
         QTRY_COMPARE(width46(), strip->width());
+        QVERIFY(reader->stripOwn());
+        QCOMPARE(preferences->strip(reader->seriesId(), u"other"_s).width, 1000.0);
+        QTest::keyClick(window, Qt::Key_0, Qt::ControlModifier);
+        QTRY_COMPARE(width46(), 1000.0);
+        QVERIFY(!reader->stripOwn());
         // The book's zoom was never touched.
         QCOMPARE(zoomOf(view), 1.0);
+    }
+
+    /// A webtoon's card is its own row (maquette « Bande du bas »): the chapter among the
+    /// others and the steps to its neighbours, the zoom − % +, the A — and none of a book's
+    /// scrub nor its pages, which said nothing of where a strip is.
+    void a_webtoons_card_names_the_chapter_among_the_others_and_steps_to_them()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.preceded = true;
+        extras.followed = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s, nullptr, nullptr,
+                                &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QTRY_COMPARE(reader->entryCount(), 3);
+        QVERIFY(!itemNamed(view, u"reader-book-row"_s)->isVisible());
+        QQuickItem *back = barsCalled(window, view, u"reader-entry-backward"_s);
+        QVERIFY(back);
+        const auto text = [&](const QString &name) {
+            return itemNamed(view, name)->property("text").toString();
+        };
+        QCOMPARE(text(u"reader-entry-name"_s), reader->entryLabel());
+        QCOMPARE(text(u"reader-entry-among"_s), Words::readerAmong(3));
+        QTRY_COMPARE(text(u"reader-strip-level"_s), Words::readerZoom(1));
+
+        // − is a lasting zoom, said in the card.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(view, u"reader-zoom-out"_s)));
+        QTRY_VERIFY(qAbs(reader->stripWidth() - 1000 / 1.1) < 0.001);
+        QCOMPARE(text(u"reader-strip-level"_s), Words::readerZoom(1 / 1.1));
+
+        // « goes to the chapter before, and » back to this one.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(back));
+        QTRY_VERIFY(!reader->loading() && reader->entryId() == u"e11"_s);
+        QTRY_COMPARE(reader->entryPosition(), 1);
+        QVERIFY(!reader->hasPrevious());
+        QQuickItem *forward = barsCalled(window, view, u"reader-entry-forward"_s);
+        QVERIFY(forward);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(forward));
+        QTRY_VERIFY(!reader->loading() && reader->entryId() == u"e12"_s);
+    }
+
+    /// Going down a strip is reading it: the bars go at the first notch down, and stay going
+    /// up — a reader going back up a few panels has not asked for them (24/11/2026).
+    void a_webtoon_sends_its_bars_away_going_down_and_not_going_up()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QVERIFY(barsCalled(qobject_cast<QQuickWindow *>(window), view, u"reader-auto-read"_s));
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const qreal from = strip->property("contentY").toReal();
+
+        wheel(window, across(view, 0.5), QPoint(0, 120));
+        QTRY_VERIFY(strip->property("contentY").toReal() < from);
+        QVERIFY(view->property("barsShown").toBool());
+
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_VERIFY(!view->property("barsShown").toBool());
+    }
+
+    /// The A sends the strip down by itself, green while it does; the bars go a moment after
+    /// it is pressed, and a hand on the strip — a notch of the wheel — stops it.
+    void the_a_reads_a_webtoon_by_itself_until_a_hand_moves_it()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QQuickItem *a = barsCalled(window, view, u"reader-auto-read"_s);
+        QVERIFY(a);
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const qreal from = strip->property("contentY").toReal();
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(a));
+        QTRY_VERIFY(strip->property("autoRead").toBool());
+        auto *theme = engine.singletonInstance<Theme *>(qmlTypeId("Leaf", 1, 0, "Theme"));
+        QVERIFY(theme);
+        QTRY_COMPARE(a->property("color").value<QColor>(), theme->emerald());
+        QTRY_VERIFY(strip->property("contentY").toReal() > from + 20);
+        QTRY_VERIFY(!view->property("barsShown").toBool());
+
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_VERIFY(!strip->property("autoRead").toBool());
+        const qreal stopped = strip->property("contentY").toReal();
+        QTest::qWait(300);
+        QCOMPARE(strip->property("contentY").toReal(), stopped);
+    }
+
+    /// The mark on the right edge says how far down the chapter the strip is, and a click on
+    /// it goes there: three quarters down the mark is three quarters down the chapter.
+    void the_mark_on_the_right_of_a_strip_says_how_far_and_jumps()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QQuickItem *mark = barsCalled(window, view, u"reader-strip-mark"_s);
+        QVERIFY(mark);
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const auto fraction = [&] { return strip->property("fraction").toReal(); };
+        // Opened at page 46 of 190: about a quarter down.
+        QVERIFY(qAbs(fraction() - 46.0 / 189) < 0.05);
+        QVERIFY(qAbs(itemNamed(mark, u"reader-strip-mark-read"_s)->height()
+                     - mark->height() * fraction()) < 1);
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          mark->mapToScene(QPointF(mark->width() / 2, mark->height() * 0.75))
+                              .toPoint());
+        QTRY_VERIFY(qAbs(fraction() - 0.75) < 0.05);
+        QTRY_VERIFY(reader->firstPage() > 130);
+    }
+
+    /// A webtoon's desk, after the validated mockup: two sliders under « Défilement », when the
+    /// bars go under « Commandes » with the line saying what the pill chosen does, the box
+    /// « à l'arrêt » unless scrolling never sends them away, the paper, and its own note.
+    void a_webtoons_desk_offers_its_scrolling_its_controls_and_the_paper()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QQuickItem *card = openTheSettings(window, view);
+        QVERIFY(card);
+        const auto shown = [&](const QString &name) {
+            QQuickItem *one = itemNamed(card, name);
+            return one && one->isVisible();
+        };
+        for (const QString &name : {u"reader-sensitivity"_s, u"reader-auto-speed"_s,
+                                    u"reader-controls"_s, u"reader-at-rest"_s,
+                                    u"reader-backdrop"_s})
+            QVERIFY2(shown(name), qPrintable(name));
+        QVERIFY(!shown(u"reader-motion"_s));
+        QCOMPARE(itemNamed(card, u"reader-desk-note"_s)->property("text").toString(),
+                 Words::readerStripDeskNote());
+
+        // « Au clic »: the line says so, and the box has nothing left to add.
+        // The pointer arrives before it presses, as a hand's does: a press out of nowhere
+        // is the first thing a pill's hover has not yet seen.
+        QTest::mouseMove(window, centreOf(itemNamed(card, u"reader-controls-click"_s)));
+        QTest::qWait(100);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(card, u"reader-controls-click"_s)));
+        QTRY_COMPARE(preferences->stripControls(), Preferences::StripControls::OnClick);
+        QCOMPARE(itemNamed(card, u"reader-controls-hint"_s)->property("text").toString(),
+                 Words::readerStripControlsHint(Preferences::StripControls::OnClick));
+        QTRY_VERIFY(!shown(u"reader-at-rest"_s));
+
+        // The slider's far end is its last step, and the A goes five times as fast as at its
+        // third: a quarter faster each step.
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const qreal before = strip->property("autoSpeed").toReal();
+        QQuickItem *speed = itemNamed(card, u"reader-auto-speed"_s);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          speed->mapToScene(QPointF(speed->width() - 2, 4)).toPoint());
+        QTRY_COMPARE(preferences->stripAutoSpeed(), 10);
+        QVERIFY(qAbs(strip->property("autoSpeed").toReal() / before - std::pow(10, 0.7)) < 0.01);
+    }
+
+    /// The arrows ↓ and ↑ scroll a webtoon while they are held and stop at the release: the
+    /// reader opens with its bars up, and a click in the middle calling them again must not
+    /// take the keys away from the page.
+    void a_webtoons_arrows_scroll_while_held_with_the_bars_up_or_not()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const auto y = [&] { return strip->property("contentY").toReal(); };
+        const auto held = [&](Qt::Key key, int ms) {
+            const qreal from = y();
+            QTest::keyPress(window, key);
+            QTest::qWait(ms);
+            QTest::keyRelease(window, key);
+            return y() - from;
+        };
+
+        // Straight after opening, with the keys where the volume left them.
+        qreal moved = held(Qt::Key_Down, 500);
+        QVERIFY2(moved > 100, qPrintable(u"down on opening moved %1"_s.arg(moved)));
+        // Let the strip come to rest: the speed it had is not given up in the half second.
+        QTest::qWait(600);
+        moved = held(Qt::Key_Up, 500);
+        QVERIFY2(moved < -50, qPrintable(u"up moved %1"_s.arg(moved)));
+        QTest::qWait(600);
+
+        // And after the bars were called by a click in the middle.
+        QVERIFY(barsCalled(window, view, u"reader-auto-read"_s));
+        moved = held(Qt::Key_Down, 500);
+        QVERIFY2(moved > 100, qPrintable(u"down after a click moved %1"_s.arg(moved)));
+        // Let go, it stops.
+        QTest::qWait(400);
+        const qreal rest = y();
+        QTest::qWait(300);
+        QCOMPARE(y(), rest);
+    }
+
+    /// What a reader on the touchpad does: calls the bars with a click, presses one of their
+    /// buttons, sweeps two fingers down — the bars go — and then uses the arrows. Wherever the
+    /// focus was left by the click, the arrows still scroll; the pad's phases (begin, updates in
+    /// pixels, end) take the bars away and, under « En remontant », bring them back.
+    void a_webtoons_arrows_and_bars_follow_a_reader_on_the_touchpad()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->chooseStripControls(Preferences::StripControls::OnTheWayUp);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const auto y = [&] { return strip->property("contentY").toReal(); };
+        const auto bars = [&] { return view->property("barsShown").toBool(); };
+        const auto sweep = [&](int pixels, int updates) {
+            wheel(window, across(view, 0.5), {}, {}, Qt::NoModifier, Qt::ScrollBegin);
+            for (int i = 0; i < updates; ++i) {
+                wheel(window, across(view, 0.5), QPoint(0, pixels), QPoint(0, pixels),
+                      Qt::NoModifier, Qt::ScrollUpdate);
+                QTest::qWait(8);
+            }
+            wheel(window, across(view, 0.5), {}, {}, Qt::NoModifier, Qt::ScrollEnd);
+        };
+
+        // The bars called, a button of theirs pressed by the pointer: it keeps the focus.
+        QVERIFY(barsCalled(window, view, u"reader-auto-read"_s));
+        QQuickItem *button = itemNamed(view, u"reader-auto-read"_s);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(button));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(button));
+        QVERIFY(!strip->property("autoRead").toBool());
+
+        // Two fingers down: the bars go.
+        sweep(-40, 6);
+        QTRY_VERIFY(!bars());
+        QTest::qWait(900);
+
+        // The arrows, after all that.
+        const qreal from = y();
+        QTest::keyPress(window, Qt::Key_Down);
+        QTest::qWait(500);
+        QTest::keyRelease(window, Qt::Key_Down);
+        QVERIFY2(y() - from > 100,
+                 qPrintable(u"down moved %1, focus on %2"_s.arg(y() - from)
+                                .arg(window->activeFocusItem()
+                                         ? window->activeFocusItem()->objectName()
+                                         : u"nothing"_s)));
+        QTest::qWait(600);
+        const qreal low = y();
+        QTest::keyPress(window, Qt::Key_Up);
+        QTest::qWait(500);
+        QTest::keyRelease(window, Qt::Key_Up);
+        QVERIFY2(y() - low < -50, qPrintable(u"up moved %1"_s.arg(y() - low)));
+        QTest::qWait(600);
+        // Held up for half a second, the arrow climbed more than a quarter of the window: the
+        // bars are back, by the way chosen.
+        QTRY_VERIFY(bars());
+
+        // Gone again by two fingers down, and back by two fingers up.
+        sweep(-40, 6);
+        QTRY_VERIFY(!bars());
+        QTest::qWait(900);
+        sweep(40, 40);
+        QTRY_VERIFY(bars());
+    }
+
+    /// The settings used, then put away: the pill clicked in them held the keys, and with the
+    /// card gone the arrows must scroll the strip again, not go to a control nobody can see.
+    void a_webtoons_arrows_work_after_the_settings_were_used()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const auto y = [&] { return strip->property("contentY").toReal(); };
+        QQuickItem *card = openTheSettings(window, view);
+        QVERIFY(card);
+        QQuickItem *pill = itemNamed(card, u"reader-controls"_s);
+        QVERIFY(pill);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(pill));
+        QTest::qWait(200);
+        // Put away by its own button, as a reader does.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(card, u"reader-settings-close"_s)));
+        QTRY_VERIFY(!card->isVisible());
+        QTest::qWait(400);
+
+        const qreal from = y();
+        QTest::keyPress(window, Qt::Key_Down);
+        QTest::qWait(500);
+        QTest::keyRelease(window, Qt::Key_Down);
+        QVERIFY2(y() - from > 100,
+                 qPrintable(u"down moved %1, focus on %2"_s.arg(y() - from)
+                                .arg(window->activeFocusItem()
+                                         ? window->activeFocusItem()->objectName()
+                                         : u"nothing"_s)));
+        QTest::qWait(600);
+
+        // The S opens the settings, and closes them.
+        QTest::keyClick(window, Qt::Key_S);
+        QTRY_VERIFY(card->isVisible());
+        QTest::keyClick(window, Qt::Key_S);
+        QTRY_VERIFY(!card->isVisible());
+    }
+
+    /// The dock's A has a key: pressed, the strip reads itself down, and the same key stops it.
+    /// The card of keys, asked for a webtoon, says so — with the arrows that scroll, and none
+    /// of the book's « page précédente » over the left and right arrows.
+    void the_A_key_reads_a_webtoon_by_itself_and_the_card_of_keys_says_so()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        QVERIFY(!strip->property("autoRead").toBool());
+
+        QTest::keyClick(window, Qt::Key_A);
+        QTRY_VERIFY(strip->property("autoRead").toBool());
+        QTest::keyClick(window, Qt::Key_A);
+        QTRY_VERIFY(!strip->property("autoRead").toBool());
+
+        ReaderCaptions captions;
+        const auto doesOf = [&captions](bool webtoon) {
+            QStringList does;
+            for (const QVariant &group : captions.shortcutGroups(false, webtoon)) {
+                for (const QVariant &line : group.toMap().value(u"rows"_s).toList())
+                    does << line.toMap().value(u"does"_s).toString();
+            }
+            return does;
+        };
+        QVERIFY(doesOf(true).contains(Words::shortcutDoes(Words::ShortcutDoes::AutoRead)));
+        QVERIFY(doesOf(true).contains(Words::shortcutDoes(Words::ShortcutDoes::ScrollByArrow)));
+        QVERIFY(!doesOf(true).contains(Words::shortcutDoes(Words::ShortcutDoes::TurnByArrow)));
+        QVERIFY(!doesOf(false).contains(Words::shortcutDoes(Words::ShortcutDoes::AutoRead)));
+    }
+
+    /// The A stopped, « À l'arrêt » counts from there: the bars it sent away come back five
+    /// seconds after the pause, which nothing moving the strip would otherwise start.
+    void the_bars_come_back_at_rest_once_the_A_stops()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->chooseStripAtRest(true);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QVERIFY(barsCalled(qobject_cast<QQuickWindow *>(window), view, u"reader-auto-read"_s));
+        const auto bars = [&] { return view->property("barsShown").toBool(); };
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+
+        QTest::keyClick(window, Qt::Key_A);
+        QTRY_VERIFY(strip->property("autoRead").toBool());
+        QTRY_VERIFY_WITH_TIMEOUT(!bars(), 3000);
+        QTest::keyClick(window, Qt::Key_A);
+        QTRY_VERIFY(!strip->property("autoRead").toBool());
+        QVERIFY(!bars());
+        QTRY_VERIFY_WITH_TIMEOUT(bars(), 7000);
+    }
+
+    /// The bars and the strip's way down, by the mode chosen: « Au clic » leaves them up going
+    /// down; « En remontant » brings them back after a quarter of a screen up, and not a notch.
+    void a_webtoons_bars_come_back_by_the_way_chosen()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->chooseStripControls(Preferences::StripControls::OnClick);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QVERIFY(barsCalled(qobject_cast<QQuickWindow *>(window), view, u"reader-auto-read"_s));
+        const auto bars = [&] { return view->property("barsShown").toBool(); };
+
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTest::qWait(200);
+        QVERIFY(bars());
+
+        preferences->chooseStripControls(Preferences::StripControls::OnTheWayUp);
+        // The second step: a notch is 108 pixels, a quarter of the window's 760 being 190.
+        preferences->chooseStripSensitivity(1);
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_VERIFY(!bars());
+        // A notch up is 108, less than a quarter of the window.
+        wheel(window, across(view, 0.5), QPoint(0, 120));
+        QTest::qWait(200);
+        QVERIFY(!bars());
+        wheel(window, across(view, 0.5), QPoint(0, 120));
+        QTRY_VERIFY(bars());
+    }
+
+    /// « Reviennent aussi à l'arrêt »: five seconds with the strip still after it sent them
+    /// away going down, and they are back.
+    void a_webtoons_bars_come_back_at_rest_when_asked()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->chooseStripAtRest(true);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QVERIFY(barsCalled(qobject_cast<QQuickWindow *>(window), view, u"reader-auto-read"_s));
+        const auto bars = [&] { return view->property("barsShown").toBool(); };
+
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_VERIFY(!bars());
+        QTest::qWait(3000);
+        QVERIFY(!bars());
+        QTRY_VERIFY_WITH_TIMEOUT(bars(), 4000);
+    }
+
+    /// The sensitivity moves a notch six times as far at its last step, and two
+    /// fingers lifted from the pad leave the strip going on a little — unless the reader asked
+    /// for no motion.
+    void a_webtoon_scrolls_by_its_sensitivity_and_coasts_after_the_pad()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->chooseStripSensitivity(10);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const auto y = [&] { return strip->property("contentY").toReal(); };
+
+        qreal from = y();
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_COMPARE(y(), from + 720);
+
+        from = y();
+        wheel(window, across(view, 0.5), {}, {}, Qt::NoModifier, Qt::ScrollBegin);
+        for (int i = 0; i < 4; ++i) {
+            wheel(window, across(view, 0.5), QPoint(0, -30), QPoint(0, -30), Qt::NoModifier,
+                  Qt::ScrollUpdate);
+            QTest::qWait(10);
+        }
+        wheel(window, across(view, 0.5), {}, {}, Qt::NoModifier, Qt::ScrollEnd);
+        const qreal lifted = y();
+        QCOMPARE(lifted, from + 4 * 180);
+        QTRY_VERIFY(y() > lifted + 20);
+        QTRY_VERIFY(!strip->property("coasting").toReal());
+    }
+
+    /// The pad's two fingers, as a desktop really sends them, move the strip by the sensitivity:
+    /// the same swipe goes six times as far at the last step as at the first — the thing the settings promise, which the real pad never got.
+    void a_pad_swipe_goes_as_far_as_the_sensitivity_says()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const auto y = [&] { return strip->property("contentY").toReal(); };
+        const auto swiped = [&](int step) {
+            preferences->chooseStripSensitivity(step);
+            QTest::qWait(1000);
+            const qreal from = y();
+            swipe(window, across(view, 0.5), 20, -3);
+            // The strip goes on a little after the fingers lift: let it come to rest.
+            QTest::qWait(1500);
+            return y() - from;
+        };
+        const qreal slow = swiped(0);
+        const qreal fast = swiped(10);
+        QVERIFY2(slow > 100, qPrintable(u"slow moved %1"_s.arg(slow)));
+        QVERIFY2(fast > slow * 5 && fast < slow * 7,
+                 qPrintable(u"slow %1, fast %2"_s.arg(slow).arg(fast)));
+    }
+
+    /// A click held and dragged moves the strip by the sensitivity too: one for one at the
+    /// middle step, and by the sixth root and a half of the curve either side.
+    void a_dragged_strip_follows_the_sensitivity_too()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const auto y = [&] { return strip->property("contentY").toReal(); };
+        const auto dragged = [&](int step) {
+            preferences->chooseStripSensitivity(step);
+            QTest::qWait(1000);
+            const qreal from = y();
+            const QPoint start = across(view, 0.5) + QPoint(0, 250);
+            QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, start);
+            for (int i = 1; i <= 20; ++i) {
+                QTest::mouseMove(window, start - QPoint(0, 10 * i));
+                QTest::qWait(8);
+            }
+            // Held still before it lets go, so that nothing goes on after.
+            QTest::qWait(250);
+            QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, start - QPoint(0, 200));
+            QTest::qWait(600);
+            return y() - from;
+        };
+        const qreal middle = dragged(5);
+        QVERIFY2(middle > 150 && middle < 250, qPrintable(u"middle moved %1"_s.arg(middle)));
+        const qreal slow = dragged(0);
+        const qreal fast = dragged(10);
+        QVERIFY2(fast > slow * 2.3 && fast < slow * 3.6,
+                 qPrintable(u"slow %1, fast %2"_s.arg(slow).arg(fast)));
+    }
+
+    /// A webtoon turns nothing, so a click on its left or its right calls the bars like one in
+    /// the middle; and bars put away by a click stay away however the strip is scrolled.
+    void a_webtoons_bars_answer_a_click_anywhere_and_stay_away_once_clicked_away()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->chooseStripAtRest(true);
+        preferences->chooseStripControls(Preferences::StripControls::Discreet);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const auto bars = [&] { return view->property("barsShown").toBool(); };
+
+        // The welcome's three seconds, and the bars are gone by themselves.
+        QTRY_VERIFY_WITH_TIMEOUT(!bars(), 6000);
+        for (const qreal side : {0.1, 0.9}) {
+            QTest::mouseMove(window, across(view, side));
+            QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, side));
+            QTRY_VERIFY(bars());
+            QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, side));
+            QTRY_VERIFY(!bars());
+        }
+        // A click put them away for good: scrolling alone never calls them back.
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTest::qWait(6000);
+        QVERIFY(!bars());
+    }
+
+    /// The bars the welcome took away, after three seconds, come back at rest once the strip was
+    /// scrolled, as the ones scrolling sent away do: the reader never touched a bar, and
+    /// « À l'arrêt » did nothing for them.
+    void a_webtoons_bars_the_welcome_took_come_back_at_rest()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->chooseStripAtRest(true);
+        preferences->chooseStripControls(Preferences::StripControls::Discreet);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const auto bars = [&] { return view->property("barsShown").toBool(); };
+        QTRY_VERIFY_WITH_TIMEOUT(!bars(), 6000);
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTest::qWait(1000);
+        QVERIFY(!bars());
+        QTRY_VERIFY_WITH_TIMEOUT(bars(), 7000);
+    }
+
+    /// The foot of a webtoon's chapter offers the next one at the middle of the screen, its
+    /// first pages already asked for, and the offer goes by itself after six seconds; at the
+    /// foot, going on brings it back rather than the book's card, and its button opens it.
+    void the_foot_of_a_webtoon_chapter_offers_the_next_for_six_seconds()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.followed = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s, nullptr, nullptr,
+                                &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QTRY_COMPARE(reader->entryCount(), 2);
+        QQuickItem *offer = itemNamed(view, u"reader-next-offer"_s);
+        QVERIFY(offer);
+        QVERIFY(!offer->isVisible());
+
+        QTest::keyClick(window, Qt::Key_End);
+        QTRY_VERIFY(offer->isVisible() && offer->opacity() == 1.0);
+        QCOMPARE(itemNamed(offer, u"reader-next-offer-title"_s)->property("text").toString(),
+                 reader->next().value(u"label"_s).toString());
+        QTRY_VERIFY(pretend.heard.contains("GET /entries/e13/pages/0 HTTP"));
+        QVERIFY(!reader->atTheEnd());
+        QTRY_VERIFY_WITH_TIMEOUT(!offer->isVisible(), 8000);
+
+        // Going on at the foot is the offer again, never the book's card.
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY(offer->isVisible());
+        QVERIFY(!reader->atTheEnd());
+        QTRY_VERIFY(offer->opacity() == 1.0);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(offer, u"reader-next-offer-go"_s)));
+        QTRY_COMPARE(reader->entryId(), u"e13"_s);
+        QTRY_VERIFY(!offer->isVisible());
+    }
+
+    /// A pinch over a strip is a glass and keeps nothing: what is under the fingers grows,
+    /// the bar at the foot says how to leave, and the width the series keeps is untouched.
+    /// Escape puts it away before it leaves anything else, and so does a double click.
+    void a_pinch_over_a_webtoon_is_a_glass_that_keeps_nothing()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *strip = nullptr;
+        QTRY_VERIFY((strip = itemNamed(view, u"reader-strip"_s)) && strip->isVisible());
+        QTRY_COMPARE(reader->stripWidth(), 1000.0);
+        // Said in the chapter's place in the card, which comes up for as long as it is there.
+        QQuickItem *dock = itemNamed(view, u"reader-dock"_s);
+        QQuickItem *said = itemNamed(view, u"reader-entry-name"_s);
+        QVERIFY(dock && said);
+        const auto glass = [&] { return strip->property("loupe").toReal(); };
+
+        pinch(window, QPointF(across(view, 0.5)), 0.5);
+        QTRY_VERIFY(glass() > 1.4);
+        QTRY_VERIFY(dock->isVisible() && dock->opacity() > 0);
+        QCOMPARE(said->property("text").toString(), Words::readerLoupe());
+        QCOMPARE(reader->stripWidth(), 1000.0);
+        QVERIFY(!reader->stripOwn());
+
+        // Escape takes the glass and leaves the reader where it is.
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_COMPARE(glass(), 1.0);
+        QVERIFY(view->isVisible());
+        QCOMPARE(said->property("text").toString(), reader->entryLabel());
+
+        pinch(window, QPointF(across(view, 0.5)), 0.5);
+        QTRY_VERIFY(glass() > 1.4);
+        QTest::mouseDClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.5));
+        QTRY_COMPARE(glass(), 1.0);
+        QCOMPARE(reader->stripWidth(), 1000.0);
     }
 
     /// A held arrow drives a webtoon: it starts at once, moves a little every frame and never
@@ -13991,7 +14847,7 @@ private slots:
                            Words::shortcutDoes(TurnByArrowRightToLeft),
                            Words::shortcutDoes(TurnBySpace),
                            Words::shortcutDoes(ToTheEndsRightToLeft), Words::shortcutDoes(BackAPage),
-                           Words::shortcutDoes(FullScreen), Words::shortcutDoes(VolumeInfo),
+                           Words::shortcutDoes(FullScreen), Words::shortcutDoes(VolumeInfo), Words::shortcutDoes(ReaderSettings),
                            Words::shortcutDoes(TheseShortcuts), Words::shortcutDoes(ZoomByKey),
                            Words::shortcutDoes(BackToWhole), Words::shortcutDoes(ZoomByWheel),
                            Words::shortcutDoes(ZoomWhereAimed), Words::shortcutDoes(Pinch),
@@ -14627,10 +15483,11 @@ private slots:
         QTRY_COMPARE(reader->entryId(), u"e13"_s);
     }
 
-    /// At the foot of a webtoon the wheel goes on as the space bar does: the card, then what
-    /// follows. Scrolling it did nothing, since there was no strip left to scroll, and the
-    /// card was out of reach of the wheel.
-    void at_the_foot_of_a_webtoon_the_wheel_raises_the_card_then_opens_what_follows()
+    /// At the foot of a webtoon chapter the wheel goes on as the space bar does: the next
+    /// chapter's offer — and never the next chapter itself, however many notches follow.
+    /// Scrolling it did nothing, since there was no strip left to scroll; and with the card a
+    /// notch too many opened what follows, which a strip read in one long scroll gives often.
+    void at_the_foot_of_a_webtoon_the_wheel_offers_what_follows_and_never_opens_it()
     {
         Pretend pretend;
         QVERIFY(pretend.listen(QHostAddress::LocalHost));
@@ -14652,23 +15509,25 @@ private slots:
         QTRY_VERIFY((strip = itemNamed(view, u"reader-strip"_s)) && strip->isVisible());
         QObject *rest = view->findChild<QObject *>(u"reader-wheel-rest"_s);
         QVERIFY(rest);
+        QQuickItem *offer = itemNamed(view, u"reader-next-offer"_s);
+        QVERIFY(offer);
 
         QTest::keyClick(window, Qt::Key_End);
         QTRY_VERIFY(strip->property("atYEnd").toBool());
         QTRY_COMPARE(reader->firstPage(), 189);
         QTRY_VERIFY(!reader->next().isEmpty());
         QTRY_VERIFY(!rest->property("running").toBool());
+        offer->setProperty("shown", false);
+        QTRY_VERIFY(!offer->isVisible());
 
         wheel(window, across(view, 0.5), QPoint(0, -120));
-        QVERIFY(reader->atTheEnd());
-        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_VERIFY(offer->isVisible());
+        QVERIFY(!reader->atTheEnd());
+        for (int notch = 0; notch < 4; ++notch)
+            wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTest::qWait(300);
         QCOMPARE(reader->entryId(), u"e12"_s);
-        QTRY_VERIFY(!rest->property("running").toBool());
-        wheel(window, across(view, 0.5), QPoint(0, -120), QPoint(0, 0),
-                          Qt::NoModifier, Qt::ScrollMomentum);
-        QCOMPARE(reader->entryId(), u"e12"_s);
-        wheel(window, across(view, 0.5), QPoint(0, -120));
-        QTRY_COMPARE(reader->entryId(), u"e13"_s);
+        QVERIFY(!reader->atTheEnd());
     }
 
     /// The bars a click in the middle was about to call stay away when a page is turned

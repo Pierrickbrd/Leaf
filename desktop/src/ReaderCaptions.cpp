@@ -214,10 +214,92 @@ QVariantList ReaderCaptions::fits() const
             aFit(Fit::Original, u"original"_s)};
 }
 
-QVariantList ReaderCaptions::stripFits() const
+QString ReaderCaptions::loupe() const
 {
-    using Fit = Preferences::Fit;
-    return {aFit(Fit::Width, u"width"_s), aFit(Fit::Original, u"original"_s)};
+    return Words::readerLoupe();
+}
+
+QString ReaderCaptions::scrollingGroup() const
+{
+    return Words::readerDeskGroup(Words::ReaderDeskGroup::Scrolling);
+}
+
+QString ReaderCaptions::controlsGroup() const
+{
+    return Words::readerDeskGroup(Words::ReaderDeskGroup::Controls);
+}
+
+QString ReaderCaptions::sensitivityName() const
+{
+    return Words::readerSetting(Words::ReaderSetting::Sensitivity);
+}
+
+QString ReaderCaptions::autoSpeedName() const
+{
+    return Words::readerSetting(Words::ReaderSetting::AutoSpeed);
+}
+
+QString ReaderCaptions::controlsName() const
+{
+    return Words::readerSetting(Words::ReaderSetting::Controls);
+}
+
+QStringList ReaderCaptions::sensitivityEnds() const
+{
+    return {Words::readerStepEnd(Words::StepEnd::Gentle),
+            Words::readerStepEnd(Words::StepEnd::Lively)};
+}
+
+QStringList ReaderCaptions::autoSpeedEnds() const
+{
+    return {Words::readerStepEnd(Words::StepEnd::Slow), Words::readerStepEnd(Words::StepEnd::Fast)};
+}
+
+QVariantList ReaderCaptions::stripControls() const
+{
+    using Controls = Preferences::StripControls;
+    const auto one = [](Controls which, const QString &name) {
+        return QVariantMap{{u"value"_s, std::to_underlying(which)},
+                           {u"label"_s, Words::readerStripControls(which)},
+                           {u"name"_s, name}};
+    };
+    return {one(Controls::Discreet, u"discreet"_s), one(Controls::OnTheWayUp, u"up"_s),
+            one(Controls::OnClick, u"click"_s)};
+}
+
+QString ReaderCaptions::atRest() const
+{
+    return Words::readerStripAtRest();
+}
+
+QString ReaderCaptions::stripDeskNote() const
+{
+    return Words::readerStripDeskNote();
+}
+
+QString ReaderCaptions::controlsHint(int which) const
+{
+    return Words::readerStripControlsHint(Preferences::StripControls(which));
+}
+
+QString ReaderCaptions::zoomIn() const
+{
+    return Words::readerZoomStep(true);
+}
+
+QString ReaderCaptions::zoomOut() const
+{
+    return Words::readerZoomStep(false);
+}
+
+QString ReaderCaptions::among(int count) const
+{
+    return Words::readerAmong(count);
+}
+
+QString ReaderCaptions::autoRead(bool running) const
+{
+    return Words::readerAutoRead(running);
 }
 
 QVariantList ReaderCaptions::backdrops() const
@@ -307,7 +389,7 @@ QVariantMap group(const QString &name, Words::ShortcutGroup which, const QVarian
 
 } // namespace
 
-QVariantList ReaderCaptions::shortcutGroups(bool rightToLeft) const
+QVariantList ReaderCaptions::shortcutGroups(bool rightToLeft, bool webtoon) const
 {
     using Words::KeyName;
     using enum Words::ShortcutDoes;
@@ -316,17 +398,33 @@ QVariantList ReaderCaptions::shortcutGroups(bool rightToLeft) const
     const QVariantMap plus = sign(Words::shortcutAnd());
     const QVariantMap either = sign(Words::shortcutOr());
 
+    // A webtoon is one strip: the arrows and the space bar scroll it, Home and End go to its
+    // ends, and the A reads it by itself. The card for a book said « Page précédente, suivante »
+    // over the left and right arrows, which a strip does not answer to.
+    // Chosen before the list, not inside it: a conditional in a branch of another is read twice.
+    const Words::ShortcutDoes turnByArrow = rightToLeft ? TurnByArrowRightToLeft : TurnByArrow;
+    const Words::ShortcutDoes toTheEnds = rightToLeft ? ToTheEndsRightToLeft : ToTheEnds;
+    const QVariantList navigate =
+        webtoon
+            ? QVariantList{row(ScrollByArrow,
+                               {key(u"tabler-arrow-up"_s), key(u"tabler-arrow-down"_s)}),
+                           row(ScrollBySpace, {key(KeyName::Space), sign(Words::shortcutSlash()),
+                                               key(KeyName::Shift), plus, key(KeyName::Space)}),
+                           row(ToTheEndsOfChapter, {key(KeyName::Home), key(KeyName::End)}),
+                           row(AutoRead, {key(KeyName::A)})}
+            : QVariantList{
+                  row(turnByArrow, {key(left), key(right)}),
+                  row(TurnBySpace, {key(KeyName::Space), sign(Words::shortcutSlash()),
+                                    key(KeyName::Shift), plus, key(KeyName::Space)}),
+                  row(toTheEnds, {key(KeyName::Ctrl), plus, key(left), key(right)}),
+                  row(BackAPage, {key(u"tabler-backspace"_s, true)})};
+
     return {
-        group(u"navigate"_s, Words::ShortcutGroup::Navigate,
-              {row(rightToLeft ? TurnByArrowRightToLeft : TurnByArrow, {key(left), key(right)}),
-               row(TurnBySpace, {key(KeyName::Space), sign(Words::shortcutSlash()),
-                                 key(KeyName::Shift), plus, key(KeyName::Space)}),
-               row(rightToLeft ? ToTheEndsRightToLeft : ToTheEnds,
-                   {key(KeyName::Ctrl), plus, key(left), key(right)}),
-               row(BackAPage, {key(u"tabler-backspace"_s, true)})}),
+        group(u"navigate"_s, Words::ShortcutGroup::Navigate, navigate),
         group(u"display"_s, Words::ShortcutGroup::Display,
               {row(FullScreen, {key(KeyName::F), either, key(KeyName::F11)}),
                row(VolumeInfo, {key(KeyName::I)}),
+               row(ReaderSettings, {key(KeyName::S)}),
                row(TheseShortcuts, {key(KeyName::Question), either, key(KeyName::F1)})}),
         group(u"zoom"_s, Words::ShortcutGroup::Zoom,
               {row(ZoomByKey, {key(KeyName::Ctrl), plus, key(u"tabler-plus"_s),

@@ -343,7 +343,7 @@ private slots:
     }
 
     /// What the reader chooses here is announced to be kept on the server, whole, under words.
-    void a_reading_choice_is_announced_with_all_seven_synced_values()
+    void a_reading_choice_is_announced_with_all_five_synced_values()
     {
         Preferences chosen;
         chosen.chooseFit(Preferences::Fit::Height);
@@ -352,10 +352,8 @@ private slots:
         chosen.chooseFit(Preferences::Fit::Width);
         QCOMPARE(kept.size(), 1);
         const QVariantMap said = kept.at(0).at(0).toMap();
-        QCOMPARE(said.size(), 7);
+        QCOMPARE(said.size(), 5);
         QCOMPARE(said.value(u"fit"_s).toString(), u"width"_s);
-        QCOMPARE(said.value(u"stripFit"_s).toString(), u"original"_s);
-        QCOMPARE(said.value(u"stripZoom"_s).toDouble(), 1.0);
         QCOMPARE(said.value(u"motion"_s).toString(), u"slide"_s);
         // The appearance is this machine's, and is not among them.
         QVERIFY(!said.contains(u"appearance"_s));
@@ -364,41 +362,79 @@ private slots:
         QCOMPARE(kept.size(), 1);
     }
 
-    /// A webtoon's fit is its own: « Original » on a fresh install whatever the books are read
-    /// at, never « Hauteur », and its zoom held between a third and three times.
-    void a_strip_keeps_its_own_fit_and_zoom_apart_from_the_books()
+    /// A webtoon's strip keeps a width by series and one by chapter, on this device: never
+    /// among what follows the profile, since a width in pixels is this screen's. A chapter
+    /// of 0 forgets the chapter's own, and what is not a positive number read back is nothing.
+    void a_strip_keeps_its_widths_by_series_and_by_chapter_on_this_device()
+    {
+        Preferences chosen;
+        QCOMPARE(chosen.strip(u"s1"_s, u"e1"_s).width, 0.0);
+        QSignalSpy synced(&chosen, &Preferences::syncedChanged);
+        chosen.keepStrip(u"s1"_s, u"e1"_s, {800, 720, 900});
+        chosen.keepStrip(u"s2"_s, u"e9"_s, {500, 500, 0});
+        QCOMPARE(synced.size(), 0);
+        QVERIFY(!chosen.synced().contains(u"strips"_s));
+
+        const Preferences again;
+        QCOMPARE(again.strip(u"s1"_s, u"e1"_s).width, 800.0);
+        QCOMPARE(again.strip(u"s1"_s, u"e1"_s).base, 720.0);
+        QCOMPARE(again.strip(u"s1"_s, u"e1"_s).chapter, 900.0);
+        // Another chapter of the series has the series' width and none of its own.
+        QCOMPARE(again.strip(u"s1"_s, u"e2"_s).width, 800.0);
+        QCOMPARE(again.strip(u"s1"_s, u"e2"_s).chapter, 0.0);
+        QCOMPARE(again.strip(u"s2"_s, u"e9"_s).width, 500.0);
+
+        chosen.keepStrip(u"s1"_s, u"e1"_s, {800, 720, 0});
+        QCOMPARE(Preferences().strip(u"s1"_s, u"e1"_s).chapter, 0.0);
+
+        {
+            QSettings file(QSettings::IniFormat, QSettings::UserScope, u"Leaf"_s,
+                           u"preferences"_s);
+            file.setValue(u"strips/s3/width"_s, u"large"_s);
+            file.setValue(u"strips/s3/base"_s, -40);
+            file.setValue(u"strips/s3/chapters/e1"_s, u"nan"_s);
+        }
+        const Preferences odd;
+        QCOMPARE(odd.strip(u"s3"_s, u"e1"_s).width, 0.0);
+        QCOMPARE(odd.strip(u"s3"_s, u"e1"_s).base, 0.0);
+        QCOMPARE(odd.strip(u"s3"_s, u"e1"_s).chapter, 0.0);
+    }
+
+    /// A webtoon's reading follows this desk and every webtoon: the two sliders' steps, held
+    /// between 0 and 10, the mode of its bars and the box « à l'arrêt » — written at once,
+    /// never said to the server, and read back as the defaults when the file holds nonsense.
+    void a_webtoons_reading_choices_stay_on_this_desk()
     {
         {
             Preferences chosen;
-            QCOMPARE(chosen.stripFit(), Preferences::Fit::Original);
-            QCOMPARE(chosen.stripZoom(), 1.0);
-            chosen.chooseFit(Preferences::Fit::Width);
-            QCOMPARE(chosen.stripFit(), Preferences::Fit::Original);
-
-            QSignalSpy kept(&chosen, &Preferences::syncedChanged);
-            chosen.chooseStrip(Preferences::Fit::Height, 1.5);
-            QCOMPARE(chosen.stripFit(), Preferences::Fit::Original);
-            QCOMPARE(chosen.stripZoom(), 1.5);
-            QCOMPARE(chosen.fit(), Preferences::Fit::Width);
-            QCOMPARE(kept.size(), 1);
-            chosen.chooseStrip(Preferences::Fit::Width, 40);
-            QCOMPARE(chosen.stripZoom(), 3.0);
-            chosen.chooseStrip(Preferences::Fit::Width, 0.01);
-            QCOMPARE(chosen.stripZoom(), 1.0 / 3.0);
-            chosen.chooseStrip(Preferences::Fit::Width, qQNaN());
-            QCOMPARE(chosen.stripZoom(), 1.0);
+            QCOMPARE(chosen.stripSensitivity(), 5);
+            QCOMPARE(chosen.stripAutoSpeed(), 3);
+            QCOMPARE(chosen.stripControls(), Preferences::StripControls::Discreet);
+            QVERIFY(!chosen.stripAtRest());
+            QSignalSpy synced(&chosen, &Preferences::syncedChanged);
+            chosen.chooseStripSensitivity(40);
+            chosen.chooseStripAutoSpeed(-3);
+            chosen.chooseStripControls(Preferences::StripControls::OnTheWayUp);
+            chosen.chooseStripAtRest(true);
+            QCOMPARE(chosen.stripSensitivity(), 10);
+            QCOMPARE(chosen.stripAutoSpeed(), 0);
+            QCOMPARE(synced.size(), 0);
         }
         const Preferences again;
-        QCOMPARE(again.stripFit(), Preferences::Fit::Width);
-        QCOMPARE(again.stripZoom(), 1.0);
+        QCOMPARE(again.stripSensitivity(), 10);
+        QCOMPARE(again.stripAutoSpeed(), 0);
+        QCOMPARE(again.stripControls(), Preferences::StripControls::OnTheWayUp);
+        QVERIFY(again.stripAtRest());
 
-        Preferences adopted;
-        adopted.adopt({{u"stripFit"_s, u"original"_s}, {u"stripZoom"_s, 0.8}});
-        QCOMPARE(adopted.stripFit(), Preferences::Fit::Original);
-        QVERIFY(qAbs(adopted.stripZoom() - 0.8) < 1e-9);
-        adopted.adopt({{u"stripZoom"_s, 1.2}});
-        QCOMPARE(adopted.stripFit(), Preferences::Fit::Original);
-        QVERIFY(qAbs(adopted.stripZoom() - 1.2) < 1e-9);
+        {
+            QSettings file(QSettings::IniFormat, QSettings::UserScope, u"Leaf"_s,
+                           u"preferences"_s);
+            file.setValue(u"strip/sensitivity"_s, u"vive"_s);
+            file.setValue(u"strip/controls"_s, u"always"_s);
+        }
+        const Preferences odd;
+        QCOMPARE(odd.stripSensitivity(), 5);
+        QCOMPARE(odd.stripControls(), Preferences::StripControls::Discreet);
     }
 
     /// The server's answer is applied and written locally, but never sent back to it: an echo

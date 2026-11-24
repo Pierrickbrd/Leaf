@@ -78,18 +78,22 @@ class Preferences : public QObject
     /// profile is reading, on the server under that profile (see `synced`).
     Q_PROPERTY(PageLayout pageLayout READ pageLayout NOTIFY changed)
     Q_PROPERTY(Fit fit READ fit NOTIFY changed)
-    /// A webtoon's own fit and zoom, apart from the books': a strip read at the width of a
-    /// laptop's window is a column of panels twice the size they were drawn at, and the
-    /// reader who wants a manga at the window's height does not want a webtoon that way.
-    /// « Original » until said otherwise; the zoom multiplies the column's width.
-    Q_PROPERTY(Fit stripFit READ stripFit NOTIFY changed)
-    Q_PROPERTY(double stripZoom READ stripZoom NOTIFY changed)
     /// What is behind the pages, and how a page that comes takes the place of the one that
     /// goes. The choice of 22/10/2026: a dark paper tires some eyes in a lit room, and
     /// a slide on every page is too much for some readers, so both are a reader's to say, on
     /// this desk like the layout.
     Q_PROPERTY(Backdrop backdrop READ backdrop NOTIFY changed)
     Q_PROPERTY(Motion motion READ motion NOTIFY changed)
+    /// A webtoon's reading, on this desk and for every webtoon (the card says so): how far a
+    /// notch of the wheel or a stroke of the pad moves the strip, and how fast its A goes —
+    /// eleven steps each, 0 to 10, the choice of 24/11/2026 (between ten and fifteen, and no
+    /// values running to infinity) — then when its bars go and come back.
+    Q_PROPERTY(int stripSensitivity READ stripSensitivity NOTIFY changed)
+    Q_PROPERTY(int stripAutoSpeed READ stripAutoSpeed NOTIFY changed)
+    Q_PROPERTY(StripControls stripControls READ stripControls NOTIFY changed)
+    /// The bars come back after five seconds without scrolling as well — with `Discreet` or
+    /// `OnTheWayUp`; with `OnClick` scrolling never sends them away to begin with.
+    Q_PROPERTY(bool stripAtRest READ stripAtRest NOTIFY changed)
 
 public:
     enum class Appearance { System, Light, Dark };
@@ -130,6 +134,15 @@ public:
     /// read — so `Slide`, and the reader who wants less says it here.
     enum class Motion { Slide, Fade, Instant };
     Q_ENUM(Motion)
+    /// When a webtoon's bars go: going down, back at a click or Tab (`Discreet`); going down,
+    /// back after a quarter of a screen going up as well (`OnTheWayUp`); never by scrolling
+    /// (`OnClick`). « Always there » was refused on 24/11/2026.
+    enum class StripControls { Discreet, OnTheWayUp, OnClick };
+    Q_ENUM(StripControls)
+    /// The middle of the eleven steps, and the A's third: slow enough to read at the first try.
+    static constexpr int MiddleStep = 5;
+    static constexpr int AutoStep = 3;
+    static constexpr int LastStep = 10;
 
     explicit Preferences(QObject *parent = nullptr);
 
@@ -146,14 +159,32 @@ public:
     Q_INVOKABLE void choosePageLayout(PageLayout wanted);
     Fit fit() const { return m_fit; }
     Q_INVOKABLE void chooseFit(Fit wanted);
-    Fit stripFit() const { return m_stripFit; }
-    double stripZoom() const { return m_stripZoom; }
-    /// Both at once: a pill keeps the zoom, a pinch keeps the fit.
-    Q_INVOKABLE void chooseStrip(Fit fit, double zoom);
+    /// What a webtoon's strip keeps on this device, in logical pixels, 0 for nothing kept: the
+    /// width its chapters are drawn at, the width it started at (its 100 %), and the width
+    /// one chapter keeps apart from the others. A width and not a factor: a series mixes
+    /// chapters scanned at 720 and at 1080 pixels, and one factor drew them at two widths.
+    /// Not synced — a width in pixels is this screen's, and another device's would be wrong.
+    struct Strip
+    {
+        double width = 0;
+        double base = 0;
+        double chapter = 0;
+    };
+    Strip strip(const QString &series, const QString &entry) const;
+    /// Writes all three; a `chapter` of 0 forgets the chapter's own.
+    void keepStrip(const QString &series, const QString &entry, const Strip &kept);
     Backdrop backdrop() const { return m_backdrop; }
     Q_INVOKABLE void chooseBackdrop(Backdrop wanted);
     Motion motion() const { return m_motion; }
     Q_INVOKABLE void chooseMotion(Motion wanted);
+    int stripSensitivity() const { return m_stripSensitivity; }
+    Q_INVOKABLE void chooseStripSensitivity(int step);
+    int stripAutoSpeed() const { return m_stripAutoSpeed; }
+    Q_INVOKABLE void chooseStripAutoSpeed(int step);
+    StripControls stripControls() const { return m_stripControls; }
+    Q_INVOKABLE void chooseStripControls(StripControls wanted);
+    bool stripAtRest() const { return m_stripAtRest; }
+    Q_INVOKABLE void chooseStripAtRest(bool wanted);
     /// What `Auto` resolves to for this window; a fixed choice ignores the window.
     Spreads::Layout layoutFor(QSizeF window) const;
 
@@ -228,10 +259,14 @@ private:
     bool m_volumesAsGrid = false;
     PageLayout m_pageLayout = PageLayout::Auto;
     Fit m_fit = Fit::Height;
-    Fit m_stripFit = Fit::Original;
-    double m_stripZoom = 1.0;
     Backdrop m_backdrop = Backdrop::Black;
     Motion m_motion = Motion::Slide;
+    int m_stripSensitivity = MiddleStep;
+    int m_stripAutoSpeed = AutoStep;
+    StripControls m_stripControls = StripControls::Discreet;
+    bool m_stripAtRest = false;
+    /// Writes one of a webtoon's choices, which this desk keeps and the profile does not.
+    void keepHere(const QString &key, const QVariant &value);
     /// Everything on, except the desktop for a download: a copy saved in two seconds wakes
     /// nobody. It is being pestered that makes somebody open this screen, not silence.
     QHash<Warns, bool> m_bubbles;

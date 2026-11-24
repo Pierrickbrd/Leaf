@@ -283,6 +283,7 @@ set(LEAF_QML
     qml/SettingsTabs.qml
     qml/SettingsCard.qml
     qml/SettingsChoice.qml
+    qml/StepSlider.qml
     qml/SettingsStatus.qml
     qml/SettingsLine.qml
     qml/SettingsNote.qml
@@ -362,6 +363,7 @@ set(LEAF_QML
     qml/ReaderDock.qml
     qml/ReaderScrub.qml
     qml/ReaderNextCard.qml
+    qml/ReaderNextPopup.qml
     qml/ReaderPage.qml
     qml/ReaderSettings.qml
     qml/ReaderShortcuts.qml
@@ -371,6 +373,7 @@ set(LEAF_QML
     qml/IsbnKey.qml
     qml/ReaderVolumePanel.qml
     qml/ReaderStrip.qml
+    qml/ReaderStripMark.qml
 )
 foreach(qml_file IN LISTS LEAF_QML)
     string(REGEX REPLACE "^qml/" "" alias "${qml_file}")
