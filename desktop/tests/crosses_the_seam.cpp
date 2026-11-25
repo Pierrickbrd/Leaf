@@ -20887,7 +20887,7 @@ QStringList everyCase()
     QStringList cases;
     for (int i = meta.methodOffset(); i < meta.methodCount(); ++i) {
         const QMetaMethod method = meta.method(i);
-        const QString name = QString::fromLatin1(method.name());
+        const QString name = QString::fromUtf8(method.name());
         if (method.methodType() == QMetaMethod::Slot && method.access() == QMetaMethod::Private
             && method.parameterCount() == 0 && !name.endsWith(u"_data"_s)
             && !aroundThem.contains(name))
