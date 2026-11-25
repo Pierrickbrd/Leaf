@@ -1,0 +1,318 @@
+name: ci
+
+# One workflow, one run of every test.
+#
+# There were three — `server`, `desktop` and `sonar` — and the third rebuilt and re-ran what the
+# first two had just run, only to measure it: the Rust tests twice, the client's tests twice (one
+# plain build, one instrumented), the Python tests twice. On a warm cache that was about 45 runner
+# minutes for a pull request, 26 of them in the job every pull request waits for. Now each test
+# runs once, under coverage where coverage is wanted, and `sonar` only analyses what the others
+# wrote down.
+#
+# Not filtered by path, as `sonar` never was: the analysis looks at all three blocks at once, and
+# the tests it reads the coverage of have to have run. The price is that touching the QML runs the
+# Rust tests; `sonar` already made every pull request pay that.
+on:
+  push:
+    # main only: a working branch runs everything through `pull_request`, which builds the merge
+    # into main rather than the branch alone — subscribing to both ran every job twice per push.
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A push to a pull request replaces the one before it: the earlier run answers for a commit
+# nobody will merge, and went on to the end all the same — on the day this was written, two
+# pushes five minutes apart ran two complete analyses side by side, 26 and 37 minutes. A branch of
+# `main` is never cancelled: its run is the record of what main held, and `run_id` keeps
+# every one in a group of its own.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tools:
+    # The standard library is enough for the tests; `coverage` is only there to write down what
+    # they reach. Nothing to build, so this waits on nothing.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: the tools hold their own tests, and what they reach is written down
+        run: |
+          python3 -m pip install --quiet coverage
+          python3 -m coverage run --source=tools -m unittest discover -s tools -p 'test_*.py'
+          python3 -m coverage xml -o coverage.xml
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-python
+          path: coverage.xml
+          if-no-files-found: error
+
+  server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+
+      # Formatting first: it fails in a second, and there is no point compiling to be told
+      # about a blank line afterwards.
+      - run: cargo fmt --check
+
+      # Warnings are errors here. The whole reason for this language is that the compiler
+      # is allowed to be strict, and letting it whisper would give that away. The same run is
+      # written down for the analyser, which imports these findings instead of arriving at its
+      # own, weaker, version of them: the report is JSON on stdout and the exit status is still
+      # clippy's, so a warning fails this step and leaves the report behind it.
+      - run: cargo clippy --all-targets --message-format=json -- -D warnings > ../clippy.json
+
+      - uses: taiki-e/install-action@v2.87.1
+        with:
+          tool: cargo-llvm-cov
+
+      # The tests, and which lines they reach. The percentage itself says little; what is worth
+      # knowing is which branches are never visited — in a codebase whose tests each exist
+      # because something in them was once wrong, a path nobody exercises any more is the same
+      # kind of fact as a path that is dead.
+      - run: cargo llvm-cov --workspace --all-targets --lcov --output-path ../lcov.info
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-rust
+          path: |
+            lcov.info
+            clippy.json
+          if-no-files-found: error
+
+  contract:
+    # The contract is what both clients will be generated from, so a divergence between it
+    # and the server is not a documentation problem — it is a client that will not compile,
+    # or worse, one that compiles and reads a field that is never sent. Thirty-six
+    # operations and their schemas is more than hand-written assertions can hold.
+    needs: server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: server
+
+      - run: pip install pyyaml jsonschema
+      - run: python3 tools/fixture.py "$RUNNER_TEMP/leaf"
+      - run: cargo build --release
+        working-directory: server
+
+      - name: serve the fixture and check every answer against the contract
+        env:
+          LEAF_KEYS: "ci:0123456789abcdef:read,import"
+        run: |
+          LEAF_LIBRARY="$RUNNER_TEMP/leaf/library" \
+          LEAF_INBOX="$RUNNER_TEMP/leaf/inbox" \
+          LEAF_CACHE="$RUNNER_TEMP/leaf/cache" \
+          LEAF_DROP="$RUNNER_TEMP/leaf/drop" \
+          LEAF_DB="$RUNNER_TEMP/leaf/data/leaf.sqlite" \
+          LEAF_PORT=8477 \
+          server/target/release/leaf-server serve &
+          for _ in $(seq 60); do
+            curl -sf -H "X-Leaf-Key: 0123456789abcdef" http://127.0.0.1:8477/health && break
+            sleep 1
+          done
+          sleep 2
+          python3 tools/conformance.py http://127.0.0.1:8477 0123456789abcdef
+
+  desktop:
+    # What ships: the client built the way it is shipped, and opened. The tests do not run here —
+    # they run once, in `desktop-coverage`, on the instrumented build — so this builds the one
+    # target the check needs and not the two hundred test objects beside it.
+    #
+    # The distribution the client is written for. Qt comes from its packages rather than from an
+    # installer, so what CI builds against is what the machine has.
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v7
+
+      - run: bash -n ../install.sh
+
+      - name: install Qt 6 and the QML modules
+        uses: ./.github/actions/qt
+
+      # The compiler's work, kept from one run to the next. Building the client took 671 s of a
+      # 21-minute job, every push, though a push touches a few files out of two hundred. Keyed by
+      # commit and restored from the closest one before it: a pull request reads what main left,
+      # and what its own earlier pushes left.
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/ccache
+          key: ccache-desktop-${{ github.sha }}
+          restore-keys: ccache-desktop-
+
+      # The counters travel with the cache and add up from one run to the next: a hit rate read
+      # off the end of a run was the rate of every run since the cache began — 56 % in the log
+      # where a rebuild of the same code, with every file's date renewed, measured 98 %. Zeroed
+      # here, the figure below is this run's.
+      - run: ccache --zero-stats
+
+      # Warnings are errors here, as they are on the server. A codebase that learns to ignore
+      # its warnings never unlearns it, and this block has one chance to say so.
+      - run: cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - run: cmake --build build --target leaf-desktop
+
+      # Saved once the build is done: the next push would otherwise compile everything again.
+      # The hit rate is printed so that a cache which stopped hitting is seen, not guessed.
+      - run: ccache --show-stats
+      - uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/ccache
+          key: ccache-desktop-${{ github.sha }}
+
+      # Linking is not opening. The module's resource path moved between Qt 6.4 and 6.5, so
+      # a build that links perfectly can still exit at once with nothing on screen.
+      - run: tests/opens.sh build/leaf-desktop
+
+  desktop-coverage:
+    # The client's tests, run once, on an instrumented build. `--coverage` changes the object
+    # files and a coverage build is not what anybody should be shipping, which is why `desktop`
+    # above is a build of its own. Same distribution, for the reason it gives.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install Qt 6 and the QML modules
+        uses: ./.github/actions/qt
+
+      # Ubuntu 24.04 carries gcovr 7.0, which can calculate source decisions but cannot
+      # yet write them into the SonarQube format. Pin the version this report is verified
+      # against instead of letting the distribution choose what "condition" means.
+      - run: python3 -m pip install --quiet gcovr==8.6 pyyaml
+
+      # First, because a client that has fallen behind the contract compiles perfectly: it
+      # simply stops reading a field somebody added. Nothing else in this workflow can see it.
+      - name: the client still knows the contract
+        run: python3 tools/client_knows_the_contract.py
+
+      # Its compiler's work is kept under a key of its own: instrumented objects are not the
+      # desktop's, and sharing one cache would let each build evict the other's.
+      - uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/ccache
+          key: ccache-coverage-${{ github.sha }}
+          restore-keys: ccache-coverage-
+
+      # Zeroed for the reason `desktop` gives: the counters ride in the cache.
+      - run: ccache --zero-stats
+
+      - name: coverage, C++, built
+        run: |
+          cmake -S desktop -B desktop/coverage -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_FLAGS="--coverage -O0" -DCMAKE_EXE_LINKER_FLAGS="--coverage"
+          cmake --build desktop/coverage
+          ccache --show-stats
+
+      - uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/ccache
+          key: ccache-coverage-${{ github.sha }}
+
+      # A runner has no keyring, so the fallback is the branch that runs there and the keyring
+      # branch is the one that runs on a desktop. Between the two machines both are exercised —
+      # which is why the file half is a plain function taking its own path, rather than something
+      # reachable only by luck of environment.
+      #
+      # `crosses-the-seam` is 359 cases in one binary and took 439 s of a 453 s ctest, alone. It
+      # is cut into three shares (see desktop/CMakeLists.txt) that each open their own display,
+      # so they run side by side; everything else stays serial, as before. A fourth test fails
+      # if the shares stop adding up to every case.
+      - name: coverage, C++
+        run: |
+          xvfb-run -a ctest --test-dir desktop/coverage -R '^crosses-the-seam-[0-9]+$' -j3 --output-on-failure
+          xvfb-run -a ctest --test-dir desktop/coverage -E '^crosses-the-seam-[0-9]+$' --output-on-failure
+
+      # From inside the build tree, because that is where gcov may write its intermediates.
+      # `--fail-under-line` is not a coverage target — the quality gate is that. It is a
+      # tripwire on the measurement itself: `--gcov-ignore-errors` lets a broken run report
+      # an empty file rather than fail, and an empty report reads exactly like a client
+      # nobody tests. This is what would say so.
+      #
+      # Five points under what is actually measured, not twenty. A tripwire with a quarter
+      # of the report's worth of slack in it is a tripwire the report can collapse through:
+      # the point is to notice the measurement breaking, and a broken one rarely comes back
+      # a little smaller.
+      #
+      # What Sonar calls a condition must be a decision the source actually makes. Raw gcov
+      # branches are control-flow edges in the binary: a single QString expression contributes
+      # a dozen destructor and allocation-failure edges even though the source makes no choice.
+      # `--decisions --sonarqube-metric decision` reports the outcomes of source-level
+      # conditionals and switches instead. The raw branch summary stays in the log as a second,
+      # diagnostic measurement.
+      #
+      # The other two exclusions correct the same compiler bookkeeping. Throw edges require an
+      # allocation failure to take; a bare closing brace is not an executable line. Neither
+      # option excludes a source file, a function or a decision.
+      #
+      # Measured on this change after the tests below: 219 / 219 new executable lines and
+      # source decisions. That is the number the pull-request gate receives.
+      - name: coverage, C++, written down
+        working-directory: desktop/coverage
+        run: |
+          gcovr --root "$GITHUB_WORKSPACE" \
+                --filter "$GITHUB_WORKSPACE/desktop/src/" \
+                --gcov-ignore-errors=no_working_dir_found \
+                --exclude-throw-branches \
+                --exclude-noncode-lines \
+                --decisions \
+                --sonarqube-metric decision \
+                --sonarqube "$GITHUB_WORKSPACE/coverage-cpp.xml" \
+                --print-summary --fail-under-line 87 .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: coverage-cpp
+          path: coverage-cpp.xml
+          if-no-files-found: error
+
+  sonar:
+    # Analyses; runs nothing. Every number it reads was written down by a job above, and it
+    # starts once they have all passed — an analysis of a run that failed would grade a
+    # repository half of whose tests did not finish.
+    needs: [tools, server, desktop-coverage]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Sonar assigns findings to commits and computes "new code" from history.
+          # A shallow clone leaves it guessing at both.
+          fetch-depth: 0
+
+      # The analyser reads the Rust manifest itself.
+      - uses: dtolnay/rust-toolchain@stable
+
+      # `lcov.info`, `clippy.json`, `coverage.xml` and `coverage-cpp.xml` land at the root, where
+      # sonar-project.properties looks for them. The reports name files by absolute path, and the
+      # workspace has the same path in every job of a run.
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+
+      - uses: SonarSource/sonarqube-scan-action@v8.2.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

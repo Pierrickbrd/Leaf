@@ -27,9 +27,9 @@ matching would otherwise pass in silence and go on passing — which is what
 `client_knows_the_contract.py` was doing the first time its own regex was renamed out from
 under it.
 
-**Both workflows reach it.** `ctest` runs it for a change under `desktop/`, and a change
-under `server/` runs `tools/test_guards.py`, whose last case is this guard against the real
-tree — so a `dbg!` added in a server-only pull request is refused by the server's own job
+**Both jobs reach it.** `ctest` runs it in `desktop-coverage`, and the `tools` job
+runs `tools/test_guards.py`, whose last case is this guard against the real
+tree — so a `dbg!` added in a server-only pull request is refused by that job
 rather than waiting for somebody to touch the client.
 
     tools/nothing_talks_to_the_console.py

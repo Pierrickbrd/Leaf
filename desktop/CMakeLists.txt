@@ -1171,7 +1171,7 @@ set_tests_properties(keeps-the-key talks-to-the-server keeps-its-contrast embeds
 # runner with four cores whose time it spent waiting for animations to end, not computing:
 # 364 independent cases, the slowest 17 s. Each share starts on a display of its own, as the
 # whole did, so none can move another's pointer. `LEAF_SHARD` hands each its cases, dealt out
-# in turn, and a test beside them refuses a cut that loses or doubles one. The workflows run
+# in turn, and a test beside them refuses a cut that loses or doubles one. CI runs
 # the shares with `ctest -j`; a plain `ctest` runs them one after the other, which is the old
 # time and the same coverage.
 set(leaf_seam_shards 3)
