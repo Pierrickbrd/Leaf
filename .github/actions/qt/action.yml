@@ -1,0 +1,43 @@
+name: Qt 6 from the distribution
+description: >
+  The Qt the client is built against, from the packages of the runner's own distribution,
+  with the downloaded packages kept between runs.
+
+# One list for the two jobs that build the client. It was written out twice, and two
+# copies of a list are two lists the day one of them gains a module.
+#
+# The packages themselves are kept: the sonar job spent 6 min 28 s fetching 55.3 MB from a
+# mirror serving 143 kB/s, on the job every pull request waits for. `apt-get update` still
+# runs — the index says which versions are current, and a package the cache holds at an
+# older version is simply fetched again. The key carries the runner image, so a new image
+# starts a new cache rather than installing packages built for the one before.
+runs:
+  using: composite
+  steps:
+    - id: image
+      shell: bash
+      run: echo "name=$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/cache@v6
+      with:
+        path: ~/.cache/apt-archives
+        key: apt-${{ steps.image.outputs.name }}-${{ hashFiles('.github/actions/qt/action.yml') }}
+
+    - shell: bash
+      run: |
+        archives="$HOME/.cache/apt-archives"
+        mkdir -p "$archives/partial"
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          -o Dir::Cache::Archives="$archives" -o APT::Keep-Downloaded-Packages=true \
+          cmake ninja-build ccache qt6-base-dev qt6-declarative-dev libqt6svg6-dev \
+          qml6-module-qtquick qml6-module-qtquick-controls \
+          qml6-module-qtquick-dialogs \
+          qml6-module-qtquick-layouts qml6-module-qtquick-templates \
+          qml6-module-qtqml qml6-module-qtqml-models qml6-module-qtqml-workerscript \
+          qml6-module-qt5compat-graphicaleffects qt6-image-formats-plugins \
+          xauth xvfb qtkeychain-qt6-dev
+        # apt leaves its lock and its half-downloads behind, as root: the cache would
+        # refuse to read them when it saves.
+        sudo rm -rf "$archives/partial" "$archives/lock"
+        sudo chown -R "$(id -u):$(id -g)" "$archives"

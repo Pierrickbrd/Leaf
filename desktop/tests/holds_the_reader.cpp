@@ -15,6 +15,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTest>
@@ -60,6 +61,8 @@ class HoldsTheReader : public QObject
     QJsonValue m_declared = u"RIGHT_TO_LEFT"_s;
     QJsonValue m_chosen = QJsonValue::Undefined;
     int m_pageCount = 190;
+    /// A page's width when it is not 1000: a credits page, a double page.
+    QHash<int, int> m_widthOf;
     QJsonValue m_progress = QJsonValue::Undefined;
     QJsonArray m_chapters;
     /// What the open volume carries beyond its number: title, isbn, date, summary.
@@ -111,7 +114,7 @@ class HoldsTheReader : public QObject
             all.append(QJsonObject{{u"number"_s, i},
                                    {u"name"_s, u"%1.jpg"_s.arg(i, 3, 10, QChar(u'0'))},
                                    {u"mediaType"_s, u"image/jpeg"_s},
-                                   {u"width"_s, 1000},
+                                   {u"width"_s, m_widthOf.value(i, 1000)},
                                    {u"height"_s, 1500}});
         return all;
     }
@@ -260,6 +263,9 @@ private slots:
         m_settings->setKey(u"8f3a92c1d4e5b6a7"_s);
         m_server = new Server(m_settings);
         m_library = new Library(m_server);
+        // What a strip keeps is kept by series, and every test reads the same series.
+        QSettings(QSettings::IniFormat, QSettings::UserScope, u"Leaf"_s, u"preferences"_s)
+            .remove(u"strips"_s);
         m_preferences = new Preferences;
         m_preferences->choosePageLayout(Preferences::PageLayout::Single);
         m_reader = new Reader(m_server, m_library, m_preferences);
@@ -269,6 +275,7 @@ private slots:
         m_declared = u"RIGHT_TO_LEFT"_s;
         m_chosen = QJsonValue::Undefined;
         m_pageCount = 190;
+        m_widthOf = {};
         m_progress = QJsonValue::Undefined;
         m_chapters = {};
         m_more = {};
@@ -640,6 +647,155 @@ private slots:
         QCOMPARE(m_reader->pageRatio(m_pageCount), 0.0);
     }
 
+    /// A chapter is drawn from the width most of its pages are: its credits page, narrower, and
+    /// a double page, wider, do not set it — and neither does the order they come in.
+    void a_chapter_is_as_wide_as_most_of_its_pages()
+    {
+        m_medium = u"webtoon"_s;
+        m_widthOf = {{0, 600}, {1, 600}, {2, 1440}, {3, 1440}, {189, 600}};
+        opened();
+        QCOMPARE(m_reader->commonWidth(), 1000);
+
+        m_widthOf.clear();
+        for (int page = 0; page < m_pageCount; ++page)
+            m_widthOf.insert(page, page % 2 ? 720 : 1080);
+        opened(u"e13"_s);
+        // As many of each: the wider, which is the sharper of the two.
+        QCOMPARE(m_reader->commonWidth(), 1080);
+    }
+
+    /// The first time a series is opened here, the width it is drawn at is kept as its width
+    /// and as its 100 %; once kept, opening it again at another width changes neither — and
+    /// a reader on a new day finds it as it was.
+    void a_series_keeps_the_width_it_first_opened_at_as_its_hundred_percent()
+    {
+        m_medium = u"webtoon"_s;
+        opened();
+        QCOMPARE(m_reader->stripWidth(), 0.0);
+        QSignalSpy said(m_reader, &Reader::stripChanged);
+        m_reader->startStrip(540);
+        QCOMPARE(said.size(), 1);
+        QCOMPARE(m_reader->stripWidth(), 540.0);
+        QCOMPARE(m_reader->stripBase(), 540.0);
+        m_reader->startStrip(800);
+        QCOMPARE(m_reader->stripWidth(), 540.0);
+        QCOMPARE(said.size(), 1);
+
+        opened(u"e13"_s);
+        QCOMPARE(m_reader->stripWidth(), 540.0);
+        const Preferences another;
+        QCOMPARE(another.strip(u"s1"_s, u"e13"_s).width, 540.0);
+        QCOMPARE(another.strip(u"s1"_s, u"e13"_s).base, 540.0);
+    }
+
+    /// A lasting zoom on a chapter drawn at the series' width is the series' width: the next
+    /// chapter opens at it. Past its files it stops at them, the sharpest there is, and only
+    /// the step after asks for a blur — kept by that chapter alone.
+    void a_zoom_moves_the_series_up_to_the_files_and_past_them_only_for_the_chapter()
+    {
+        m_medium = u"webtoon"_s;
+        opened();
+        m_reader->startStrip(400);
+        m_reader->zoomStrip(400, 440, 540);
+        QCOMPARE(m_reader->stripWidth(), 440.0);
+        QVERIFY(!m_reader->stripOwn());
+        m_reader->zoomStrip(440, 600, 540);
+        QCOMPARE(m_reader->stripWidth(), 540.0);
+        QVERIFY(!m_reader->stripOwn());
+        m_reader->zoomStrip(540, 594, 540);
+        QCOMPARE(m_reader->stripWidth(), 594.0);
+        QVERIFY(m_reader->stripOwn());
+        // The 100 % is still where the series began.
+        QCOMPARE(m_reader->stripBase(), 400.0);
+
+        opened(u"e13"_s);
+        QCOMPARE(m_reader->stripWidth(), 540.0);
+        QVERIFY(!m_reader->stripOwn());
+        m_reader->zoomStrip(540, 491, 540);
+        QCOMPARE(m_reader->stripWidth(), 491.0);
+
+        opened();
+        QVERIFY(m_reader->stripOwn());
+        QCOMPARE(m_reader->stripWidth(), 594.0);
+    }
+
+    /// A chapter of 720 in a series read at 1080 is drawn narrower, at its own files: a zoom
+    /// there, either way, is that chapter's, and the 1080 chapters keep their width. Ctrl 0
+    /// forgets the chapter's own, then puts the series back at its 100 %.
+    void a_chapter_held_narrower_by_its_files_keeps_its_zoom_to_itself()
+    {
+        m_medium = u"webtoon"_s;
+        opened(u"e13"_s);
+        m_reader->startStrip(1080);
+        m_reader->zoomStrip(1080, 1000, 1080);
+        QCOMPARE(m_reader->stripWidth(), 1000.0);
+
+        opened();
+        m_reader->zoomStrip(540, 594, 540);
+        QVERIFY(m_reader->stripOwn());
+        QCOMPARE(m_reader->stripWidth(), 594.0);
+        m_reader->zoomStrip(594, 490, 540);
+        QCOMPARE(m_reader->stripWidth(), 490.0);
+        QCOMPARE(m_preferences->strip(u"s1"_s, u"e12"_s).width, 1000.0);
+
+        m_reader->resetStrip();
+        QVERIFY(!m_reader->stripOwn());
+        QCOMPARE(m_reader->stripWidth(), 1000.0);
+        m_reader->resetStrip();
+        QCOMPARE(m_reader->stripWidth(), 1080.0);
+        QCOMPARE(m_preferences->strip(u"s1"_s, u"e12"_s).chapter, 0.0);
+    }
+
+    /// A webtoon's band names the chapter among the others and steps to its neighbours from
+    /// the first screen: the series is asked at once, not only near the end of the file.
+    void a_webtoon_knows_its_place_among_the_entries_from_its_first_screen()
+    {
+        m_medium = u"webtoon"_s;
+        opened();
+        QTRY_COMPARE_WITH_TIMEOUT(m_reader->entryCount(), 3, 3000);
+        QCOMPARE(m_reader->entryPosition(), 2);
+        QVERIFY(m_reader->hasPrevious());
+
+        m_reader->openNextEntry();
+        QTRY_VERIFY_WITH_TIMEOUT(!m_reader->loading() && m_reader->entryId() == u"e13"_s, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(m_reader->entryPosition(), 3, 3000);
+        QVERIFY(m_reader->next().isEmpty());
+        // Nothing after the last: the step stays where it is.
+        m_reader->openNextEntry();
+        QCOMPARE(m_reader->entryId(), u"e13"_s);
+
+        m_reader->openPreviousEntry();
+        QTRY_VERIFY_WITH_TIMEOUT(!m_reader->loading() && m_reader->entryId() == u"e12"_s, 3000);
+    }
+
+    /// A strip holds its own pages; what is fetched beside it is the next chapter, its first
+    /// three pages and its cover, once this one is three pages from its end — and not before.
+    void a_webtoon_fetches_the_next_chapter_as_this_one_ends()
+    {
+        m_medium = u"webtoon"_s;
+        opened();
+        QTRY_COMPARE_WITH_TIMEOUT(m_reader->entryCount(), 3, 3000);
+        QVERIFY(m_reader->ahead(0).isEmpty());
+
+        m_reader->scrolledTo(m_pageCount - 2);
+        const QStringList ahead = m_reader->ahead(0);
+        QCOMPARE(ahead.size(), 4);
+        QVERIFY(ahead.at(0).endsWith(u"/entries/e13/pages/0"_s));
+        QVERIFY(ahead.at(2).endsWith(u"/entries/e13/pages/2"_s));
+        QVERIFY(ahead.at(3).endsWith(u"/entries/e13/cover"_s));
+    }
+
+    /// A book has no strip: nothing of it is kept, whatever is asked.
+    void a_book_keeps_no_strip()
+    {
+        opened();
+        QVERIFY(!m_reader->webtoon());
+        m_reader->startStrip(540);
+        m_reader->zoomStrip(540, 600, 540);
+        QCOMPARE(m_reader->stripWidth(), 0.0);
+        QCOMPARE(m_preferences->strip(u"s1"_s, u"e12"_s).width, 0.0);
+    }
+
     /// The bubble over the progress bar names the chapter of the page under the pointer, not
     /// of the page on screen — by the rule that names the chapter on screen, so the two never
     /// disagree about one page.
@@ -737,6 +893,34 @@ private slots:
         QCOMPARE(volume.value(u"howFarRead"_s).toReal(), 46 / 190.0);
     }
 
+    /// Who wrote and who drew the open volume, each role a line after the series and before
+    /// the pages: the card said the series and never the people, and Takeshi Obata, who drew
+    /// every page of Death Note, was nowhere on it. Every name, wrapped rather than counted.
+    void a_volume_card_names_its_writer_and_drawer_after_the_series()
+    {
+        m_more = QJsonObject{{u"authors"_s, QJsonArray{u"Tsugumi Ōba"_s}},
+                             {u"artists"_s, QJsonArray{u"Takeshi Obata"_s}}};
+        opened();
+        const QVariantList credits = m_reader->volume().value(u"credits"_s).toList();
+        QCOMPARE(credits.size(), 2);
+        QCOMPARE(credits.at(0).toMap().value(u"name"_s).toString(), u"Scénario"_s);
+        QCOMPARE(credits.at(0).toMap().value(u"value"_s).toString(), u"Tsugumi Ōba"_s);
+        QCOMPARE(credits.at(1).toMap().value(u"name"_s).toString(), u"Dessin"_s);
+        QCOMPARE(credits.at(1).toMap().value(u"value"_s).toString(), u"Takeshi Obata"_s);
+    }
+
+    /// One person who writes and draws is one « Auteur », not the same name twice.
+    void one_person_doing_both_is_one_author_line()
+    {
+        m_more = QJsonObject{{u"authors"_s, QJsonArray{u"Hajime Isayama"_s}},
+                             {u"artists"_s, QJsonArray{u"Hajime Isayama"_s}}};
+        opened();
+        const QVariantList credits = m_reader->volume().value(u"credits"_s).toList();
+        QCOMPARE(credits.size(), 1);
+        QCOMPARE(credits.at(0).toMap().value(u"name"_s).toString(), u"Auteur"_s);
+        QCOMPARE(credits.at(0).toMap().value(u"value"_s).toString(), u"Hajime Isayama"_s);
+    }
+
     /// A field the volume does not have has no key, so the panel has no line for it — an
     /// empty value would be a label standing over nothing.
     void a_volume_without_an_isbn_has_no_isbn_in_what_the_panel_is_told()
@@ -748,6 +932,7 @@ private slots:
         QVERIFY(!volume.contains(u"summary"_s));
         QVERIFY(!volume.contains(u"title"_s));
         QVERIFY(!volume.contains(u"chapters"_s));
+        QVERIFY(volume.value(u"credits"_s).toList().isEmpty());
     }
 
     /// A chapter on its own is not the book an ISBN names: what its file carries is the

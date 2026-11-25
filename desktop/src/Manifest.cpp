@@ -158,11 +158,59 @@ bool isHidden(const QString &name)
     return name.startsWith(u'.');
 }
 
+/// Whether a file is the image a series' folder keeps as its cover — the stems and extensions
+/// of `scan/covers.rs`, which is where the server decides what a cover is. Announced beside
+/// the archives and never counted among them: `isArchive` exists because a `cover.jpg` once
+/// became a volume, and it never reached the server at all, so a series imported from a
+/// folder holding one came up with no cover.
+bool isCover(const QFileInfo &about)
+{
+    static const QStringList stems{u"cover"_s, u"default"_s, u"folder"_s, u"poster"_s,
+                                   u"series"_s};
+    static const QStringList suffixes{u"png"_s, u"jpeg"_s, u"jpg"_s, u"webp"_s, u"gif"_s,
+                                      u"tbn"_s};
+    return stems.contains(about.completeBaseName().toLower())
+           && suffixes.contains(about.suffix().toLower());
+}
+
 bool holdsArchives(const QString &at)
 {
     const QDir here(at);
     return std::ranges::any_of(here.entryInfoList(QDir::Files | QDir::NoDotAndDotDot),
                                isArchive);
+}
+
+/// A cover is announced only where something declares a series or an edition: an image
+/// beside loose volumes belongs to no one the server could give it to.
+void addCover(const QFileInfo &about, const QString &relative, bool withChecksums,
+              Manifest::Folder &into)
+{
+    Manifest::Entry cover;
+    cover.path = relative;
+    cover.size = about.size();
+    if (withChecksums)
+        cover.checksum = Manifest::checksumOf(about.absoluteFilePath());
+    into.covers.append(cover);
+}
+
+void addArchive(const QFileInfo &about, const QString &relative, bool withChecksums,
+                const Manifest::Progress &onward, Manifest::Folder &into)
+{
+    Manifest::Entry entry;
+    entry.path = relative;
+    entry.size = about.size();
+    // Every archive is opened, whether or not its bytes are hashed: what it says about
+    // itself is what the import's first screen shows, and it cost nothing more to read
+    // here than to ask for later. The checksum alone is the minutes-long part.
+    entry.members = Cbz::membersOf(about.absoluteFilePath(), withChecksums);
+    entry.title = titleIn(entry.members.entry.sidecar);
+    if (withChecksums)
+        entry.checksum = Manifest::checksumOf(about.absoluteFilePath());
+    into.files.append(entry);
+    // The running total, not the file just read: a caller counts against the volumes
+    // `found()` already told it about, and has no use for which one this was.
+    if (onward)
+        onward(into.files.size());
 }
 
 void walk(const QString &at, const QString &root, int left, Manifest::Folder &into,
@@ -199,31 +247,14 @@ void walk(const QString &at, const QString &root, int left, Manifest::Folder &in
         if (declares(about.fileName())) {
             if (QFile file(about.absoluteFilePath()); file.open(QIODevice::ReadOnly))
                 into.sidecars.append({relative, file.readAll()});
-            continue;
+        } else if (isCover(about) && declaredHere(at)) {
+            addCover(about, relative, withChecksums, into);
+        } else if (isArchive(about)) {
+            // Only what the server would call an archive: `scan/layout.rs` never treats a
+            // `cover.jpg` or any other non-`.cbz`/`.zip` file as one, and this walk used to
+            // count every file all the same.
+            addArchive(about, relative, withChecksums, onward, into);
         }
-        // Only what the server would call an archive: `scan/layout.rs` never treats a
-        // `cover.jpg` or any other non-`.cbz`/`.zip` file as one, and this walk used to
-        // count every file all the same.
-        if (!isArchive(about))
-            continue;
-
-        Manifest::Entry entry;
-        entry.path = relative;
-        entry.size = about.size();
-        if (withChecksums) {
-            entry.checksum = Manifest::checksumOf(about.absoluteFilePath());
-            // And what it says it is, while it is open anyway. A container shows the title
-            // its sidecar declares and a volume showed only its file name, so a shelf of
-            // « Tome 1.cbz » said nothing a folder listing did not. One more open per file
-            // against a full read for the checksum — and never on the instant tree, which
-            // opens nothing at all.
-            entry.title = titleIn(Cbz::sidecarOf(about.absoluteFilePath()).sidecar);
-        }
-        into.files.append(entry);
-        // The running total, not the file just read: a caller counts against the volumes
-        // `found()` already told it about, and has no use for which one this was.
-        if (onward)
-            onward(into.files.size());
     }
 }
 
@@ -258,6 +289,7 @@ Manifest::Node nodeOf(const QString &at, const QString &root, int left)
 
     const auto declared = declaredHere(at);
     node.level = declared ? declared->first : Manifest::Level::Work;
+    node.declared = declared.has_value();
     if (declared) {
         QFile file(declared->second);
         if (file.open(QIODevice::ReadOnly))
@@ -301,7 +333,42 @@ qint64 Folder::bytes() const
     qint64 total = 0;
     for (const Entry &one : files)
         total += one.size;
+    for (const Entry &one : covers)
+        total += one.size;
     return total;
+}
+
+std::optional<double> numberOf(const QString &fileName)
+{
+    const QString label = labelIn(QFileInfo(fileName).completeBaseName());
+    const auto digit = [&label](qsizetype at) {
+        return at < label.size() && label.at(at) >= u'0' && label.at(at) <= u'9';
+    };
+    const auto digitsEnd = [&digit](qsizetype from) {
+        while (digit(from))
+            ++from;
+        return from;
+    };
+
+    std::optional<double> found;
+    qsizetype i = 0;
+    while (i < label.size()) {
+        qsizetype end = i + (label.at(i) == u'-' ? 1 : 0);
+        if (!digit(end)) {
+            ++i;
+            continue;
+        }
+        end = digitsEnd(end);
+        if (end + 1 < label.size() && (label.at(end) == u'.' || label.at(end) == u',') &&
+            digit(end + 1))
+            end = digitsEnd(end + 1);
+        bool parsed = false;
+        const double value = label.mid(i, end - i).replace(u',', u'.').toDouble(&parsed);
+        if (parsed)
+            found = value;
+        i = end;
+    }
+    return found;
 }
 
 QString checksumOf(const QString &path)
@@ -327,14 +394,33 @@ Folder of(const QString &path, bool withChecksums, const Progress &onward)
 {
     const QFileInfo about(path);
     if (!about.isDir())
-        return {{}, {}, {}, Words::notAFolder()};
+        return {{}, {}, {}, Words::notAFolder(), {}};
 
     Folder found;
     found.root = about.fileName();
     walk(about.absoluteFilePath(), about.absoluteFilePath(), DeepestFolders, found,
          withChecksums, onward);
     if (!found.read())
-        return {{}, {}, {}, found.trouble};
+        return {{}, {}, {}, found.trouble, {}};
+    return found;
+}
+
+Folder single(const QString &file, bool withChecksums)
+{
+    const QFileInfo about(file);
+    if (!about.isFile() || !isArchive(about))
+        return {{}, {}, {}, Words::notAnArchive(), {}};
+
+    Folder found;
+    found.root = about.completeBaseName();
+    Entry entry;
+    entry.path = about.fileName();
+    entry.size = about.size();
+    entry.members = Cbz::membersOf(about.absoluteFilePath(), withChecksums);
+    entry.title = titleIn(entry.members.entry.sidecar);
+    if (withChecksums)
+        entry.checksum = checksumOf(about.absoluteFilePath());
+    found.files.append(entry);
     return found;
 }
 
@@ -356,6 +442,16 @@ Level levelOf(const QString &fileName)
     if (labelIn(QFileInfo(fileName).completeBaseName()).contains(u"chap"_s, Qt::CaseInsensitive))
         return Level::Chapter;
     return Level::Volume;
+}
+
+Node whole(const QString &path)
+{
+    const QFileInfo about(path);
+    if (!about.isDir())
+        return {};
+    // The root itself is kept even when it says nothing, and so is every shelf below it:
+    // what a folder holds is judged by `nodeOf`, which `found` also uses for its cards.
+    return nodeOf(about.absoluteFilePath(), about.absoluteFilePath(), DeepestFolders);
 }
 
 QList<Node> found(const QString &path)

@@ -1,4 +1,5 @@
 #include "Entries.h"
+#include "Rearrange.h"
 
 #include "Words.h"
 
@@ -64,56 +65,206 @@ QVariant gapRow(double number, Entries::Role role)
         return QVariant::fromValue(Entries::State::Missing);
     case Kind_:
         return QVariant::fromValue(Entries::Kind::Gap);
+    case Caption:
+        return Words::titled(Words::number(number), Words::missingLabel(1));
     default:
         return {};
     }
 }
 
+/// The title a file shows: its own, or for a chapter that has none the chapter's number.
+QString titleShown(const Api::Entry &file)
+{
+    if (!file.title.has_value() && file.kind == Api::Entry::Kind::Chapter
+        && file.sortKey.has_value())
+        return Words::chapterNamed(*file.sortKey);
+    return file.title.value_or(QString());
+}
+
+Entries::State stateRead(const std::optional<Api::Progress> &read)
+{
+    using enum Entries::State;
+    if (!read.has_value())
+        return NeverRead;
+    // `finished` says where the reader stands now; a volume being read again is in
+    // progress, whatever it has been before.
+    if (read->finished)
+        return Read;
+    return read->page > 0 ? InProgress : NeverRead;
+}
+
+qreal fractionRead(const std::optional<Api::Progress> &read)
+{
+    if (!read.has_value() || read->pageCount <= 0)
+        return 0.0;
+    if (read->finished)
+        return 1.0;
+    return std::clamp(qreal(read->page) / qreal(read->pageCount), qreal(0), qreal(1));
+}
+
+QString percentShown(const std::optional<Api::Progress> &read)
+{
+    if (!read.has_value() || read->finished || read->page <= 0 || read->pageCount <= 0)
+        return QString();
+    return Words::percentRead(qreal(read->page) / qreal(read->pageCount));
+}
+
 /// A file, and the record that may or may not stand beside it.
 QVariant fileRow(const Api::Entry &file, const std::optional<Api::Progress> &read,
-                 const QString &address, Entries::Role role)
+                 const QString &address, bool mixed, Entries::Role role)
 {
     using enum Entries::Role;
-    using enum Entries::State;
     switch (role) {
     case EntryId:
         return file.id;
     case Cover:
         return address.isEmpty() ? QString()
-                                 : address + u"/entries/"_s + file.id + u"/cover"_s;
+                                 : address + u"/entries/"_s + Server::segment(file.id) + u"/cover"_s;
     case FileName:
         return file.file;
+    case Chapters:
+        return file.chapterCount;
+    case Credits:
+        return Words::volumeCredits(file);
     case Number:
         return file.number.has_value() ? Words::number(*file.number) : QString();
     case Title:
-        return file.title.value_or(QString());
+        return titleShown(file);
     case Pages:
         return pagesOf(file.pageCount);
     case Weight:
         return QVariant::fromValue(file.size);
     case State_:
-        if (!read.has_value())
-            return QVariant::fromValue(NeverRead);
-        // `finished` says where the reader stands now; a volume being read again is in
-        // progress, whatever it has been before.
-        if (read->finished)
-            return QVariant::fromValue(Read);
-        return QVariant::fromValue(read->page > 0 ? InProgress : NeverRead);
+        return QVariant::fromValue(stateRead(read));
     case HowFarRead:
-        if (!read.has_value() || read->pageCount <= 0)
-            return 0.0;
-        if (read->finished)
-            return 1.0;
-        return std::clamp(qreal(read->page) / qreal(read->pageCount), qreal(0), qreal(1));
+        return fractionRead(read);
     case TimesFinished:
         return read.has_value() ? Words::timesFinished(read->timesFinished) : QString();
     case Kind_:
         return QVariant::fromValue(Entries::Kind::File);
+    case Caption:
+        return Words::tileCaption(file);
+    case Borrowed:
+        return file.borrowedCover;
+    case CoverNumber: {
+        const std::optional<double> shown = Api::numberOf(file);
+        return shown.has_value() ? Words::number(*shown) : QString();
+    }
+    case KindWord:
+        return mixed ? Words::coverWord(file.kind) : QString();
+    case ReadPercent:
+        return percentShown(read);
     case Detail:
     case Depth:
         return {};
     }
     return {};
+}
+
+qreal howFarRead(const std::optional<Api::Progress> &read, bool finished)
+{
+    if (finished)
+        return 1.0;
+    if (read.has_value() && read->pageCount > 0)
+        return std::clamp(qreal(read->page) / qreal(read->pageCount), qreal(0), qreal(1));
+    return 0.0;
+}
+
+// The arcs woven into the list: `Listing`, in the header, says why these are not methods.
+using Listing::Line;
+
+/// The line an arc begins at, or -1 when no file of this edition reaches it.
+qsizetype beginsAt(const QList<Line> &all, const Api::Arc &arc)
+{
+    // A volume range starts at the first file numbered that high; a chapter range starts
+    // inside the last file whose own first chapter is below it — `sortKey` being « the first
+    // chapter's number, otherwise the volume number ».
+    const bool byVolume = arc.unit == Api::Arc::Unit::Volume;
+    qsizetype at = -1;
+    for (qsizetype i = 0; i < all.size(); ++i) {
+        const Line &line = all.at(i);
+        if (line.arc.has_value() || !line.range.isEmpty())
+            continue;
+        const std::optional<double> key = byVolume ? line.file.number : line.file.sortKey;
+        if (!key.has_value())
+            continue;
+        if (byVolume && *key >= arc.from)
+            return i;
+        if (!byVolume && *key <= arc.from)
+            at = i;
+    }
+    return at;
+}
+
+/// The first chapter of the file after this one, which is what bounds the stretch above it.
+/// The last file of an edition has no neighbour, and its range is written open.
+std::optional<double> nextKey(const QList<Line> &all, qsizetype after)
+{
+    for (qsizetype i = after + 1; i < all.size(); ++i) {
+        const Line &line = all.at(i);
+        if (line.arc.has_value() || !line.range.isEmpty() || line.missingNumber.has_value())
+            continue;
+        if (line.file.sortKey.has_value())
+            return line.file.sortKey;
+    }
+    return std::nullopt;
+}
+
+/// Draws a frontier that falls *inside* a file: the file, then the stretch before it, the
+/// separator, and the stretch after — `first` being that file's own first chapter.
+void cutOpen(QList<Line> &all, qsizetype at, double first, const Api::Arc &arc,
+             const Line &separator)
+{
+    // The frontier is inside a line, so it is inside the line that it is drawn: the file
+    // keeps its place, and under it come the two stretches either side of the marker. Not
+    // the chapters themselves — a range is not something one opens, and `startPage` is null
+    // on most libraries.
+    Line before;
+    before.range = Words::chapterRange(first, arc.from - 1);
+    Line after;
+    const std::optional<double> next = nextKey(all, at);
+    after.range = next.has_value() ? Words::chapterRange(arc.from, *next - 1)
+                                   : Words::fromChapter(arc.from);
+    all.insert(at + 1, after);
+    all.insert(at + 1, separator);
+    all.insert(at + 1, before);
+}
+
+/// Every separator put where its arc begins, and the one volume an arc runs through cut into
+/// the two stretches either side of the frontier.
+QList<Line> woven(const QList<Line> &files, const QList<Api::Arc> &arcs)
+{
+    QList<Line> all = files;
+    if (arcs.isEmpty())
+        return all;
+
+    // A saga holds its arcs, and one level of indentation is drawn: past that the eye loses
+    // the thread. The parent has to be one of this edition's arcs — the scan guarantees it,
+    // and a link to nothing indents nothing.
+    const auto declared = [&arcs](const QString &id) {
+        return std::ranges::any_of(arcs, [&id](const Api::Arc &one) { return one.id == id; });
+    };
+
+    for (const Api::Arc &arc : arcs) {
+        Line separator;
+        separator.arc = arc;
+        separator.depth = arc.parentId.has_value() && declared(*arc.parentId) ? 1 : 0;
+
+        const qsizetype at = beginsAt(all, arc);
+        if (at < 0)
+            continue;
+        const std::optional<double> key = arc.unit == Api::Arc::Unit::Volume
+                                              ? all.at(at).file.number
+                                              : all.at(at).file.sortKey;
+        // A chapter range beginning above this file's own first chapter runs *through* it.
+        // Anything else begins at a line, and the separator goes above that line.
+        if (arc.unit == Api::Arc::Unit::Volume || !key.has_value() || *key >= arc.from) {
+            all.insert(at, separator);
+            continue;
+        }
+        cutOpen(all, at, *key, arc, separator);
+    }
+    return all;
 }
 
 } // namespace
@@ -174,7 +325,7 @@ QVariant Entries::data(const QModelIndex &index, int role) const
     if (line.missingNumber.has_value())
         return gapRow(*line.missingNumber, which);
     return fileRow(line.file, line.read, m_server == nullptr ? QString() : m_server->address(),
-                   which);
+                   m_mixed, which);
 }
 
 QHash<int, QByteArray> Entries::roleNames() const
@@ -196,6 +347,13 @@ QHash<int, QByteArray> Entries::roleNames() const
     named.insert(qToUnderlying(Depth), "depth");
     named.insert(qToUnderlying(Cover), "cover");
     named.insert(qToUnderlying(FileName), "fileName");
+    named.insert(qToUnderlying(Chapters), "chapters");
+    named.insert(qToUnderlying(Credits), "credits");
+    named.insert(qToUnderlying(Caption), "caption");
+    named.insert(qToUnderlying(Borrowed), "borrowed");
+    named.insert(qToUnderlying(CoverNumber), "coverNumber");
+    named.insert(qToUnderlying(KindWord), "kindWord");
+    named.insert(qToUnderlying(ReadPercent), "readPercent");
     return named;
 }
 
@@ -212,10 +370,31 @@ void Entries::point(const QString &seriesId, const QVariantList &missing, int ar
     reload();
 }
 
+void Entries::follow(const QVariantList &missing, int arcCount)
+{
+    if (m_id.isEmpty() || !m_server)
+        return;
+    QList<double> gaps;
+    gaps.reserve(missing.size());
+    for (const QVariant &one : missing)
+        gaps.append(one.toDouble());
+    if (gaps == m_missing && arcCount == m_arcCount)
+        return;
+    m_missing = gaps;
+    // The arcs are asked for again only when their number moved: a list with the same
+    // count of them is the same arcs, and `woven` will use the ones it holds.
+    if (arcCount != m_arcCount)
+        m_arcs.clear();
+    m_arcCount = arcCount;
+    reload();
+}
+
 void Entries::forget()
 {
     m_settling.stop();
     ++m_generation;
+    m_progressPending = false;
+    m_arcsPending = false;
     if (m_id.isEmpty() && m_all.isEmpty())
         return;
     m_id.clear();
@@ -225,6 +404,7 @@ void Entries::forget()
     m_arcs.clear();
     m_arcCount = 0;
     m_files.clear();
+    m_mixed = false;
     beginResetModel();
     m_all.clear();
     m_shown.clear();
@@ -236,6 +416,8 @@ void Entries::forget()
 void Entries::reload()
 {
     ++m_generation;
+    m_progressPending = false;
+    m_arcsPending = false;
     m_trouble.clear();
 
     if (m_id.isEmpty() || !m_server) {
@@ -310,48 +492,62 @@ void Entries::tookEntries(const Server::Answer &answer)
     }
 
     m_files = fresh;
+    // A gap is no kind of file and decides nothing.
+    const auto holds = [this](Api::Entry::Kind kind) {
+        return std::ranges::any_of(m_files, [kind](const Line &line) {
+            return !line.missingNumber.has_value() && line.file.kind == kind;
+        });
+    };
+    m_mixed = holds(Api::Entry::Kind::Volume) && holds(Api::Entry::Kind::Chapter);
     m_trouble.clear();
-    weaveArcs();
 
-    // The reading states follow. A refusal here costs the marks and not the list: a page of
-    // volumes with no ring on any line is still the page, and a banner over it would say the
-    // series could not be read at all.
+    // The reading states and the arcs are asked for together and the list is drawn when both
+    // have answered, once. Drawn as each came, every volume read « Non lu » and then the true
+    // states, and the separators pushed the lines down after that: three resets of the model,
+    // every row built three times. A refusal of either costs the marks or the separators and
+    // not the list: a page of volumes with no ring on any line is still the page, and a banner
+    // over it would say the series could not be read at all.
+    m_progressPending = true;
+    m_arcsPending = m_arcCount > 0 && m_arcs.isEmpty();
     const int mine = m_generation;
     m_server->get(u"/series/"_s + m_id + u"/progress"_s, this,
                   [this, mine](const Server::Answer &states) {
         if (mine == m_generation)
             tookProgress(states);
     });
-}
-
-void Entries::tookProgress(const Server::Answer &answer)
-{
-    m_loading = false;
-    if (!answer.went() || !answer.body.isArray()) {
-        emit changed();
+    if (!m_arcsPending)
         return;
-    }
-
-    const QHash<QString, Api::Progress> where = statesIn(answer);
-
-    for (Line &line : m_files) {
-        if (line.missingNumber.has_value())
-            continue;
-        const auto found = where.constFind(line.file.id);
-        if (found != where.constEnd())
-            line.read = *found;
-    }
-    weaveArcs();
-
-    // The separators last, and only when there are any: a screen knows before it asks.
-    if (m_arcCount <= 0 || !m_arcs.isEmpty())
-        return;
-    const int mine = m_generation;
     m_server->get(u"/series/"_s + m_id + u"/arcs"_s, this,
                   [this, mine](const Server::Answer &ranges) {
         if (mine == m_generation)
             tookArcs(ranges);
     });
+}
+
+void Entries::tookProgress(const Server::Answer &answer)
+{
+    m_progressPending = false;
+    if (answer.went() && answer.body.isArray()) {
+        const QHash<QString, Api::Progress> where = statesIn(answer);
+
+        for (Line &line : m_files) {
+            if (line.missingNumber.has_value())
+                continue;
+            const auto found = where.constFind(line.file.id);
+            if (found != where.constEnd())
+                line.read = *found;
+        }
+    }
+    settle();
+}
+
+void Entries::settle()
+{
+    if (m_progressPending || m_arcsPending)
+        return;
+    m_loading = false;
+    m_all = woven(m_files, m_arcs);
+    rebuild();
 }
 
 QHash<QString, Api::Progress> Entries::statesIn(const Server::Answer &answer)
@@ -365,6 +561,94 @@ QHash<QString, Api::Progress> Entries::statesIn(const Server::Answer &answer)
             where.insert(read.value->entryId, *read.value);
     }
     return where;
+}
+
+QVariantMap Entries::describe(const QString &entryId) const
+{
+    using Words::FileFact;
+    using Words::ReaderFact;
+    for (const Line &line : m_files) {
+        if (line.file.id != entryId)
+            continue;
+        QVariantList lines;
+        const auto add = [&lines](const QString &name, const QString &value) {
+            if (!value.isEmpty())
+                lines << QVariantMap{{u"name"_s, name}, {u"value"_s, value}};
+        };
+        const bool finished = line.read && line.read->finished;
+        const bool started = line.read && (line.read->page > 0 || finished);
+        // The panel of the open volume says the same things in the same order; the file's own
+        // lines come after, since they are what the library knows and the reader does not.
+        for (const Words::CreditLine &credit :
+             Words::creditLines(line.file.credits.authors, line.file.credits.artists))
+            add(credit.label, credit.names.join(u", "_s));
+        add(Words::readerFact(ReaderFact::Pages),
+            line.file.pageCount > 0 ? QString::number(line.file.pageCount) : QString());
+        add(Words::readerFact(ReaderFact::Published),
+            line.file.publishedOn ? Words::readerPublished(*line.file.publishedOn) : QString());
+        add(Words::readerFact(ReaderFact::Isbn), line.file.isbn.value_or(QString()));
+        add(Words::readerFact(ReaderFact::Read),
+            started ? Words::readerReadAt(line.read->page, line.file.pageCount, finished)
+                    : QString());
+        add(Words::fileFact(FileFact::File), line.file.file);
+        add(Words::fileFact(FileFact::Size), line.file.size > 0 ? Words::size(line.file.size)
+                                                                : QString());
+        add(Words::fileFact(FileFact::Added),
+            line.file.addedAt.has_value() ? Words::moment(*line.file.addedAt) : QString());
+        const qreal how = howFarRead(line.read, finished);
+        return {{u"lines"_s, lines},
+                {u"copyName"_s, line.file.downloadName.isEmpty() ? line.file.file
+                                                                 : line.file.downloadName},
+                {u"cover"_s, m_server ? m_server->address() + u"/entries/"_s + Server::segment(line.file.id)
+                                            + u"/cover"_s
+                                      : QString()},
+                {u"summary"_s, line.file.summary.value_or(QString())},
+                {u"started"_s, started},
+                {u"finished"_s, finished},
+                {u"howFarRead"_s, how}};
+    }
+    return {};
+}
+
+QVariantMap Entries::forEditing(const QString &entryId) const
+{
+    for (const Line &line : m_files) {
+        if (line.file.id != entryId)
+            continue;
+        return {{u"number"_s, line.file.number.has_value() ? Words::number(*line.file.number)
+                                                           : QString()},
+                {u"title"_s, line.file.title.value_or(QString())},
+                {u"isbn"_s, line.file.isbn.value_or(QString())},
+                {u"publishedOn"_s, line.file.publishedOn.value_or(QString())},
+                {u"summary"_s, line.file.summary.value_or(QString())},
+                // Counted from 1 as a reader counts, while the contract counts from 0: the
+                // window speaks the first and the conversion lives here, once.
+                {u"coverPage"_s, line.file.coverPage.has_value()
+                                     ? QString::number(*line.file.coverPage + 1)
+                                     : QString()},
+                {u"pageCount"_s, line.file.pageCount},
+                {u"coverImage"_s, line.file.coverImage},
+                {u"cover"_s, m_server ? m_server->address() + u"/entries/"_s + Server::segment(line.file.id)
+                                            + u"/cover"_s
+                                      : QString()},
+                {u"pages"_s, m_server ? m_server->address() + u"/entries/"_s
+                                            + Server::segment(line.file.id) + u"/pages/"_s
+                                      : QString()},
+                {u"file"_s, line.file.file},
+                // The volume's own lists, empty when it draws on its series, and the names it
+                // then draws: an own list is what the window edits, the other what it shows
+                // greyed, and sending the second back as the first would tie the volume to
+                // names its series may change.
+                {u"authors"_s, line.file.authorsInherited ? QStringList()
+                                                          : line.file.credits.authors},
+                {u"artists"_s, line.file.artistsInherited ? QStringList()
+                                                          : line.file.credits.artists},
+                {u"seriesAuthors"_s, line.file.authorsInherited ? line.file.credits.authors
+                                                                : QStringList()},
+                {u"seriesArtists"_s, line.file.artistsInherited ? line.file.credits.artists
+                                                                : QStringList()}};
+    }
+    return {};
 }
 
 void Entries::refreshProgress()
@@ -399,7 +683,7 @@ void Entries::tookProgressAgain(const Server::Answer &answer)
     };
 
     // All three, because they are copies of one another: `m_files` is what a later
-    // `weaveArcs` builds from, `m_all` what a search filters, and `m_shown` what is drawn.
+    // `woven` builds from, `m_all` what a search filters, and `m_shown` what is drawn.
     // Putting it in one of them only leaves the next search showing the state before.
     for (Line &line : m_files) {
         put(line);
@@ -422,109 +706,19 @@ void Entries::tookProgressAgain(const Server::Answer &answer)
 
 void Entries::tookArcs(const Server::Answer &answer)
 {
+    m_arcsPending = false;
     // A refusal costs the separators and nothing else. A list of volumes with no arc drawn
     // over it is still the list, and a banner would say the series could not be read.
-    if (!answer.went() || !answer.body.isArray())
-        return;
-
-    for (const QJsonValue &one : answer.body.array()) {
-        if (!one.isObject())
-            continue;
-        if (const Api::Read<Api::Arc> read = Api::arc(one.toObject()); read.ok())
-            m_arcs.append(*read.value);
-    }
-    std::ranges::sort(m_arcs, {}, &Api::Arc::position);
-    weaveArcs();
-}
-
-void Entries::weaveArcs()
-{
-    m_all = m_files;
-    if (m_arcs.isEmpty()) {
-        rebuild();
-        return;
-    }
-
-    // A saga holds its arcs, and one level of indentation is drawn: past that the eye loses
-    // the thread. The parent has to be one of this edition's arcs — the scan guarantees it,
-    // and a link to nothing indents nothing.
-    const auto declared = [this](const QString &id) {
-        return std::ranges::any_of(m_arcs, [&id](const Api::Arc &one) { return one.id == id; });
-    };
-
-    for (const Api::Arc &arc : m_arcs) {
-        Line separator;
-        separator.arc = arc;
-        separator.depth = arc.parentId.has_value() && declared(*arc.parentId) ? 1 : 0;
-
-        const qsizetype at = beginsAt(arc);
-        if (at < 0)
-            continue;
-        const std::optional<double> key = arc.unit == Api::Arc::Unit::Volume
-                                              ? m_all.at(at).file.number
-                                              : m_all.at(at).file.sortKey;
-        // A chapter range beginning above this file's own first chapter runs *through* it.
-        // Anything else begins at a line, and the separator goes above that line.
-        if (arc.unit == Api::Arc::Unit::Volume || !key.has_value() || *key >= arc.from) {
-            m_all.insert(at, separator);
-            continue;
+    if (answer.went() && answer.body.isArray()) {
+        for (const QJsonValue &one : answer.body.array()) {
+            if (!one.isObject())
+                continue;
+            if (const Api::Read<Api::Arc> read = Api::arc(one.toObject()); read.ok())
+                m_arcs.append(*read.value);
         }
-        cutOpen(at, *key, arc, separator);
+        std::ranges::sort(m_arcs, {}, &Api::Arc::position);
     }
-    rebuild();
-}
-
-qsizetype Entries::beginsAt(const Api::Arc &arc) const
-{
-    // A volume range starts at the first file numbered that high; a chapter range starts
-    // inside the last file whose own first chapter is below it — `sortKey` being « the first
-    // chapter's number, otherwise the volume number ».
-    const bool byVolume = arc.unit == Api::Arc::Unit::Volume;
-    qsizetype at = -1;
-    for (qsizetype i = 0; i < m_all.size(); ++i) {
-        const Line &line = m_all.at(i);
-        if (line.arc.has_value() || !line.range.isEmpty())
-            continue;
-        const std::optional<double> key = byVolume ? line.file.number : line.file.sortKey;
-        if (!key.has_value())
-            continue;
-        if (byVolume && *key >= arc.from)
-            return i;
-        if (!byVolume && *key <= arc.from)
-            at = i;
-    }
-    return at;
-}
-
-void Entries::cutOpen(qsizetype at, double first, const Api::Arc &arc, const Line &separator)
-{
-    // The frontier is inside a line, so it is inside the line that it is drawn: the file
-    // keeps its place, and under it come the two stretches either side of the marker. Not
-    // the chapters themselves — a range is not something one opens, and `startPage` is null
-    // on most libraries.
-    Line before;
-    before.range = Words::chapterRange(first, arc.from - 1);
-    Line after;
-    const std::optional<double> next = nextKey(at);
-    after.range = next.has_value() ? Words::chapterRange(arc.from, *next - 1)
-                                   : Words::fromChapter(arc.from);
-    m_all.insert(at + 1, after);
-    m_all.insert(at + 1, separator);
-    m_all.insert(at + 1, before);
-}
-
-/// The first chapter of the file after this one, which is what bounds the stretch above it.
-/// The last file of an edition has no neighbour, and its range is written open.
-std::optional<double> Entries::nextKey(qsizetype after) const
-{
-    for (qsizetype i = after + 1; i < m_all.size(); ++i) {
-        const Line &line = m_all.at(i);
-        if (line.arc.has_value() || !line.range.isEmpty() || line.missingNumber.has_value())
-            continue;
-        if (line.file.sortKey.has_value())
-            return line.file.sortKey;
-    }
-    return std::nullopt;
+    settle();
 }
 
 void Entries::searchFor(const QString &query)
@@ -550,11 +744,10 @@ void Entries::searchFor(const QString &query)
 
 void Entries::rebuild()
 {
-    beginResetModel();
+    QList<Line> next;
     if (m_query.isEmpty()) {
-        m_shown = m_all;
+        next = m_all;
     } else {
-        m_shown.clear();
         for (const Line &line : m_all) {
             // Its number or its title — the two things written on the line. A gap is matched
             // on its number like any other: it is in the list, so it is searchable in it.
@@ -564,9 +757,69 @@ void Entries::rebuild()
             const QString title = line.file.title.value_or(QString());
             if (number.contains(m_query, Qt::CaseInsensitive)
                 || title.contains(m_query, Qt::CaseInsensitive))
-                m_shown.append(line);
+                next.append(line);
         }
     }
-    endResetModel();
+
+    // From one list to the next row by row, as the shelf does it: a list asked for again after
+    // a mark, a scan, a deleted file keeps the rows that are still there — every cover already
+    // decoded, the one under the pointer still the one under the pointer — and a reset is for a
+    // list that comes from nothing or goes to nothing.
+    const auto name = [](const Line &line) {
+        if (line.arc.has_value())
+            return u"arc:"_s + line.arc->id + line.range;
+        if (line.missingNumber.has_value())
+            return u"gap:"_s + QString::number(*line.missingNumber);
+        return line.file.id + u"|"_s + line.range;
+    };
+    if (m_shown.isEmpty() || next.isEmpty()) {
+        beginResetModel();
+        m_shown = next;
+        endResetModel();
+        emit changed();
+        return;
+    }
+
+    QStringList held;
+    held.reserve(m_shown.size());
+    for (const Line &line : m_shown)
+        held << name(line);
+    QStringList wanted;
+    wanted.reserve(next.size());
+    for (const Line &line : next)
+        wanted << name(line);
+
+    for (const Rearrange::Step &step : Rearrange::plan(held, wanted)) {
+        using enum Rearrange::Step::Kind;
+
+        switch (step.kind) {
+        case Remove:
+            beginRemoveRows({}, step.first, step.last);
+            m_shown.remove(step.first, step.last - step.first + 1);
+            endRemoveRows();
+            break;
+        case Move:
+            beginMoveRows({}, step.from, step.from, {}, step.to);
+            m_shown.move(step.from, step.to);
+            endMoveRows();
+            break;
+        case Insert:
+            beginInsertRows({}, step.to, step.to);
+            m_shown.insert(step.to, next.at(step.to));
+            endInsertRows();
+            break;
+        }
+    }
+    // The rows are where they belong; what is written on them may have moved.
+    m_shown = next;
+    emit dataChanged(index(0), index(int(m_shown.size()) - 1));
     emit changed();
+}
+
+QList<Api::Entry> Entries::files() const
+{
+    QList<Api::Entry> out;
+    for (const Line &line : m_files)
+        out << line.file;
+    return out;
 }

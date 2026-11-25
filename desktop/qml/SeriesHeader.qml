@@ -25,9 +25,14 @@ Item {
     required property string editionsLabel
 
     signal universeAsked()
+    signal universeReimportAsked()
+    signal editionsAddAsked()
+    property string universeId: ""
     signal genreAsked(string genre)
     signal editionChosen(string seriesId)
     signal reimportAsked()
+    /// « et N autres » pressed in the line of who made it.
+    signal peopleAsked()
 
     /// The menu at the end of the title, opened without the pointer — from its own button,
     /// which takes the focus first: a popup gives the focus back to where it hangs, and
@@ -44,6 +49,14 @@ Item {
     // than pulling the tab bar up to meet it.
     implicitHeight: 208
     height: implicitHeight
+
+    // The secondary button opens the same menu as the three dots, wherever on it it lands.
+    TapHandler {
+        acceptedButtons: Qt.RightButton
+        gesturePolicy: TapHandler.ReleaseWithinBounds
+        enabled: header.seriesId.length > 0
+        onTapped: commands.show()
+    }
 
     Row {
         anchors.fill: parent
@@ -62,6 +75,7 @@ Item {
             }
 
             RoundedCover {
+                pictureName: "series-header-picture"
                 anchors.fill: parent
                 source: header.cover
             }
@@ -110,10 +124,11 @@ Item {
                     }
                 }
 
-                FocusRing {
-                    objectName: "series-universe-focus"
-                    cornerRadius: 4
-                }
+                /// Lit by the keys alone, as every ring — see `FocusRing`.
+                readonly property var cursor: Window.window ? Window.window.navigationCursor
+                                                            : null
+                readonly property bool keyed: universeName.activeFocus
+                                              && !(cursor && cursor.pointerTookOver)
 
                 LevelMark {
                     id: mark
@@ -128,20 +143,27 @@ Item {
 
                     anchors.left: mark.right
                     anchors.leftMargin: 6
+                    textFormat: Text.PlainText
                     text: header.universe
-                    color: pointer.hovered ? Theme.ink : Theme.inkSoft
+                    color: pointer.hovered || universeName.keyed ? Theme.ink : Theme.inkSoft
                     font.family: Theme.textFamily
                     font.pixelSize: 14
                 }
 
                 // Under the words *and* under the icon: it is how a link says it is one
                 // without borrowing the emerald a command wears.
+                //
+                // The keys' focus is this same rule, thicker and emerald: a ring round a short
+                // link was a frame round a line of words, and the rule is already where a
+                // link says it is one.
                 Rectangle {
+                    objectName: "series-universe-focus"
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.bottom: parent.bottom
-                    height: 1
-                    color: pointer.hovered ? Theme.inkSoft : Theme.rule
+                    height: universeName.keyed ? 2 : 1
+                    color: universeName.keyed ? Theme.emerald
+                                              : (pointer.hovered ? Theme.inkSoft : Theme.rule)
                 }
             }
 
@@ -159,6 +181,7 @@ Item {
                     anchors.right: commands.left
                     anchors.rightMargin: 8
                     anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
                     text: header.work
                     color: Theme.ink
                     font.family: Theme.displayFamily
@@ -176,8 +199,13 @@ Item {
                     glyphSide: 20
                     visible: header.seriesId.length > 0
                     seriesId: header.seriesId
+                    edition: header.edition.length > 0
                     label: header.work
+                    universeId: header.universeId
+                    universeName: header.universe
                     onReimportAsked: header.reimportAsked()
+                    onUniverseReimportAsked: header.universeReimportAsked()
+                    onEditionsAddAsked: header.editionsAddAsked()
                 }
             }
 
@@ -187,6 +215,7 @@ Item {
                 visible: header.edition.length > 0 || header.editionsLabel.length > 0
 
                 Text {
+                    textFormat: Text.PlainText
                     text: header.edition
                     color: Theme.ink
                     font.family: Theme.textFamily
@@ -206,16 +235,28 @@ Item {
             Item { width: 1; height: 8 }
 
             Text {
+                objectName: "series-makers"
                 width: parent.width
+                // Written for a rich text by `Series.description.makersLinked`, which escapes
+                // the names.
+                textFormat: Text.StyledText
                 text: header.makers
+                linkColor: Theme.emerald
+                onLinkActivated: header.peopleAsked()
                 color: Theme.inkSoft
                 font.family: Theme.textFamily
                 font.pixelSize: 14
                 elide: Text.ElideRight
+
+                HoverHandler {
+                    cursorShape: parent.hoveredLink.length > 0 ? Qt.PointingHandCursor
+                                                               : Qt.ArrowCursor
+                }
             }
 
             Text {
                 width: parent.width
+                textFormat: Text.PlainText
                 text: header.weights
                 color: Theme.inkFaint
                 font.family: Theme.textFamily
@@ -225,9 +266,9 @@ Item {
 
             Item { width: 1; height: 8 }
 
-            // Here **and** at the foot of the description, which is where the design draws
-            // them twice: up here they say at a glance what kind of book this is, down there
-            // they close the civil status they belong to. See `GenrePill`.
+            // Here and only here: they say at a glance what kind of book this is. The design
+            // drew them again at the foot of the description, and on 23/10/2026 the owner
+            // kept this one. See `GenrePill`.
             Flow {
                 width: parent.width
                 spacing: 6

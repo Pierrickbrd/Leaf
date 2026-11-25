@@ -18,7 +18,9 @@ Item {
     required property real cellHeight
     required property real coverWidth
     required property real coverHeight
-    required property real leftInset
+    /// The room a real tile keeps left of and above its cover, for its focus ring: given to
+    /// the placeholders too, so the first cover lands exactly where its shape stood.
+    required property real clearance
 
     objectName: "shelf-skeleton"
 
@@ -33,7 +35,7 @@ Item {
     SequentialAnimation {
         id: breath
 
-        running: skeleton.visible
+        running: skeleton.visible && Preferences.motion !== Preferences.Instant
         loops: Animation.Infinite
 
         NumberAnimation {
@@ -57,9 +59,14 @@ Item {
 
     property real pulse: 1.0
 
+    TileLines {
+        id: lines
+    }
+
     Column {
-        x: skeleton.leftInset
-        width: skeleton.width - 2 * skeleton.leftInset
+        x: skeleton.clearance
+        y: skeleton.clearance
+        width: skeleton.width - 2 * skeleton.clearance
         spacing: 0
 
         Repeater {
@@ -84,20 +91,26 @@ Item {
                             opacity: skeleton.pulse
                         }
 
+                        // Where the name's first line and the count will land, from the
+                        // same lines the tile draws: placeholders drawn at 12 and 32 under
+                        // the cover stood where the words of 1100 used to be, not the ones
+                        // a smaller window or a larger text size gives.
                         Rectangle {
-                            y: skeleton.coverHeight + 12
+                            y: skeleton.coverHeight + lines.above
+                               + Math.round((lines.titleLine - height) / 2)
                             width: skeleton.coverWidth * 0.72
-                            height: 12
-                            radius: 4
+                            height: Math.round(lines.titleLine * 0.6)
+                            radius: Widths.scale.size(4)
                             color: Theme.onPaper
                             opacity: skeleton.pulse
                         }
 
                         Rectangle {
-                            y: skeleton.coverHeight + 32
+                            y: skeleton.coverHeight + lines.above + lines.titleLine
+                               + lines.between + Math.round((lines.countLine - height) / 2)
                             width: skeleton.coverWidth * 0.42
-                            height: 10
-                            radius: 4
+                            height: Math.round(lines.countLine * 0.55)
+                            radius: Widths.scale.size(4)
                             color: Theme.onPaper
                             opacity: skeleton.pulse * 0.7
                         }

@@ -8,16 +8,24 @@ import Leaf
 MenuItem {
     id: option
 
-    implicitWidth: 270
-    implicitHeight: 46
-    leftPadding: 14
-    rightPadding: 14
+    // A row of words: `column()` wide, as tall as its words with air, its gaps `label`
+    // from the mark to the word. At a literal 46 a desktop text half as large again filled
+    // the row edge to edge.
+    //
+    // And wider when its words are: a profile's name, typed on another device, was cut at the
+    // floor in a menu with room beside it.
+    implicitWidth: Math.max(Widths.scale.column(270),
+                            leftPadding + contentItem.implicitWidth + rightPadding)
+    implicitHeight: Math.max(Widths.scale.size(46),
+                             contentItem.implicitHeight + 2 * Widths.space.row)
+    leftPadding: Widths.scale.size(14)
+    rightPadding: Widths.scale.size(14)
     topPadding: 0
     bottomPadding: 0
-    spacing: 12
+    spacing: Widths.space.label
 
     font.family: Theme.textFamily
-    font.pixelSize: 15
+    font.pixelSize: Widths.scale.body(15)
     font.weight: checked ? Font.Medium : Font.Normal
 
     contentItem: Text {
@@ -37,8 +45,8 @@ MenuItem {
     indicator: Item {
         x: option.leftPadding
         y: (option.height - height) / 2
-        implicitWidth: 18
-        implicitHeight: 18
+        implicitWidth: Widths.scale.icon(18)
+        implicitHeight: implicitWidth
         width: implicitWidth
         height: implicitHeight
         visible: option.checkable
@@ -57,8 +65,8 @@ MenuItem {
             objectName: option.objectName.length > 0
                         ? option.objectName + "-dot" : ""
             anchors.centerIn: parent
-            width: 8
-            height: 8
+            width: Widths.scale.icon(8)
+            height: width
             radius: width / 2
             visible: option.checked
             color: Theme.emerald

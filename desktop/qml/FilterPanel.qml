@@ -57,7 +57,15 @@ Popup {
     }
 
     objectName: "filter-panel"
-    width: 380
+    // A card of words: `column(380)`, so it grows with them and not with the window, and
+    // never past the window less the gutter it hangs from and the one it keeps on the right.
+    // At a fixed 380 a text size half as large again wrapped every author in two.
+    width: {
+        const words = Widths.scale.column(380)
+        const overlay = Overlay.overlay
+        return overlay ? Math.max(0, Math.min(words, overlay.width - 2 * Widths.space.gutter))
+                       : words
+    }
     // Bounded by the window and never by its own content: a panel that runs off the bottom
     // is a panel whose last axis nobody knows is there.
     //
@@ -65,9 +73,10 @@ Popup {
     // window, a panel taller than what was left below its button was pushed up by `margins`
     // until it fitted — over the button that opened it, on any window short enough, so the
     // one command that closes it was under it.
-    height: Math.min(sheet.implicitHeight + 2 * padding, Math.max(160, roomBelow))
-    /// The space between the button and the panel hung under it.
-    property real gap: 7
+    height: Math.min(sheet.implicitHeight + 2 * padding,
+                     Math.max(Widths.scale.size(160), roomBelow))
+    /// The space between the button and the panel hung under it: `compact`, as every menu's.
+    property real gap: Widths.space.compact
     /// From the button's foot to the window's, less the gap above the panel and the margin
     /// below it. Measured from the button and not from `y`: `y` is where the panel ended up,
     /// and a panel already pushed up read its own room from there, found itself fitting, and
@@ -79,8 +88,11 @@ Popup {
             return 520
         return overlay.height - parent.mapToItem(overlay, 0, parent.height).y - gap - margins
     }
-    padding: 8
-    margins: 10
+    // One padding for every menu and panel of the application, where the sort menu had 8,
+    // this 8 and the editions 4 (spacing audit, 23/10/2026).
+    padding: Widths.space.compact
+    // Held off the window's edge as a page is.
+    margins: Widths.space.gutter
     modal: false
     focus: true
     // OutsideParent and not Outside. The panel's parent is the button that opens it, so a
@@ -174,19 +186,23 @@ Popup {
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top
-            height: 32
+            height: Math.max(Widths.scale.size(32), headingWords.implicitHeight
+                                                    + Widths.space.compact)
 
             Text {
+                id: headingWords
+
                 anchors.left: parent.left
-                anchors.leftMargin: 6
+                anchors.leftMargin: Widths.scale.size(6)
                 anchors.verticalCenter: parent.verticalCenter
-                text: Captions.filterLabel
+                textFormat: Text.PlainText
+                text: BarCaptions.filterLabel
                 color: Theme.inkFaint
                 font.family: Theme.textFamily
-                font.pixelSize: 12
+                font.pixelSize: Widths.scale.caption(12)
                 font.weight: Font.Medium
                 font.capitalization: Font.AllUppercase
-                font.letterSpacing: 0.8
+                font.letterSpacing: Widths.scale.letters(0.8)
             }
 
             // Shown only when there is something to clear: a command that can do nothing is
@@ -194,10 +210,11 @@ Popup {
             LeafTextAction {
                 objectName: "clear-every-filter"
                 anchors.right: parent.right
-                anchors.rightMargin: 2
+                anchors.rightMargin: Widths.space.tight
                 anchors.verticalCenter: parent.verticalCenter
+                scaled: true
                 visible: panel.litCount > 0
-                label: Captions.clearFiltersLabel
+                label: BarCaptions.clearFiltersLabel
                 onTriggered: panel.shelf.filterBy({})
             }
         }
@@ -219,7 +236,7 @@ Popup {
                 id: axesColumn
 
                 width: list.width
-                spacing: 2
+                spacing: Widths.space.tight
 
                 // A count, and each axis reads its own entry. Handed the list, the open
                 // panel was rebuilt whenever a count moved — every axis folded again, what was
@@ -254,16 +271,17 @@ Popup {
 
                 Text {
                     objectName: "filter-panel-nothing"
-                    x: 6
-                    width: axesColumn.width - 12
+                    x: Widths.scale.size(6)
+                    width: axesColumn.width - 2 * x
                     visible: panel.axes.length === 0
-                    text: Captions.nothingToFilterLabel
+                    textFormat: Text.PlainText
+                    text: BarCaptions.nothingToFilterLabel
                     color: Theme.inkSoft
                     font.family: Theme.textFamily
-                    font.pixelSize: 13
+                    font.pixelSize: Widths.scale.body(13)
                     wrapMode: Text.Wrap
-                    topPadding: 6
-                    bottomPadding: 10
+                    topPadding: Widths.scale.size(6)
+                    bottomPadding: Widths.space.row
                 }
             }
         }

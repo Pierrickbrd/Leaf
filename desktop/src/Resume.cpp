@@ -102,6 +102,21 @@ qreal Resume::progress() const
     return std::clamp(qreal(*m_card->page) / qreal(m_card->pageCount), qreal(0), qreal(1));
 }
 
+void Resume::forget()
+{
+    // The generation moves, so an answer still on the wire for the profile being left is
+    // dropped rather than landing on the next one's band.
+    ++m_generation;
+    m_trouble.clear();
+    m_loading = false;
+    if (!m_card.has_value()) {
+        emit changed();
+        return;
+    }
+    m_card.reset();
+    emit changed();
+}
+
 void Resume::reload()
 {
     ++m_generation;

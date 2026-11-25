@@ -96,6 +96,22 @@ private slots:
         QVERIFY(!heard.contains("8f3a92c1d4e5b6a7"));
     }
 
+    void a_cover_redirected_elsewhere_does_not_take_the_key_along()
+    {
+        // Qt carries a request's own headers across a redirect, to another host as to the same
+        // one: a server of the library that answers a cover with a 302 would be handing the
+        // key to the address it names. The redirect is the answer, and is not followed.
+        m_leaf->answer = "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:"
+                         + QByteArray::number(m_elsewhere->serverPort())
+                         + "/series/dn/cover\r\nContent-Length: 0\r\n\r\n";
+        m_elsewhere->heard.clear();
+        fetch(m_leaf, u"/series/dn/cover"_s);
+        QTest::qWait(100);
+
+        QVERIFY(!m_elsewhere->heard.contains(Server::KeyHeader));
+        QVERIFY(!m_elsewhere->heard.contains("8f3a92c1d4e5b6a7"));
+    }
+
     void the_key_that_rides_is_the_one_in_force_now()
     {
         // Asked of the settings per request rather than held by the manager: the keyring

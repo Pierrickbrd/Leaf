@@ -54,19 +54,10 @@ Rectangle {
         Layout.preferredHeight: stop.width
         side: Widths.scale.icon(20)
 
+        // Space and Enter, and the ring, are `IconButton`'s: written here a second time they
+        // ran both, and one press on the volume's button opened its panel and shut it again.
         activeFocusOnTab: true
         Accessible.focusable: true
-        Keys.onPressed: event => {
-            if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
-                    || event.key === Qt.Key_Enter) {
-                stop.press()
-                event.accepted = true
-            }
-        }
-
-        FocusRing {
-            cornerRadius: stop.radius
-        }
 
         LeafToolTip {
             visible: stop.hovered
@@ -82,7 +73,9 @@ Rectangle {
     }
 
     objectName: "reader-bar"
-    height: Widths.scale.size(58)
+    // The application bar's 58, or its two lines and their room when the desktop's text makes
+    // them taller: at a text size of 1.5 the two lines alone need more than 58.
+    height: Math.max(Widths.scale.size(58), lines.implicitHeight + Widths.scale.size(16))
     color: Theme.surface
 
     Rectangle {
@@ -98,8 +91,8 @@ Rectangle {
         id: row
 
         anchors.fill: parent
-        anchors.leftMargin: Widths.shelfMargin
-        anchors.rightMargin: Widths.shelfMargin
+        anchors.leftMargin: Widths.space.gutter
+        anchors.rightMargin: Widths.space.gutter
         spacing: Widths.scale.room(9)
 
         Stop {
@@ -110,6 +103,8 @@ Rectangle {
         }
 
         Column {
+            id: lines
+
             Layout.fillWidth: true
             Layout.leftMargin: Widths.scale.room(4)
             spacing: 1

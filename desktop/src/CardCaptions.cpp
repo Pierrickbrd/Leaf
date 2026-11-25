@@ -46,11 +46,6 @@ QString CardCaptions::levelIcon(int level) const
     return Words::levelIcon(Manifest::Level(level));
 }
 
-QString CardCaptions::willCreateLabel(const QString &kind, const QString &name) const
-{
-    return Words::willCreate(kind, name);
-}
-
 QString CardCaptions::alreadyElsewhereLabel(const QString &name, const QString &from) const
 {
     // The folder it sits in, not the path it sits at. A reader recognises « Mangas » and

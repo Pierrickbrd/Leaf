@@ -4,6 +4,7 @@ pub mod checks;
 pub mod covers;
 pub mod identity;
 pub mod layout;
+pub mod orders;
 pub mod report;
 pub mod runner;
 pub mod scanner;

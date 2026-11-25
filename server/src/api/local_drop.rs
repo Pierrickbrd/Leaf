@@ -78,7 +78,8 @@ impl LocalDrop {
             .flatten()
             .filter_map(|e| {
                 let path = e.path();
-                let meta = std::fs::metadata(&path).ok()?;
+                // Not followed: a link in the folder names a file that is not the folder's.
+                let meta = std::fs::symlink_metadata(&path).ok()?;
                 let name = path.file_name()?.to_string_lossy().to_string();
                 meta.is_file().then_some(DropFile {
                     name,
@@ -112,7 +113,8 @@ impl LocalDrop {
         if !source.starts_with(here) {
             return Err(invalid(format!("file outside the drop: {}", request.name)));
         }
-        if !source.is_file() {
+        // A link is not a file of the drop: `consume` moves what it names, wherever that is.
+        if !std::fs::symlink_metadata(&source).is_ok_and(|meta| meta.is_file()) {
             return Err(absent(format!("no such file in the drop: {name}")));
         }
 

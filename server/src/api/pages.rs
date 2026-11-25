@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::Arc;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 
 use anyhow::Result;
 use fast_image_resize::images::Image as FirImage;
@@ -171,6 +171,10 @@ pub struct Pages {
     /// Bounded on purpose: a client that sweeps through widths must not turn this into a
     /// list of everything it ever tried, and then warm all of it.
     seen_widths: Mutex<Vec<u32>>,
+    /// Whether a shelf sweep is running, and whether another was asked for meanwhile.
+    sweep: Mutex<Sweep>,
+    /// Sweeps begun, so a test can count them.
+    sweeps: AtomicU64,
     /// How many times a page has been decoded to be shrunk.
     ///
     /// The same reason `Cx` counts queries: the defects that hurt here do not fail anything.
@@ -183,11 +187,52 @@ pub struct Pages {
     /// On the instance and not in a `static`, unlike `cbz::OPENED`: tests in one binary share
     /// a process, and a global count is one a test can only print. Each `Pages` has its own.
     decoded: AtomicU64,
+    /// Decodes under way, and the most there have been at once.
+    decoding: Mutex<usize>,
+    freed: Condvar,
+    /// How many may be under way together; [`MAX_DECODES`] unless a test narrows it.
+    places: usize,
+    peak: AtomicU64,
     /// The resizes in progress, by tag, so the same one is never done twice at once.
     flights: Flights,
 }
 
+/// How many pages may be decoded at the same moment. A decode holds the whole bitmap — fourteen
+/// megabytes for an ordinary page, hundreds for a strip — and nothing bounded how many were
+/// begun at once but the blocking pool, five hundred and twelve threads: a reader opening a
+/// webtoon, or a client asking widths in a loop, filled the memory of the machine with
+/// bitmaps. The others wait their turn, as they would wait for the processor.
+pub const MAX_DECODES: usize = 4;
+
 impl Pages {
+    /// Fewer places than the default, to see the others wait for them.
+    pub fn with_decode_places(mut self, places: usize) -> Self {
+        self.places = places.max(1);
+        self
+    }
+
+    /// The most decodes that have been under way together since this instance began.
+    pub fn peak_decodes(&self) -> u64 {
+        self.peak.load(Ordering::Relaxed)
+    }
+
+    /// Waits for a place among the decodes in progress and holds it until dropped.
+    fn deciding(&self) -> Decoding<'_> {
+        let mut now = self
+            .decoding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *now >= self.places {
+            now = self
+                .freed
+                .wait(now)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *now += 1;
+        self.peak.fetch_max(*now as u64, Ordering::Relaxed);
+        Decoding(self)
+    }
+
     pub fn new(db: Arc<Db>, cache_root: PathBuf, quality: u8, max_cache_bytes: u64) -> Self {
         // Sweeping on every write would stat the whole cache for every page; sweeping too
         // rarely lets it overshoot. An eighth of the budget is the compromise, floored so a
@@ -206,7 +251,13 @@ impl Pages {
             written_since_check: AtomicU64::new(0),
             check_every,
             seen_widths: Mutex::new(Vec::new()),
+            sweep: Mutex::new(Sweep::default()),
+            sweeps: AtomicU64::new(0),
             decoded: AtomicU64::new(0),
+            decoding: Mutex::new(0),
+            places: MAX_DECODES,
+            freed: Condvar::new(),
+            peak: AtomicU64::new(0),
             flights: Flights::default(),
         }
     }
@@ -214,6 +265,20 @@ impl Pages {
     /// How many pages this instance has decoded in order to shrink them.
     pub fn decodes(&self) -> u64 {
         self.decoded.load(Ordering::Relaxed)
+    }
+
+    /// Empties the cache of resized pages and covers, markers included. Nothing is lost that
+    /// the originals cannot make again: the next request for a page resizes it once more.
+    pub fn purge_cache(&self) -> super::cache_budget::Purged {
+        let done = super::cache_budget::purge(&self.cache_root);
+        // The sweep counts what was written since it last looked; what was written is gone.
+        self.written_since_check.store(0, Ordering::Relaxed);
+        tracing::info!(
+            files = done.files,
+            bytes = done.bytes,
+            "cache emptied on request"
+        );
+        done
     }
 
     pub fn prepare(&self) {
@@ -317,22 +382,61 @@ impl Pages {
         held: Option<&str>,
         ceiling: &Ceiling,
     ) -> Result<Option<Served>> {
-        // A cover chosen on disk wins over page zero — that is what "cover.jpg beside the
-        // volumes" is for.
+        self.cover_inner(entry_id, width, held, ceiling, true)
+    }
+
+    /// `inherit` is whether a file with no cover of its own may speak with its series'. The
+    /// series asking for the cover of its first file says no: that file would ask the series
+    /// back, and the two would ask each other for ever.
+    fn cover_inner(
+        &self,
+        entry_id: &str,
+        width: Option<u32>,
+        held: Option<&str>,
+        ceiling: &Ceiling,
+        inherit: bool,
+    ) -> Result<Option<Served>> {
+        // The page the archive itself names comes first, then an image sitting beside it, then
+        // page zero. The archive's own word is the later and deliberate one — somebody opened
+        // the volume and picked a page — where a file beside it may be a leftover from a
+        // download; and it is the only one of the three that travels with the volume.
         let sql = format!(
-            "SELECT x.cover_file FROM entry x WHERE x.id = ?1{}",
+            "SELECT x.cover_page, x.cover_file, x.edition_id,
+                    (SELECT p.entry_name FROM page p WHERE p.entry_id = x.id AND p.number = 0)
+             FROM entry x WHERE x.id = ?1{}",
             ceiling.and_edition("x.edition_id")
         );
-        let chosen: Option<Option<String>> = self
-            .db
-            .read(|cx| cx.query_one(&sql, [entry_id], |r| r.get::<_, Option<String>>(0)))?;
+        type Chosen = (Option<i64>, Option<String>, String, Option<String>);
+        let chosen: Option<Chosen> = self.db.read(|cx| {
+            cx.query_one(&sql, [entry_id], |r| {
+                Ok((
+                    r.get::<_, Option<i64>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            })
+        })?;
         // Not there for this caller: not even page zero, which the line below would
         // otherwise reach by asking again with the same ceiling and a second query.
-        let Some(chosen) = chosen else {
+        let Some((page, file, edition, first_page)) = chosen else {
             return Ok(None);
         };
+        // A file numbered from `001` has no cover of its own, chapter or volume: its first page
+        // is a page of the story. 120 chapters each showing their opening panel made a shelf of
+        // identical-looking tiles with nothing to tell the series by.
+        if inherit
+            && page.is_none()
+            && file.is_none()
+            && crate::archive::opens_without_cover(first_page.as_deref())
+        {
+            return self.series_cover_or_unchanged(&edition, width, held, ceiling);
+        }
         let requested = tile_width(width);
-        if let Some(path) = chosen {
+        if let Some(number) = page {
+            return self.page_or_unchanged(entry_id, number, Some(requested), held, ceiling);
+        }
+        if let Some(path) = file {
             return self.serve_file(Path::new(&path), requested, held);
         }
         // Not a read: a cover is a tile on a shelf, and nobody has opened the volume.
@@ -370,14 +474,38 @@ impl Pages {
             self.remember_width(requested);
         }
         let visible = ceiling.and_edition("ed.id");
-        let sql = format!("SELECT ed.cover_file FROM edition ed WHERE ed.id = ?1{visible}");
-        let chosen: Option<Option<String>> = self
-            .db
-            .read(|cx| cx.query_one(&sql, [edition_id], |r| r.get::<_, Option<String>>(0)))?;
-        let Some(chosen) = chosen else {
+        let sql = format!(
+            "SELECT ed.cover_file,
+                    (SELECT x.id FROM entry x
+                      WHERE x.edition_id = ed.id AND x.volume_number = ed.cover_volume)
+             FROM edition ed WHERE ed.id = ?1{visible}"
+        );
+        let chosen: Option<(Option<String>, Option<String>)> = self.db.read(|cx| {
+            cx.query_one(&sql, [edition_id], |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ))
+            })
+        })?;
+        let Some((path, volume)) = chosen else {
             return Ok(None);
         };
-        if let Some(path) = chosen {
+        // An image the server wrote comes first, then a volume somebody picked, then a
+        // `cover.jpg` placed by hand, then the first volume. Choosing either of the first two
+        // removes or forgets the other, so only one of them exists at a time and the order
+        // between them is a safety, not a rule the reader meets. A number no volume holds any
+        // more (the file left) finds no entry, and the series goes on to the folder's image.
+        let own = path.as_deref().filter(|p| crate::scan::covers::is_own(p));
+        if let Some(path) = own {
+            return self.serve_file(Path::new(path), requested, held);
+        }
+        // Never inheriting: a chosen volume numbered from `001` would ask the series back,
+        // the series would choose the same volume again, and the stack would run out.
+        if let Some(entry) = volume {
+            return self.cover_inner(&entry, Some(requested), held, ceiling, false);
+        }
+        if let Some(path) = path {
             return self.serve_file(Path::new(&path), requested, held);
         }
         let first: Option<String> = self.db.read(|cx| {
@@ -389,7 +517,7 @@ impl Pages {
         })?;
         match first {
             // The series was already found visible above, and its entries are its own.
-            Some(entry) => self.cover_or_unchanged(&entry, Some(requested), held, ceiling),
+            Some(entry) => self.cover_inner(&entry, Some(requested), held, ceiling, false),
             None => Ok(None),
         }
     }
@@ -665,6 +793,7 @@ impl Pages {
         // Counted here rather than inside `resize`, because this is the line that commits to
         // the decode: everything above decided whether to reach it.
         self.decoded.fetch_add(1, Ordering::Relaxed);
+        let place = self.deciding();
         let resized = match resize(
             &source,
             plan.target,
@@ -681,6 +810,7 @@ impl Pages {
                 return plain(source);
             }
         };
+        drop(place);
 
         // A resize can come out larger than its source — a third to a half of the WebP pages
         // of the real library did, when this encoded JPEG. Serving that would be absurd, so
@@ -960,6 +1090,22 @@ impl Pages {
             return;
         }
 
+        // One sweep at a time. Every `commit` ends here, and fifty commits in a row started
+        // fifty threads that each read the whole library again, one behind the other. A call
+        // that finds a sweep running only says "once more": the running one does a complete
+        // pass again when it ends, which also covers whatever the later commits installed.
+        {
+            let mut sweep = self
+                .sweep
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if sweep.running {
+                sweep.again = true;
+                return;
+            }
+            sweep.running = true;
+        }
+
         // A thread of its own rather than the read-ahead queue. That queue is four pages
         // deep per worker **on purpose** — when it fills, the page furthest ahead is
         // dropped, because the reader is about to turn to the nearest one. Handing it five
@@ -974,32 +1120,68 @@ impl Pages {
             .name("leaf-covers".into())
             .spawn(move || {
                 let Some(pages) = pages.upgrade() else { return };
-                let editions: Vec<String> = pages
-                    .db
-                    .read(|cx| cx.query("SELECT id FROM edition", [], |r| r.get::<_, String>(0)))
-                    .unwrap_or_default();
-                let (mut done, wanted) = (0usize, editions.len() * widths.len());
-                for id in editions {
-                    for width in &widths {
-                        let key = format!("cover:{id}@{width}");
-                        // Claimed, so a request arriving for the same tile does not make it
-                        // twice — and released whatever happens, or it is never made again.
-                        if !pages.claim(&key) {
-                            continue;
-                        }
-                        let released = Claim(&pages, &key);
-                        if let Err(e) = pages.series_cover(&id, Some(*width), &Ceiling::NONE) {
-                            tracing::debug!(key, error = %e, "could not warm");
-                        }
-                        drop(released);
-                        done += 1;
+                // Handed back on the way out, a panic included: a sweep that died holding
+                // the flag would have made every later one a silent "once more".
+                let _over = SweepOver(&pages);
+                let mut widths = widths;
+                loop {
+                    pages.sweeps.fetch_add(1, Ordering::Relaxed);
+                    pages.sweep_once(&widths);
+                    let mut sweep = pages
+                        .sweep
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if !std::mem::take(&mut sweep.again) {
+                        sweep.running = false;
+                        return;
                     }
+                    drop(sweep);
+                    // A width seen while this one ran is worth the pass that follows.
+                    widths = pages
+                        .seen_widths
+                        .lock()
+                        .map(|w| w.clone())
+                        .unwrap_or(widths);
                 }
-                tracing::info!(done, wanted, "shelf covers prepared");
             });
         if let Err(e) = started {
+            self.sweep
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .running = false;
             tracing::warn!(error = %e, "no thread for the shelf covers");
         }
+    }
+
+    fn sweep_once(&self, widths: &[u32]) {
+        let editions: Vec<String> = self
+            .db
+            .read(|cx| cx.query("SELECT id FROM edition", [], |r| r.get::<_, String>(0)))
+            .unwrap_or_default();
+        let (mut done, wanted) = (0usize, editions.len() * widths.len());
+        for id in editions {
+            for width in widths {
+                let key = format!("cover:{id}@{width}");
+                // Claimed, so a request arriving for the same tile does not make it
+                // twice — and released whatever happens, or it is never made again.
+                if !self.claim(&key) {
+                    continue;
+                }
+                let released = Claim(self, &key);
+                if let Err(e) = self.series_cover(&id, Some(*width), &Ceiling::NONE) {
+                    tracing::debug!(key, error = %e, "could not warm");
+                }
+                drop(released);
+                done += 1;
+            }
+        }
+        tracing::info!(done, wanted, "shelf covers prepared");
+    }
+
+    /// Shelf sweeps begun. Exposed so a test can count them: fifty asks that make fifty
+    /// sweeps return the same covers as two, and only a count tells them apart.
+    pub fn sweeps(&self) -> u64 {
+        self.sweeps.load(Ordering::Relaxed)
     }
 
     fn remember_width(&self, width: u32) {
@@ -1040,6 +1222,34 @@ struct Claim<'a>(&'a Pages, &'a str);
 impl Drop for Claim<'_> {
     fn drop(&mut self) {
         self.0.release(self.1);
+    }
+}
+
+#[derive(Default)]
+struct Sweep {
+    running: bool,
+    again: bool,
+}
+
+/// Gives the sweep flag back when its thread dies.
+///
+/// Only then: a sweep that ends normally gives it back itself, under the same lock as its
+/// last look at `again`. Given back a second time here, the flag of a sweep started in
+/// between was cleared under it and a third could run beside it.
+struct SweepOver<'a>(&'a Pages);
+
+impl Drop for SweepOver<'_> {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        let mut sweep = self
+            .0
+            .sweep
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        sweep.running = false;
+        sweep.again = false;
     }
 }
 
@@ -1279,4 +1489,19 @@ fn touch(path: &Path) -> std::io::Result<()> {
         .write(true)
         .open(path)?
         .set_modified(std::time::SystemTime::now())
+}
+
+/// A place among the decodes, given back when it goes — also when the decoder panics.
+struct Decoding<'a>(&'a Pages);
+
+impl Drop for Decoding<'_> {
+    fn drop(&mut self) {
+        let mut now = self
+            .0
+            .decoding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *now -= 1;
+        self.0.freed.notify_one();
+    }
 }

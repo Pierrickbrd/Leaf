@@ -17,11 +17,14 @@ namespace {
 
 /// One pill, ready to draw and ready to send back: the contract's spelling, the French, and
 /// the count the server arrived at.
-QVariantMap pill(const QString &value, const QString &label, int count)
+QVariantMap pill(const QString &value, const QString &word, int count)
 {
     return {
         {u"value"_s, value},
-        {u"label"_s, label},
+        // The two apart as well as together: the row draws the count in a badge of its own, and
+        // the whole is what a screen reader says.
+        {u"word"_s, word},
+        {u"label"_s, Words::pill(word, count)},
         {u"count"_s, count},
     };
 }
@@ -51,7 +54,7 @@ QVariantList readStatusPills(const QList<Api::Facet> &facets)
     for (const Api::ReadStatus status : {Unread, InProgress, Read}) {
         const QString value = Api::spell(status);
         if (const auto count = counted(facets, value); count.has_value())
-            pills << pill(value, Words::pill(Words::readStatus(status), *count), *count);
+            pills << pill(value, Words::readStatus(status), *count);
     }
     return pills;
 }
@@ -66,7 +69,7 @@ QVariantList mediumPills(const QList<Api::Facet> &facets)
          {Manga, Bd, Comics, Manhwa, Manhua, Webtoon, Artbook, Other}) {
         const QString value = Api::spell(medium);
         if (const auto count = counted(facets, value); count.has_value())
-            pills << pill(value, Words::pill(Words::medium(medium), *count), *count);
+            pills << pill(value, Words::medium(medium), *count);
     }
     return pills;
 }
@@ -79,7 +82,7 @@ QVariantList verbatimPills(const QList<Api::Facet> &facets)
     for (const Api::Facet &one : facets) {
         if (one.value.trimmed().isEmpty())
             continue;
-        pills << pill(one.value, Words::pill(one.value, one.count), one.count);
+        pills << pill(one.value, one.value, one.count);
     }
     return pills;
 }
@@ -94,7 +97,7 @@ QVariantList worded(const QList<Api::Facet> &facets, Say say)
     for (const Api::Facet &one : facets) {
         if (one.value.trimmed().isEmpty())
             continue;
-        pills << pill(one.value, Words::pill(say(one.value), one.count), one.count);
+        pills << pill(one.value, say(one.value), one.count);
     }
     return pills;
 }

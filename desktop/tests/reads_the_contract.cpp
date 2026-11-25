@@ -49,6 +49,7 @@ QJsonObject aSeries()
         {u"publisher"_s, u"Kana"_s},
         {u"collection"_s, QJsonValue::Null},
         {u"colour"_s, true},
+        {u"coverVolume"_s, 2.5},
         {u"language"_s, u"fr"_s},
         {u"addedAt"_s, 1750000000},
         {u"lastAddedAt"_s, 1755000000},
@@ -303,6 +304,230 @@ private slots:
         QCOMPARE(got.value->toSend, QList<QString>({u"Elfes/Tome 1.cbz"_s}));
     }
 
+    /// Every field of the new schemas, so a field the client stops reading is a test that
+    /// fails and not a screen that quietly shows less than the server knew.
+    void a_reimport_answer_is_read_whole()
+    {
+        const QJsonObject held{
+            {u"entryId"_s, u"en-1"_s},   {u"number"_s, 2.5},        {u"title"_s, u"Ciel"_s},
+            {u"file"_s, u"Tome 2.cbz"_s}, {u"size"_s, 4096},        {u"pages"_s, 180},
+            {u"chapters"_s, QJsonArray{1, 2}}, {u"page"_s, 40},     {u"finished"_s, false},
+            {u"others"_s, 2}};
+        const Api::Read<Api::Opened> got = Api::opened(QJsonObject{
+            {u"id"_s, u"imp_1"_s},
+            {u"root"_s, u"Blue Period"_s},
+            {u"bytesToSend"_s, 10},
+            {u"target"_s,
+             QJsonObject{{u"kind"_s, u"CHAPTER"_s},
+                         {u"id"_s, u"ch-1"_s},
+                         {u"name"_s, u"Chapitre 4"_s},
+                         {u"trail"_s,
+                          QJsonArray{QJsonObject{{u"kind"_s, u"SERIES"_s},
+                                                 {u"id"_s, u"ed-1"_s},
+                                                 {u"name"_s, u"Blue Period"_s},
+                                                 {u"count"_s, 12}}}}}},
+            {u"volumes"_s,
+             QJsonArray{QJsonObject{
+                 {u"path"_s, u"Tome 2.cbz"_s},
+                 {u"lands"_s, u"Tome 2.cbz"_s},
+                 {u"outcome"_s, u"REPLACE"_s},
+                 {u"number"_s, 2.5},
+                 {u"entryId"_s, u"en-1"_s},
+                 {u"wanted"_s, u"en-9"_s},
+                 {u"present"_s, held},
+                 {u"arriving"_s, QJsonObject{{u"pages"_s, 190},
+                                             {u"title"_s, u"Ciel"_s},
+                                             {u"chapters"_s, QJsonArray{1, 2, 3}}}},
+                 {u"differs"_s, QJsonArray{u"pages"_s}}}}},
+            {u"absent"_s, QJsonArray{held}},
+            {u"splice"_s,
+             QJsonObject{{u"pagesBefore"_s, 180},
+                         {u"pagesAfter"_s, 190},
+                         {u"page"_s, 40},
+                         {u"pageBecomes"_s, 45},
+                         {u"chapters"_s,
+                          QJsonArray{QJsonObject{{u"id"_s, u"ch-1"_s},
+                                                 {u"number"_s, 4},
+                                                 {u"title"_s, QJsonValue::Null},
+                                                 {u"from"_s, 30},
+                                                 {u"to"_s, 59},
+                                                 {u"becomesFrom"_s, 30},
+                                                 {u"becomesTo"_s, 69},
+                                                 {u"outcome"_s, u"REPLACE"_s}}}}}},
+            {u"absentSeries"_s, QJsonArray{QJsonObject{{u"workId"_s, u"wk-2"_s},
+                                                       {u"seriesId"_s, u"ed-2"_s},
+                                                       {u"name"_s, u"Elfes"_s},
+                                                       {u"volumes"_s, 7}}}},
+            {u"resembles"_s, QJsonArray{QJsonObject{{u"at"_s, u"blue period"_s},
+                                                    {u"seriesId"_s, u"ed-1"_s},
+                                                    {u"name"_s, u"Blue Period"_s},
+                                                    {u"from"_s, u"BD"_s}}}},
+            {u"toSend"_s, QJsonArray{u"Tome 2.cbz"_s}},
+            {u"alreadyThere"_s, QJsonArray{}},
+        });
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+
+        QCOMPARE(got.value->target->kind, u"CHAPTER"_s);
+        QCOMPARE(got.value->target->name, u"Chapitre 4"_s);
+        QCOMPARE(got.value->target->trail.constFirst().count, 12);
+        const Api::VolumeMatch &match = got.value->volumes.constFirst();
+        QCOMPARE(match.path, u"Tome 2.cbz"_s);
+        QCOMPARE(match.lands, u"Tome 2.cbz"_s);
+        QCOMPARE(match.outcome, Api::Outcome::Replace);
+        QCOMPARE(match.number, std::optional<double>(2.5));
+        QCOMPARE(match.entryId, u"en-1"_s);
+        QCOMPARE(match.wanted, u"en-9"_s);
+        QCOMPARE(match.arriving.pages, std::optional<int>(190));
+        QCOMPARE(match.arriving.title, std::optional<QString>(u"Ciel"_s));
+        QCOMPARE(match.arriving.chapters, QList<double>({1, 2, 3}));
+        QCOMPARE(match.differs, QList<QString>({u"pages"_s}));
+        QVERIFY(match.present);
+        QCOMPARE(match.present->file, u"Tome 2.cbz"_s);
+        QCOMPARE(match.present->size, 4096LL);
+        QCOMPARE(match.present->pages, 180);
+        QCOMPARE(match.present->chapters, QList<double>({1, 2}));
+        QCOMPARE(match.present->page, std::optional<int>(40));
+        QCOMPARE(match.present->others, 2);
+        QVERIFY(!match.present->finished);
+        QCOMPARE(got.value->absent.constFirst().entryId, u"en-1"_s);
+        QCOMPARE(got.value->splice->pagesAfter, 190);
+        QCOMPARE(got.value->splice->pageBecomes, std::optional<int>(45));
+        QCOMPARE(got.value->splice->chapters.constFirst().outcome, u"REPLACE"_s);
+        QCOMPARE(got.value->splice->chapters.constFirst().becomesTo, 69);
+        QVERIFY(!got.value->splice->chapters.constFirst().title);
+        QCOMPARE(got.value->absentSeries.constFirst().volumes, 7);
+        QCOMPARE(got.value->resembles.constFirst().from, u"BD"_s);
+
+        const Api::Read<Api::Installed> done = Api::installed(QJsonObject{
+            {u"root"_s, u"Blue Period"_s},
+            {u"installed"_s, 1},
+            {u"orphans"_s, QJsonArray{}},
+            {u"replaced"_s,
+             QJsonArray{QJsonObject{{u"path"_s, u"Tome 2.cbz"_s},
+                                    {u"entryId"_s, u"en-1"_s},
+                                    {u"keptAt"_s, u"replaced/imp_1/Tome 2.cbz"_s}}}},
+        });
+        QVERIFY2(done.ok(), qPrintable(done.trouble));
+        QCOMPARE(done.value->replaced.constFirst().keptAt, u"replaced/imp_1/Tome 2.cbz"_s);
+        QCOMPARE(done.value->replaced.constFirst().entryId, u"en-1"_s);
+    }
+
+    /// The announcement says where each file will be filed, under what name, and which
+    /// files would meet. An older server says none of it, and the import goes on without.
+    void an_announcement_is_read_with_the_names_the_server_gives()
+    {
+        const Api::Read<Api::Opened> got = Api::opened(QJsonObject{
+            {u"id"_s, u"imp_1"_s},
+            {u"root"_s, u"Dragon Ball"_s},
+            {u"creates"_s, QJsonArray{}},
+            {u"replaces"_s, QJsonArray{}},
+            {u"declarations"_s, QJsonArray{}},
+            {u"toSend"_s, QJsonArray{}},
+            {u"alreadyThere"_s, QJsonArray{}},
+            {u"bytesToSend"_s, 0},
+            {u"landsAs"_s,
+             QJsonArray{QJsonObject{{u"path"_s, u"Perfect/DB 01.cbz"_s},
+                                    {u"folder"_s, u"Dragon Ball › Perfect"_s},
+                                    {u"file"_s, u"dragon-ball_tome_001.cbz"_s},
+                                    {u"wasCalled"_s, u"DB 01.cbz"_s}}}},
+            {u"collisions"_s, QJsonArray{QJsonObject{{u"path"_s, u"a.cbz"_s},
+                                                     {u"with"_s, u"b.cbz"_s}}}},
+            {u"reshelved"_s, QJsonArray{QJsonObject{{u"edition"_s, u"Dragon Ball › Originale"_s},
+                                                    {u"count"_s, 42}}}},
+        });
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        QCOMPARE(got.value->landsAs.constFirst().folder, u"Dragon Ball › Perfect"_s);
+        QCOMPARE(got.value->landsAs.constFirst().file, u"dragon-ball_tome_001.cbz"_s);
+        QCOMPARE(got.value->landsAs.constFirst().wasCalled, u"DB 01.cbz"_s);
+        QCOMPARE(got.value->collisions.constFirst().with, u"b.cbz"_s);
+        QCOMPARE(got.value->reshelved.constFirst().count, 42);
+
+        const Api::Read<Api::Opened> named = Api::opened(QJsonObject{
+            {u"id"_s, u"imp_2"_s},
+            {u"root"_s, u"Ajout"_s},
+            {u"creates"_s, QJsonArray{}},
+            {u"replaces"_s, QJsonArray{}},
+            {u"declarations"_s, QJsonArray{}},
+            {u"toSend"_s, QJsonArray{}},
+            {u"alreadyThere"_s, QJsonArray{}},
+            {u"bytesToSend"_s, 0},
+            {u"editionsNeedingAName"_s,
+             QJsonArray{QJsonObject{{u"path"_s, u"@current"_s}, {u"current"_s, true}}}},
+            {u"problems"_s, QJsonArray{QJsonObject{{u"path"_s, u"B"_s},
+                                                    {u"kind"_s, u"DUPLICATE"_s},
+                                                    {u"with"_s, u"Originale"_s}}}},
+        });
+        QVERIFY2(named.ok(), qPrintable(named.trouble));
+        QVERIFY(named.value->editionsNeedingAName.constFirst().current);
+        QCOMPARE(named.value->problems.constFirst().with, u"Originale"_s);
+
+        const Api::Read<Api::Opened> older = Api::opened(QJsonObject{
+            {u"id"_s, u"imp_1"_s},
+            {u"root"_s, u"Dragon Ball"_s},
+            {u"creates"_s, QJsonArray{}},
+            {u"replaces"_s, QJsonArray{}},
+            {u"declarations"_s, QJsonArray{}},
+            {u"toSend"_s, QJsonArray{}},
+            {u"alreadyThere"_s, QJsonArray{}},
+            {u"bytesToSend"_s, 0},
+        });
+        QVERIFY2(older.ok(), qPrintable(older.trouble));
+        QVERIFY(older.value->landsAs.isEmpty());
+    }
+
+    /// The server may learn a word before the client does: the file stays on screen, by its
+    /// path and its volume, as « Other » rather than vanishing for being described too well.
+    void an_outcome_the_client_does_not_know_keeps_its_volume()
+    {
+        const Api::Read<Api::Opened> got = Api::opened(QJsonObject{
+            {u"id"_s, u"imp_1"_s},
+            {u"root"_s, u"S"_s},
+            {u"bytesToSend"_s, 0},
+            {u"volumes"_s,
+             QJsonArray{QJsonObject{{u"path"_s, u"Tome 1.cbz"_s},
+                                    {u"outcome"_s, u"MERGE"_s},
+                                    {u"entryId"_s, u"en-1"_s},
+                                    {u"arriving"_s, QJsonObject{}}}}},
+        });
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        QCOMPARE(got.value->volumes.constFirst().outcome, Api::Outcome::Other);
+        QCOMPARE(got.value->volumes.constFirst().entryId, u"en-1"_s);
+    }
+
+    /// Structure is strict: a comparison that does not say which file it is about names
+    /// nothing, and is refused with the field.
+    void a_volume_match_without_its_path_is_refused_and_named()
+    {
+        const Api::Read<Api::Opened> got = Api::opened(QJsonObject{
+            {u"id"_s, u"imp_1"_s},
+            {u"root"_s, u"S"_s},
+            {u"bytesToSend"_s, 0},
+            {u"volumes"_s, QJsonArray{QJsonObject{{u"outcome"_s, u"SAME"_s},
+                                                  {u"arriving"_s, QJsonObject{}}}}},
+        });
+        QVERIFY(!got.ok());
+        QVERIFY2(got.trouble.contains(u"path"_s), qPrintable(got.trouble));
+    }
+
+    /// « éditeur » says something differs and « Pika » says what a rewrite would lose, which
+    /// is what a reader decides on.
+    void the_present_values_of_a_declaration_are_read()
+    {
+        const Api::Read<Api::Opened> got = Api::opened(QJsonObject{
+            {u"id"_s, u"imp_1"_s},
+            {u"root"_s, u"S"_s},
+            {u"bytesToSend"_s, 0},
+            {u"declarations"_s,
+             QJsonArray{QJsonObject{{u"path"_s, u"work.json"_s},
+                                    {u"differs"_s, QJsonArray{u"publisher"_s}},
+                                    {u"present"_s,
+                                     QJsonObject{{u"publisher"_s, u"Pika"_s}}}}}},
+        });
+        QVERIFY2(got.ok(), qPrintable(got.trouble));
+        QCOMPARE(got.value->declarations.constFirst().present.value(u"publisher"_s).toString(),
+                 u"Pika"_s);
+    }
+
     /// And what it would *move*: a series the library already holds, that this folder
     /// declares somewhere else. It is not a creation and the dialog must not word it as one
     /// — the two are told apart only because a folder's identity travels in its sidecar.
@@ -316,7 +541,8 @@ private slots:
              QJsonArray{QJsonObject{{u"workId"_s, u"w-1"_s},
                                     {u"name"_s, u"Elfes"_s},
                                     {u"from"_s, u"/srv/leaf/library/Mangas/Elfes"_s},
-                                    {u"at"_s, u"Elfes"_s}}}},
+                                    {u"at"_s, u"Elfes"_s},
+                                    {u"matched"_s, u"TITLE"_s}}}},
             {u"toSend"_s, QJsonArray{}},
             {u"alreadyThere"_s, QJsonArray{}},
             {u"bytesToSend"_s, 0},
@@ -327,6 +553,7 @@ private slots:
         QCOMPARE(got.value->moves.constFirst().name, u"Elfes"_s);
         QCOMPARE(got.value->moves.constFirst().from, u"/srv/leaf/library/Mangas/Elfes"_s);
         QCOMPARE(got.value->moves.constFirst().at, u"Elfes"_s);
+        QCOMPARE(got.value->moves.constFirst().matched, u"TITLE"_s);
 
         // A line missing what a move is aimed with is refused by name: without the identity
         // the box would be there to tick and would file nothing.
@@ -734,6 +961,72 @@ private slots:
         QCOMPARE(full.value->summary, std::optional<QString>(u"Une dryade."_s));
     }
 
+    /// A volume that names its own cover says which page, counted from 0; one that does not says
+    /// nothing, which is not page 0 — the cover is then a file beside the archive.
+    void an_entry_that_chose_its_cover_page_says_which()
+    {
+        QJsonObject file{{u"id"_s, u"v5"_s},      {u"type"_s, u"VOLUME"_s},
+                         {u"pageCount"_s, 54},    {u"chapterCount"_s, 0},
+                         {u"file"_s, u"Tome 5.cbz"_s}, {u"size"_s, 1}};
+        QVERIFY(!Api::entry(file).value->coverPage);
+        file[u"coverPage"_s] = 3;
+        QCOMPARE(Api::entry(file).value->coverPage, std::optional<int>(3));
+    }
+
+    /// Whether an image was chosen from the reader's disk, and not merely placed by hand: absent
+    /// is false, on a series and on a volume.
+    void a_chosen_cover_image_is_read_on_a_series_and_on_a_volume()
+    {
+        QJsonObject one = aSeries();
+        QVERIFY(!Api::series(one).value->coverImage);
+        one[u"coverImage"_s] = true;
+        QVERIFY(Api::series(one).value->coverImage);
+
+        QJsonObject file{{u"id"_s, u"v5"_s},      {u"type"_s, u"VOLUME"_s},
+                         {u"pageCount"_s, 54},    {u"chapterCount"_s, 0},
+                         {u"file"_s, u"Tome 5.cbz"_s}, {u"size"_s, 1}};
+        QVERIFY(!Api::entry(file).value->coverImage);
+        file[u"coverImage"_s] = true;
+        QVERIFY(Api::entry(file).value->coverImage);
+    }
+
+    /// A volume answered with nothing about who made it, so neither the card nor the reader could
+    /// say who drew volume 2. Absent is nobody, and not inherited.
+    void an_entry_reads_its_credits_and_where_they_came_from()
+    {
+        QJsonObject file{{u"id"_s, u"v2"_s},      {u"type"_s, u"VOLUME"_s},
+                         {u"pageCount"_s, 54},    {u"chapterCount"_s, 0},
+                         {u"file"_s, u"Tome 2.cbz"_s}, {u"size"_s, 1}};
+        const Api::Entry bare = *Api::entry(file).value;
+        QVERIFY(bare.credits.authors.isEmpty());
+        QVERIFY(!bare.authorsInherited);
+
+        file[u"authors"_s] = QJsonArray{u"Jul"_s};
+        file[u"artists"_s] = QJsonArray{u"Morris"_s};
+        file[u"authorsInherited"_s] = false;
+        file[u"artistsInherited"_s] = true;
+        const Api::Entry one = *Api::entry(file).value;
+        QCOMPARE(one.credits.authors, QList<QString>({u"Jul"_s}));
+        QCOMPARE(one.credits.artists, QList<QString>({u"Morris"_s}));
+        QVERIFY(!one.authorsInherited);
+        QVERIFY(one.artistsInherited);
+    }
+
+    /// « Modifier la série » was filled with everybody the series is credited with, and saving
+    /// froze that union into `work.json`. The default is read apart from it.
+    void a_series_reads_its_declared_default()
+    {
+        QJsonObject one = aSeries();
+        QVERIFY(Api::series(one).value->declared.authors.isEmpty());
+        one[u"authors"_s] = QJsonArray{u"René Goscinny"_s, u"Jul"_s};
+        one[u"declaredAuthors"_s] = QJsonArray{u"René Goscinny"_s};
+        one[u"declaredArtists"_s] = QJsonArray{u"Morris"_s};
+        const Api::Series read = *Api::series(one).value;
+        QCOMPARE(read.declared.authors, QList<QString>({u"René Goscinny"_s}));
+        QCOMPARE(read.declared.artists, QList<QString>({u"Morris"_s}));
+        QCOMPARE(read.credits.authors.size(), 2);
+    }
+
     void a_whole_series_arrives_intact()
     {
         const Api::Read<Api::Series> got = Api::series(aSeries());
@@ -759,6 +1052,7 @@ private slots:
         QCOMPARE(one.ageRating, std::optional<QString>(u"12+"_s));
         QVERIFY(!one.publication.collection.has_value());
         QCOMPARE(one.colour, std::optional<bool>(true));
+        QCOMPARE(one.coverVolume, std::optional<double>(2.5));
         QCOMPARE(one.holding.missingChapters, QList<double>({3.5}));
         QVERIFY(one.holding.missingVolumes.isEmpty());
         QCOMPARE(one.holding.lastAddedAt, std::optional<qint64>(1755000000));
@@ -818,7 +1112,7 @@ private slots:
     void a_word_the_client_never_heard_is_absent_and_never_the_wrong_one()
     {
         QJsonObject odd = aSeries();
-        odd[u"status"_s] = u"hiatus"_s;
+        odd[u"status"_s] = u"paused"_s;
         odd[u"readStatus"_s] = u"ARCHIVED"_s;
 
         const Api::Read<Api::Series> got = Api::series(odd);
@@ -1151,6 +1445,12 @@ private slots:
         const Api::Read<Api::Health> told = Api::health(keyed);
         QVERIFY2(told.ok(), qPrintable(told.trouble));
         QVERIFY(!told.value->relay);
+        // Said only to a key the server recognises: nothing said is an empty string, never a
+        // version made up.
+        QVERIFY(read.value->version.isEmpty());
+
+        keyed.insert(u"version"_s, u"0.1.0"_s);
+        QCOMPARE(Api::health(keyed).value->version, u"0.1.0"_s);
     }
 
     /// No shared folder is the ordinary case for a server on another machine, not a

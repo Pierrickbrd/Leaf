@@ -10,10 +10,11 @@ import QtQuick
 import QtQuick.Controls
 import Leaf
 
-Popup {
+LeafDialog {
     id: dialog
 
     objectName: "code-dialog"
+    initialFocus: dialog.forgot ? recoveryField : field
 
     /// The profile left, as `Profiles.active`; empty for a device whose profile was deleted.
     property var from: ({})
@@ -63,11 +64,8 @@ Popup {
         Profiles.switchTo(dialog.to.id, field.text, dialog.keep)
     }
 
-    width: 400
-    anchors.centerIn: Overlay.overlay
-    padding: 0
-    modal: true
-    focus: true
+    drawnWidth: 400
+    lineSpacing: Widths.space.block
     // Not while a switch is out: a window cancelled and then switched anyway by the answer
     // would have lied about what « Annuler » did.
     closePolicy: dialog.waiting ? Popup.NoAutoClose : Popup.CloseOnEscape
@@ -106,308 +104,297 @@ Popup {
         }
     }
 
-    Overlay.modal: Rectangle {
-        color: Qt.rgba(12 / 255, 16 / 255, 14 / 255, 0.74)
+    Row {
+        anchors.horizontalCenter: parent.horizontalCenter
+        spacing: 14
+
+        ProfileSquare {
+            objectName: "code-from"
+            visible: !!dialog.from && !!dialog.from.id
+            profile: dialog.from
+            side: 52
+            radius: 14
+        }
+
+        Glyph {
+            visible: dialog.mode === "switch" && !!dialog.from && !!dialog.from.id
+            anchors.verticalCenter: parent.verticalCenter
+            side: 22
+            source: "assets/icons/arrow_back.svg"
+            tint: Theme.inkSoft
+            rotation: 180
+        }
+
+        ProfileSquare {
+            objectName: "code-to"
+            visible: dialog.mode === "switch"
+            profile: dialog.to ?? ({})
+            side: 52
+            radius: 14
+        }
     }
 
-    background: Rectangle {
-        radius: Theme.cardRadius
-        color: Theme.surface
-        border.color: Theme.rule
-        border.width: 1
-        antialiasing: true
-
-        CardLift { level: CardLift.Modal }
+    Text {
+        objectName: "code-title"
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        text: dialog.mode === "add" ? Profiles.words.addAProfile
+                                    : Profiles.saySwitchToProfile(dialog.to ? dialog.to.name : "")
+        // The name is the profile's own choice, shown as typed, never as markup.
+        textFormat: Text.PlainText
+        color: Theme.ink
+        font.family: Theme.displayFamily
+        font.pixelSize: 24
+        font.weight: Font.Bold
+        wrapMode: Text.Wrap
     }
 
-    contentItem: DialogBody {
-        objectName: "code-dialog-body"
-        implicitHeight: form.height + 44
+    Text {
+        objectName: "code-sentence"
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        textFormat: Text.PlainText
+        text: dialog.forgot ? Profiles.words.recoverExplained
+              : dialog.mode === "add" ? Profiles.words.addNeedsCode
+              : (Profiles.isRestricted || Profiles.held) ? Profiles.words.leaveNeedsCode
+              : Profiles.words.enterCode
+        color: Theme.inkSoft
+        font.family: Theme.textFamily
+        font.pixelSize: 13
+        lineHeight: 1.35
+        wrapMode: Text.Wrap
+    }
 
-        Column {
-            id: form
+    // Typed apart and never seen: the recovery code is a secret like the code, and the
+    // two new codes are what it is replaced with.
+    Column {
+        objectName: "code-recover-fields"
+        visible: dialog.forgot
+        width: parent.width
+        spacing: 10
 
-            x: 24
-            y: 22
-            width: parent.width - 48
-            spacing: 16
+        LeafField {
+            id: recoveryField
 
-            Row {
-                anchors.horizontalCenter: parent.horizontalCenter
-                spacing: 14
+            objectName: "code-recovery-field"
+            width: parent.width
+            activeFocusOnTab: true
+            placeholderText: Profiles.words.recoveryField
+            inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText
+            Accessible.name: Profiles.words.recoveryField
+            onTextEdited: dialog.said = ""
+            onAccepted: newCode.forceActiveFocus()
+        }
 
-                ProfileSquare {
-                    objectName: "code-from"
-                    visible: !!dialog.from && !!dialog.from.id
-                    profile: dialog.from
-                    side: 52
-                    radius: 14
-                }
+        Row {
+            width: parent.width
+            spacing: 10
 
-                Glyph {
-                    visible: dialog.mode === "switch" && !!dialog.from && !!dialog.from.id
-                    anchors.verticalCenter: parent.verticalCenter
-                    side: 22
-                    source: "assets/icons/arrow_back.svg"
-                    tint: Theme.inkSoft
-                    rotation: 180
-                }
+            LeafField {
+                id: newCode
 
-                ProfileSquare {
-                    objectName: "code-to"
-                    visible: dialog.mode === "switch"
-                    profile: dialog.to ?? ({})
-                    side: 52
-                    radius: 14
-                }
+                objectName: "code-new-field"
+                width: (parent.width - 10) / 2
+                activeFocusOnTab: true
+                echoMode: TextInput.Password
+                maximumLength: 8
+                placeholderText: Profiles.words.newCodeField
+                Accessible.name: Profiles.words.newCodeField
+                onTextEdited: dialog.said = ""
+                onAccepted: newCodeAgain.forceActiveFocus()
             }
 
-            Text {
-                objectName: "code-title"
-                width: parent.width
-                horizontalAlignment: Text.AlignHCenter
-                text: dialog.mode === "add" ? Profiles.words.addAProfile
-                                            : Profiles.saySwitchToProfile(dialog.to ? dialog.to.name : "")
-                // The name is the profile's own choice, shown as typed, never as markup.
-                textFormat: Text.PlainText
-                color: Theme.ink
-                font.family: Theme.displayFamily
-                font.pixelSize: 24
-                font.weight: Font.Bold
-                wrapMode: Text.Wrap
+            LeafField {
+                id: newCodeAgain
+
+                objectName: "code-new-again-field"
+                width: newCode.width
+                activeFocusOnTab: true
+                echoMode: TextInput.Password
+                maximumLength: 8
+                placeholderText: Profiles.words.codeAgain
+                Accessible.name: Profiles.words.codeAgain
+                onTextEdited: dialog.said = ""
+                onAccepted: dialog.recover()
             }
+        }
+    }
 
-            Text {
-                objectName: "code-sentence"
-                width: parent.width
-                horizontalAlignment: Text.AlignHCenter
-                text: dialog.forgot ? Profiles.words.recoverExplained
-                      : dialog.mode === "add" ? Profiles.words.addNeedsCode
-                      : (Profiles.isRestricted || Profiles.held) ? Profiles.words.leaveNeedsCode
-                      : Profiles.words.enterCode
-                color: Theme.inkSoft
-                font.family: Theme.textFamily
-                font.pixelSize: 13
-                lineHeight: 1.35
-                wrapMode: Text.Wrap
-            }
+    Text {
+        objectName: "code-no-recovery"
+        visible: dialog.forgot
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        textFormat: Text.PlainText
+        text: Profiles.words.noRecoveryCommand
+        color: Theme.inkFaint
+        font.family: Theme.textFamily
+        font.pixelSize: 12
+        lineHeight: 1.35
+        wrapMode: Text.Wrap
+    }
 
-            // Typed apart and never seen: the recovery code is a secret like the code, and the
-            // two new codes are what it is replaced with.
-            Column {
-                objectName: "code-recover-fields"
-                visible: dialog.forgot
-                width: parent.width
-                spacing: 10
+    Rectangle {
+        visible: dialog.forgot
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: command.implicitWidth + 28
+        height: 36
+        radius: 8
+        color: Theme.onBar
 
-                LeafField {
-                    id: recoveryField
+        FocusRing {
+            cornerRadius: 8
+            focused: command.activeFocus
+        }
 
-                    objectName: "code-recovery-field"
-                    width: parent.width
-                    activeFocusOnTab: true
-                    placeholderText: Profiles.words.recoveryField
-                    inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText
-                    Accessible.name: Profiles.words.recoveryField
-                    onTextEdited: dialog.said = ""
-                    onAccepted: newCode.forceActiveFocus()
-                }
+        // Selectable, to be copied into the server's terminal as it stands.
+        TextEdit {
+            id: command
 
-                Row {
-                    width: parent.width
-                    spacing: 10
+            objectName: "code-command"
+            anchors.centerIn: parent
+            readOnly: true
+            selectByMouse: true
+            // Reached and selected by the keys too, ready for Ctrl+C: copied by the hand alone,
+            // it was the one thing in the window a keyboard could not take away.
+            activeFocusOnTab: true
+            onActiveFocusChanged: activeFocus ? selectAll() : deselect()
+            textFormat: Text.PlainText
+            text: Profiles.words.resetCodeCommand
+            color: Theme.ink
+            selectionColor: Theme.emerald
+            selectedTextColor: Theme.onEmerald
+            font.family: Theme.commandFamily
+            font.pixelSize: 13
+        }
+    }
 
-                    LeafField {
-                        id: newCode
+    Item {
+        objectName: "code-rounds"
+        visible: !dialog.forgot
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: rounds.width
+        height: rounds.height
 
-                        objectName: "code-new-field"
-                        width: (parent.width - 10) / 2
-                        activeFocusOnTab: true
-                        echoMode: TextInput.Password
-                        maximumLength: 8
-                        placeholderText: Profiles.words.newCodeField
-                        Accessible.name: Profiles.words.newCodeField
-                        onTextEdited: dialog.said = ""
-                        onAccepted: newCodeAgain.forceActiveFocus()
-                    }
+        // Typed into, never seen: the rounds are what shows. Echo off and the input
+        // method told it is sensitive, so no prediction keeps what is typed.
+        TextInput {
+            id: field
 
-                    LeafField {
-                        id: newCodeAgain
+            objectName: "code-field"
+            anchors.fill: parent
+            // Held from the moment the window takes the focus, not from `opened`: that
+            // comes after the fade, and the first character typed before it was lost.
+            focus: true
+            // Back to it by Tab from the buttons below.
+            activeFocusOnTab: true
+            opacity: 0
+            maximumLength: 8
+            echoMode: TextInput.NoEcho
+            inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText
+            Accessible.name: Profiles.words.enterCode
+            onTextEdited: dialog.said = ""
+            onAccepted: dialog.submit()
+        }
 
-                        objectName: "code-new-again-field"
-                        width: newCode.width
-                        activeFocusOnTab: true
-                        echoMode: TextInput.Password
-                        maximumLength: 8
-                        placeholderText: Profiles.words.codeAgain
-                        Accessible.name: Profiles.words.codeAgain
-                        onTextEdited: dialog.said = ""
-                        onAccepted: dialog.recover()
-                    }
-                }
-            }
+        Row {
+            id: rounds
 
-            Text {
-                objectName: "code-no-recovery"
-                visible: dialog.forgot
-                width: parent.width
-                horizontalAlignment: Text.AlignHCenter
-                text: Profiles.words.noRecoveryCommand
-                color: Theme.inkFaint
-                font.family: Theme.textFamily
-                font.pixelSize: 12
-                lineHeight: 1.35
-                wrapMode: Text.Wrap
-            }
+            spacing: 12
 
-            Rectangle {
-                visible: dialog.forgot
-                anchors.horizontalCenter: parent.horizontalCenter
-                width: command.implicitWidth + 28
-                height: 36
-                radius: 8
-                color: Theme.onBar
+            Repeater {
+                model: 8
 
-                // Selectable, to be copied into the server's terminal as it stands.
-                TextEdit {
-                    id: command
+                delegate: Rectangle {
+                    required property int index
+                    readonly property bool filled: index < field.length
 
-                    objectName: "code-command"
-                    anchors.centerIn: parent
-                    readOnly: true
-                    selectByMouse: true
-                    text: Profiles.words.resetCodeCommand
-                    color: Theme.ink
-                    selectionColor: Theme.emerald
-                    selectedTextColor: Theme.onEmerald
-                    font.family: Theme.commandFamily
-                    font.pixelSize: 13
+                    objectName: "code-round-" + index
+                    width: 14
+                    height: 14
+                    radius: 7
+                    // The round the next digit fills, in the field's emerald while the keys
+                    // are in it: the input itself is never drawn, and tabbed back to, nothing
+                    // said where the keys had gone.
+                    readonly property bool next: field.activeFocus && index === field.length
+                    color: filled ? Theme.ink : "transparent"
+                    border.color: filled ? Theme.ink : (next ? Theme.emerald : Theme.inkSoft)
+                    border.width: next ? 2 : 1.5
+                    antialiasing: true
                 }
             }
+        }
+    }
 
-            Item {
-                objectName: "code-rounds"
-                visible: !dialog.forgot
-                anchors.horizontalCenter: parent.horizontalCenter
-                width: rounds.width
-                height: rounds.height
+    Text {
+        objectName: "code-trouble"
+        visible: text.length > 0
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        textFormat: Text.PlainText
+        text: dialog.said
+        color: Theme.alert
+        font.family: Theme.textFamily
+        font.pixelSize: 13
+        wrapMode: Text.Wrap
+    }
 
-                // Typed into, never seen: the rounds are what shows. Echo off and the input
-                // method told it is sensitive, so no prediction keeps what is typed.
-                TextInput {
-                    id: field
+    Row {
+        anchors.horizontalCenter: parent.horizontalCenter
+        spacing: 10
 
-                    objectName: "code-field"
-                    anchors.fill: parent
-                    // Held from the moment the window takes the focus, not from `opened`: that
-                    // comes after the fade, and the first character typed before it was lost.
-                    focus: true
-                    // Back to it by Tab from the buttons below.
-                    activeFocusOnTab: true
-                    opacity: 0
-                    maximumLength: 8
-                    echoMode: TextInput.NoEcho
-                    inputMethodHints: Qt.ImhSensitiveData | Qt.ImhNoPredictiveText
-                    Accessible.name: Profiles.words.enterCode
-                    onTextEdited: dialog.said = ""
-                    onAccepted: dialog.submit()
-                }
-
-                Row {
-                    id: rounds
-
-                    spacing: 12
-
-                    Repeater {
-                        model: 8
-
-                        delegate: Rectangle {
-                            required property int index
-                            readonly property bool filled: index < field.length
-
-                            objectName: "code-round-" + index
-                            width: 14
-                            height: 14
-                            radius: 7
-                            color: filled ? Theme.ink : "transparent"
-                            border.color: filled ? Theme.ink : Theme.inkSoft
-                            border.width: 1.5
-                            antialiasing: true
-                        }
-                    }
-                }
+        LeafTextAction {
+            objectName: "code-forgot"
+            anchors.verticalCenter: parent.verticalCenter
+            visible: !dialog.forgot
+            activeFocusOnTab: true
+            label: Profiles.words.forgotCode
+            // To the recovery code: pressed from the keyboard, the action hid itself
+            // with the focus on it, and the focus went nowhere.
+            onTriggered: {
+                dialog.forgot = true
+                recoveryField.forceActiveFocus()
             }
+        }
 
-            Text {
-                objectName: "code-trouble"
-                visible: text.length > 0
-                width: parent.width
-                horizontalAlignment: Text.AlignHCenter
-                text: dialog.said
-                color: Theme.alert
-                font.family: Theme.textFamily
-                font.pixelSize: 13
-                wrapMode: Text.Wrap
+        LeafTextAction {
+            objectName: "code-cancel"
+            anchors.verticalCenter: parent.verticalCenter
+            visible: !dialog.forgot
+            activeFocusOnTab: true
+            label: Profiles.words.cancel
+            enabled: !dialog.waiting
+            onTriggered: dialog.close()
+        }
+
+        LeafTextAction {
+            objectName: "code-back"
+            anchors.verticalCenter: parent.verticalCenter
+            visible: dialog.forgot
+            activeFocusOnTab: true
+            label: Profiles.words.back
+            enabled: !dialog.waiting
+            onTriggered: {
+                dialog.forgot = false
+                dialog.said = ""
+                field.forceActiveFocus()
             }
+        }
 
-            Row {
-                anchors.horizontalCenter: parent.horizontalCenter
-                spacing: 10
+        ActionButton {
+            objectName: "code-replace"
+            visible: dialog.forgot
+            label: Profiles.words.replaceCode
+            ready: recoveryField.length > 0 && newCode.length > 0 && !dialog.waiting
+            onTriggered: dialog.recover()
+        }
 
-                LeafTextAction {
-                    objectName: "code-forgot"
-                    anchors.verticalCenter: parent.verticalCenter
-                    visible: !dialog.forgot
-                    activeFocusOnTab: true
-                    label: Profiles.words.forgotCode
-                    // To the recovery code: pressed from the keyboard, the action hid itself
-                    // with the focus on it, and the focus went nowhere.
-                    onTriggered: {
-                        dialog.forgot = true
-                        recoveryField.forceActiveFocus()
-                    }
-                }
-
-                LeafTextAction {
-                    objectName: "code-cancel"
-                    anchors.verticalCenter: parent.verticalCenter
-                    visible: !dialog.forgot
-                    activeFocusOnTab: true
-                    label: Profiles.words.cancel
-                    enabled: !dialog.waiting
-                    onTriggered: dialog.close()
-                }
-
-                LeafTextAction {
-                    objectName: "code-back"
-                    anchors.verticalCenter: parent.verticalCenter
-                    visible: dialog.forgot
-                    activeFocusOnTab: true
-                    label: Profiles.words.back
-                    enabled: !dialog.waiting
-                    onTriggered: {
-                        dialog.forgot = false
-                        dialog.said = ""
-                        field.forceActiveFocus()
-                    }
-                }
-
-                ActionButton {
-                    objectName: "code-replace"
-                    visible: dialog.forgot
-                    label: Profiles.words.replaceCode
-                    ready: recoveryField.length > 0 && newCode.length > 0 && !dialog.waiting
-                    onTriggered: dialog.recover()
-                }
-
-                ActionButton {
-                    objectName: "code-confirm"
-                    visible: !dialog.forgot
-                    label: Profiles.words.confirm
-                    ready: field.length > 0 && !dialog.waiting
-                    onTriggered: dialog.submit()
-                }
-            }
+        ActionButton {
+            objectName: "code-confirm"
+            visible: !dialog.forgot
+            label: Profiles.words.confirm
+            ready: field.length > 0 && !dialog.waiting
+            onTriggered: dialog.submit()
         }
     }
 }

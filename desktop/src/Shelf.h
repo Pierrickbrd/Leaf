@@ -30,6 +30,7 @@
 #include <QHash>
 #include <QQmlEngine>
 #include <QList>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QVariantMap>
@@ -77,6 +78,8 @@ public:
         /// The one file of a book that is a whole book on its own, empty for any other
         /// series: its tile opens the reader on it (spec §01).
         OneShotEntry,
+        /// The volumes held, as a number: `Volumes` is the sentence a tile prints.
+        VolumeCount,
     };
     Q_ENUM(Role)
 
@@ -175,6 +178,9 @@ public:
     /// first hundred: a reader a hundred and fifty series down saw the rest taken off the
     /// wall, and the scroll jump back to where the hundredth had been.
     Q_INVOKABLE void refresh();
+    /// `refresh`, for what an import brought: `arriving` is said first, and the tiles the answer
+    /// adds come in with the choreography of an arrival.
+    Q_INVOKABLE void refreshForArrivals();
 
     /// One series as the server now has it, after something was done to it. Its tile alone
     /// changes; nothing is asked. When the change can move it — out of a lit read status, or
@@ -184,7 +190,23 @@ public:
     /// Taken off the disk: its tile leaves, and nothing is asked.
     void forget(const QString &seriesId);
 
+    /// How long a series taken off the disk stays in the model after `forgetting` is said, in
+    /// milliseconds: the time its tile needs to leave in front of the reader. Nought removes it
+    /// at once, which is what everything but the shelf's own window wants.
+    Q_PROPERTY(int erasureLead READ erasureLead WRITE setErasureLead NOTIFY erasureLeadChanged)
+    int erasureLead() const { return m_erasureLead; }
+    void setErasureLead(int milliseconds);
+
 signals:
+    void erasureLeadChanged();
+    /// A series is about to leave because it was taken off the disk — said before its row goes,
+    /// so that its tile can still be told why and leave with the choreography of an erasure
+    /// rather than vanishing as it does for a filter that no longer holds it.
+    void forgetting(const QString &seriesId);
+    /// The shelf is about to be asked for what an import brought — said before the answer, which
+    /// is when the tiles it adds are told how to come in.
+    void arriving();
+
     /// One signal for the four properties above. It fires on every transition of every one of
     /// them — a `NOTIFY` that only fires sometimes is a binding that is sometimes wrong.
     void changed();
@@ -228,6 +250,10 @@ private:
     QVariantMap m_narrowing;
     QList<Api::Series> m_held;
     int m_total = 0;
+    int m_erasureLead = 0;
+    /// Told to leave, and still in the model for the length of the lead.
+    QSet<QString> m_leaving;
+    void takeOff(const QString &seriesId);
     /// The page to ask for next, counted here rather than read from the answer's echo: a
     /// server repeating the page it was given would otherwise fetch the same one for ever.
     int m_next = 0;

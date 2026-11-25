@@ -13,12 +13,23 @@ ApplicationWindow {
     /// Whatever the page is showing: the Loader's screen when there is one, the shelf
     /// underneath it otherwise. The shelf is no longer the Loader's business, so nothing
     /// may ask the Loader what is on screen.
-    readonly property var showing: screen.item ? screen.item : shelf
+    readonly property var showing: Navigation.destination === Navigation.Series && seriesHolder.item
+                                   ? seriesHolder.item : (screen.item ? screen.item : shelf)
     /// Set when something changed the wall, or its counts, while the wall was not on screen,
     /// and answered on the way back. Held here rather than on `Shelf`, because it is not a
     /// fact about the library: it is a fact about what is drawn over it.
     property bool shelfIsStale: false
+    /// A line of an import landed while its window was open: the wall is asked for it, as an
+    /// arrival, when the window is shut.
+    property bool arrivalsWaiting: false
     property bool countsAreStale: false
+    /// A scan or an import came while the series page was hidden under another screen: what it
+    /// held is asked again when it comes back.
+    property bool seriesIsStale: false
+    /// The name of the stop the keys last held on the series page, for the page to be given it
+    /// back when it is shown again: kept alive under the settings, it stands where it was left,
+    /// and the keys went to its first stop and scrolled it to the top to show it.
+    property string seriesKeysOn: ""
     /// The reader is on screen. Kept rather than read from `Navigation` because leaving it is
     /// a change of its own — the book closed, what it recorded drawn — and by the time
     /// `Navigation` says where it went it no longer says where it was.
@@ -36,6 +47,10 @@ ApplicationWindow {
     // off until the server answered — kept or refused — and `lastWrite` is a ceiling on a
     // server that does not answer, not the way to know the write went.
     onClosing: close => {
+        // How it stood, for the next time: a window that opened at 1100 × 760 whatever the
+        // reader had made of it was one to resize at every start.
+        Preferences.rememberWindow(window.width, window.height,
+                                   window.visibility === Window.Maximized)
         if (window.closingAfterWrite || !window.reading || !Reader.close())
             return
         close.accepted = false
@@ -96,11 +111,19 @@ ApplicationWindow {
     /// Each is asked where somebody is looking and marked out of date where nobody is: asked
     /// for at every change it would be libraries nobody looked at, and never asked for it
     /// would go on saying « 4 lus » under a tile whose fifth was just marked.
-    function refreshTheShelf() {
-        if (Navigation.destination === Navigation.Shelf)
-            Shelf.refresh()
-        else
+    ///
+    /// While the import window is open the wall is not asked at all: it is behind the window, and
+    /// what an import brought (a scan answering, a line landing) would be put on it where nobody
+    /// can see it come. It is asked once the window is shut, as an arrival.
+    function refreshTheShelf(arrival = false) {
+        if (importDialog.visible)
+            window.arrivalsWaiting = true
+        else if (Navigation.destination !== Navigation.Shelf)
             window.shelfIsStale = true
+        else if (arrival)
+            Shelf.refreshForArrivals()
+        else
+            Shelf.refresh()
     }
     /// The pills' numbers, which only the shelf draws. « Terminées 1 » stayed at one after a
     /// series was marked read: they were asked for once, when the row appeared, and never
@@ -113,13 +136,17 @@ ApplicationWindow {
     }
     /// Everything a change that names nothing may have moved: the wall, its counts, the band,
     /// and the page of a series if one is open.
-    function refreshAll() {
-        window.refreshTheShelf()
+    function refreshAll(arrival = false) {
+        window.refreshTheShelf(arrival)
         window.refreshTheCounts()
         Resume.reload()
-        if (Navigation.destination === Navigation.Series && Series.identifier.length > 0) {
+        if (Series.identifier.length === 0)
+            return
+        if (Navigation.destination === Navigation.Series) {
             Series.reload()
             Entries.reload()
+        } else {
+            window.seriesIsStale = true
         }
     }
 
@@ -136,6 +163,7 @@ ApplicationWindow {
         // did the tiles kept until an answer — covers and all.
         Shelf.startOver()
         Filters.reload()
+        Resume.forget()
         Resume.reload()
         window.shelfIsStale = false
         window.countsAreStale = false
@@ -180,6 +208,12 @@ ApplicationWindow {
         return false
     }
 
+    /// A Loader that draws a screen: the keys can be left on it when the screen it held went,
+    /// and it is no stop.
+    function isAHolder(item) {
+        return item === screen || item === seriesHolder
+    }
+
     function clearNavigation() {
         appNavigationCursor.reset()
     }
@@ -219,6 +253,47 @@ ApplicationWindow {
         navigationStart.forceActiveFocus(Qt.MouseFocusReason)
     }
 
+    /// Where the keys stand once another page is shown. Nothing moved them: a series opened
+    /// from the results of a search left the focus in the search field, which the series
+    /// page hides, and Tab went from it to the bar and stayed there — nothing on the page was
+    /// reached (owner, 25/10/2026). A focus still on something shown — the search field `/`
+    /// brought back, a field the page focused itself — is left alone.
+    ///
+    /// Arrived at by the keys, the page is entered by its first stop, ringed; by the hand, the
+    /// focus waits at the start of the page and the first Tab begins at the bar, as after a
+    /// click on bare paper. Back on the shelf by the keys, the keys find the cover they left.
+    ///
+    /// The Loader that draws the page is one of the places the focus can be left on, and one that
+    /// is no stop: the page it held, destroyed while the keys were in it, hands the focus to the
+    /// Loader, and the next series opened found it « still on something shown », left it, and
+    /// answered no key at all — the bar included — whichever series it was.
+    function settleFocus() {
+        if (window.whoReadsOpen || linkScreen.active
+                || Navigation.destination === Navigation.Reader)
+            return
+        const held = window.activeFocusItem
+        if (held && held !== page && held !== navigationStart && !window.isAHolder(held)
+                && held.visible)
+            return
+        const byKeys = !appNavigationCursor.pointerTookOver
+        appNavigationCursor.clear()
+        if (!byKeys) {
+            navigationStart.forceActiveFocus(Qt.OtherFocusReason)
+            return
+        }
+        if (Navigation.destination === Navigation.Shelf && shelf.comeBack())
+            return
+        if (Navigation.destination === Navigation.Series && window.seriesKeysOn.length > 0) {
+            const left = window.namedWithin(seriesHolder.item, window.seriesKeysOn)
+            if (left && left.keyStop === true) {
+                appNavigationCursor.beginKeyboard(true)
+                left.forceActiveFocus(Qt.TabFocusReason)
+                return
+            }
+        }
+        moveIntoScreen(true)
+    }
+
     function continueNavigation(origin, forward) {
         appNavigationCursor.beginKeyboard(forward)
         const next = origin.nextItemInFocusChain(forward)
@@ -233,6 +308,11 @@ ApplicationWindow {
 
     width: 1100
     height: 760
+    // The smallest window there is (owner, 23/10/2026): at 800 × 560 every screen still has
+    // somewhere to put what it shows; under it the series page showed no volume at all. The
+    // numbers live in Widths, which the tests read too.
+    minimumWidth: Widths.minimumWindowWidth
+    minimumHeight: Widths.minimumWindowHeight
     visible: true
     title: qsTr("Leaf")
 
@@ -242,7 +322,54 @@ ApplicationWindow {
         if (!active)
             clearNavigation()
     }
+    /// The name of what last held the keys, and on which page: a row rebuilt by its model
+    /// drops the focus to the page with the row it destroyed, and the same row comes back
+    /// under the same name a moment later. Ticking a right, choosing how a device opens,
+    /// closing the window a pencil opened — each rebuilt its list and left the keys on
+    /// nothing, and the next Tab began again at the bar (audit, 25/10/2026).
+    property string keysLastOn: ""
+    property int keysLastWhere: -1
+
+    function findTheKeysAgain(name, where) {
+        const held = window.activeFocusItem
+        if (held && held !== page && !window.isAHolder(held) && held !== window.contentItem)
+            return
+        if (where !== Navigation.destination || window.whoReadsOpen)
+            return
+        const again = window.namedWithin(window.showing, name)
+        if (again)
+            again.forceActiveFocus(Qt.OtherFocusReason)
+    }
+
+    function namedWithin(item, name) {
+        if (!item || !item.visible || !item.enabled)
+            return null
+        if (item.objectName === name)
+            return item
+        for (let i = 0; i < item.children.length; ++i) {
+            const found = window.namedWithin(item.children[i], name)
+            if (found)
+                return found
+        }
+        return null
+    }
+
     onActiveFocusItemChanged: {
+        const held = activeFocusItem
+        // The page's own items only: a window over it gives the keys back to its opener when
+        // it closes, and its buttons are no place to find them again.
+        if (held && held !== page && held !== navigationStart && held.objectName.length > 0
+                && window.belongsTo(page, held)) {
+            window.keysLastOn = held.objectName
+            window.keysLastWhere = Navigation.destination
+            if (seriesHolder.item && window.belongsTo(seriesHolder.item, held)
+                    && held.keyStop === true)
+                window.seriesKeysOn = held.objectName
+        } else if ((!held || held === page || window.isAHolder(held)
+                    || held === window.contentItem)
+                   && window.keysLastOn.length > 0) {
+            Qt.callLater(window.findTheKeysAgain, window.keysLastOn, window.keysLastWhere)
+        }
         appNavigationCursor.noteFocus(activeFocusItem)
         const owner = appNavigationCursor.region
         if (owner && activeFocusItem && !belongsTo(owner, activeFocusItem))
@@ -250,10 +377,19 @@ ApplicationWindow {
     }
 
     // The three widths are declared once, in Widths, and fed from here — the one place that
-    // knows how wide the window is.
+    // knows how wide the window is, and how high.
     onWidthChanged: Widths.window = window.width
+    onHeightChanged: Widths.height = window.height
     Component.onCompleted: {
+        const kept = Preferences.windowFrame()
+        if (kept.width !== undefined) {
+            window.width = Math.max(window.minimumWidth, kept.width)
+            window.height = Math.max(window.minimumHeight, kept.height)
+            if (kept.maximized)
+                window.visibility = Window.Maximized
+        }
         Widths.window = window.width
+        Widths.height = window.height
         if (window.linked)
             Profiles.ask()
     }
@@ -273,6 +409,11 @@ ApplicationWindow {
             if (window.whoReadsOpen) {
                 if (whoReads.closable)
                     window.whoReadsOpen = false
+                return
+            }
+            // A selection is the topmost thing there is to take back.
+            if (Selection.active) {
+                Selection.clear()
                 return
             }
             // The reader takes away one layer at a time — the full screen before the book —
@@ -332,7 +473,8 @@ ApplicationWindow {
 
         function beginNavigation(forward) {
             const origin = window.activeFocusItem
-            if (!origin || origin === page || origin === navigationStart) {
+            if (!origin || origin === page || origin === navigationStart
+                    || window.isAHolder(origin)) {
                 // From nothing, the page starts where the eye starts: the bar. Direction does
                 // not matter here — after a click on bare paper every key restarts there, and
                 // the order runs bar, band, row, covers, and round again from either end.
@@ -366,6 +508,7 @@ ApplicationWindow {
             // including Up and Down from that same field.
             if (window.activeFocusItem
                     && window.activeFocusItem.objectName === "search-field"
+                    && window.activeFocusItem.visible
                     && (event.key === Qt.Key_Left || event.key === Qt.Key_Right))
                 return
 
@@ -454,14 +597,30 @@ ApplicationWindow {
                 switch (Navigation.destination) {
                 case Navigation.Settings:
                     return settingsScreen
-                case Navigation.Series:
-                    return seriesScreen
                 case Navigation.Reader:
                     return readerScreen
                 default:
                     return null
                 }
             }
+        }
+
+        // The series page, kept alive for as long as a series is in the stack: under the
+        // settings or the reader it is hidden and not destroyed, as the shelf is. Drawn again
+        // from nothing on every return, its covers were fetched again and came in one by one,
+        // its rows were built again, and it stood at the top of the first tab wherever it had
+        // been left.
+        Loader {
+            id: seriesHolder
+
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: appBar.visible ? appBar.bottom : parent.top
+            anchors.bottom: parent.bottom
+            enabled: !window.whoReadsOpen
+            active: Navigation.holdsSeries
+            visible: Navigation.destination === Navigation.Series
+            sourceComponent: seriesScreen
         }
 
         // Over the shelf and the bar, under the linking screen and every window: the code and
@@ -509,10 +668,39 @@ ApplicationWindow {
         // profile that may not import would only meet the server's refusal.
         enabled: !linkScreen.active && Profiles.canImport
         onDropped: drop => {
-            if (Imports.offerUrls(drop.urls) > 0) {
+            if (ImportOffers.offerUrls(drop.urls) > 0) {
                 importDialog.phase = importDialog.proposing
                 importDialog.open()
             }
+        }
+    }
+
+    // Over the page and under the bubbles: what a command answered stays readable on it.
+    SelectionBar { }
+
+    // And the card of an export on its way, which takes no room either.
+    ExportBar { }
+
+    ExportDialog { }
+
+    Connections {
+        target: Exports
+
+        function onFinished(where, missing) {
+            Warnings.exported(Exports.name, where, missing)
+        }
+
+        function onFailed(why) {
+            Warnings.exportFailed(why)
+        }
+    }
+
+    // A selection is of what is drawn: it does not follow the reader to another page.
+    Connections {
+        target: Navigation
+
+        function onChanged() {
+            Selection.clear()
         }
     }
 
@@ -547,11 +735,34 @@ ApplicationWindow {
         target: Imports
 
         function onSettled(went, subject, said) {
-            Toasts.importSettled(went, subject, said)
+            Warnings.importSettled(went, subject, said)
             // What landed is on the wall without anybody pressing « Voir ». It was not: the
             // shelf was asked again only from the bubble's button.
             if (went)
-                window.refreshAll()
+                importsLanded.restart()
+        }
+    }
+
+    // One refresh for a batch: every file of thirty landing asked for the shelf, the pills, the
+    // band and the open page again, thirty times in a row. A pause long enough to take the
+    // next one that is already on its way, short enough to be the moment it lands.
+    Timer {
+        id: importsLanded
+
+        interval: 400
+        // Not while the import window is open: the wall is behind it, and what arrived would
+        // come in where nobody can see it. It comes in when the window is shut.
+        onTriggered: window.refreshAll(true)
+    }
+
+    Connections {
+        target: importDialog
+
+        function onClosed() {
+            if (!window.arrivalsWaiting)
+                return
+            window.arrivalsWaiting = false
+            window.refreshAll(true)
         }
     }
 
@@ -560,9 +771,9 @@ ApplicationWindow {
 
         function onFinished() {
             if (Scan.trouble.length > 0)
-                Toasts.scanFailed(Scan.trouble)
+                Warnings.scanFailed(Scan.trouble)
             else
-                Toasts.scanFinished(Scan.counts)
+                Warnings.scanFinished(Scan.counts)
             // What the scan found is on the wall and in its counts without a restart. It
             // was neither: a scan changed the library and nothing on screen asked again. A
             // scan names no series, so this is the one change that asks for all of it.
@@ -578,12 +789,12 @@ ApplicationWindow {
         target: Commands
 
         function onSaved(where) {
-            Toasts.copySaved(where)
+            Warnings.copySaved(where)
         }
 
         function onChanged() {
             if (Commands.trouble.length > 0)
-                Toasts.commandRefused(Commands.trouble)
+                Warnings.commandRefused(Commands.trouble)
         }
     }
 
@@ -679,6 +890,21 @@ ApplicationWindow {
         id: importDialog
     }
 
+    // The chapter a volume's menu asked to replace is known once the server has listed them.
+    Connections {
+        target: ImportOffers
+
+        function onChapterAimed(id, name) {
+            importDialog.showFor("CHAPTER", id, name)
+        }
+
+        // Asked by a tile's menu, on the shelf or in a search, where the window's dialog is out
+        // of reach: « Réimporter… » there said nothing and opened nothing.
+        function onReimportWanted(kind, id, name, volumes) {
+            importDialog.showFor(kind, id, name, volumes)
+        }
+    }
+
     Component {
         id: settingsScreen
 
@@ -700,7 +926,8 @@ ApplicationWindow {
         SeriesView {
             // The import belongs to the window, not to a row: a dialog opened from inside a
             // list would go with the list the moment its model answers again.
-            onReimportAsked: importDialog.show()
+            onReimportAsked: (kind, id, name, volumes) => importDialog.showFor(kind, id, name, volumes)
+            onChapterAsked: (entryId, name) => ImportOffers.aimAtChapterOf(entryId, name)
             onNavigationBoundary: forward => window.leaveScreen(forward)
         }
     }
@@ -724,6 +951,8 @@ ApplicationWindow {
         target: Navigation
 
         function onChanged() {
+            // After the Loader has built the page the keys are to go into.
+            Qt.callLater(window.settleFocus)
             // Out of the reader: what the delay was holding is written now. If that sent a
             // write, what reading moved is asked for when the server has kept it — see
             // `onRecorded` below; asked now, the answer could still carry the page before.
@@ -752,18 +981,34 @@ ApplicationWindow {
                 Filters.refresh()
                 window.countsAreStale = false
             }
-            // Off the page: what it was holding is let go. Kept, the next series opened on
-            // the last one's cover and title for as long as its answer took — and a shelf
-            // seen in between did not make that any less wrong.
-            if (Navigation.destination !== Navigation.Series) {
+            // Off the page, onto the shelf: what it was holding is let go. Kept, the next series
+            // opened on the last one's cover and title for as long as its answer took — and a
+            // shelf seen in between did not make that any less wrong. Under the settings it is
+            // kept, as under the reader: the series is still below in the stack, and asked for
+            // again, every request of its page was made twice for nothing and drawn in seven
+            // stages when one came back.
+            if (Navigation.destination === Navigation.Shelf) {
                 Series.forget()
                 Entries.forget()
                 Elsewhere.forget()
+                window.seriesIsStale = false
+                window.seriesKeysOn = ""
                 return
             }
+            if (Navigation.destination !== Navigation.Series)
+                return
             const asked = Navigation.parameters.series ?? ""
-            if (asked.length > 0 && asked !== Series.identifier)
+            if (asked.length > 0 && asked !== Series.identifier) {
                 Series.point(asked)
+                // Another series on a page kept alive: at the top of its first tab.
+                window.seriesKeysOn = ""
+                if (seriesHolder.item)
+                    seriesHolder.item.startOver()
+            } else if (window.seriesIsStale) {
+                window.seriesIsStale = false
+                Series.reload()
+                Entries.reload()
+            }
         }
     }
 
@@ -771,8 +1016,16 @@ ApplicationWindow {
         target: Series
 
         function onChanged() {
-            if (!Series.available || Series.identifier === Entries.pointedAt)
+            // The answer for the series pointed at: pointed at another, the old one is kept under
+            // the eye and its gaps and arcs are the old series'.
+            if (!Series.settled)
                 return
+            // The same series, said again: a volume deleted or found moved its gaps and its
+            // arcs, which the list was woven with when it was pointed.
+            if (Series.identifier === Entries.pointedAt) {
+                Entries.follow(Series.missingVolumes, Series.arcCount)
+                return
+            }
             Entries.point(Series.identifier, Series.missingVolumes, Series.arcCount)
             // The universe block follows the same page. Pointed even at a series that belongs
             // to no universe, because that is how it learns to draw nothing: a block still
@@ -788,6 +1041,15 @@ ApplicationWindow {
     // a grid rebuilt from nothing, which is what a reader saw as the page reloading.
     Connections {
         target: Commands
+
+        // A series or a file rewritten: its tile, its page and its list are asked again, and
+        // the list in full, since a number changed moves a volume to another place.
+        function onEdited(seriesId, entryId) {
+            Library.touched(seriesId)
+            if (seriesId.length > 0 && seriesId === Series.identifier)
+                Entries.reload()
+            Resume.reload()
+        }
 
         function onMarked(seriesId, entryId) {
             // The one series, once, for its tile, the header of its page, its place among

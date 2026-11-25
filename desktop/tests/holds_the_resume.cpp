@@ -221,6 +221,23 @@ private slots:
         QVERIFY(!m_resume->trouble().isEmpty());
     }
 
+    /// Another profile reads: the card was listed for the one before, and a refusal would have
+    /// kept it for good — the next profile shown a book it was never offered.
+    void a_profile_left_takes_its_card_with_it_even_when_the_next_answer_is_a_refusal()
+    {
+        m_pretend->answers(200, offers({anOffer()}));
+        m_resume->reload();
+        settle();
+        QVERIFY(m_resume->available());
+
+        m_resume->forget();
+        QVERIFY(!m_resume->available());
+        m_pretend->answers(403, "{}");
+        m_resume->reload();
+        settle();
+        QVERIFY(!m_resume->available());
+    }
+
     void a_server_that_says_no_from_the_start_offers_nothing_and_says_why()
     {
         m_pretend->answers(500, "{}");

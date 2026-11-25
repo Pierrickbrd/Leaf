@@ -8,7 +8,7 @@ mod common;
 use common::{read_only, writable};
 
 use leaf_server::api::pages::Pages;
-use leaf_server::store::repository::Ceiling;
+use leaf_server::store::repository::{Ceiling, Repository};
 use leaf_server::store::Db;
 
 /// A CBZ with pages of a known size, so "was it resized" has an answer.
@@ -290,6 +290,77 @@ fn the_cache_is_trimmed_back_under_its_budget() {
     );
 }
 
+#[test]
+fn emptying_the_cache_removes_every_file_and_the_next_request_makes_them_again() {
+    let f = Fixture::new();
+    let pages = f.pages();
+    for width in [200, 300] {
+        pages.page("v1", 0, Some(width), &Ceiling::NONE).unwrap();
+    }
+    let held = f.cache_files();
+    assert!(held >= 2, "something to empty: {held}");
+
+    let done = pages.purge_cache();
+    assert_eq!(held as u64, done.files, "it says how many it removed");
+    assert!(
+        done.bytes >= done.files * 4096,
+        "at what the disk was charged"
+    );
+    assert_eq!(0, f.cache_files());
+    assert_eq!(
+        pages.purge_cache(),
+        Default::default(),
+        "an empty cache has nothing to claim"
+    );
+
+    let again = pages.page("v1", 0, Some(200), &Ceiling::NONE).unwrap();
+    assert!(again.is_some(), "the page is resized again, not lost");
+    assert!(f.cache_files() >= 1);
+}
+
+#[test]
+fn emptying_the_cache_removes_every_file_and_says_how_many() {
+    let f = Fixture::new();
+    let pages = f.pages();
+    for width in [200, 300] {
+        pages.page("v1", 0, Some(width), &Ceiling::NONE).unwrap();
+    }
+    let held = f.cache_files();
+    assert!(held >= 2, "something to empty");
+
+    let done = pages.purge_cache();
+    assert_eq!(held as u64, done.files);
+    assert!(
+        done.bytes >= done.files * 4096,
+        "counted at what the disk charges"
+    );
+    assert_eq!(0, f.cache_files());
+
+    // And it fills again: the folder stays, and the originals made nothing worse.
+    assert!(pages
+        .page("v1", 0, Some(200), &Ceiling::NONE)
+        .unwrap()
+        .is_some());
+    assert_eq!(1, f.cache_files());
+    assert_eq!(
+        0,
+        pages.purge_cache().files - 1,
+        "a second purge takes only what came back"
+    );
+}
+
+#[test]
+fn emptying_a_cache_that_does_not_exist_takes_nothing() {
+    let f = Fixture::new();
+    let pages = Pages::new(
+        Arc::clone(&f.db),
+        f.dir.path().join("never-made"),
+        85,
+        1 << 20,
+    );
+    assert_eq!(0, pages.purge_cache().files);
+}
+
 fn walk(dir: &Path) -> u64 {
     std::fs::read_dir(dir)
         .map(|entries| {
@@ -519,6 +590,94 @@ fn a_nought_does_not_take_a_real_width_s_place_in_the_sweep() {
     }
 }
 
+/// Every `commit` ends in a sweep of the shelf covers, and fifty commits in a row started
+/// fifty threads that each read the whole library again, one behind the other.
+#[test]
+fn fifty_sweeps_asked_while_one_runs_make_two_not_fifty() {
+    let f = Fixture::new();
+    let pages = Arc::new(f.pages());
+    let small = f.dir.path().join("Petit.cbz");
+    archive(&small, &[("000.jpg", 900, 1200)]);
+    f.db.write(|cx| {
+        for n in 0..49 {
+            let copy = f.dir.path().join(format!("Copie {n}.cbz"));
+            std::fs::copy(&small, &copy).unwrap();
+            let copy = copy.to_string_lossy().to_string();
+            cx.execute(
+                "INSERT INTO edition (id, work_id, path, implicit) VALUES (?1, 'w', ?2, 1)",
+                (format!("e{n}"), format!("/w/e{n}")),
+            )?;
+            cx.execute(
+                "INSERT INTO entry (id, edition_id, type, file, size, modified_at, added_at,
+                                        volume_number, sort_key, page_count)
+                     VALUES (?1, ?2, 'VOLUME', ?3, 1, 1700000000000, 1, 1.0, 1.0, 3)",
+                (format!("x{n}"), format!("e{n}"), copy),
+            )?;
+            // The pages the cover is cut from.
+            cx.execute(
+                "INSERT INTO page (entry_id, number, entry_name, media_type, width, height, size)
+                     VALUES (?1, 0, '000.jpg', 'image/jpeg', 900, 1200, 1000)",
+                [format!("x{n}")],
+            )?;
+        }
+        Ok(())
+    })
+    .expect("fifty editions");
+
+    // A width seen, then the cache emptied so that what appears can only be the sweep's.
+    pages
+        .series_cover("e", Some(300), &Ceiling::NONE)
+        .unwrap()
+        .expect("a tile");
+    std::fs::remove_dir_all(f.dir.path().join("cache")).unwrap();
+    pages.prepare();
+
+    for _ in 0..50 {
+        pages.warm_covers();
+    }
+
+    // Only there to end a sweep that hangs, not a speed: under coverage on a loaded runner the
+    // whole suite took 84 s one run and 132 s the next, and 46 covers of fifty in 60 s failed a
+    // sweep that was working. What the test measures is the count of sweeps, below.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    while f.cache_files() < 50 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the sweep prepared {} of fifty covers",
+            f.cache_files()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // Long enough for a pass that was wrongly owed to begin.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(
+        2,
+        pages.sweeps(),
+        "fifty asks made {} sweeps",
+        pages.sweeps()
+    );
+    assert_eq!(50, f.cache_files(), "each cover is in the cache once");
+}
+
+#[test]
+fn a_sweep_asked_when_none_runs_starts_at_once() {
+    let f = Fixture::new();
+    let pages = Arc::new(f.pages());
+    pages
+        .series_cover("e", Some(300), &Ceiling::NONE)
+        .unwrap()
+        .expect("a tile");
+    assert_eq!(0, pages.sweeps());
+    pages.warm_covers();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while pages.sweeps() < 1 {
+        assert!(std::time::Instant::now() < deadline, "no sweep began");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(1, pages.sweeps());
+}
+
 /// And nothing is read ahead at a width nothing is stored under.
 ///
 /// Reading a volume with `?width=0` queued the four pages after each one, and each of those
@@ -682,6 +841,209 @@ fn a_cover_chosen_on_disk_wins_over_page_zero() {
     // "cover.jpg beside the volumes" is what this is for: one file speaking for the whole
     // series, rather than whatever the first volume happens to open on.
     assert_ne!(first.tag, series.tag);
+}
+
+/// A file of edition `edition`, of `kind`, whose pages are named `names`, recorded as the
+/// scan records it: the archive on the disk and one `page` row per page.
+fn add_entry(f: &Fixture, id: &str, edition: &str, kind: &str, sort: f64, names: &[&str]) {
+    let cbz = f.dir.path().join(format!("{id}.cbz"));
+    let pages: Vec<(&str, u32, u32)> = names.iter().map(|n| (*n, 800, 1200)).collect();
+    archive(&cbz, &pages);
+    f.db.write(|cx| {
+        cx.execute(
+            "INSERT OR IGNORE INTO edition (id, work_id, path, implicit)
+             VALUES (?1, 'w', '/w/' || ?1, 1)",
+            [edition],
+        )?;
+        cx.execute(
+            "INSERT INTO entry (id, edition_id, type, file, size, modified_at, added_at,
+                                sort_key, page_count)
+             VALUES (?1, ?2, ?3, ?4, 1, 1700000000000, 1, ?5, ?6)",
+            rusqlite::params![
+                id,
+                edition,
+                kind,
+                cbz.to_string_lossy().to_string(),
+                sort,
+                names.len() as i64
+            ],
+        )?;
+        for (number, name) in names.iter().enumerate() {
+            cx.execute(
+                "INSERT INTO page (entry_id, number, entry_name, media_type, width, height, size)
+                 VALUES (?1, ?2, ?3, 'image/jpeg', 800, 1200, 1000)",
+                rusqlite::params![id, number as i64, name],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+}
+
+fn series_cover_on_disk(f: &Fixture, edition: &str) {
+    let chosen = f.dir.path().join(format!("{edition}-cover.jpg"));
+    std::fs::write(&chosen, jpeg(700, 1000)).unwrap();
+    f.db.write(|cx| {
+        cx.execute(
+            "UPDATE edition SET cover_file = ?1 WHERE id = ?2",
+            [chosen.to_string_lossy().to_string(), edition.to_string()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn a_chapter_opening_on_001_shows_its_series_cover() {
+    let f = Fixture::new();
+    add_entry(&f, "c1", "webtoon", "CHAPTER", 1.0, &["001.jpg", "002.jpg"]);
+    series_cover_on_disk(&f, "webtoon");
+    let pages = f.pages();
+    let chapter = pages.cover("c1", None, &Ceiling::NONE).unwrap().unwrap();
+    let series = pages
+        .series_cover("webtoon", None, &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    // A hundred and twenty chapters opening on their first panel were a hundred and twenty
+    // tiles nobody could tell apart, and none of them the series.
+    assert_eq!(chapter.tag, series.tag);
+}
+
+#[test]
+fn a_chapter_opening_on_000_keeps_it_as_its_cover() {
+    let f = Fixture::new();
+    add_entry(
+        &f,
+        "c1",
+        "webtoon",
+        "CHAPTER",
+        1.0,
+        &["sub/000.jpg", "001.jpg"],
+    );
+    series_cover_on_disk(&f, "webtoon");
+    let pages = f.pages();
+    let chapter = pages.cover("c1", None, &Ceiling::NONE).unwrap().unwrap();
+    let first = pages
+        .page("c1", 0, Some(300), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    assert_eq!(chapter.tag, first.tag);
+}
+
+#[test]
+fn a_volume_opening_on_001_shows_its_series_cover() {
+    let f = Fixture::new();
+    add_entry(&f, "t2", "e", "VOLUME", 2.0, &["001.jpg", "002.jpg"]);
+    series_cover_on_disk(&f, "e");
+    let pages = f.pages();
+    let volume = pages.cover("t2", None, &Ceiling::NONE).unwrap().unwrap();
+    let series = pages
+        .series_cover("e", None, &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    // A volume numbered from 001 has no cover page, as a chapter has none: a manga's tome 2
+    // showing its first panel looked like a page torn out of the series.
+    assert_eq!(volume.tag, series.tag);
+}
+
+/// The list of an edition says which volumes show the series' cover in their place, by the
+/// rule the cover itself is served by: the tile writes the number over a borrowed picture,
+/// and a client guessing it from the picture would guess wrong on every series of one.
+#[test]
+fn the_list_says_which_volumes_borrow_the_series_cover() {
+    let f = Fixture::new();
+    add_entry(&f, "c1", "webtoon", "CHAPTER", 1.0, &["001.jpg", "002.jpg"]);
+    add_entry(&f, "c2", "webtoon", "CHAPTER", 2.0, &["000.jpg", "001.jpg"]);
+    add_entry(&f, "c3", "webtoon", "CHAPTER", 3.0, &["01.jpg", "02.jpg"]);
+    add_entry(&f, "c4", "webtoon", "CHAPTER", 4.0, &["001.jpg", "002.jpg"]);
+    f.db.write(|cx| {
+        cx.execute("UPDATE entry SET cover_page = 1 WHERE id = 'c4'", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let listed = Repository::new(&f.db)
+        .entries("webtoon", &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    let borrowed = |id: &str| listed.iter().find(|e| e.id == id).unwrap().borrowed_cover;
+    assert!(borrowed("c1"));
+    assert!(!borrowed("c2"), "a page 000 is the volume's own cover");
+    assert!(
+        borrowed("c3"),
+        "01 is page 1 as 001 is: the width follows the page count, not the meaning"
+    );
+    assert!(!borrowed("c4"), "a page chosen as the cover is its own");
+    let one = Repository::new(&f.db)
+        .entry("c1", &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    assert!(one.borrowed_cover);
+}
+
+#[test]
+fn a_file_named_outside_the_library_format_keeps_its_first_page() {
+    let f = Fixture::new();
+    add_entry(&f, "c1", "webtoon", "CHAPTER", 1.0, &["01.jpg", "02.jpg"]);
+    series_cover_on_disk(&f, "webtoon");
+    let pages = f.pages();
+    let chapter = pages.cover("c1", None, &Ceiling::NONE).unwrap().unwrap();
+    let first = pages
+        .page("c1", 0, Some(300), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    // `01.jpg` is page 1 as `001.jpg` is: a webtoon from elsewhere counting with two digits
+    // had its first page of reading drawn as its cover while the series held one.
+    let series = pages
+        .series_cover("webtoon", None, &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    assert_eq!(chapter.tag, series.tag);
+    assert_ne!(chapter.tag, first.tag);
+}
+
+#[test]
+fn chapters_with_no_cover_anywhere_show_the_first_page_of_the_first() {
+    let f = Fixture::new();
+    add_entry(&f, "c1", "webtoon", "CHAPTER", 1.0, &["001.jpg", "002.jpg"]);
+    add_entry(&f, "c2", "webtoon", "CHAPTER", 2.0, &["001.jpg", "002.jpg"]);
+    let pages = f.pages();
+    // The series falls to its first chapter, which has no cover of its own and would fall
+    // back to the series: asked of each other, the two would never answer.
+    let series = pages
+        .series_cover("webtoon", None, &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    let first = pages
+        .page("c1", 0, Some(300), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    assert_eq!(series.tag, first.tag);
+    let second = pages.cover("c2", None, &Ceiling::NONE).unwrap().unwrap();
+    assert_eq!(second.tag, series.tag);
+}
+
+#[test]
+fn a_chosen_volume_opening_on_001_is_the_series_cover_without_asking_it_back() {
+    let f = Fixture::new();
+    add_entry(&f, "t2", "e", "VOLUME", 2.0, &["001.jpg", "002.jpg"]);
+    f.db.write(|cx| {
+        cx.execute("UPDATE entry SET volume_number = 2 WHERE id = 't2'", [])?;
+        cx.execute("UPDATE edition SET cover_volume = 2 WHERE id = 'e'", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let pages = f.pages();
+    // The volume has no cover page and would borrow the series', which is this volume: the
+    // two asked each other until the stack ran out, from one request anybody could send.
+    let series = pages
+        .series_cover("e", None, &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    let first = pages
+        .page("t2", 0, Some(300), &Ceiling::NONE)
+        .unwrap()
+        .unwrap();
+    assert_eq!(series.tag, first.tag);
 }
 
 // ----------------------------------------------------------------- prefetch
@@ -1862,4 +2224,37 @@ fn a_page_asked_for_while_it_is_being_warmed_is_made_once() {
         pages.decodes(),
         "made once, by whichever got there first"
     );
+}
+
+/// A decode holds a whole bitmap, and readers asking together began as many as they were:
+/// memory went with the count. They are all served, a few at a time — here one at a time, to
+/// see the others wait for their place.
+#[test]
+fn decodes_asked_together_wait_for_a_place_and_are_all_served() {
+    let fixture = Fixture::new();
+    let pages = Arc::new(fixture.pages().with_decode_places(1));
+
+    let threads: Vec<_> = (0..12u32)
+        .map(|i| {
+            let pages = Arc::clone(&pages);
+            std::thread::spawn(move || {
+                // Three pages and widths far enough apart not to share an answer.
+                pages
+                    .page(
+                        "v1",
+                        (i % 3) as i64,
+                        Some(100 + (i / 3) * 150),
+                        &Ceiling::NONE,
+                    )
+                    .expect("serving")
+                    .expect("a page")
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().expect("a reader that was served");
+    }
+
+    assert!(pages.decodes() > 3, "{} decodes", pages.decodes());
+    assert_eq!(1, pages.peak_decodes(), "decodes at once");
 }

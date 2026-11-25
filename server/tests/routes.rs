@@ -277,7 +277,9 @@ async fn a_downloaded_file_keeps_its_name_across_a_header_that_cannot_hold_it() 
     use tower::ServiceExt;
 
     let server = Server::new();
-    let folder = server.library().join("Bleach");
+    // A series written in kana and ideographs, since that is what is left of a name once it
+    // has been made a file name: its letters, in a header that holds only ASCII.
+    let folder = server.library().join("進撃の巨人");
     std::fs::create_dir_all(&folder).unwrap();
     let file = folder.join("Tome 1 — L'\"Été\".cbz");
     std::fs::write(&file, archive_bytes(None)).unwrap();
@@ -312,7 +314,9 @@ async fn a_downloaded_file_keeps_its_name_across_a_header_that_cannot_hold_it() 
 
     // The whole name, percent-encoded, which is what every browser reads first.
     assert!(
-        said.contains("filename*=UTF-8''Tome%201%20%E2%80%94%20L%27%22%C3%89t%C3%A9%22.cbz"),
+        said.contains(
+            "filename*=UTF-8''%E9%80%B2%E6%92%83%E3%81%AE%E5%B7%A8%E4%BA%BA_tome_001.cbz"
+        ),
         "{said}"
     );
     // And a plain one behind it for whatever does not: nothing outside ASCII, and no quote
@@ -323,7 +327,7 @@ async fn a_downloaded_file_keeps_its_name_across_a_header_that_cannot_hold_it() 
         .and_then(|rest| rest.split('"').next())
         .expect("a plain name too");
     assert!(plain.is_ascii(), "{plain}");
-    assert_eq!("Tome 1 _ L___t__.cbz", plain);
+    assert_eq!("______tome_001.cbz", plain);
 
     // And the bytes themselves, streamed rather than held: what came back is the file, and
     // it said how big it was before it started.
@@ -655,6 +659,38 @@ async fn a_file_offered_is_described_before_it_is_filed() {
     assert!(status.is_success(), "{status} {filed}");
 }
 
+/// The answer names the volume that was filed, and the volume is there under that id: a
+/// client that opens it from the answer must not be told it does not exist.
+#[tokio::test]
+async fn the_id_a_filed_volume_is_answered_with_is_the_one_the_library_holds() {
+    let (server, series, _) = a_library().await;
+    let (_, proposal) = server
+        .send(
+            request("POST", "/entries", IMPORTER)
+                .header("Content-Type", "application/octet-stream")
+                .header("X-Leaf-Name", "Tome 2.cbz")
+                .body(Body::from(archive_bytes(None)))
+                .unwrap(),
+        )
+        .await;
+    let offered = proposal["received"].as_str().expect("an id").to_string();
+    let (_, filed) = server
+        .send(
+            request("POST", &format!("/intake/{offered}/file"), IMPORTER)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"seriesId": series}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    let entry = filed["entryId"].as_str().expect("an entry id").to_string();
+
+    let (status, _) = get(&server, &format!("/entries/{entry}")).await;
+
+    assert_eq!(status, StatusCode::OK, "{filed}");
+}
+
 #[tokio::test]
 async fn a_file_offered_and_then_thought_better_of_is_abandoned() {
     let (server, _, _) = a_library().await;
@@ -717,6 +753,102 @@ async fn an_import_is_opened_looked_at_and_given_up_on() {
         )
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+/// Two folders of a universe each, announced, sent and committed through the router.
+async fn commit_a_universe(
+    server: &Server,
+    state: &leaf_server::api::routes::AppState,
+    name: &str,
+) {
+    let volume = archive_bytes(None);
+    let mut sidecars = vec![serde_json::json!({
+        "path": "universe.json",
+        "json": format!("{{\"leaf\":1,\"name\":\"{name}\"}}"),
+    })];
+    let mut files = Vec::new();
+    for work in ["Un", "Deux"] {
+        sidecars.push(serde_json::json!({
+            "path": format!("{work}/work.json"),
+            "json": format!("{{\"leaf\":1,\"name\":\"{name} {work}\"}}"),
+        }));
+        files.push(serde_json::json!({"path": format!("{work}/Tome 1.cbz"), "size": volume.len()}));
+    }
+    let (status, opened) = server
+        .send_to(
+            state.clone(),
+            request("POST", "/import", IMPORTER)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"root": name, "files": files, "sidecars": sidecars})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{opened}");
+    let id = opened["id"].as_str().expect("an id").to_string();
+    for work in ["Un", "Deux"] {
+        let (status, _) = server
+            .send_to(
+                state.clone(),
+                request(
+                    "PUT",
+                    &format!("/import/{id}/file?path={work}%2FTome%201.cbz"),
+                    IMPORTER,
+                )
+                .body(Body::from(volume.clone()))
+                .unwrap(),
+            )
+            .await;
+        assert!(status.is_success(), "{status}");
+    }
+    let (status, body) = server
+        .send_to(
+            state.clone(),
+            request("POST", &format!("/import/{id}/commit"), IMPORTER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn a_universe_committed_while_a_scan_runs_is_indexed_when_it_ends() {
+    // Fifty commits in a row meet a scan the first one started. A universe cannot be
+    // rescanned in place, so it relies on the full pass: told "already running", it was
+    // installed on disk and left out of the index until the next scan happened to run.
+    let server = Server::new();
+    let state = server.state();
+    let (gate, wait) = std::sync::mpsc::channel::<()>();
+    assert!(state.runner.start("Long", move || {
+        let _ = wait.recv();
+        Ok(Default::default())
+    }));
+
+    commit_a_universe(&server, &state, "Terres d'Arran").await;
+    commit_a_universe(&server, &state, "Monde").await;
+    let _ = gate.send(());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while state.runner.status().state != "DONE" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the scans never ended"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let (status, universes) = get(&server, "/universes").await;
+    assert_eq!(status, StatusCode::OK, "{universes}");
+    let mut names: Vec<String> = universes
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|u| u["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(vec!["Monde", "Terres d'Arran"], names, "{universes}");
 }
 
 #[tokio::test]
@@ -1017,10 +1149,12 @@ async fn naming_an_edition_that_has_a_folder_writes_it_there() {
     .await;
     assert_eq!(StatusCode::OK, status, "{body}");
 
+    // The name is written in the edition's own file, and the folder is called by it now.
     let written =
-        std::fs::read_to_string(server.library().join("Bleach/Perfect Edition/edition.json"))
+        std::fs::read_to_string(server.library().join("Bleach/Édition Deluxe/edition.json"))
             .unwrap();
     assert!(written.contains("Édition Deluxe"), "{written}");
+    assert!(!server.library().join("Bleach/Perfect Edition").exists());
 }
 
 #[tokio::test]
@@ -1588,4 +1722,208 @@ async fn a_chunk_for_a_file_the_manifest_never_mentioned_is_refused() {
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+/// Opens an import of one file, « Tome 1.cbz », under « Essai », and hands back its id.
+async fn an_import_of_one_file(server: &Server) -> String {
+    let (status, opened) = server
+        .send(
+            request("POST", "/import", IMPORTER)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "root": "Essai",
+                        "files": [{"path": "Tome 1.cbz", "size": 2}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{opened}");
+    opened["id"].as_str().expect("an id").to_string()
+}
+
+async fn put_at(server: &Server, id: &str, path: &str) -> (StatusCode, serde_json::Value) {
+    server
+        .send(
+            request("PUT", &format!("/import/{id}/file?path={path}"), IMPORTER)
+                .header("Content-Type", "application/octet-stream")
+                .body(Body::from(b"{}".to_vec()))
+                .unwrap(),
+        )
+        .await
+}
+
+/// The session's own files sat beside the received ones, and a chunk sent at the name of
+/// one rewrote where the commit installed.
+#[tokio::test]
+async fn a_chunk_at_the_sessions_own_files_is_refused() {
+    let (server, _, _) = a_library().await;
+    let id = an_import_of_one_file(&server).await;
+    for own in ["_landings.json", "_manifest.json", "Tome+2.cbz"] {
+        let (status, body) = put_at(&server, &id, own).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{own}: {body}");
+        // The contract's words: a path the announcement did not list.
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("the announcement did not list")),
+            "{own}: {body}"
+        );
+    }
+}
+
+/// Written on the disk by something else than this server, the landings are not followed.
+#[tokio::test]
+async fn a_commit_over_forged_landings_refuses_and_writes_nothing() {
+    let (server, _, _) = a_library().await;
+    let id = an_import_of_one_file(&server).await;
+    let (status, body) = server
+        .send(
+            request(
+                "PUT",
+                &format!("/import/{id}/file?path=Tome+1.cbz"),
+                IMPORTER,
+            )
+            .header("Content-Type", "application/octet-stream")
+            .body(Body::from(vec![0u8; 2]))
+            .unwrap(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let session = server.dir.path().join("inbox").join(&id);
+    std::fs::write(
+        session.join("_landings.json"),
+        serde_json::json!({
+            "root": "../x",
+            "files": {"Tome 1.cbz": "Tome 1.cbz"},
+            "sidecars": {},
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let (status, body) = server
+        .send(
+            request("POST", &format!("/import/{id}/commit"), IMPORTER)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert!(!server.dir.path().join("x").exists());
+    assert!(!server.library().join("Essai").exists());
+    assert!(session.join("files/Tome 1.cbz").is_file());
+}
+
+// ------------------------------------------------------------------ credits
+
+/// Lucky Luke: the team in `work.json`, and one volume whose script changed hands.
+async fn lucky_luke() -> Server {
+    let server = Server::new();
+    let folder = server.library().join("Lucky Luke");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("work.json"),
+        r#"{"leaf":1,"title":"Lucky Luke","authors":["René Goscinny"],"artists":["Morris"]}"#,
+    )
+    .unwrap();
+    for (number, authors) in [(1.0, vec![]), (2.0, vec!["Jul".to_string()])] {
+        std::fs::write(
+            folder.join(format!("Tome {number}.cbz")),
+            archive_bytes(Some(&leaf_server::metadata::sidecars::EntryJson {
+                leaf: Some(1),
+                number: Some(number),
+                authors,
+                ..Default::default()
+            })),
+        )
+        .unwrap();
+    }
+    server.scan();
+    server
+}
+
+/// A volume answered with its title and nothing about who made it, so neither the card,
+/// the reader nor the search could say who drew volume 2.
+#[tokio::test]
+async fn an_entry_answers_with_who_wrote_and_drew_it_and_whether_it_came_from_its_series() {
+    let server = lucky_luke().await;
+    let (status, body) = get(&server, &format!("/series/{}/entries", server.series())).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let first = &body[0];
+    assert_eq!(
+        first["authors"],
+        serde_json::json!(["René Goscinny"]),
+        "{first}"
+    );
+    assert_eq!(first["authorsInherited"], true);
+    let second = &body[1];
+    assert_eq!(second["authors"], serde_json::json!(["Jul"]), "{second}");
+    assert_eq!(second["authorsInherited"], false);
+    assert_eq!(second["artists"], serde_json::json!(["Morris"]));
+    assert_eq!(second["artistsInherited"], true);
+
+    let id = second["id"].as_str().unwrap();
+    let (_, one) = get(&server, &format!("/entries/{id}")).await;
+    assert_eq!(one["authors"], serde_json::json!(["Jul"]), "{one}");
+}
+
+/// « Modifier la série » was filled with everybody the series is credited with, and saving
+/// it froze that union into `work.json` as the default.
+#[tokio::test]
+async fn a_series_tells_its_declared_default_apart_from_everyone_it_is_credited_with() {
+    let server = lucky_luke().await;
+    let (status, body) = get(&server, &format!("/series/{}", server.series())).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let mut authors: Vec<String> = serde_json::from_value(body["authors"].clone()).expect("a list");
+    authors.sort();
+    assert_eq!(vec!["Jul", "René Goscinny"], authors);
+    assert_eq!(
+        body["declaredAuthors"],
+        serde_json::json!(["René Goscinny"])
+    );
+    assert_eq!(body["declaredArtists"], serde_json::json!(["Morris"]));
+}
+
+/// A series nobody declared anything for says so, even when its volumes credit people.
+#[tokio::test]
+async fn a_series_that_declares_nobody_has_an_empty_default() {
+    let (server, series, _) = a_library().await;
+    let (_, body) = get(&server, &format!("/series/{series}")).await;
+    assert_eq!(body["declaredAuthors"], serde_json::json!([]), "{body}");
+    assert_eq!(body["declaredArtists"], serde_json::json!([]));
+}
+
+/// The facet of drawers was offered and choosing one filtered nothing: `artist=` was not read.
+#[tokio::test]
+async fn series_are_filtered_by_who_drew_them() {
+    let server = lucky_luke().await;
+    let other = server.library().join("Bleach");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(
+        other.join("work.json"),
+        r#"{"leaf":1,"title":"Bleach","artists":["Tite Kubo"]}"#,
+    )
+    .unwrap();
+    std::fs::write(other.join("Tome 1.cbz"), archive_bytes(None)).unwrap();
+    server.scan();
+
+    let names = |body: &serde_json::Value| -> Vec<String> {
+        let mut found: Vec<String> = body["items"]
+            .as_array()
+            .expect("a page")
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_string())
+            .collect();
+        found.sort();
+        found
+    };
+    let (_, one) = get(&server, "/series?artist=morris").await;
+    assert_eq!(vec!["Lucky Luke"], names(&one), "{one}");
+    let (_, both) = get(&server, "/series?artist=Morris&artist=Tite%20Kubo").await;
+    assert_eq!(vec!["Bleach", "Lucky Luke"], names(&both), "{both}");
 }

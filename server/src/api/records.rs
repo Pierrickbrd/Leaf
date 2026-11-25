@@ -18,31 +18,77 @@ use crate::metadata::legacy_comic_info;
 use crate::metadata::sidecars::{self, ArcJson, EditionJson, EntryJson, WorkJson, FORMAT_VERSION};
 use crate::scan::layout;
 use crate::scan::scanner::ENTRY_JSON;
+use crate::store::text::tag_case;
 use crate::store::Db;
+
+/// A field a patch may leave alone (absent), set (a value) or take away (`null`).
+///
+/// `Option<Option<T>>` and not `Option<T>`: serde reads an absent field and a `null` as the
+/// same `None`, so a field once written could be changed and never emptied — a wrong ISBN
+/// stayed on the volume until somebody edited the archive by hand.
+pub type Clear<T> = Option<Option<T>>;
+
+fn clearable<'de, D, T>(from: D) -> Result<Clear<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(from).map(Some)
+}
+
+/// What a field becomes: itself when the patch did not mention it, whatever the patch said
+/// otherwise — including nothing at all.
+fn keep<T: Clone>(given: &Clear<T>, current: Option<T>) -> Option<T> {
+    match given {
+        None => current,
+        Some(value) => value.clone(),
+    }
+}
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SeriesPatch {
     pub name: Option<String>,
-    pub title: Option<String>,
-    pub medium: Option<String>,
+    #[serde(deserialize_with = "clearable")]
+    pub title: Clear<String>,
+    #[serde(deserialize_with = "clearable")]
+    pub medium: Clear<String>,
     /// The former singular. `authors` is what a client should send; this stays readable for
     /// one that has not been rebuilt.
-    pub author: Option<String>,
+    #[serde(deserialize_with = "clearable")]
+    pub author: Clear<String>,
     pub authors: Option<Vec<String>>,
     pub artists: Option<Vec<String>>,
-    pub status: Option<String>,
-    pub reading_direction: Option<String>,
+    #[serde(deserialize_with = "clearable")]
+    pub status: Clear<String>,
+    #[serde(deserialize_with = "clearable")]
+    pub reading_direction: Clear<String>,
     pub genres: Option<Vec<String>>,
     pub tags: Option<Vec<String>>,
-    pub age_rating: Option<String>,
-    pub summary: Option<String>,
-    pub publisher: Option<String>,
-    pub collection: Option<String>,
-    pub volume_count: Option<i32>,
-    pub format: Option<String>,
-    pub language: Option<String>,
-    pub colour: Option<bool>,
+    #[serde(deserialize_with = "clearable")]
+    pub age_rating: Clear<String>,
+    #[serde(deserialize_with = "clearable")]
+    pub summary: Clear<String>,
+    #[serde(deserialize_with = "clearable")]
+    pub publisher: Clear<String>,
+    #[serde(deserialize_with = "clearable")]
+    pub collection: Clear<String>,
+    #[serde(deserialize_with = "clearable")]
+    pub volume_count: Clear<i32>,
+    #[serde(deserialize_with = "clearable")]
+    pub format: Clear<String>,
+    #[serde(deserialize_with = "clearable")]
+    pub language: Clear<String>,
+    #[serde(deserialize_with = "clearable")]
+    pub colour: Clear<bool>,
+    /// The number of the volume whose cover is the series'; `null` gives the choice back to
+    /// `cover.jpg`, then to the first volume.
+    #[serde(deserialize_with = "clearable")]
+    pub cover_volume: Clear<f64>,
+    /// What *this printing* is, in its own `edition.json`; `null` hands the description back
+    /// to the work's. An edition with no folder of its own has none to keep it in.
+    #[serde(deserialize_with = "clearable")]
+    pub edition_summary: Clear<String>,
 }
 
 impl SeriesPatch {
@@ -70,6 +116,8 @@ impl SeriesPatch {
             || self.status.is_some()
             || self.volume_count.is_some()
             || self.colour.is_some()
+            || self.cover_volume.is_some()
+            || self.edition_summary.is_some()
     }
 }
 
@@ -80,9 +128,9 @@ impl SeriesPatch {
 /// writes a medium into the status of a sidecar. Named fields cost nothing and that mistake
 /// cannot be made.
 struct Spelled {
-    medium: Option<String>,
-    status: Option<String>,
-    reading_direction: Option<String>,
+    medium: Clear<String>,
+    status: Clear<String>,
+    reading_direction: Clear<String>,
 }
 
 impl Spelled {
@@ -132,37 +180,45 @@ fn work_document(
     let mut it: WorkJson = document.read();
     it.leaf = Some(FORMAT_VERSION);
     if patch.touches_work() {
-        it.title = patch.title.clone().or(it.title);
-        it.medium = words.medium.clone().or(it.medium);
-        it.author = patch.author.clone().or(it.author);
+        it.title = keep(&patch.title, it.title);
+        it.medium = keep(&words.medium, it.medium);
+        it.author = keep(&patch.author, it.author);
         if let Some(authors) = &patch.authors {
             it.authors = authors.clone();
         }
         if let Some(artists) = &patch.artists {
             it.artists = artists.clone();
         }
-        it.status = words.status.clone().or(it.status);
-        it.reading_direction = words.reading_direction.clone().or(it.reading_direction);
+        it.status = keep(&words.status, it.status);
+        it.reading_direction = keep(&words.reading_direction, it.reading_direction);
         if let Some(genres) = &patch.genres {
             it.genres = genres.clone();
         }
         if let Some(tags) = &patch.tags {
-            it.tags = tags.clone();
+            // In capitals in the file itself, and once each: the sidecar is the truth, and
+            // a spelling the index folds but the file keeps would come back on a rebuild.
+            let mut seen = std::collections::HashSet::new();
+            it.tags = tags
+                .iter()
+                .map(|t| tag_case(t))
+                .filter(|t| !t.is_empty() && seen.insert(crate::store::text::search_key(t)))
+                .collect();
         }
-        it.age_rating = patch.age_rating.clone().or(it.age_rating);
-        it.summary = patch.summary.clone().or(it.summary);
+        it.age_rating = keep(&patch.age_rating, it.age_rating);
+        it.summary = keep(&patch.summary, it.summary);
     }
     // An implicit edition has no folder of its own: its fields go down into work.json.
     // Dropping an edition.json there would flip how the folder is classified — it would stop
     // being a work and become an edition.
     if gets_the_edition {
-        it.publisher = patch.publisher.clone().or(it.publisher);
-        it.collection = patch.collection.clone().or(it.collection);
-        it.volume_count = patch.volume_count.or(it.volume_count);
-        it.format = patch.format.clone().or(it.format);
-        it.language = patch.language.clone().or(it.language);
-        it.status = words.status.clone().or(it.status);
-        it.colour = patch.colour.or(it.colour);
+        it.publisher = keep(&patch.publisher, it.publisher);
+        it.collection = keep(&patch.collection, it.collection);
+        it.volume_count = keep(&patch.volume_count, it.volume_count);
+        it.format = keep(&patch.format, it.format);
+        it.language = keep(&patch.language, it.language);
+        it.status = keep(&words.status, it.status);
+        it.colour = keep(&patch.colour, it.colour);
+        it.cover_volume = keep(&patch.cover_volume, it.cover_volume);
     }
     Ok(Some((document, it)))
 }
@@ -182,28 +238,47 @@ fn edition_document(
     let mut it: EditionJson = document.read();
     it.leaf = Some(FORMAT_VERSION);
     it.name = patch.name.clone().or(it.name);
-    it.publisher = patch.publisher.clone().or(it.publisher);
-    it.collection = patch.collection.clone().or(it.collection);
-    it.status = words.status.clone().or(it.status);
-    it.volume_count = patch.volume_count.or(it.volume_count);
-    it.format = patch.format.clone().or(it.format);
-    it.language = patch.language.clone().or(it.language);
-    it.colour = patch.colour.or(it.colour);
+    it.publisher = keep(&patch.publisher, it.publisher);
+    it.collection = keep(&patch.collection, it.collection);
+    it.status = keep(&words.status, it.status);
+    it.volume_count = keep(&patch.volume_count, it.volume_count);
+    it.format = keep(&patch.format, it.format);
+    it.language = keep(&patch.language, it.language);
+    it.colour = keep(&patch.colour, it.colour);
+    it.cover_volume = keep(&patch.cover_volume, it.cover_volume);
+    it.summary = keep(&patch.edition_summary, it.summary);
     Ok(Some((document, it)))
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct EntryPatch {
+    /// Never taken away: a volume without a number is not one the edition can place.
     pub number: Option<f64>,
-    pub title: Option<String>,
-    pub isbn: Option<String>,
-    pub published_on: Option<String>,
-    pub summary: Option<String>,
+    #[serde(deserialize_with = "clearable")]
+    pub title: Clear<String>,
+    #[serde(deserialize_with = "clearable")]
+    pub isbn: Clear<String>,
+    #[serde(deserialize_with = "clearable")]
+    pub published_on: Clear<String>,
+    #[serde(deserialize_with = "clearable")]
+    pub summary: Clear<String>,
+    /// The page shown as the cover, from 0 like `/pages/{number}`; `null` goes back to an
+    /// image beside the archive, otherwise page 0.
+    #[serde(deserialize_with = "clearable")]
+    pub cover_page: Clear<i32>,
+    /// Who wrote this volume. Absent leaves it; a list replaces the volume's own; an empty
+    /// list takes the volume's own away, and its series' default speaks for it again.
+    pub authors: Option<Vec<String>>,
+    /// Who drew it, on the same terms.
+    pub artists: Option<Vec<String>>,
 }
 
 pub struct Records<'a> {
     db: &'a Db,
+    /// Where imports land, so a volume converted on its way in is followed when Leaf
+    /// rewrites it. `None` for a caller that writes only files no import put there.
+    library: Option<&'a Path>,
 }
 
 /// Where an edition's files live, and under what names.
@@ -217,7 +292,157 @@ struct Places {
 
 impl<'a> Records<'a> {
     pub fn new(db: &'a Db) -> Self {
-        Records { db }
+        Records { db, library: None }
+    }
+
+    /// The same, for a caller that may rewrite a volume an import converted: every route
+    /// that edits or stamps an archive of the library says where the library is.
+    pub fn in_library(self, library: &'a Path) -> Self {
+        Records {
+            library: Some(library),
+            ..self
+        }
+    }
+
+    /// Writes `entry.json` into a volume, and follows the origin it was converted from.
+    ///
+    /// Leaf's own rewrite changes the archive's size, and the next import compared it to the
+    /// size it was kept at: a title corrected in the application read as an edit made by
+    /// hand, and the import offered to overwrite it. A failure to follow is said and not
+    /// raised — the volume is written, and a stale origin only makes the next import ask.
+    fn write_entry_json(&self, file: &Path, entry: &EntryJson) -> Result<()> {
+        let was = std::fs::metadata(file).map(|m| m.len()).ok();
+        cbz_writer::replace_sidecar(file, ENTRY_JSON, &sidecars::write(entry)?)?;
+        self.follow_origin(file, was);
+        Ok(())
+    }
+
+    /// See [`Self::write_entry_json`]: `was` is the archive's size before Leaf rewrote it.
+    fn follow_origin(&self, file: &Path, was: Option<u64>) {
+        let (Some(library), Some(was)) = (self.library, was) else {
+            return;
+        };
+        let Some(key) = crate::api::bulk_import::origin_key_of(library, file) else {
+            return;
+        };
+        let followed = std::fs::metadata(file)
+            .map_err(anyhow::Error::from)
+            .and_then(|m| crate::store::origins::follow(self.db, &key, was, m.len()));
+        if let Err(e) = followed {
+            tracing::warn!(file = %file.display(), error = %e, "could not follow the origin");
+        }
+    }
+
+    /// Makes `image` the volume's page `000`, the cover the format names: replacing the one
+    /// it has, or — a volume numbered from `001` has none — adding it before the first page.
+    ///
+    /// Adding one moves every page a place down, and everything that counts pages moves with
+    /// it **in the same operation**: each profile's place in the volume, and the first page of
+    /// every chapter and the cover page `entry.json` names. A chosen `coverPage` is cleared,
+    /// since it would go on outranking the page 0 just written. Chapters a volume only
+    /// declares in its ComicInfo are moved too: they are read the way a patch reads them, and
+    /// written into `entry.json`, which wins over the ComicInfo from then on.
+    ///
+    /// The new archive is written beside the old one and read back — its first page must be
+    /// the image, and it must hold the pages expected — before it replaces the volume. The
+    /// cover it replaces is **not kept**: the archive is the volume, and it holds the cover
+    /// now. `false` when there is no such volume.
+    pub fn set_cover_page(&self, entry_id: &str, extension: &str, image: &[u8]) -> Result<bool> {
+        let row = self.db.read(|cx| {
+            cx.query_one(
+                "SELECT file, edition_id FROM entry WHERE id = ?1",
+                [entry_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+        })?;
+        let Some((file, edition_id)) = row else {
+            return Ok(false);
+        };
+        let Some(where_) = self.places(&edition_id)? else {
+            return Ok(false);
+        };
+        let file = PathBuf::from(file);
+        let held = cbz::read(&file, false)?.pages;
+        let Some(first) = held.first() else {
+            return Err(crate::api::invalid("the volume has no pages"));
+        };
+        // Where the page goes: over the one it replaces, in its folder and under the new
+        // extension, or at the root of an archive that has none.
+        let replaced = crate::archive::page_number(&first.name) == Some(0);
+        let folder = if replaced {
+            first.name.rsplit_once('/').map(|(f, _)| f)
+        } else {
+            None
+        };
+        // Named as its siblings are: a file numbered `01`, `02`… gets `00`, one numbered `1`,
+        // `2`… gets `0`, and anything else the three digits a library writes.
+        let width = crate::archive::page_stem(&first.name)
+            .filter(|stem| crate::archive::page_number(stem).is_some())
+            .map_or(3, str::len);
+        let stem = format!("{:0width$}", 0);
+        let name = match folder {
+            Some(folder) => format!("{folder}/{stem}.{extension}"),
+            None => format!("{stem}.{extension}"),
+        };
+        let shifted = !replaced;
+
+        let mut current = read_entry_json(&file).unwrap_or_default();
+        let changes_json = shifted || current.cover_page.is_some();
+        let json = if changes_json {
+            current.leaf = Some(FORMAT_VERSION);
+            current.work = Some(where_.work_name);
+            current.edition = where_.edition_name;
+            current.id = Some(entry_id.to_string());
+            current.cover_page = None;
+            if shifted {
+                for chapter in &mut current.chapters {
+                    chapter.start_page = chapter.start_page.map(|p| p + 1);
+                }
+            }
+            Some(sidecars::write(&current)?)
+        } else {
+            None
+        };
+
+        let mut add: Vec<(&str, &[u8])> = vec![(name.as_str(), image)];
+        if let Some(json) = &json {
+            add.push((ENTRY_JSON, json));
+        }
+        let remove: Vec<&str> = if replaced && first.name != name {
+            vec![first.name.as_str()]
+        } else {
+            Vec::new()
+        };
+        let was = std::fs::metadata(&file).map(|m| m.len()).ok();
+        let temporary = crate::store::files::beside(&file, "leaf-tmp");
+        cbz_writer::rewrite_into(&file, &temporary, &add, &remove)?;
+        // Read back before it replaces anything: a page that does not sort first would be a
+        // cover nobody sees, and the pages shifted for it would be shifted for nothing.
+        let written = cbz::read(&temporary, false).map(|c| c.pages);
+        let expected = held.len() + usize::from(shifted);
+        let sound = written.as_ref().is_ok_and(|pages| {
+            pages.len() == expected && pages.first().is_some_and(|p| p.name == name)
+        });
+        if !sound {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(crate::api::invalid(
+                "the volume cannot be given that cover: its pages would not read in order",
+            ));
+        }
+        std::fs::rename(&temporary, &file)
+            .map_err(|e| anyhow!("replacing {}: {e}", file.display()))?;
+        tracing::info!(file = %file.display(), "cover page written");
+        if shifted {
+            self.db.write(|cx| {
+                cx.execute(
+                    "UPDATE progress SET page = page + 1 WHERE entry_id = ?1",
+                    [entry_id],
+                )?;
+                Ok(())
+            })?;
+        }
+        self.follow_origin(&file, was);
+        Ok(true)
     }
 
     pub fn patch_series(&self, edition_id: &str, patch: &SeriesPatch) -> Result<bool> {
@@ -240,7 +465,31 @@ impl<'a> Records<'a> {
             ));
         }
 
+        if where_.implicit && patch.edition_summary.is_some() {
+            return Err(crate::api::invalid(
+                "this edition has no folder of its own, so it has no description of its own — \
+                 the work's is the one it shows",
+            ));
+        }
+
         let words = Spelled::of(patch)?;
+
+        // Against the index, like a volume's cover page: a number the edition does not hold
+        // would be written down, then ignored at every request for the cover.
+        if let Some(Some(number)) = patch.cover_volume {
+            let held = self.db.read(|cx| {
+                cx.query_one(
+                    "SELECT 1 FROM entry WHERE edition_id = ?1 AND volume_number = ?2",
+                    rusqlite::params![edition_id, number],
+                    |r| r.get::<_, i64>(0),
+                )
+            })?;
+            if held.is_none() {
+                return Err(crate::api::invalid(format!(
+                    "the series has no volume {number}"
+                )));
+            }
+        }
 
         let work_file = where_.work.join(layout::WORK_FILE);
         let edition_file = where_.edition.join(layout::EDITION_FILE);
@@ -325,6 +574,41 @@ impl<'a> Records<'a> {
             return Ok(false);
         };
 
+        // Before the archive is touched. Two volumes of an edition holding the same number
+        // are one volume twice, and every list built on `number` would show it.
+        if let Some(number) = patch.number {
+            let taken = self.db.read(|cx| {
+                cx.query_one(
+                    "SELECT 1 FROM entry WHERE edition_id = ?1 AND volume_number = ?2 AND id <> ?3",
+                    rusqlite::params![edition_id, number, entry_id],
+                    |r| r.get::<_, i64>(0),
+                )
+            })?;
+            if taken.is_some() {
+                return Err(crate::api::invalid(
+                    "another file of this edition already has that number",
+                ));
+            }
+        }
+
+        // Against the index, which holds the pages the archive had when it was last read:
+        // opening a second time to count them would cost an archive read for a number
+        // already in hand.
+        if let Some(Some(page)) = patch.cover_page {
+            let held = self.db.read(|cx| {
+                cx.query_one(
+                    "SELECT 1 FROM page WHERE entry_id = ?1 AND number = ?2",
+                    rusqlite::params![entry_id, page],
+                    |r| r.get::<_, i64>(0),
+                )
+            })?;
+            if held.is_none() {
+                return Err(crate::api::invalid(format!(
+                    "the volume has no page {page}; pages are counted from 0"
+                )));
+            }
+        }
+
         let file = PathBuf::from(file);
         let mut current = read_entry_json(&file).unwrap_or_default();
         current.leaf = Some(FORMAT_VERSION);
@@ -332,12 +616,19 @@ impl<'a> Records<'a> {
         current.edition = where_.edition_name;
         current.id = Some(entry_id.to_string());
         current.number = patch.number.or(current.number);
-        current.title = patch.title.clone().or(current.title);
-        current.isbn = patch.isbn.clone().or(current.isbn);
-        current.published_on = patch.published_on.clone().or(current.published_on);
-        current.summary = patch.summary.clone().or(current.summary);
+        current.title = keep(&patch.title, current.title);
+        current.isbn = keep(&patch.isbn, current.isbn);
+        current.published_on = keep(&patch.published_on, current.published_on);
+        current.summary = keep(&patch.summary, current.summary);
+        current.cover_page = keep(&patch.cover_page, current.cover_page);
+        if let Some(authors) = &patch.authors {
+            current.authors = people(authors);
+        }
+        if let Some(artists) = &patch.artists {
+            current.artists = people(artists);
+        }
 
-        cbz_writer::replace_sidecar(&file, ENTRY_JSON, &sidecars::write(&current)?)?;
+        self.write_entry_json(&file, &current)?;
         Ok(true)
     }
 
@@ -409,7 +700,7 @@ impl<'a> Records<'a> {
         current.number = number.or(current.number);
         current.id = Some(entry_id.to_string());
 
-        cbz_writer::replace_sidecar(file, ENTRY_JSON, &sidecars::write(&current)?)
+        self.write_entry_json(file, &current)
     }
 
     fn places(&self, edition_id: &str) -> Result<Option<Places>> {
@@ -439,14 +730,17 @@ impl<'a> Records<'a> {
 /// and find the contract; a refusal listing what was allowed *is* the contract, at the one
 /// moment somebody is reading it.
 fn spelled(
-    given: &Option<String>,
+    given: &Clear<String>,
     known: fn(&str) -> Option<&'static str>,
     what: &str,
     vocabulary: &[&str],
-) -> Result<Option<String>> {
+) -> Result<Clear<String>> {
     let Some(word) = given else { return Ok(None) };
+    let Some(word) = word else {
+        return Ok(Some(None));
+    };
     match known(word) {
-        Some(it) => Ok(Some(it.to_string())),
+        Some(it) => Ok(Some(Some(it.to_string()))),
         None => Err(crate::api::invalid(format!(
             "\"{word}\" is not {what} — {}",
             vocabulary.join(", ")
@@ -455,6 +749,17 @@ fn spelled(
 }
 
 /// What a file says about itself: entry.json if it has one, ComicInfo otherwise.
+/// Names as a person typed them, without the blanks a form leaves behind: a name of spaces is
+/// nobody, and writing it would credit the volume with nobody instead of letting its series
+/// speak.
+fn people(names: &[String]) -> Vec<String> {
+    names
+        .iter()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect()
+}
+
 pub fn read_entry_json(file: &Path) -> Option<EntryJson> {
     let content = cbz::read(file, false).ok()?;
     if let Some(own) = content.sidecar(ENTRY_JSON).and_then(sidecars::read) {

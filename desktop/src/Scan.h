@@ -10,6 +10,11 @@
 // **Asked at intervals only while it runs.** A scan takes minutes; asking every half second
 // would keep a remote server's disk awake to learn nothing. Asking stops the moment the
 // state comes back anything but RUNNING.
+//
+// **The scan and nothing else.** The library tab also empties the server's cache and saves
+// the reading as a file; both used to live here, because this was the singleton the tab
+// already reached, and the class stood at forty-nine methods (`cpp:S1448`). They are
+// `CachePurge` and `ReadingExport` now: one request each, sharing a tab and no state.
 
 #include "Api.h"
 #include "Server.h"
@@ -49,6 +54,7 @@ class Scan : public QObject
 
     Q_PROPERTY(QString title READ title CONSTANT)
     Q_PROPERTY(QString foundTitle READ foundTitle CONSTANT)
+    Q_PROPERTY(QString foldLabel READ foldLabel CONSTANT)
     Q_PROPERTY(QString stateLabel READ stateLabel NOTIFY changed)
     Q_PROPERTY(QString lastScanLabel READ lastScanLabel NOTIFY changed)
     Q_PROPERTY(QString startLabel READ startLabel CONSTANT)
@@ -78,14 +84,20 @@ public:
     QString failure() const;
     QString title() const;
     QString foundTitle() const;
+    QString foldLabel() const;
+    Q_INVOKABLE QString seeAllLabel(int count) const;
     QString stateLabel() const;
     QString lastScanLabel() const;
     QString startLabel() const;
-
     Q_INVOKABLE void ask();
     /// Starts one, unless one is already running: two scans over one library is work done
     /// twice and a report nobody can attribute.
     Q_INVOKABLE void start();
+    /// Reads one work again from its files — the work of a series, or of a volume — and not
+    /// the library. The same rules as `start()`, and the answer is read the same way: it is
+    /// the scan that began, so the shelf is refreshed when it ends as it is after any.
+    Q_INVOKABLE void rescanSeries(const QString &seriesId);
+    Q_INVOKABLE void rescanEntry(const QString &entryId);
 
 signals:
     void changed();
@@ -94,6 +106,9 @@ signals:
     void finished();
 
 private:
+    /// What `start()` and the two above share: ask a path to scan, once, if none is running.
+    void startAt(const QString &path);
+
     /// Long enough that a remote disk is left alone, short enough that nobody wonders.
     static constexpr int Between = 3000;
 

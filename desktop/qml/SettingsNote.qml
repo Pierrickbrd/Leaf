@@ -23,7 +23,7 @@ Text {
     // why the note is now beside the pattern rather than beside one instance of it.
     color: alarming ? Theme.alert : (muted ? Theme.inkFaint : Theme.inkSoft)
     font.family: Theme.textFamily
-    font.pixelSize: 13
+    font.pixelSize: Widths.scale.body(13)
     lineHeight: 1.35
     wrapMode: Text.Wrap
     topPadding: 2

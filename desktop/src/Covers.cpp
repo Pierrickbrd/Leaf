@@ -52,6 +52,11 @@ protected:
         // factory's own thread, because this runs on whichever thread Qt loads an image on.
         if (QByteArray key; m_covers && m_covers->carry(request.url(), key)) {
             carried.setRawHeader(Server::KeyHeader, key);
+            // Never followed with the key on it: Qt carries a request's headers across a
+            // redirect, to another host as to the same, so the server of the library could
+            // hand the key to any address by answering a cover with a 302.
+            carried.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                                 QNetworkRequest::ManualRedirectPolicy);
         }
         return QNetworkAccessManager::createRequest(operation, carried, outgoing);
     }

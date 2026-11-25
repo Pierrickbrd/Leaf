@@ -17,6 +17,9 @@ Rectangle {
     /// one ratio cannot give a legible lock at 34 px without hiding the initial at 132.
     readonly property int badge: side >= 100 ? 36 : 18
     readonly property int overhang: side >= 100 ? 8 : 5
+    /// Whether it carries a badge.
+    readonly property bool badged: kind === "principal" || kind === "restricted"
+                                   || kind === "other"
 
     width: side
     height: side
@@ -41,6 +44,7 @@ Rectangle {
         anchors.horizontalCenter: parent.horizontalCenter
         y: parent.height / 2 - (ink.tightBoundingRect.y + ink.tightBoundingRect.height / 2)
            - baselineOffset
+        textFormat: Text.PlainText
         text: square.profile && square.profile.initial ? square.profile.initial : ""
         color: Theme.profileInk
         font.family: Theme.displayFamily
@@ -50,8 +54,7 @@ Rectangle {
 
     Rectangle {
         objectName: square.objectName + "-badge"
-        visible: square.kind === "principal" || square.kind === "restricted"
-                 || square.kind === "other"
+        visible: square.badged
         x: square.width - square.badge + square.overhang
         y: square.height - square.badge + square.overhang
         width: square.badge

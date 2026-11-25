@@ -1,6 +1,7 @@
 // File matches above the shelf, against the real HTTP seam and without a window.
 
 #include "Pretend.h"
+#include "BarCaptions.h"
 #include "Captions.h"
 #include "Search.h"
 #include "Server.h"
@@ -70,6 +71,7 @@ class HoldsTheSearch : public QObject
     Server *m_server = nullptr;
     Search *m_search = nullptr;
     Captions *m_captions = nullptr;
+    BarCaptions *m_bar = nullptr;
 
     void settle()
     {
@@ -101,11 +103,13 @@ private slots:
         // The words the bar shows, which moved off the model that finds the rows: the two
         // are exercised together because a caption quotes a count.
         m_captions = new Captions(m_search, nullptr);
+        m_bar = new BarCaptions(nullptr);
         m_pretend->answers(200, hits({}));
     }
 
     void cleanup()
     {
+        delete m_bar;
         delete m_captions;
         delete m_search;
         delete m_server;
@@ -119,16 +123,16 @@ private slots:
         QVERIFY(!m_search->loading());
         QCOMPARE(m_search->count(), 0);
         QVERIFY(m_pretend->heard.isEmpty());
-        QCOMPARE(m_captions->placeholder(), u"Rechercher une série, un tome, un chapitre…"_s);
-        QCOMPARE(m_captions->shortPlaceholder(), u"Rechercher…"_s);
-        QCOMPARE(m_captions->clearLabel(), u"Effacer la recherche"_s);
-        QCOMPARE(m_captions->filterLabel(), u"Filtrer"_s);
-        QCOMPARE(m_captions->settingsLabel(), u"Réglages"_s);
+        QCOMPARE(m_bar->placeholder(), u"Rechercher une série, un tome, un chapitre…"_s);
+        QCOMPARE(m_bar->shortPlaceholder(), u"Rechercher…"_s);
+        QCOMPARE(m_bar->clearLabel(), u"Effacer la recherche"_s);
+        QCOMPARE(m_bar->filterLabel(), u"Filtrer"_s);
+        QCOMPARE(m_bar->settingsLabel(), u"Réglages"_s);
         QCOMPARE(m_captions->noSeriesLabel(), u"Aucune série ne porte ce nom."_s);
         QCOMPARE(m_captions->overviewLabel(), u"Aperçu"_s);
         QCOMPARE(m_captions->filesHeading(), u"Fichiers · 0"_s);
-        QCOMPARE(m_captions->sortLabel(), u"Trier : Nom · A → Z"_s);
-        QCOMPARE(m_captions->sortOptions().size(), 4);
+        QCOMPARE(m_bar->sortLabel(), u"Trier : Nom · A → Z"_s);
+        QCOMPARE(m_bar->sortOptions().size(), 4);
     }
 
     /// A pill or an order must not put sixty lines out and a spinner in. What is on screen

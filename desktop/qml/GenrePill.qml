@@ -1,9 +1,9 @@
 // One genre of a series, and the way to every other series that has it.
 //
-// Drawn twice on a series page — in the header, where it says at a glance what kind of book
-// this is, and at the foot of the description, where it closes the civil status — and
-// written once here: the two were the same rectangle copied, and only one of them would
-// have learned to be pressed.
+// Drawn in the series' header, where it says at a glance what kind of book this is. It was
+// drawn at the foot of the description too, until the owner chose one place on 23/10/2026;
+// written once here because the two were the same rectangle copied, and only one of them
+// would have learned to be pressed.
 //
 // Pressed, it does what the universe above it does: the shelf, narrowed to that one genre.
 // It answers the pointer the way a filter chip does — see `Pill` — and is never lit: it

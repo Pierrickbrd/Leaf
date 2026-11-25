@@ -26,8 +26,24 @@ pub struct LegacyRead {
     pub language: Option<String>,
     pub reading_direction: Option<String>,
     pub genres: Vec<String>,
-    pub author: Option<String>,
+    pub author: Vec<String>,
+    /// `Penciller`: the drawing, which `Writer` does not say. A list, like `Writer`: ComicInfo
+    /// writes several people in one field, separated by commas.
+    pub artist: Vec<String>,
     pub arc: Option<String>,
+}
+
+/// A field that lists several things, separated by commas.
+fn listed(field: Option<String>) -> Vec<String> {
+    field
+        .map(|text| {
+            text.split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub const ENTRY_NAME: &str = "ComicInfo.xml";
@@ -164,16 +180,9 @@ pub fn read(content: &[u8]) -> Option<LegacyRead> {
         reading_direction: get("Manga")
             .filter(|m| m.contains("RightToLeft"))
             .map(|_| "RIGHT_TO_LEFT".to_string()),
-        genres: get("Genre")
-            .map(|g| {
-                g.split(',')
-                    .map(str::trim)
-                    .filter(|p| !p.is_empty())
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        author: get("Writer"),
+        genres: listed(get("Genre")),
+        author: listed(get("Writer")),
+        artist: listed(get("Penciller")),
         arc: get("StoryArc"),
     })
 }

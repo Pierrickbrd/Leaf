@@ -5,6 +5,7 @@
 #include "Words.h"
 
 #include <QDebug>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonValue>
@@ -33,6 +34,9 @@ constexpr int WidthStep = 200;
 /// Three pages from the end is where what follows starts to matter: its cover has to be
 /// there whole when the end card comes up (spec §10).
 constexpr int NearTheEnd = 3;
+/// The pages of the next chapter fetched before it opens: the first screen and a little more
+/// of a strip whose pages are long.
+constexpr int AheadOfAChapter = 3;
 
 static_assert(int(Reader::Direction::LeftToRight) == int(Api::ReadingDirection::LeftToRight)
                   && int(Reader::Direction::RightToLeft)
@@ -65,12 +69,12 @@ QString readAll(const QJsonDocument &body, Api::Read<T> (*one)(const QJsonObject
 /// The output is ASCII, so reading it as UTF-8 is exact.
 QString entryPath(const QString &id)
 {
-    return u"/entries/"_s + QString::fromUtf8(QUrl::toPercentEncoding(id));
+    return u"/entries/"_s + Server::segment(id);
 }
 
 QString seriesPath(const QString &id)
 {
-    return u"/series/"_s + QString::fromUtf8(QUrl::toPercentEncoding(id));
+    return u"/series/"_s + Server::segment(id);
 }
 
 QString entryName(const Api::Entry &one)
@@ -79,6 +83,29 @@ QString entryName(const Api::Entry &one)
         return one.title.value_or(QString());
     return one.kind == Api::Entry::Kind::Chapter ? Words::readerChapter(*one.number)
                                                  : Words::readerVolume(*one.number);
+}
+
+/// The width most pages have, the wider on a tie: one credits page narrower than the rest
+/// does not set the width of a chapter, nor one double page wider than it.
+int commonWidthOf(const QList<Api::PageInfo> &pages)
+{
+    QHash<int, int> seen;
+    for (const Api::PageInfo &page : pages) {
+        if (page.width.has_value() && *page.width > 0)
+            ++seen[*page.width];
+    }
+    int common = 0;
+    int most = 0;
+    // Constant iterators, not `asKeyValueRange()`: Qt 6.4's range is no standard range, so it
+    // cannot be piped into `std::views::as_const`, and the build there refused it.
+    for (auto it = seen.constKeyValueBegin(); it != seen.constKeyValueEnd(); ++it) {
+        const auto &[width, count] = *it;
+        if (count > most || (count == most && width > common)) {
+            common = width;
+            most = count;
+        }
+    }
+    return common;
 }
 
 } // namespace
@@ -225,6 +252,13 @@ QVariantMap Reader::volume() const
         when(u"isbn"_s, m_entry->isbn);
     when(u"publishedOn"_s, m_entry->publishedOn);
     when(u"summary"_s, m_entry->summary);
+    // Who made this volume, a line a role, every name: the card said the series and never the
+    // people, and Takeshi Obata, who drew every page of Death Note, was nowhere on it.
+    QVariantList credits;
+    for (const Words::CreditLine &line :
+         Words::creditLines(m_entry->credits.authors, m_entry->credits.artists))
+        credits << QVariantMap{{u"name"_s, line.label}, {u"value"_s, line.names.join(u", "_s)}};
+    about.insert(u"credits"_s, credits);
 
     // The stretch the chapters cover, from their numbers: a chapter that names none says
     // nothing about it, and a volume none of whose chapters does has no stretch.
@@ -283,6 +317,8 @@ void Reader::openAt(const QString &seriesId, const QString &entryId, bool atTheE
     m_chapters.clear();
     m_displays.clear();
     m_display = 0;
+    m_common = 0;
+    m_strip = {};
     // The copy kept larger belongs to the volume it was asked for; this one starts from the
     // window it opens in, and asks its list of pages at that width.
     m_asked = 0;
@@ -295,6 +331,8 @@ void Reader::openAt(const QString &seriesId, const QString &entryId, bool atTheE
     m_wayOnKnown = false;
     m_next.reset();
     m_previous.reset();
+    m_entryPosition = 0;
+    m_entryCount = 0;
     m_backOwed = false;
     m_landAtTheEnd = atTheEnd;
     m_trouble.clear();
@@ -403,6 +441,8 @@ void Reader::arrived()
     m_series = m_arriving.series;
     m_pages = m_arriving.pages.value_or(QList<Api::PageInfo>());
     m_chapters = m_arriving.chapters.value_or(QList<Api::Chapter>());
+    m_common = commonWidthOf(m_pages);
+    m_strip = m_preferences ? m_preferences->strip(m_seriesId, m_entryId) : Preferences::Strip{};
     const std::optional<Api::Progress> where =
         m_arriving.progress.value_or(std::optional<Api::Progress>());
     m_arriving = {};
@@ -423,7 +463,9 @@ void Reader::arrived()
     m_display = std::max(0, Spreads::displayOf(m_displays, page));
     m_loading = false;
     emit changed();
-    if (nearTheEnd())
+    // A webtoon's band names the chapter among the others and steps to its neighbours from
+    // the first screen, not only near the end.
+    if (webtoon() || nearTheEnd())
         askTheWayOn();
 }
 
@@ -597,6 +639,18 @@ void Reader::previousChapter()
         goToPage(*target);
 }
 
+void Reader::openNextEntry()
+{
+    if (m_next)
+        open(m_seriesId, m_next->id);
+}
+
+void Reader::openPreviousEntry()
+{
+    if (m_previous)
+        open(m_seriesId, m_previous->id);
+}
+
 int Reader::currentChapter() const
 {
     return chapterAt(firstPage());
@@ -752,9 +806,11 @@ void Reader::askTheWayOn()
                       // The entries on either side of this one in the order received,
                       // which is the edition's: the client never re-sorts what the server
                       // ordered.
+                      m_entryCount = int(all.size());
                       for (int i = 0; i < all.size(); ++i) {
                           if (all.at(i).id != m_entryId)
                               continue;
+                          m_entryPosition = i + 1;
                           if (i + 1 < all.size())
                               m_next = all.at(i + 1);
                           if (i > 0)
@@ -783,6 +839,61 @@ QString Reader::pageUrl(int page, int width) const
     return url;
 }
 
+void Reader::startStrip(qreal width)
+{
+    if (!webtoon() || width <= 0 || m_strip.width > 0)
+        return;
+    keepStrip({width, width, m_strip.chapter});
+}
+
+void Reader::zoomStrip(qreal drawn, qreal to, qreal native)
+{
+    if (!webtoon() || drawn <= 0 || to <= 0 || native <= 0)
+        return;
+    // A quarter of its files to four times: below, a column of thumbnails nobody reads.
+    const qreal target = std::clamp(to, native / 4, native * 4);
+    // Half a pixel: a width read back from the file, or rounded on the way, is the same one.
+    constexpr qreal Pixel = 0.5;
+    Preferences::Strip kept = m_strip;
+    if (kept.width <= 0)
+        kept = {drawn, drawn, kept.chapter};
+    if (kept.chapter > 0 || kept.width > native + Pixel)
+        kept.chapter = target;
+    else if (target <= native + Pixel)
+        kept.width = target;
+    else if (drawn < native - Pixel)
+        // Up to the files' own width and no further: the step that would go past it stops on
+        // the sharpest width there is, and only the next one asks for the blur.
+        kept.width = native;
+    else
+        kept.chapter = target;
+    keepStrip(kept);
+}
+
+void Reader::resetStrip()
+{
+    if (!webtoon())
+        return;
+    Preferences::Strip kept = m_strip;
+    if (kept.chapter > 0)
+        kept.chapter = 0;
+    else
+        kept.width = kept.base;
+    keepStrip(kept);
+}
+
+void Reader::keepStrip(const Preferences::Strip &kept)
+{
+    if (qFuzzyCompare(1 + kept.width, 1 + m_strip.width)
+        && qFuzzyCompare(1 + kept.base, 1 + m_strip.base)
+        && qFuzzyCompare(1 + kept.chapter, 1 + m_strip.chapter))
+        return;
+    m_strip = kept;
+    if (m_preferences)
+        m_preferences->keepStrip(m_seriesId, m_entryId, kept);
+    emit stripChanged();
+}
+
 qreal Reader::pageRatio(int page) const
 {
     if (page < 0 || page >= m_pages.size())
@@ -803,6 +914,18 @@ QStringList Reader::ahead(int width) const
     QStringList wanted;
     if (m_displays.isEmpty())
         return wanted;
+    // A strip holds its own pages, three screens round the view; what it cannot hold is the
+    // next chapter, fetched as this one ends so that it opens on pages already there, with
+    // the cover its offer shows.
+    if (webtoon()) {
+        if (!nearTheEnd() || !m_next || !m_server)
+            return wanted;
+        for (int page = 0; page < AheadOfAChapter; ++page)
+            wanted << m_server->address() + entryPath(m_next->id) + u"/pages/"_s
+                          + QString::number(page);
+        wanted << next().value(u"cover"_s).toString();
+        return wanted;
+    }
     const auto pagesOf = [this, width, &wanted](qsizetype display) {
         if (display < 0 || display >= m_displays.size())
             return;

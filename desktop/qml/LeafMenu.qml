@@ -15,15 +15,40 @@ Menu {
     // menu never appeared to close.
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
 
-    margins: 10
-    padding: 8
+    // Held off the window's edge as a page is, and padded as every menu and panel is: the
+    // sort menu had 8, the filters 8 and the editions 4 (spacing audit, 23/10/2026).
+    margins: Widths.space.gutter
+    padding: Widths.space.compact
     overlap: 0
 
     delegate: LeafMenuItem { }
 
+    // As wide as the widest row asks to be, and no narrower than the floor. `Menu` does not
+    // do it for a style that draws its own background: its content width stayed at zero and
+    // every menu was the background's constant, whatever its words — « Marquer toute la série
+    // comme non lue » ended in « … ». Taken when the menu opens, because which rows are shown
+    // depends on the rights of whoever opens it.
+    property real widest: 0
+    implicitWidth: Math.max(implicitBackgroundWidth + leftInset + rightInset,
+                            widest + leftPadding + rightPadding)
+
+    // When it turns visible and not in `aboutToShow`: Qt 6.4 has not yet made its rows visible
+    // there, so every one was skipped and the menu stayed at the floor.
+    onVisibleChanged: {
+        if (!menu.visible)
+            return
+        let wide = 0
+        for (let i = 0; i < menu.count; ++i) {
+            const row = menu.itemAt(i)
+            if (row && row.visible)
+                wide = Math.max(wide, row.implicitWidth)
+        }
+        menu.widest = wide
+    }
+
     background: Item {
-        implicitWidth: 248
-        implicitHeight: 48
+        implicitWidth: Widths.scale.column(248)
+        implicitHeight: Widths.scale.size(48)
 
         Rectangle {
             id: panel

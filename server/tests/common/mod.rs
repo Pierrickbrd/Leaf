@@ -57,6 +57,34 @@ pub fn archive_bytes(entry: Option<&EntryJson>) -> Vec<u8> {
     zip.finish().unwrap().into_inner()
 }
 
+/// A picture no other `coloured_jpeg` is, so that two pages served are told apart by their
+/// bytes and not by trusting their names.
+pub fn coloured_jpeg(seed: u8) -> Vec<u8> {
+    let mut buffer = image::RgbImage::new(60, 90);
+    for (x, y, pixel) in buffer.enumerate_pixels_mut() {
+        *pixel = image::Rgb([seed.wrapping_mul(80), (x % 256) as u8, (y % 256) as u8]);
+    }
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(buffer)
+        .write_to(&mut out, image::ImageFormat::Jpeg)
+        .unwrap();
+    out.into_inner()
+}
+
+/// An archive of `pages` different pages, `entry.json` first.
+pub fn archive_of_pages(entry: &EntryJson, pages: u8) -> Vec<u8> {
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = zip::write::SimpleFileOptions::default();
+    for seed in 0..pages {
+        zip.start_file::<_, ()>(format!("{seed:03}.jpg"), options)
+            .unwrap();
+        zip.write_all(&coloured_jpeg(seed)).unwrap();
+    }
+    zip.start_file::<_, ()>("entry.json", options).unwrap();
+    zip.write_all(&sidecars::write(entry).unwrap()).unwrap();
+    zip.finish().unwrap().into_inner()
+}
+
 pub struct Server {
     pub dir: tempfile::TempDir,
     pub db: Arc<Db>,
@@ -253,6 +281,27 @@ pub fn a_volume(server: &Server) {
 }
 
 impl Server {
+    /// What a route answers with, as the bytes it sent and the tag that goes with them.
+    pub async fn bytes(&self, uri: &str, held: Option<&str>) -> (StatusCode, Vec<u8>, String) {
+        let mut asked = request("GET", uri, READ_ONLY);
+        if let Some(held) = held {
+            asked = asked.header("If-None-Match", held);
+        }
+        let response = router(self.state())
+            .oneshot(asked.body(Body::empty()).unwrap())
+            .await
+            .expect("a response");
+        let status = response.status();
+        let tag = response
+            .headers()
+            .get(axum::http::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, bytes.to_vec(), tag)
+    }
+
     /// The ETag one route hands out, for the test that asks for it again.
     pub async fn tagged(&self, uri: &str) -> Option<String> {
         let response = router(self.state())

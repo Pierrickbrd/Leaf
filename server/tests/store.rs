@@ -6,6 +6,7 @@
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
+use leaf_server::store::origins::{self, Origin};
 use leaf_server::store::Db;
 
 fn temp() -> tempfile::TempDir {
@@ -430,8 +431,8 @@ fn assert_migrated_to_the_end_with_every_position(file: &std::path::Path) {
 /// migration 41, and there were thirty.
 #[test]
 fn the_version_is_the_number_of_the_last_migration() {
-    assert_eq!(34, MIGRATIONS.len());
-    assert_eq!(34, schema_version());
+    assert_eq!(40, MIGRATIONS.len());
+    assert_eq!(40, schema_version());
 }
 
 #[test]
@@ -440,7 +441,7 @@ fn a_fresh_database_is_stamped_with_the_marker_and_the_last_migration() {
     let file = dir.path().join("fresh.sqlite");
     drop(Db::open(&file).expect("opening"));
 
-    assert_eq!(34, user_version(&file));
+    assert_eq!(40, user_version(&file));
     assert_eq!(LEAF_APPLICATION_ID, application_id(&file));
 }
 
@@ -565,7 +566,7 @@ fn an_index_written_by_a_newer_leaf_is_refused() {
     drop(Db::open(&file).expect("creating"));
     rusqlite::Connection::open(&file)
         .expect("opening")
-        .execute_batch("PRAGMA user_version = 35;")
+        .execute_batch("PRAGMA user_version = 41;")
         .expect("pretending to be newer");
 
     let said = match Db::open(&file) {
@@ -574,7 +575,7 @@ fn an_index_written_by_a_newer_leaf_is_refused() {
     };
     assert!(said.contains("written by a newer Leaf"), "{said}");
     assert!(said.contains("must not run on it"), "{said}");
-    assert_eq!(35, user_version(&file), "and it is left as it was found");
+    assert_eq!(41, user_version(&file), "and it is left as it was found");
 }
 
 /// No release ever counted past 47 in the old numbering; a count beyond it comes from a
@@ -1356,4 +1357,1080 @@ fn an_unmarked_index_at_41_holding_the_readers_table_is_brought_to_the_last_migr
         ),
         "the reader's choice outlives the migrations that ran under it"
     );
+}
+
+fn origin(path: &str, kept: u64, announced: u64, checksum: Option<&str>) -> Origin {
+    Origin {
+        path: path.to_string(),
+        kept_size: kept,
+        origin_size: announced,
+        origin_checksum: checksum.map(str::to_string),
+        rewrite: Some("fingerprint".to_string()),
+    }
+}
+
+/// A rewritten archive no longer has the size of the file that was announced; without this
+/// memory it would be sent again at every re-import.
+#[test]
+fn an_origin_is_kept_and_found_by_its_path() {
+    let dir = temp();
+    let db = Db::open(&dir.path().join("origins.sqlite")).expect("opening");
+    let kept = origin("Serie/T01.cbz", 900, 1200, Some("abc"));
+    origins::record(&db, std::slice::from_ref(&kept)).expect("recording");
+
+    let found = origins::known(&db, &["Serie/T01.cbz".to_string(), "ailleurs".to_string()])
+        .expect("asking");
+    assert_eq!(1, found.len());
+    assert_eq!(Some(&kept), found.get("Serie/T01.cbz"));
+}
+
+/// The cost is the assertion, as for `Cx` elsewhere: a re-import asks about every file at once.
+#[test]
+fn finding_a_hundred_origins_costs_one_query() {
+    let dir = temp();
+    let db = Db::open(&dir.path().join("cost.sqlite")).expect("opening");
+    let all: Vec<Origin> = (0..100)
+        .map(|i| origin(&format!("S/T{i:03}.cbz"), 1, 2, None))
+        .collect();
+    origins::record(&db, &all).expect("recording");
+    let paths: Vec<String> = all.iter().map(|o| o.path.clone()).collect();
+
+    let before = db.statements();
+    let found = origins::known(&db, &paths).expect("asking");
+    assert_eq!(100, found.len());
+    assert_eq!(1, db.statements() - before);
+}
+
+/// A file rewritten again from a newer origin must not leave the old size behind, or the
+/// next import would take the new one for a change.
+#[test]
+fn recording_an_origin_twice_keeps_the_last() {
+    let dir = temp();
+    let db = Db::open(&dir.path().join("twice.sqlite")).expect("opening");
+    origins::record(&db, &[origin("S/T01.cbz", 1, 2, Some("old"))]).expect("first");
+    origins::record(&db, &[origin("S/T01.cbz", 3, 4, None)]).expect("second");
+
+    let found = origins::known(&db, &["S/T01.cbz".to_string()]).expect("asking");
+    assert_eq!(
+        Some(&origin("S/T01.cbz", 3, 4, None)),
+        found.get("S/T01.cbz")
+    );
+}
+
+/// Nothing asked is nothing queried: an empty `IN ()` is not valid in every SQLite build.
+#[test]
+fn asking_for_no_origin_asks_nothing() {
+    let dir = temp();
+    let db = Db::open(&dir.path().join("none.sqlite")).expect("opening");
+    let before = db.statements();
+    assert!(origins::known(&db, &[]).expect("asking").is_empty());
+    assert_eq!(0, db.statements() - before);
+}
+
+/// The rewrite asked for is kept with the origin: a corrected `entry.json` sent with the same
+/// archive is another request, and an origin that forgot it answered « already there ».
+#[test]
+fn an_origin_keeps_the_rewrite_it_was_made_with() {
+    let dir = temp();
+    let db = Db::open(&dir.path().join("rewrite.sqlite")).expect("opening");
+    let mut plain = origin("S/T01.cbz", 1, 2, None);
+    plain.rewrite = None;
+    origins::record(&db, &[origin("S/T02.cbz", 1, 2, None), plain.clone()]).expect("recording");
+
+    let found =
+        origins::known(&db, &["S/T01.cbz".to_string(), "S/T02.cbz".to_string()]).expect("asking");
+    assert_eq!(Some("fingerprint"), found["S/T02.cbz"].rewrite.as_deref());
+    assert_eq!(Some(&plain), found.get("S/T01.cbz"));
+}
+
+/// Leaf's own edit of a converted archive changes its size; without following it, the next
+/// import took a title corrected in the application for a hand edit and offered to undo it.
+/// One statement, whatever the edit.
+#[test]
+fn an_origin_follows_an_archive_leaf_rewrote_in_one_statement() {
+    let dir = temp();
+    let db = Db::open(&dir.path().join("follow.sqlite")).expect("opening");
+    origins::record(&db, &[origin("S/T01.cbz", 900, 1200, None)]).expect("recording");
+
+    let before = db.statements();
+    assert!(origins::follow(&db, "S/T01.cbz", 900, 950).expect("following"));
+    assert_eq!(1, db.statements() - before);
+
+    let found = origins::known(&db, &["S/T01.cbz".to_string()]).expect("asking");
+    assert_eq!(950, found["S/T01.cbz"].kept_size);
+}
+
+/// An archive that was no longer as it was kept had been changed by hand before Leaf touched
+/// it, and following it would erase the only sign of that.
+#[test]
+fn an_origin_does_not_follow_a_file_that_was_no_longer_as_it_was_kept() {
+    let dir = temp();
+    let db = Db::open(&dir.path().join("hand.sqlite")).expect("opening");
+    origins::record(&db, &[origin("S/T01.cbz", 900, 1200, None)]).expect("recording");
+
+    assert!(!origins::follow(&db, "S/T01.cbz", 901, 950).expect("following"));
+    assert!(!origins::follow(&db, "S/ailleurs.cbz", 900, 950).expect("following"));
+
+    let found = origins::known(&db, &["S/T01.cbz".to_string()]).expect("asking");
+    assert_eq!(900, found["S/T01.cbz"].kept_size);
+}
+
+// ------------------------------------------------------------------ what a reimport reads
+
+mod held {
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use leaf_server::scan::scanner::Scanner;
+    use leaf_server::store::held::{self, Aim};
+    use leaf_server::store::repository::Ceiling;
+    use leaf_server::store::Db;
+
+    fn jpeg() -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8))
+            .write_to(&mut out, image::ImageFormat::Jpeg)
+            .unwrap();
+        out.into_inner()
+    }
+
+    fn archive(path: &Path, pages: usize, entry_json: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        let page = jpeg();
+        for i in 0..pages {
+            zip.start_file::<_, ()>(format!("{i:03}.jpg"), options)
+                .unwrap();
+            zip.write_all(&page).unwrap();
+        }
+        zip.start_file::<_, ()>("entry.json", options).unwrap();
+        zip.write_all(entry_json.as_bytes()).unwrap();
+        zip.finish().unwrap();
+    }
+
+    struct Library {
+        dir: tempfile::TempDir,
+        db: Arc<Db>,
+    }
+
+    impl Library {
+        fn new() -> Self {
+            let dir = super::temp();
+            std::fs::create_dir_all(dir.path().join("library")).unwrap();
+            let db = Arc::new(Db::open(&dir.path().join("index.sqlite")).unwrap());
+            Library { dir, db }
+        }
+
+        fn at(&self, path: &str) -> PathBuf {
+            self.dir.path().join("library").join(path)
+        }
+
+        fn write(&self, path: &str, body: &str) {
+            let full = self.at(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, body).unwrap();
+        }
+
+        fn volume(&self, path: &str, number: u32, pages: usize) {
+            archive(
+                &self.at(path),
+                pages,
+                &format!(r#"{{"leaf":1,"type":"VOLUME","number":{number}}}"#),
+            );
+        }
+
+        fn scan(&self) {
+            Scanner::new(Arc::clone(&self.db), true)
+                .scan(&[self.dir.path().join("library")])
+                .expect("scanning");
+        }
+
+        fn id(&self, sql: &str) -> String {
+            self.db
+                .read(|cx| cx.query_one(sql, [], |r| r.get::<_, String>(0)))
+                .unwrap()
+                .expect("a row")
+        }
+
+        fn second_profile(&self) {
+            self.db
+                .write(|cx| {
+                    cx.execute(
+                        "INSERT INTO profile (id, name, name_key, created_at)
+                         VALUES ('leo', 'Léo', 'leo', 1)",
+                        [],
+                    )
+                })
+                .unwrap();
+        }
+    }
+
+    /// A universe of one series of two volumes, the shape a rail has to draw in full.
+    fn aquilon() -> Library {
+        let library = Library::new();
+        library.write(
+            "Monde d'Aquilon/universe.json",
+            r#"{"leaf":1,"name":"Monde d'Aquilon"}"#,
+        );
+        library.write(
+            "Monde d'Aquilon/Les Gardiens/work.json",
+            r#"{"leaf":1,"title":"Les Gardiens"}"#,
+        );
+        library.volume("Monde d'Aquilon/Les Gardiens/Tome 1.cbz", 1, 3);
+        library.volume("Monde d'Aquilon/Les Gardiens/Tome 2.cbz", 2, 4);
+        library.scan();
+        library
+    }
+
+    #[test]
+    fn a_volume_target_is_found_with_its_whole_trail_in_one_query() {
+        let library = aquilon();
+        let entry = library.id("SELECT id FROM entry WHERE volume_number = 2");
+
+        let before = library.db.statements();
+        let place = held::place_of(&library.db, &Aim::Entry(entry.clone()), &Ceiling::NONE)
+            .expect("asking")
+            .expect("the volume is there");
+        assert_eq!(1, library.db.statements() - before);
+
+        let kinds: Vec<&str> = place.trail.iter().map(|s| s.kind).collect();
+        assert_eq!(vec!["UNIVERSE", "SERIES", "ENTRY"], kinds);
+        assert_eq!("Monde d'Aquilon", place.trail[0].name);
+        assert_eq!("Les Gardiens", place.trail[1].name);
+        assert_eq!(2, place.trail[1].count, "the series holds two volumes");
+        assert_eq!(Some(entry), place.entry_id);
+        assert_eq!(library.at("Monde d'Aquilon/Les Gardiens"), place.folder);
+        assert_eq!(
+            Some(library.at("Monde d'Aquilon/Les Gardiens")),
+            place.work_folder
+        );
+        assert_eq!(1, place.editions.len());
+        assert!(place.work_id.is_some() && place.universe_id.is_some());
+    }
+
+    #[test]
+    fn a_series_and_a_universe_are_found_by_their_own_id() {
+        let library = aquilon();
+        let series = library.id("SELECT id FROM edition");
+        let universe = library.id("SELECT id FROM universe");
+
+        let before = library.db.statements();
+        let by_series = held::place_of(&library.db, &Aim::Series(series.clone()), &Ceiling::NONE)
+            .unwrap()
+            .expect("the series");
+        assert_eq!(1, library.db.statements() - before);
+        assert_eq!(vec![series], by_series.editions);
+        assert_eq!(None, by_series.entry_id);
+
+        let before = library.db.statements();
+        let by_universe = held::place_of(&library.db, &Aim::Universe(universe), &Ceiling::NONE)
+            .unwrap()
+            .expect("the universe");
+        assert_eq!(1, library.db.statements() - before);
+        assert_eq!(library.at("Monde d'Aquilon"), by_universe.folder);
+        assert_eq!(None, by_universe.work_folder);
+        assert_eq!(by_series.editions, by_universe.editions);
+
+        assert!(
+            held::place_of(&library.db, &Aim::Series("nope".into()), &Ceiling::NONE)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_series_hidden_from_a_profile_is_no_target_for_it() {
+        let library = Library::new();
+        library.write(
+            "Adulte/work.json",
+            r#"{"leaf":1,"title":"Adulte","ageRating":"16+"}"#,
+        );
+        library.volume("Adulte/Tome 1.cbz", 1, 2);
+        library.scan();
+        let series = library.id("SELECT id FROM edition");
+        let entry = library.id("SELECT id FROM entry");
+
+        let twelve = Ceiling(Some(12));
+        assert!(
+            held::place_of(&library.db, &Aim::Series(series.clone()), &twelve)
+                .unwrap()
+                .is_none()
+        );
+        assert!(held::place_of(&library.db, &Aim::Entry(entry), &twelve)
+            .unwrap()
+            .is_none());
+        assert!(
+            held::place_of(&library.db, &Aim::Series(series), &Ceiling(Some(16)))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_universe_whose_works_are_all_hidden_is_no_target_for_a_child() {
+        let library = Library::new();
+        library.write("Mondes/universe.json", r#"{"leaf":1,"name":"Mondes"}"#);
+        library.write(
+            "Mondes/Adulte/work.json",
+            r#"{"leaf":1,"title":"Adulte","ageRating":"16+"}"#,
+        );
+        library.volume("Mondes/Adulte/Tome 1.cbz", 1, 2);
+        library.scan();
+        let universe = library.id("SELECT id FROM universe");
+
+        assert!(
+            held::place_of(&library.db, &Aim::Universe(universe), &Ceiling(Some(12)))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_empty_universe_is_a_target_for_everyone_alike() {
+        let library = Library::new();
+        library.write("Vide/universe.json", r#"{"leaf":1,"name":"Vide"}"#);
+        library.volume("Vide/Seul/Tome 1.cbz", 1, 1);
+        library.scan();
+        let universe = library.id("SELECT id FROM universe");
+        library
+            .db
+            .write(|cx| cx.execute("DELETE FROM work", []))
+            .unwrap();
+
+        for ceiling in [Ceiling::NONE, Ceiling(Some(12))] {
+            let place =
+                held::place_of(&library.db, &Aim::Universe(universe.clone()), &ceiling).unwrap();
+            assert!(place.is_some_and(|p| p.editions.is_empty()), "{ceiling:?}");
+        }
+    }
+
+    #[test]
+    fn a_chapter_target_carries_its_start_page() {
+        let library = Library::new();
+        library.write("Haikyu/work.json", r#"{"leaf":1,"title":"Haikyū"}"#);
+        archive(
+            &library.at("Haikyu/Tome 1.cbz"),
+            4,
+            r#"{"leaf":1,"type":"VOLUME","number":1,
+                "chapters":[{"raw":"1","title":"Le début","startPage":0},
+                            {"raw":"2","title":"Le roi","startPage":2}]}"#,
+        );
+        library.scan();
+        let chapter = library.id("SELECT id FROM chapter WHERE number = 2");
+
+        let before = library.db.statements();
+        let place = held::place_of(&library.db, &Aim::Chapter(chapter), &Ceiling::NONE)
+            .unwrap()
+            .expect("the chapter");
+        assert_eq!(1, library.db.statements() - before);
+
+        let held_chapter = place.chapter.expect("its row");
+        assert_eq!(Some(2), held_chapter.start_page);
+        assert_eq!(Some(2.0), held_chapter.number);
+        assert_eq!(Some("Le roi".to_string()), held_chapter.title);
+        assert!(place.entry_id.is_some(), "and the volume it lives in");
+        assert_eq!(Some("CHAPTER"), place.trail.last().map(|s| s.kind));
+    }
+
+    #[test]
+    fn what_an_edition_holds_is_read_in_one_query_whatever_its_size() {
+        let library = Library::new();
+        library.write("Longue/work.json", r#"{"leaf":1,"title":"Longue"}"#);
+        for n in 1..=200 {
+            library.volume(&format!("Longue/Tome {n}.cbz"), n, 1);
+        }
+        library.scan();
+        library.second_profile();
+        let edition = library.id("SELECT id FROM edition");
+        let read = library.id("SELECT id FROM entry WHERE volume_number = 7");
+        library
+            .db
+            .write(|cx| {
+                cx.execute(
+                    "INSERT INTO progress (profile_id, entry_id, edition_id, page, finished,
+                                           times_finished, updated_at)
+                     VALUES ('default', ?1, ?2, 0, 1, 2, 1), ('leo', ?1, ?2, 5, 0, 0, 1)",
+                    [&read, &edition],
+                )
+            })
+            .unwrap();
+
+        let before = library.db.statements();
+        let all = held::held_in(&library.db, &[edition], "default").expect("reading");
+        assert_eq!(1, library.db.statements() - before);
+
+        assert_eq!(200, all.len());
+        let seventh = all.iter().find(|h| h.entry_id == read).unwrap();
+        assert_eq!(Some(7.0), seventh.number);
+        assert_eq!(Some(0), seventh.page);
+        assert!(seventh.finished);
+        assert_eq!(1, seventh.others, "the other profile has a place in it");
+        assert_eq!(1, seventh.pages);
+        assert_eq!("VOLUME", seventh.kind);
+        assert!(seventh.file.ends_with("Tome 7.cbz"));
+        let untouched = all.iter().find(|h| h.number == Some(8.0)).unwrap();
+        assert_eq!(
+            (None, false, 0),
+            (untouched.page, untouched.finished, untouched.others)
+        );
+    }
+
+    #[test]
+    fn a_volume_lists_the_numbers_of_its_chapters() {
+        let library = Library::new();
+        library.write("Haikyu/work.json", r#"{"leaf":1,"title":"Haikyū"}"#);
+        archive(
+            &library.at("Haikyu/Tome 1.cbz"),
+            4,
+            r#"{"leaf":1,"type":"VOLUME","number":1,
+                "chapters":[{"raw":"1","startPage":0},{"raw":"2.5","startPage":2},
+                            {"raw":"Bonus","after":2}]}"#,
+        );
+        library.scan();
+        let edition = library.id("SELECT id FROM edition");
+
+        let all = held::held_in(&library.db, &[edition], "default").unwrap();
+
+        let mut chapters = all[0].chapters.clone();
+        chapters.sort_by(f64::total_cmp);
+        assert_eq!(vec![1.0, 2.5], chapters, "a bonus has no number to list");
+    }
+
+    #[test]
+    fn nothing_held_by_no_edition_costs_no_query() {
+        let library = Library::new();
+        let before = library.db.statements();
+        assert!(held::held_in(&library.db, &[], "default")
+            .unwrap()
+            .is_empty());
+        assert_eq!(0, library.db.statements() - before);
+    }
+
+    #[test]
+    fn editions_are_found_by_their_folder_in_one_query() {
+        let library = Library::new();
+        for n in 0..49 {
+            library.write(
+                &format!("Serie {n}/work.json"),
+                &format!(r#"{{"leaf":1,"title":"Serie {n}"}}"#),
+            );
+            library.volume(&format!("Serie {n}/Tome 1.cbz"), 1, 1);
+        }
+        library.scan();
+        let mut folders: Vec<PathBuf> =
+            (0..49).map(|n| library.at(&format!("Serie {n}"))).collect();
+        folders.push(library.at("Inconnue"));
+
+        let before = library.db.statements();
+        let found = held::editions_at(&library.db, &folders, &Ceiling::NONE).expect("asking");
+        assert_eq!(1, library.db.statements() - before);
+
+        assert_eq!(49, found.len());
+        assert!(!found.contains_key(&library.at("Inconnue")));
+        let first = library.db.read(|cx| {
+            cx.query_one(
+                "SELECT id FROM edition WHERE path = ?1",
+                [library.at("Serie 0").to_string_lossy().to_string()],
+                |r| r.get::<_, String>(0),
+            )
+        });
+        assert_eq!(
+            first.unwrap().as_ref(),
+            found.get(&library.at("Serie 0")).map(|at| &at.id)
+        );
+    }
+
+    #[test]
+    fn a_folder_name_with_a_quote_is_bound_not_spliced() {
+        let library = Library::new();
+        library.write("L'Arran/work.json", r#"{"leaf":1,"title":"L'Arran"}"#);
+        library.volume("L'Arran/Tome 1.cbz", 1, 1);
+        library.scan();
+
+        let found = held::editions_at(
+            &library.db,
+            &[library.at("L'Arran"), library.at("x' OR '1'='1")],
+            &Ceiling::NONE,
+        )
+        .unwrap();
+
+        assert_eq!(1, found.len());
+    }
+
+    #[test]
+    fn an_edition_names_its_work_and_hides_from_a_profile_that_may_not_see_it() {
+        let library = Library::new();
+        library.write(
+            "One Piece (Glénat)/work.json",
+            r#"{"leaf":1,"title":"One Piece"}"#,
+        );
+        library.volume("One Piece (Glénat)/Tome 1.cbz", 1, 1);
+        library.scan();
+        let folder = library.at("One Piece (Glénat)");
+
+        let found =
+            held::editions_at(&library.db, std::slice::from_ref(&folder), &Ceiling::NONE).unwrap();
+        let at = found.get(&folder).expect("the edition");
+        assert_eq!("One Piece (Glénat)", at.work_name);
+        assert_eq!(Some("One Piece"), at.work_title.as_deref());
+
+        // Nobody rated it: a child of twelve does not see it, so it is no edition to them.
+        let hidden = held::editions_at(&library.db, &[folder], &Ceiling(Some(12))).unwrap();
+        assert!(hidden.is_empty());
+    }
+
+    #[test]
+    fn every_work_is_listed_in_one_query() {
+        let library = aquilon();
+        library.write("Seule/work.json", r#"{"leaf":1,"title":"Seule"}"#);
+        library.volume("Seule/Tome 1.cbz", 1, 1);
+        library.scan();
+
+        let before = library.db.statements();
+        let works = held::works(&library.db, &Ceiling::NONE).expect("listing");
+        assert_eq!(1, library.db.statements() - before);
+
+        assert_eq!(2, works.len());
+        let gardiens = works.iter().find(|w| w.name == "Les Gardiens").unwrap();
+        assert!(gardiens.universe_id.is_some());
+        assert_eq!(library.at("Monde d'Aquilon/Les Gardiens"), gardiens.path);
+        assert_eq!(Some("Les Gardiens".to_string()), gardiens.title);
+        assert!(!gardiens.series_id.is_empty());
+        assert_eq!(2, gardiens.volumes);
+        let seule = works.iter().find(|w| w.name == "Seule").unwrap();
+        assert_eq!(None, seule.universe_id);
+        assert_eq!(1, seule.volumes);
+    }
+
+    /// Every work is what a reimport compares a new series with and names in what it
+    /// answers: a hidden one listed there would name, to a child, a series the library does
+    /// not show it.
+    /// The volume a chapter is replaced in, and every chapter it holds in reading order, in
+    /// one statement whatever their number: the announcement works out each one's new range.
+    #[test]
+    fn a_volume_is_read_with_its_chapters_in_one_query() {
+        let library = Library::new();
+        archive(
+            &library.at("Seule/Tome 1.cbz"),
+            12,
+            r#"{"leaf":1,"type":"VOLUME","number":1,
+                "chapters":[{"number":2,"startPage":5},{"number":1,"startPage":0}]}"#,
+        );
+        library.scan();
+        let entry = library.id("SELECT id FROM entry");
+
+        let before = library.db.statements();
+        let volume = held::chaptered_volume(
+            &library.db,
+            &entry,
+            leaf_server::store::schema::DEFAULT_PROFILE,
+        )
+        .unwrap()
+        .expect("the volume");
+        assert_eq!(1, library.db.statements() - before);
+        assert_eq!(12, volume.pages);
+        assert_eq!(library.at("Seule/Tome 1.cbz"), volume.file);
+        assert_eq!(None, volume.page);
+        let starts: Vec<Option<i64>> = volume.chapters.iter().map(|c| c.start_page).collect();
+        assert_eq!(vec![Some(0), Some(5)], starts);
+        assert!(held::chaptered_volume(
+            &library.db,
+            "nothing",
+            leaf_server::store::schema::DEFAULT_PROFILE
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[test]
+    fn a_hidden_work_is_not_listed() {
+        let library = aquilon();
+        library.write(
+            "Adulte/work.json",
+            r#"{"leaf":1,"title":"Adulte","ageRating":"16+"}"#,
+        );
+        library.volume("Adulte/Tome 1.cbz", 1, 2);
+        library.scan();
+
+        let before = library.db.statements();
+        let works = held::works(&library.db, &Ceiling(Some(12))).unwrap();
+        assert_eq!(1, library.db.statements() - before);
+        let names: Vec<&str> = works.iter().map(|w| w.name.as_str()).collect();
+        assert!(!names.contains(&"Adulte"), "{names:?}");
+        assert_eq!(2, held::works(&library.db, &Ceiling::NONE).unwrap().len());
+    }
+
+    /// The folder and the name of every edition of a universe, in the one statement that
+    /// finds it: a drop's series is compared with an edition it names by folder or by name,
+    /// and a second read per series would cost as many statements as the drop has series.
+    #[test]
+    fn a_universe_target_names_the_folder_of_each_of_its_editions() {
+        let library = aquilon();
+        let universe = library.id("SELECT id FROM universe");
+
+        let before = library.db.statements();
+        let place = held::place_of(&library.db, &Aim::Universe(universe), &Ceiling::NONE)
+            .unwrap()
+            .unwrap();
+        assert_eq!(1, library.db.statements() - before);
+        assert_eq!(1, place.edition_folders.len());
+        let gardiens = &place.edition_folders[0];
+        assert_eq!(library.at("Monde d'Aquilon/Les Gardiens"), gardiens.path);
+        assert!(gardiens.implicit);
+        assert_eq!(place.editions, vec![gardiens.id.clone()]);
+    }
+
+    #[test]
+    fn a_work_says_whether_its_folder_declared_an_identity() {
+        let library = Library::new();
+        library.write("Seule/work.json", r#"{"leaf":1,"title":"Seule"}"#);
+        library.volume("Seule/Tome 1.cbz", 1, 1);
+        library.scan();
+        let works = held::works(&library.db, &Ceiling::NONE).unwrap();
+        assert!(
+            works[0].identity_declared,
+            "the scan stamped one in the sidecar"
+        );
+
+        // The identity a folder has only because of where it is: what an unwritable disk
+        // leaves, and what a folder copied without its sidecar gets.
+        let path = library.at("Sans sidecar");
+        let by_place = leaf_server::scan::scanner::id_of(&path, "");
+        library
+            .db
+            .write(|cx| {
+                cx.execute(
+                    "INSERT INTO work (id, name, path) VALUES (?1, 'Sans sidecar', ?2)",
+                    [&by_place, &path.to_string_lossy().to_string()],
+                )?;
+                cx.execute(
+                    "INSERT INTO edition (id, work_id, path, implicit) VALUES ('e', ?1, ?2, 1)",
+                    [&by_place, &path.to_string_lossy().to_string()],
+                )
+            })
+            .unwrap();
+        let works = held::works(&library.db, &Ceiling::NONE).unwrap();
+        let bare = works.iter().find(|w| w.name == "Sans sidecar").unwrap();
+        assert!(!bare.identity_declared);
+    }
+}
+
+// ------------------------------------------------------------------ what a reimport replaced
+
+mod replaced {
+    use leaf_server::store::replaced::{self, Positions, Replaced};
+    use leaf_server::store::Db;
+
+    fn library() -> (tempfile::TempDir, Db) {
+        let dir = super::temp();
+        let db = Db::open(&dir.path().join("index.sqlite")).expect("opening");
+        db.write(|cx| {
+            cx.execute(
+                "INSERT INTO work (id, name, path) VALUES ('w', 'W', '/w')",
+                [],
+            )?;
+            cx.execute(
+                "INSERT INTO edition (id, work_id, path, implicit) VALUES ('e', 'w', '/w', 1)",
+                [],
+            )?;
+            for entry in ["t1", "t2"] {
+                cx.execute(
+                    "INSERT INTO entry (id, edition_id, type, file, size, modified_at)
+                     VALUES (?1, 'e', 'VOLUME', ?2, 10, 1)",
+                    [entry, &format!("/w/{entry}.cbz")],
+                )?;
+            }
+            Ok(())
+        })
+        .expect("seeding");
+        (dir, db)
+    }
+
+    /// Each profile of `pages` at its own page of `entry`, finished twice over.
+    fn read_at(db: &Db, entry: &str, pages: &[(&str, i64)]) {
+        db.write(|cx| {
+            for (profile, page) in pages {
+                cx.execute(
+                    "INSERT OR IGNORE INTO profile (id, name, name_key, created_at)
+                     VALUES (?1, ?1, ?1, 1)",
+                    [profile],
+                )?;
+                cx.execute(
+                    "INSERT INTO progress (profile_id, entry_id, edition_id, page, finished,
+                                           times_finished, updated_at)
+                     VALUES (?1, ?2, 'e', ?3, 1, 2, 7)",
+                    rusqlite::params![profile, entry, page],
+                )?;
+            }
+            Ok(())
+        })
+        .expect("reading");
+    }
+
+    fn pages_of(db: &Db, entry: &str) -> Vec<(String, i64)> {
+        db.read(|cx| {
+            cx.query(
+                "SELECT profile_id, page FROM progress WHERE entry_id = ?1 ORDER BY profile_id",
+                [entry],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .expect("asking")
+    }
+
+    fn done(import: &str, path: &str, entry: &str) -> Replaced {
+        Replaced {
+            import_id: import.to_string(),
+            path: path.to_string(),
+            entry_id: entry.to_string(),
+            kept_at: format!("replaced/{import}/{path}"),
+            replaced_at: 1_790_000_000_000,
+            profile_id: "default".to_string(),
+            old_size: 1200,
+            new_size: 1500,
+            old_pages: Some(30),
+            new_pages: None,
+        }
+    }
+
+    #[test]
+    fn a_replacement_is_recorded_and_found_by_its_entry() {
+        let (_dir, db) = library();
+
+        replaced::replace(
+            &db,
+            &done("imp_a", "w/t1.cbz", "t1"),
+            &Positions::Kept { last: 29 },
+        )
+        .expect("replacing");
+
+        let found = replaced::of_entry(&db, "t1").expect("asking");
+        assert_eq!(vec![done("imp_a", "w/t1.cbz", "t1")], found);
+        assert!(replaced::of_entry(&db, "t2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_replacement_outlives_the_entry_it_replaced() {
+        let (_dir, db) = library();
+        replaced::replace(
+            &db,
+            &done("imp_a", "w/t1.cbz", "t1"),
+            &Positions::Kept { last: 29 },
+        )
+        .unwrap();
+
+        db.write(|cx| cx.execute("DELETE FROM entry WHERE id = 't1'", []))
+            .unwrap();
+
+        assert_eq!(1, replaced::of_entry(&db, "t1").unwrap().len());
+    }
+
+    #[test]
+    fn recording_the_same_replacement_twice_keeps_one_line() {
+        let (_dir, db) = library();
+        let first = done("imp_a", "w/t1.cbz", "t1");
+        let mut again = first.clone();
+        again.new_size = 1600;
+
+        replaced::replace(&db, &first, &Positions::Kept { last: 29 }).unwrap();
+        replaced::replace(&db, &again, &Positions::Kept { last: 29 }).unwrap();
+
+        let found = replaced::of_entry(&db, "t1").unwrap();
+        assert_eq!(
+            1,
+            found.len(),
+            "a second commit of one session doubles nothing"
+        );
+        assert_eq!(1600, found[0].new_size);
+    }
+
+    #[test]
+    fn two_sessions_replacing_one_volume_are_two_lines() {
+        let (_dir, db) = library();
+
+        replaced::replace(
+            &db,
+            &done("imp_a", "w/t1.cbz", "t1"),
+            &Positions::Kept { last: 29 },
+        )
+        .unwrap();
+        replaced::replace(
+            &db,
+            &done("imp_b", "w/t1.cbz", "t1"),
+            &Positions::Kept { last: 29 },
+        )
+        .unwrap();
+
+        assert_eq!(2, replaced::of_entry(&db, "t1").unwrap().len());
+    }
+
+    #[test]
+    fn replacing_costs_the_same_statements_whatever_the_readers() {
+        let (_dir, db) = library();
+        read_at(&db, "t1", &[("default", 10)]);
+        read_at(
+            &db,
+            "t2",
+            &[
+                ("default", 10),
+                ("p1", 20),
+                ("p2", 30),
+                ("p3", 40),
+                ("p4", 50),
+            ],
+        );
+        let splice = Positions::Spliced {
+            from: 5,
+            old_to: 15,
+            new_to: 20,
+            last: 99,
+        };
+
+        let before = db.statements();
+        replaced::replace(&db, &done("imp_a", "w/t1.cbz", "t1"), &splice).unwrap();
+        let one = db.statements() - before;
+        let before = db.statements();
+        replaced::replace(&db, &done("imp_a", "w/t2.cbz", "t2"), &splice).unwrap();
+        let five = db.statements() - before;
+
+        // The record and the places: two statements for one reader or for five.
+        assert_eq!(2, one);
+        assert_eq!(2, five);
+        let reset = Positions::Reset {
+            profile: "p1".into(),
+            last: 99,
+        };
+        let before = db.statements();
+        replaced::replace(&db, &done("imp_b", "w/t2.cbz", "t2"), &reset).unwrap();
+        let reset_cost = db.statements() - before;
+        let kept = Positions::Kept { last: 99 };
+        let before = db.statements();
+        replaced::replace(&db, &done("imp_c", "w/t2.cbz", "t2"), &kept).unwrap();
+        assert_eq!(reset_cost, db.statements() - before);
+    }
+
+    #[test]
+    fn a_reset_returns_only_its_own_profile_to_the_first_page() {
+        let (_dir, db) = library();
+        read_at(&db, "t1", &[("default", 112), ("p1", 40)]);
+
+        replaced::replace(
+            &db,
+            &done("imp_a", "w/t1.cbz", "t1"),
+            &Positions::Reset {
+                profile: "default".into(),
+                last: 200,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            vec![("default".to_string(), 0), ("p1".to_string(), 40)],
+            pages_of(&db, "t1"),
+            "the other reader keeps the page they were on"
+        );
+    }
+
+    #[test]
+    fn a_reset_still_brings_the_others_back_under_the_new_last_page() {
+        let (_dir, db) = library();
+        read_at(&db, "t1", &[("default", 112), ("p1", 90), ("p2", 20)]);
+
+        replaced::replace(
+            &db,
+            &done("imp_a", "w/t1.cbz", "t1"),
+            &Positions::Reset {
+                profile: "default".into(),
+                last: 50,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            vec![
+                ("default".to_string(), 0),
+                ("p1".to_string(), 50),
+                ("p2".to_string(), 20)
+            ],
+            pages_of(&db, "t1")
+        );
+    }
+
+    #[test]
+    fn no_replacement_ever_clears_what_was_finished() {
+        for positions in [
+            Positions::Kept { last: 3 },
+            Positions::Reset {
+                profile: "default".into(),
+                last: 3,
+            },
+            Positions::Spliced {
+                from: 0,
+                old_to: 100,
+                new_to: 2,
+                last: 3,
+            },
+        ] {
+            let (_dir, db) = library();
+            read_at(&db, "t1", &[("default", 112), ("p1", 8)]);
+
+            replaced::replace(&db, &done("imp_a", "w/t1.cbz", "t1"), &positions).unwrap();
+
+            let state: Vec<(i64, i64)> = db
+                .read(|cx| {
+                    cx.query(
+                        "SELECT finished, times_finished FROM progress ORDER BY profile_id",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                })
+                .unwrap();
+            assert_eq!(vec![(1, 2), (1, 2)], state, "{positions:?}");
+        }
+    }
+
+    #[test]
+    fn a_position_past_the_new_last_page_is_brought_back_to_it() {
+        let (_dir, db) = library();
+        read_at(&db, "t1", &[("default", 112), ("p1", 29), ("p2", 5)]);
+
+        replaced::replace(
+            &db,
+            &done("imp_a", "w/t1.cbz", "t1"),
+            &Positions::Kept { last: 29 },
+        )
+        .unwrap();
+
+        assert_eq!(
+            vec![
+                ("default".to_string(), 29),
+                ("p1".to_string(), 29),
+                ("p2".to_string(), 5)
+            ],
+            pages_of(&db, "t1")
+        );
+    }
+
+    #[test]
+    fn a_replacement_leaves_the_other_volumes_places_alone() {
+        let (_dir, db) = library();
+        read_at(&db, "t1", &[("default", 112)]);
+        read_at(&db, "t2", &[("default", 112)]);
+
+        replaced::replace(
+            &db,
+            &done("imp_a", "w/t1.cbz", "t1"),
+            &Positions::Kept { last: 3 },
+        )
+        .unwrap();
+
+        assert_eq!(vec![("default".to_string(), 112)], pages_of(&db, "t2"));
+    }
+
+    #[test]
+    fn a_splice_shifts_what_follows_and_keeps_what_still_fits() {
+        let (_dir, db) = library();
+        read_at(&db, "t1", &[("a", 50), ("b", 70), ("c", 120), ("d", 150)]);
+
+        replaced::replace(
+            &db,
+            &done("imp_a", "w/t1.cbz", "t1"),
+            &Positions::Spliced {
+                from: 62,
+                old_to: 120,
+                new_to: 123,
+                last: 400,
+            },
+        )
+        .unwrap();
+
+        let after: Vec<i64> = pages_of(&db, "t1").into_iter().map(|(_, p)| p).collect();
+        assert_eq!(vec![50, 70, 120, 153], after);
+    }
+
+    #[test]
+    fn a_splice_that_shortens_the_chapter_brings_its_readers_back_into_it() {
+        let (_dir, db) = library();
+        read_at(&db, "t1", &[("a", 100), ("b", 130), ("c", 61)]);
+
+        replaced::replace(
+            &db,
+            &done("imp_a", "w/t1.cbz", "t1"),
+            &Positions::Spliced {
+                from: 62,
+                old_to: 120,
+                new_to: 90,
+                last: 400,
+            },
+        )
+        .unwrap();
+
+        let after: Vec<i64> = pages_of(&db, "t1").into_iter().map(|(_, p)| p).collect();
+        assert_eq!(
+            vec![90, 100, 61],
+            after,
+            "inside: held at the new end; after: shifted back"
+        );
+    }
+
+    #[test]
+    fn a_size_no_column_can_hold_is_refused() {
+        let (_dir, db) = library();
+        read_at(&db, "t1", &[("default", 112)]);
+        let mut bad = done("imp_a", "w/t1.cbz", "t1");
+        // A size no integer column can hold: the call refuses before it writes anything.
+        bad.old_size = u64::MAX;
+
+        assert!(replaced::replace(&db, &bad, &Positions::Kept { last: 3 }).is_err());
+
+        assert!(replaced::of_entry(&db, "t1").unwrap().is_empty());
+        assert_eq!(vec![("default".to_string(), 112)], pages_of(&db, "t1"));
+    }
+
+    #[test]
+    fn a_replacement_that_fails_after_its_record_leaves_no_record_and_no_moved_place() {
+        let (_dir, db) = library();
+        read_at(&db, "t1", &[("default", 112)]);
+        // The record is written first; the places are settled after it. A refusal there must
+        // take the record back with it, or the history would tell of a replacement whose
+        // places never moved.
+        db.write(|cx| {
+            cx.run(
+                "CREATE TRIGGER refuse BEFORE UPDATE ON progress
+                 BEGIN SELECT RAISE(ABORT, 'refusé'); END",
+            )
+        })
+        .unwrap();
+
+        let failed = replaced::replace(
+            &db,
+            &done("imp_a", "w/t1.cbz", "t1"),
+            &Positions::Kept { last: 3 },
+        );
+
+        assert!(failed.is_err());
+        assert!(replaced::of_entry(&db, "t1").unwrap().is_empty());
+        assert_eq!(vec![("default".to_string(), 112)], pages_of(&db, "t1"));
+    }
+
+    #[test]
+    fn what_was_replaced_in_an_entry_is_read_in_one_query() {
+        let (_dir, db) = library();
+        for session in ["imp_a", "imp_b", "imp_c"] {
+            replaced::replace(
+                &db,
+                &done(session, "w/t1.cbz", "t1"),
+                &Positions::Kept { last: 3 },
+            )
+            .unwrap();
+        }
+
+        let before = db.statements();
+        let found = replaced::of_entry(&db, "t1").unwrap();
+
+        assert_eq!(3, found.len());
+        assert_eq!(1, db.statements() - before);
+    }
 }

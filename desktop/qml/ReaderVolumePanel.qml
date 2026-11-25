@@ -42,7 +42,13 @@ import Leaf
 Rectangle {
     id: card
 
-    readonly property int padding: Widths.scale.size(18)
+    /// The padding of every card, which was 18 here and 16 on every other card of the
+    /// application: two pixels, and one role (spacing audit, 23/10/2026).
+    readonly property int padding: Widths.space.card
+    /// As tall as it would be with nothing scrolled away: `ReaderView` holds it to this, and
+    /// to the window, rather than to the dock whatever it holds.
+    readonly property real natural: head.y + head.height + sheet.anchors.topMargin
+                                    + sheet.contentHeight + card.padding
     /// The cover above the facts and not beside them: beside a cover, a card narrower than
     /// this left the facts a column of one word per line.
     readonly property bool stacked: card.width - 2 * card.padding < Widths.scale.column(380)
@@ -117,53 +123,18 @@ Rectangle {
 
     CardLift { level: CardLift.Menu }
 
-    /// One line of the facts: a name and its value, and neither when there is no value.
-    component Fact: Row {
-        id: fact
-
-        required property string key
-        required property string name
-        required property string value
-        readonly property int named: Widths.scale.size(78)
-
-        width: parent.width
-        spacing: Widths.scale.size(10)
-        visible: fact.value.length > 0
-
-        Text {
-            objectName: "reader-volume-" + fact.key + "-name"
-            width: fact.named
-            text: fact.name
-            color: Theme.inkFaint
-            font.family: Theme.textFamily
-            font.pixelSize: Widths.scale.caption(13)
-            font.weight: Font.Medium
-        }
-
-        Text {
-            objectName: "reader-volume-" + fact.key
-            width: parent.width - fact.named - parent.spacing
-            text: fact.value
-            color: Theme.ink
-            font.family: Theme.textFamily
-            font.pixelSize: Widths.scale.body(14)
-            wrapMode: Text.Wrap
-            // Server data, shown as written: a ComicInfo can carry `<b>`, `<br>` or a bare
-            // `&`, and the default `AutoText` would read them as markup (see
-            // SeriesDescription).
-            textFormat: Text.PlainText
-        }
-    }
-
     Item {
         id: head
 
         x: card.padding
         y: card.padding
         width: card.width - 2 * card.padding
-        height: Widths.scale.size(26)
+        // The cross's height, or the title's when the desktop's text makes it taller.
+        height: Math.max(Widths.scale.size(26), headline.implicitHeight)
 
         Text {
+            id: headline
+
             objectName: "reader-volume-head"
             anchors.left: parent.left
             anchors.right: cross.left
@@ -182,6 +153,9 @@ Rectangle {
             id: cross
 
             objectName: "reader-volume-close"
+            // A stop, as the bar's buttons are: Escape was the only way out by the keys.
+            activeFocusOnTab: true
+            Accessible.focusable: true
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             width: Widths.scale.size(26)
@@ -250,32 +224,46 @@ Rectangle {
                                         : parent.width - cover.width - parent.columnSpacing
                     spacing: Widths.scale.size(7)
 
-                    Fact {
+                    VolumeFact {
                         key: "series"
                         name: ReaderCaptions.factSeries
                         value: Reader.seriesName
                     }
 
-                    Fact {
+                    // A line a role, every name: the value wraps rather than counting the rest.
+                    Repeater {
+                        model: (card.about.credits ?? []).length
+
+                        VolumeFact {
+                            required property int index
+                            readonly property var one: card.about.credits[index] ?? ({})
+
+                            key: "credit-" + index
+                            name: one.name ?? ""
+                            value: one.value ?? ""
+                        }
+                    }
+
+                    VolumeFact {
                         key: "pages"
                         name: ReaderCaptions.factPages
                         value: card.about.pageCount > 0 ? String(card.about.pageCount) : ""
                     }
 
-                    Fact {
+                    VolumeFact {
                         key: "chapters"
                         name: ReaderCaptions.factChapters
                         value: card.about.chapters || ""
                     }
 
-                    Fact {
+                    VolumeFact {
                         key: "published"
                         name: ReaderCaptions.factPublished
                         value: card.about.publishedOn
                                ? ReaderCaptions.published(card.about.publishedOn) : ""
                     }
 
-                    Fact {
+                    VolumeFact {
                         key: "isbn"
                         name: ReaderCaptions.factIsbn
                         // Drawn as the key after the chapters when it adds up; the line is
@@ -283,7 +271,7 @@ Rectangle {
                         value: card.barcoded ? "" : card.about.isbn || ""
                     }
 
-                    Fact {
+                    VolumeFact {
                         key: "read"
                         name: ReaderCaptions.factRead
                         value: card.about.started || card.about.finished
@@ -301,14 +289,15 @@ Rectangle {
                         height: visible ? 4 : 0
                         visible: !!card.about.started || !!card.about.finished
 
+                        // Under the values, where the facts' column of names ends.
                         Item {
-                            x: Widths.scale.size(88)
+                            x: Widths.scale.column(78) + Widths.scale.size(10)
                             width: parent.width - x
                             height: 4
 
                             ReadBar {
                                 key: Reader.entryId
-                                shaded: false
+                                onCover: false
                                 started: !!card.about.started
                                 finished: !!card.about.finished
                                 howFarRead: card.about.howFarRead || 0
@@ -334,6 +323,7 @@ Rectangle {
             Text {
                 objectName: "reader-volume-chapters-heading"
                 visible: Reader.chapters.length > 0
+                textFormat: Text.PlainText
                 text: ReaderCaptions.factChapters
                 color: Theme.inkFaint
                 font.family: Theme.textFamily
@@ -369,6 +359,40 @@ Rectangle {
                         width: parent.width
                         height: Math.max(Widths.scale.size(34),
                                          label.implicitHeight + Widths.scale.size(14))
+                        // A stop when it leads somewhere: a chapter was a place to click and
+                        // nothing else, and the keys could open the panel but not go to one.
+                        activeFocusOnTab: row.jumps
+
+                        function jump() {
+                            if (row.jumps)
+                                Reader.goToPage(row.modelData.startPage)
+                        }
+
+                        Accessible.role: Accessible.Button
+                        Accessible.name: label.text
+                        Accessible.focusable: row.jumps
+                        Accessible.focused: row.activeFocus
+                        Accessible.onPressAction: row.jump()
+
+                        Keys.onPressed: event => {
+                            if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                                    || event.key === Qt.Key_Enter) {
+                                if (!event.isAutoRepeat)
+                                    row.jump()
+                                event.accepted = true
+                            }
+                        }
+
+                        // Reached by the keys below the fold, the sheet follows.
+                        onActiveFocusChanged: {
+                            if (!row.activeFocus)
+                                return
+                            const top = row.mapToItem(content, 0, 0).y
+                            if (top < sheet.contentY)
+                                sheet.contentY = top
+                            else if (top + row.height > sheet.contentY + sheet.height)
+                                sheet.contentY = top + row.height - sheet.height
+                        }
 
                         Rectangle {
                             anchors.fill: parent
@@ -437,7 +461,12 @@ Rectangle {
                         TapHandler {
                             enabled: row.jumps
                             gesturePolicy: TapHandler.ReleaseWithinBounds
-                            onTapped: Reader.goToPage(row.modelData.startPage)
+                            onTapped: row.jump()
+                        }
+
+                        FocusRing {
+                            objectName: row.objectName + "-focus"
+                            cornerRadius: Widths.scale.size(8)
                         }
                     }
                 }

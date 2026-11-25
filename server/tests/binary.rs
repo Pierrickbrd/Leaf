@@ -528,9 +528,12 @@ fn serve_over_tls_generates_its_own_certificate_and_answers_on_it() {
 fn ask(port: u16, path: &str) -> Option<String> {
     use std::io::Read;
     let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+    // Addressed as a client of this machine is: a library with no key answers only to a name
+    // of the machine, and `leaf` is not one.
     stream
         .write_all(
-            format!("GET {path} HTTP/1.1\r\nHost: leaf\r\nConnection: close\r\n\r\n").as_bytes(),
+            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
         )
         .ok()?;
     let mut said = String::new();

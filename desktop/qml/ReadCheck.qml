@@ -1,9 +1,9 @@
-// « And it is done », in the bottom corner of a finished cover.
+// « And it is done », beside the words under a finished cover.
 //
-// Bottom right, just above the bar. The top corner belongs to the three dots, and the two of
-// them shared it: a check half under a button is a state one has to move the pointer away to
-// read. Above the bar rather than on it — the bar says « how far » and this says « and it is
-// done », which a fill rounded up to a hundred per cent would not prove.
+// Out of the cover since 24/11/2026: in its bottom corner it sat on the veil every cover now
+// has, beside a volume's number, and on the bar it stood above — three marks in one corner of
+// a picture. Beside the name and its count it is a word of the caption, a green pill at the
+// right, centred on the two lines; the tile places it and narrows its words to leave it room.
 //
 // Shared by the shelf's tile and a series page's, which is why it is a file: see `ReadBar`.
 
@@ -15,29 +15,19 @@ Rectangle {
 
     required property string key
     required property bool finished
-    /// The cover it sits on, which its size follows: see `Widths.markOn`.
-    required property real coverWidth
 
     objectName: "finished-" + done.key
-    anchors.right: parent.right
-    anchors.bottom: parent.bottom
-    anchors.rightMargin: 6
-    anchors.bottomMargin: 10
-    width: Widths.markOn(done.coverWidth)
+    width: Widths.scale.size(18)
     height: width
-    radius: 99
+    radius: width / 2
     visible: done.finished
-    // The same dark the three dots sit on, for the same reason: what is underneath is an
-    // illustration and it may be any colour at all. The emerald is the mark, not the disc —
-    // drawn the other way round it was a green button stuck in the corner of every finished
-    // cover.
-    color: Qt.rgba(12 / 255, 16 / 255, 14 / 255, 0.74)
+    color: Theme.emerald
     antialiasing: true
 
     Glyph {
         anchors.centerIn: parent
-        side: Math.round(done.width * 0.62)
+        side: Math.round(done.width * 0.72)
         source: "assets/icons/check.svg"
-        tint: Theme.emerald
+        tint: Theme.onEmerald
     }
 }

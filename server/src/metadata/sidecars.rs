@@ -57,6 +57,11 @@ pub struct WorkJson {
     pub collection: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub colour: Option<bool>,
+    /// The number of the volume whose cover is the series', which then speaks before a
+    /// `cover.jpg` in the folder. Chosen by number and not by file: `number` identifies a
+    /// volume and survives a rename of its archive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover_volume: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volume_count: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -140,6 +145,11 @@ pub struct StepJson {
     pub from: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<f64>,
+    /// Names another order of the same file, read in this step's place: by its `id`, or by
+    /// its name when no order has that `id`. A step that includes carries nothing else, and
+    /// two orders that include each other are both refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include: Option<String>,
 }
 
 /// The two units a step can be measured in. A third would be a third kind of range, so this
@@ -188,6 +198,11 @@ pub struct EditionJson {
     /// double negative is not a fact worth asking a file to hold.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub colour: Option<bool>,
+    /// The number of the volume whose cover is the series', which then speaks before a
+    /// `cover.jpg` in the folder. Chosen by number and not by file: `number` identifies a
+    /// volume and survives a rename of its archive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover_volume: Option<f64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub arcs: Vec<ArcJson>,
 }
@@ -312,7 +327,7 @@ pub fn arc_unit(spelled: &str) -> Option<&'static str> {
 pub const MEDIA: [&str; 8] = [
     "manga", "bd", "comics", "manhwa", "manhua", "webtoon", "artbook", "other",
 ];
-pub const STATUSES: [&str; 2] = ["ongoing", "completed"];
+pub const STATUSES: [&str; 4] = ["ongoing", "completed", "hiatus", "cancelled"];
 pub const READING_DIRECTIONS: [&str; 3] = ["LEFT_TO_RIGHT", "RIGHT_TO_LEFT", "VERTICAL"];
 
 /// The same rule as [`arc_unit`], for the three enums beside it: **what may be written is
@@ -388,8 +403,20 @@ pub struct EntryJson {
     /// chapter's number.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volume: Option<f64>,
+    /// The page the volume shows as its cover, counted from 0 like `/pages/{number}`. Absent:
+    /// an image beside the archive, otherwise page 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover_page: Option<i32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub chapters: Vec<ChapterJson>,
+    /// Who wrote **this** volume, for a series whose script changes hands from one volume to
+    /// the next. The series is credited with all of them, in reading order, unless its
+    /// `work.json` says otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub authors: Vec<String>,
+    /// Who drew this volume, on the same terms as `authors`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub artists: Vec<String>,
 }
 
 fn volume_type() -> String {
@@ -418,7 +445,10 @@ impl Default for EntryJson {
             published_on: None,
             summary: None,
             volume: None,
+            cover_page: None,
             chapters: Vec::new(),
+            authors: Vec::new(),
+            artists: Vec::new(),
         }
     }
 }
@@ -550,6 +580,11 @@ impl Document {
     /// in the file; a new one goes at the end.
     pub fn set(&mut self, key: &str, value: serde_json::Value) {
         self.0.insert(key.to_string(), value);
+    }
+
+    /// Takes one key out, and gives back what it held. The rest keeps its place.
+    pub fn remove(&mut self, key: &str) -> Option<serde_json::Value> {
+        self.0.shift_remove(key)
     }
 
     /// The document's own bytes, for a change made key by key rather than through a type.

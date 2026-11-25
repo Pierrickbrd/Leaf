@@ -1,7 +1,6 @@
 #include "Captions.h"
 
 #include "Api.h"
-#include "Navigation.h"
 #include "Search.h"
 #include "Shelf.h"
 #include "Words.h"
@@ -10,6 +9,7 @@
 #include <QQmlEngine>
 #include <QVariantMap>
 
+#include <algorithm>
 #include <optional>
 #include <utility>
 
@@ -106,29 +106,29 @@ QString Captions::suggestion() const
     return Words::didYouMean(aside.approximate);
 }
 
-QString Captions::placeholder() const
+bool Captions::filtered() const
 {
-    return Words::searchHint();
+    if (!m_shelf)
+        return false;
+    const QVariantMap narrowing = m_shelf->narrowing();
+    return std::ranges::any_of(narrowing, [](const QVariant &values) {
+        return !values.toStringList().isEmpty();
+    });
 }
 
-QString Captions::shortPlaceholder() const
+QString Captions::emptyHeadline() const
 {
-    return Words::searchHintShort();
+    return filtered() ? Words::nothingLeftHeadline() : Words::emptyShelfHeadline();
 }
 
-QString Captions::clearLabel() const
+QString Captions::emptySaid() const
 {
-    return Words::clearTheSearch();
+    return filtered() ? Words::nothingLeft() : Words::emptyShelf();
 }
 
-QString Captions::filterLabel() const
+QString Captions::troubleHeadline() const
 {
-    return Words::filter();
-}
-
-QString Captions::settingsLabel() const
-{
-    return Words::destination(Navigation::Destination::Settings);
+    return Words::shelfTroubleHeadline();
 }
 
 QString Captions::noSeriesLabel() const
@@ -136,54 +136,9 @@ QString Captions::noSeriesLabel() const
     return Words::noSeriesByThatName();
 }
 
-QString Captions::clearFiltersLabel() const
+QString Captions::nothingFoundLabel() const
 {
-    return Words::clearEveryFilter();
-}
-
-QString Captions::nothingToFilterLabel() const
-{
-    return Words::nothingToFilter();
-}
-
-QString Captions::noValueByThatNameLabel() const
-{
-    return Words::noValueByThatName();
-}
-
-QString Captions::quotedAxis(const QString &axisTitle) const
-{
-    return Words::quotedAxis(axisTitle);
-}
-
-QString Captions::searchWithin(const QString &axisTitle) const
-{
-    return Words::searchWithin(axisTitle);
-}
-
-QString Captions::sortValue() const
-{
-    const Api::Sort order = m_shelf ? Api::sort(m_shelf->sort()) : Api::Sort::Name;
-    return Words::sortValue(order, m_shelf && m_shelf->sortReversed());
-}
-
-QString Captions::sortLabel() const
-{
-    const Api::Sort order = m_shelf ? Api::sort(m_shelf->sort()) : Api::Sort::Name;
-    return Words::labelled(u"Trier"_s,
-                           Words::sortValue(order, m_shelf && m_shelf->sortReversed()));
-}
-
-QVariantList Captions::sortOptions() const
-{
-    QVariantList options;
-    using enum Api::Sort;
-
-    for (const Api::Sort order : {Name, Added, Volumes, Read}) {
-        options << QVariantMap{{u"value"_s, Api::spell(order)},
-                               {u"label"_s, Words::sortOrder(order)}};
-    }
-    return options;
+    return Words::nothingFound();
 }
 
 QStringList Captions::narrowedBy(const QString &axis) const

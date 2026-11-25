@@ -3,9 +3,9 @@
 // What one card of the import queue, and one line of its tree, say about themselves.
 //
 // The same split `Captions.h` made on `Search` and `ImportCaptions.h` made on `Imports`, one
-// floor further down. `ImportCaptions` holds what the *dialog* says — a title, six buttons,
-// the two file pickers — and every one of those is a constant property read once when the
-// screen is built. These are not that: they are answers about one thing being imported, asked
+// floor further down. `ImportCaptions` and the step classes beside it hold what the *dialog*
+// says — a title, the buttons, the two file pickers — and nearly every one of those is a
+// constant read once when the screen is built. These are not that: they are answers about one thing being imported, asked
 // per row and per node, and the class carried both halves under one name until Sonar's
 // `cpp:S1448` counted forty-one methods on it.
 //
@@ -47,10 +47,6 @@ public:
     /// `Words`, so `LevelMark` composes the path and nothing French leaves it.
     Q_INVOKABLE QString levelLabel(int level) const;
     Q_INVOKABLE QString levelIcon(int level) const;
-
-    /// « créera la série « Elfes » ». Said here rather than in the QML for the reason
-    /// `Words.h` gives: the elision in front of a vowel is not a rule QML could apply.
-    Q_INVOKABLE QString willCreateLabel(const QString &kind, const QString &name) const;
 
     /// « « Elfes » est déjà dans « Mangas » — le ranger ici l'y déplacera ». `from` is the
     /// whole path the server sent; only the folder it sits in is shown, because a reader

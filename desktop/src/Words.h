@@ -18,10 +18,13 @@
 #include "Toasts.h"
 #include "Manifest.h"
 #include "Navigation.h"
+#include "Orders.h"
+#include "Shape.h"
 #include "Widths.h"
 
 #include <QDateTime>
 #include <QString>
+#include <QVariantMap>
 #include <QStringList>
 
 #include <optional>
@@ -47,6 +50,10 @@ QString chapterName(const QString &label, const QString &title);
 /// "21 tomes", "7 albums", "1 tome". A BD comes in albums and everything else in volumes —
 /// which is a fact about the medium, so it is read from the medium and not from the shelf.
 QString volumes(int count, std::optional<Api::Medium> medium);
+/// What a series holds, under its tile: « 12 tomes », or « 120 chapitres » when it holds
+/// no volume and files that are all chapters — a webtoon is downloaded as chapters and read
+/// « 0 tome » for as long as the line counted volumes only (test of 24/11/2026).
+QString holdings(const Api::Series &one);
 
 /// The pills, left to right: « Non lues », « En cours », « Terminées ».
 QString readStatus(Api::ReadStatus status);
@@ -67,6 +74,21 @@ QString clearEveryFilter();
 /// and all manga leave no axis that cuts anything, and an empty panel with no sentence in it
 /// reads as a panel that failed to load.
 QString nothingToFilter();
+
+/// What an empty shelf says, headline then sentence. The shelf of a library with nothing in
+/// it drew a bar, a row of pills and four hundred and fifty pixels of bare paper in the audit
+/// of 23/10/2026: not one word to tell an empty library from a screen that failed to draw.
+QString emptyShelfHeadline();
+QString emptyShelf();
+
+/// What a shelf emptied by its own filters says — not the same thing as a library with
+/// nothing in it, and a reader told « vide » would go looking for the files.
+QString nothingLeftHeadline();
+QString nothingLeft();
+
+/// The headline over what went wrong when the shelf could not fill, said above the trouble
+/// itself: the trouble names the cause, this names what it cost.
+QString shelfTroubleHeadline();
 
 /// « Chercher dans Auteur… » — the field that narrows one long axis, named after the axis so
 /// that nobody mistakes it for the one that asks the server a question.
@@ -101,6 +123,9 @@ QString whatItFound();
 /// here would point the dependency back at the object that uses it.
 enum class Looks { System, Light, Dark };
 QString appearance();
+/// The card of the reader's own habits — layout, fit, backdrop, motion — as the general
+/// settings hold them: what a volume opens with, before it is changed from inside the reader.
+QString readerDefaults();
 QString appearanceChoice(Looks which);
 
 /// « Bibliothèque connectée », « Pas de connexion ». What a reader needs of a server: not
@@ -125,6 +150,16 @@ QString keyStorage(KeyFrom where);
 /// scanned at startup and never since is the ordinary case.
 QString scanState(Scanning state);
 QString startAScan();
+QString theCache();
+QString purgeTheCache();
+QString exportReading();
+QString exportExplained();
+/// « Export enregistré : /chemin/leaf-lecture.json »
+QString readingExported(const QString &path);
+QString readingExportName();
+QString purgeExplained();
+/// « Cache vidé : 12 fichiers, 3,4 Mio. », or that there was nothing to empty.
+QString cachePurged(qint64 files, qint64 bytes);
 
 /// « 6 séries, 59 tomes, 546 chapitres » — what the library holds, as the last scan counted
 /// it. The counts describe the library and not the work done on it: an unchanged rescan
@@ -146,6 +181,14 @@ QString scanFailed(const QString &why);
 /// « et 18 autres » — a list is capped at sixteen, and the cap has to be visible or the
 /// screen quietly claims there were sixteen.
 QString andMore(int rest);
+/// « Dernières notifications » and what it says before there is one: the list of what the
+/// bubbles said lately, in the notifications tab.
+QString notificationHistory();
+QString nothingToldYet();
+/// « Tout voir (12) » and « Replier »: a finding of the scan is three lines until asked for
+/// the rest, so that nine of them do not stack into a wall.
+QString seeAllFindings(int count);
+QString foldFindings();
 QString lastScan(qint64 milliseconds);
 /// « Commencé : 19 octobre 2026, 14:02 » — the line under « En cours… ». Not `lastScan`:
 /// a scan under way has no end yet, the server says so with an empty `finishedAt`, and that
@@ -174,6 +217,11 @@ QString axis(const QString &name);
 /// the same question as whether *you* have read it. Worded apart from `readStatus` on
 /// purpose: « En cours » under two different headings is one word doing two jobs.
 QString editionStatus(const QString &word);
+
+/// « En parution · 30 albums annoncés » — the state of the run beside what the publisher
+/// announces, one line, because « En parution » alone leaves « out of how many? » unanswered.
+/// The space before « · » does not break.
+QString runAnnounced(const QString &status, int declared, std::optional<Api::Medium> medium);
 
 /// « Français », « Japonais » — a language tag as a reader's word for it. Read from the
 /// system rather than from a table here: a table of every tag a library might carry is a
@@ -249,7 +297,40 @@ QString tab(Tab which);
 
 /// « Collectif · Soleil · BD · En cours » — who made it and what it is, in one line. Absent
 /// facts are left out rather than shown empty, the way the resume band does it.
-QString makers(const Api::Series &one);
+///
+/// `people` are the names in the order the page ranks them; left empty, they are read off the
+/// series' credits. With a `link`, the words are written for a rich text and « et N autres »
+/// is a link to it.
+QString makers(const Api::Series &one, const QStringList &people = {}, const QString &link = {});
+/// « et 9 autres » — the people a line does not name.
+QString andOthers(int count);
+/// `most` names and « et N autres » — two in the header, three a line of the description —
+/// but never « et 1 autre », since the name it would hide takes no more room than the words
+/// hiding it. With a `link`, written for a rich text and the count a link to it.
+QString namesWithin(const QStringList &names, int most, const QString &link = {});
+/// « Scénario : Jul · Dessin : Achdé » under a volume's title — empty when the volume is
+/// credited with its series' default on both counts.
+QString volumeCredits(const Api::Entry &one);
+/// « Les auteurs de Lucky Luke » and « 11 personnes · rangées par nombre d’albums » — the
+/// window listing everyone.
+QString peopleTitle(const QString &work);
+QString peopleCount(int count, std::optional<Api::Medium> medium);
+
+/// One line of who made a work: « Auteur », « Scénario » or « Dessin », and whom.
+struct CreditLine {
+    QString label;
+    QStringList names;
+};
+/// Who wrote and who drew, each person once: in both lists, an « Auteur » — « Auteurs » for
+/// several, since it names people —; in one, « Scénario » or « Dessin », which name a role
+/// and do not agree. Lines in that order, empty ones left out, names in the order they came;
+/// two spellings the search folds together are one person, spelt as first met.
+QList<CreditLine> creditLines(const QStringList &authors, const QStringList &artists);
+
+/// Under a series' credit in its window: « Pour les albums ne précisant pas de scénariste ».
+/// What the field holds is the default its volumes draw on, not the union of what they name,
+/// and nothing else on the window said so. `drawing` for « Dessin ».
+QString creditDefault(bool drawing, std::optional<Api::Medium> medium);
 
 /// « 29 albums · 5 arcs · Tout public · Gauche à droite » — what it weighs. The count of
 /// volumes follows the medium, so a BD is counted in albums; the rest is left out when it is
@@ -368,14 +449,41 @@ enum class Command {
     MarkSeriesRead,
     MarkSeriesUnread,
     ReimportSeries,
+    AddEditions,
     EraseSeries,
     MarkEntryRead,
     MarkEntryUnread,
     ReimportEntry,
     SaveACopy,
     EraseEntry,
+    ShowInfo,
+    ChooseDirection,
+    EditSeries,
+    EditEntry,
+    Rescan,
+    ReplaceChapter,
+    /// An edition is not « la série » on the shelf: its tile reads « Dragon Ball · Perfect
+    /// Edition », and a menu that says « la série » about it names something else.
+    EraseEdition,
+    EditEdition,
+    /// The export asks a folder every time, and says what it takes: this edition or volume,
+    /// the whole work, the whole universe.
+    Export,
+    ExportWork,
+    ExportUniverse,
 };
 QString command(Command which);
+
+/// « 3 séries sélectionnées », « 2 tomes sélectionnés » — what a selection holds, said on its
+/// bar. One is singular like nought: French counts 0 and 1 in the singular.
+QString selectionCount(int count, bool volumes);
+
+/// « Marquer la sélection comme lue » / « …comme non lue » — one sentence for series and for
+/// volumes, since « sélection » is the same word for both and the bar says which it holds.
+QString markSelection(bool read);
+
+/// « Désélectionner » — empties the selection, and is the word of the bar's last button.
+QString clearSelection();
 
 /// « Supprimer le tome 23 ? » — the question a deletion asks, naming the one thing that goes.
 QString eraseEntryQuestion(double number);
@@ -416,9 +524,10 @@ QString noTrash(bool several);
 /// the day one must not be wrong.
 QString otherEditionUntouched(const QString &name);
 
-/// « Tapez Elfes pour confirmer » — the only protection that works against a reflex, and it
-/// is worth its weight on thirty files where it would be ceremony on one.
-QString typeToConfirm(const QString &name);
+/// « Tapez « Supprimer » pour confirmer » — the only protection that works against a reflex,
+/// and it is worth its weight on thirty files where it would be ceremony on one. The word is
+/// the button's own, so what is typed is what is pressed.
+QString typeToConfirm(const QString &word);
 
 /// « Supprimer » — the button that does it, and the one word on the screen painted in the
 /// alert colour.
@@ -483,6 +592,29 @@ QString eventColumn();
 QString bubbleColumn();
 QString desktopColumn();
 
+/// What an export says, from the question of where to the bubble that ends it. The folder is
+/// asked every time, so its title is the whole of what the picker needs to be told.
+QString exportFolderTitle();
+QString exportConflictTitle();
+/// « 3 éléments existent déjà dans ce dossier, par exemple « Tome 01.cbz ». » — what stands in
+/// the way, with one of them named so that the reader knows whether it is the right folder.
+QString exportConflict(int count, const QString &example);
+QString exportReplace();
+QString exportComplete();
+/// « Export de « Dragon Ball » » — the bar's name for what is on its way.
+QString exportingNow(const QString &name);
+/// « 3 séries » — the name of an export of a selection, which has none of its own.
+QString exportOfSeveral(int count);
+/// « Export terminé », and under it the folder's name and the sidecars the disk did not have.
+QString exportDone();
+QString exportDoneDetail(const QString &name, const QStringList &missing);
+QString exportStopped();
+QString nothingToExport();
+/// « Il manque 1,2 Gio sur ce disque : 4,1 Gio à écrire, 2,9 Gio libres. »
+QString notEnoughRoom(qint64 needed, qint64 free);
+QString exportUnsafePath(const QString &path);
+QString couldNotMakeFolder(const QString &path);
+
 /// « Tome 5.cbz n'a pas pu être écrit. » — a copy that did not reach the disk. Named by the
 /// file it was going to be, because that is the only part of it the reader chose.
 QString couldNotWrite(const QString &name);
@@ -521,6 +653,10 @@ QString filter();
 /// « Aucune série ne porte ce nom. » — under the lines, when a search found files and no
 /// series at all. The grid disappears rather than stay empty, and this says why.
 QString noSeriesByThatName();
+
+/// What a search that found nothing at all says, alone on its screen: a sentence, where the
+/// screen drew two headings reading « 0 » over bare paper before (23/10/2026).
+QString nothingFound();
 
 /// « aucun résultat dans manga · 3 sans les filtres » — the sentence under the field when a
 /// search finds nothing behind a lit pill. Without it the screen just looks broken.
@@ -591,6 +727,21 @@ QString readerOutOf(int count);
 /// 2 for 200 %; a pinch stops anywhere, and is said to the nearest whole percent.
 QString readerZoom(qreal level);
 
+/// « Zoom temporaire · Échap » — said in the bar at the foot while a pinch magnifies a strip:
+/// nothing of it is kept, and the reader is told so, and how to leave it.
+QString readerLoupe();
+
+/// « sur 120 », under « Chapitre 12 » in a webtoon's band: how many chapters the series has.
+QString readerAmong(int count);
+
+/// « Agrandir », « Réduire » — the zoom steps of a webtoon's band, for the bubble and for
+/// whoever reads the screen aloud.
+QString readerZoomStep(bool larger);
+
+/// « Lecture automatique », and « Arrêter la lecture automatique » while it runs: the A of a
+/// webtoon's band.
+QString readerAutoRead(bool running);
+
 /// « 98 à 106 » — the chapters a volume holds, by their numbers; one number alone when the
 /// stretch is a single chapter. The word « Chapitres » is the line's, not this.
 QString readerChapterSpan(double from, double to);
@@ -602,6 +753,16 @@ QString readerVolumeHead(const QString &entry, const QString &title);
 /// The names of the lines in the volume's panel.
 enum class ReaderFact { Series, Pages, Chapters, Published, Isbn, Read };
 QString readerFact(ReaderFact which);
+
+/// The names of the lines of a file's information that the volume's panel does not have: the
+/// file's own name, what it weighs, and when it arrived.
+enum class FileFact { File, Size, Added };
+QString fileFact(FileFact which);
+
+/// The words of the two editing windows, by name: what a field is called, how a list is
+/// typed, and what saving a volume costs. One map for the lot (`Editing.words`) rather
+/// than a function a field.
+QVariantMap editing();
 
 /// « Cliquer pour copier », under the ISBN drawn as a barcode in the volume's panel.
 QString readerCopyIsbn();
@@ -649,11 +810,13 @@ QString readerMotion(Preferences::Motion which);
 /// The two halves of « Sur cet appareil », each over its rows: « Pages », what the book looks
 /// like, and « Confort », what is around it. The critique of 22/10/2026 was four
 /// anonymous rows of pills, which a reader had to try to learn what each one was about.
-enum class ReaderDeskGroup { Pages, Comfort };
+/// A webtoon's card has « Défilement » and « Commandes » instead of « Pages ».
+enum class ReaderDeskGroup { Pages, Comfort, Scrolling, Controls };
 QString readerDeskGroup(ReaderDeskGroup which);
 /// What each of those rows chooses, written beside its pills: « Mise en page »,
-/// « Ajustement », « Fond », « Changement de page ».
-enum class ReaderSetting { Layout, Fit, Backdrop, Motion };
+/// « Ajustement », « Fond », « Changement de page » — and a webtoon's « Sensibilité »,
+/// « Lecture automatique », « Commandes ».
+enum class ReaderSetting { Layout, Fit, Backdrop, Motion, Sensitivity, AutoSpeed, Controls };
 QString readerSetting(ReaderSetting which);
 /// « La série déclare : **droite → gauche**. Ce que vous choisissez ici ne vaut que pour cette
 /// série, mais sur tous vos appareils. » The bold is `<b>…</b>` for a `Text` in styled-text
@@ -662,6 +825,18 @@ QString readerSetting(ReaderSetting which);
 QString readerDeclares(std::optional<Api::ReadingDirection> declared);
 /// « Pour tous les livres, sur ce bureau seulement. »
 QString readerDeskNote();
+/// « Pour tous les webtoons, sur ce bureau seulement. »
+QString readerStripDeskNote();
+/// The words at either end of a webtoon's two sliders: « Douce » to « Vive » for how far the
+/// wheel moves the strip, « Lente » to « Rapide » for its A.
+enum class StepEnd { Gentle, Lively, Slow, Fast };
+QString readerStepEnd(StepEnd which);
+/// « Discrètes », « En remontant », « Au clic » — when a webtoon's bars go and come back.
+QString readerStripControls(Preferences::StripControls which);
+/// The line under those pills, saying what the one chosen does.
+QString readerStripControlsHint(Preferences::StripControls which);
+/// « Reviennent aussi à l’arrêt, après 5 s sans défiler ».
+QString readerStripAtRest();
 
 /// « Raccourcis » — the card of the reader's keys: its title, and what the bar's button that
 /// opens it says under the pointer.
@@ -679,11 +854,16 @@ enum class ShortcutDoes {
     TurnByArrow,
     TurnByArrowRightToLeft,
     TurnBySpace,
+    ScrollByArrow,
+    ScrollBySpace,
+    ToTheEndsOfChapter,
+    AutoRead,
     ToTheEnds,
     ToTheEndsRightToLeft,
     BackAPage,
     FullScreen,
     VolumeInfo,
+    ReaderSettings,
     TheseShortcuts,
     ZoomByKey,
     BackToWhole,
@@ -699,7 +879,7 @@ QString shortcutDoes(ShortcutDoes which);
 /// What is written on a key. A letter and a function key are words of the card like the
 /// others, and kept here with them: « Échap », not « Esc », is a decision about French.
 enum class KeyName { Space, Shift, Ctrl, Alt, Escape, F, F11, I, Question, F1, Zero, W, Enter, Tab,
-                     Menu, F10, Slash };
+                     Menu, F10, Slash, A, Home, End, S };
 QString keyName(KeyName which);
 
 /// « + » between the keys of one combination, « / » and « ou » between two that do the same,
@@ -734,9 +914,13 @@ QString noLibrary();
 /// network error, which Qt does translate; only Leaf's half of the sentence was English.
 QString unreachable(const QString &why);
 
-/// « Le serveur a répondu quelque chose d’illisible. » — an answer that is not the JSON its
+/// « Leaf n’a pas pu lire la réponse du serveur… » — an answer that is not the JSON its
 /// own contract promises.
 QString unreadableAnswer();
+/// What the client says when the server answered and the answer lacks what it needs, from the
+/// machine's « part: field is missing ». A line that is not in that shape is returned as it
+/// came: it was already a sentence.
+QString answerNotUnderstood(const QString &raw);
 
 /// « La clé a été refusée. », and what the server said after it when it said anything.
 QString keyRefused(const QString &said);
@@ -764,6 +948,8 @@ QString deviceNameField();
 QString deviceNameHelp();
 /// « Relier » while there is nothing to link to, « Relier à cette bibliothèque » once found.
 QString linkAction(bool found);
+/// The button of a link that was read and not yet looked for.
+QString lookForTheLibrary();
 /// Said while the address in the link is being reached, before anything is known of it.
 QString lookingForTheLibrary();
 /// « Bibliothèque trouvée : 192.168.1.20 », and under it what was checked and what it holds.
@@ -905,7 +1091,9 @@ QString closeThePanel();
 /// Where one file is on its way in. Its own enumeration rather than `Imports::Stage`, for
 /// the reason at the top of this file: this is a leaf, and it does not know what owns a
 /// queue or a socket.
-enum class Importing { Asking, Deciding, Ready, Sending, Filing, Filed, Paused, Failed };
+/// `Reviewing` comes last, as on `Card::Stage`: the screen mirrors these as numbers, and a
+/// stage inserted in the middle would renumber every one after it under the QML's feet.
+enum class Importing { Asking, Deciding, Ready, Sending, Filing, Filed, Paused, Failed, Reviewing };
 
 /// « Importer » — the dialog's own name, and the bar button's.
 QString importing();
@@ -913,11 +1101,125 @@ QString importing();
 /// first one alone leaves a reader wondering whether the window is the target or the box is.
 QString dropFilesHere();
 QString dropHow();
-/// The four commands along the bottom, in the order they appear and change.
+/// The drop zone's one sentence under its title: what may be dropped, and what is read of it.
+QString dropWhat();
+/// Under the drop zone: nothing leaves the machine on the choosing step.
+QString chooseReassurance();
+/// « Déjà lu, 3 éléments » — over the cards of what was dropped.
+QString readSoFar(int cards);
+/// The footer's sentence while the cards are shown: nothing is written before it was seen.
+QString everythingIsChecked();
+/// « Vider » — gives up what was dropped and goes back to the empty drop zone.
+QString emptyTheQueue();
+/// « 53 fichiers à envoyer · 6,8 Gio » — what the drop would send, over the cards.
+QString toSendTotal(int files, qint64 bytes);
+
+/// The third step, « Envoyer »: what is about to travel, said once at the top and then line by
+/// line, and the same frame once a line has gone. Volumes, which is what a reader counts:
+/// the archives are what a folder holds that is sent.
+QString recapTitle(int volumes);
+QString recapAbout(qint64 bytes, int cards);
+QString recapExplains();
+QString recapSeries();
+QString recapVolumes();
+QString recapSize();
+QString recapState();
+/// Under the checking box of the third step, which only recalls what the first chose.
+QString recapVerifies();
+/// « Importer tout » — the button that sends every line not yet going nor done.
+QString importAll();
+/// « Terminer » — that same button once every line has arrived: it closes the window.
+QString finishIt();
+/// « Envoi en cours : 69 tomes sur 79 » and « 3,1 Gio sur 7,5 Gio » — the banner once a line
+/// has gone.
+QString sendingTitle(int done, int whole);
+QString sendingAbout(qint64 sent, qint64 whole);
+QString sendingExplains();
+/// « Envoi terminé : 79 tomes », or « Envoi interrompu : 69 tomes sur 79 » when a line did
+/// not arrive.
+QString sentTitle(int done, int whole);
+/// The sentence under the banner: what « Envoyer » will do before the send, what each line's
+/// button does during it, and nothing once it is over.
+QString bannerExplains(bool going, bool finished);
+QString sentAbout(qint64 bytes, int failed);
+/// The foot's sentence before and after a line has gone.
+QString recapFoot();
+QString sendingFoot();
+/// « 46 % » — how far a line has gone, rounded down: 100 is for what has arrived.
+QString percentSent(double fraction);
+/// What a line says under its name: « Série · 2 éditions · sera créée · JSON Leaf lu ».
+/// `works` and `editions` count what stands under the card's own root; `state` is what
+/// becomes of that root, empty when nothing is known; `origin` is how the sheets were read
+/// (0 said, 1 taken, 2 nothing, -1 not read yet).
+QString lineAbout(Manifest::Level level, int works, int editions, const QString &state,
+                  int origin);
+/// A line that waits its turn or was stopped, said in front of what it is.
+QString lineQueued(const QString &about);
+QString linePaused(const QString &about);
+/// A line put back to zero, until the server has answered again.
+QString lineResetting();
+/// The tooltips of the three marks of a line: send it, stop it, put it back to zero.
+QString lineStart();
+QString lineStop();
+QString lineRetry();
+QString lineCancel();
+/// « 12 fichiers déjà dans la bibliothèque, non renvoyés » — empty when none is.
+QString heldNotResent(int files);
+/// How a whole card was read — « Complet » (its own JSON), « Komga » (a ComicInfo), « Nu » (nothing).
+QString readHow(int origin);
+/// « Blue Period existe déjà dans la bibliothèque : 12 tomes sur 14. Cet apport sera traité
+/// comme un réimport. » — the drop held in part, by name.
+QString heldNamed(const QString &name, int held, int whole);
+/// What a line of the choosing step says of its own count: « Vérification · 6 / 14 » while the
+/// walk hashes, « Lecture · 6 / 14 » while it only reads, and bare « 6 / 14 » when the line has
+/// no room for the word (`brief`). Said over the line and not under its name: the second line
+/// of a card is what it holds, and the count has to outlast the walk it counts.
+QString lineCounting(bool hashing, qint64 done, qint64 whole, bool brief);
+/// « Vérifié · 14 / 14 » once a walk that hashed is over, « Lu · 14 / 14 » when it did not;
+/// bare « 14 / 14 » when brief.
+QString lineChecked(bool hashed, qint64 whole, bool brief);
+/// What the same line says when a walk that hashed could not hash the pages of some archive of
+/// the folder: « Fichier vérifié, pages non vérifiées », and « Pages non vérifiées » when
+/// brief. Never « Vérifié », which would say the pages that a rewrite at the other end is
+/// compared with were covered, and they were not; the reason is said under the line.
+QString lineCheckedFileOnly(bool brief);
+/// « Vérification : 37 tomes sur 120 » over the whole drop, « Lecture : … » when nothing is
+/// hashed — the one line that says why « Suivant » is not yet there.
+QString checkingAll(bool hashing, qint64 done, qint64 whole);
+/// « Lecture en cours : 2 séries sur 5 » — before any folder has said how many volumes it holds.
+QString readingAll(int done, int whole);
+/// « Prêt : 5 séries à importer » — everything read, nothing left to answer.
+QString readyAll(int series);
+/// « À vous de dire : 2 séries » — what the drop still asks, once it is all read.
+QString decidingAll(int series);
+/// The one line under the drop zone, from where the whole drop stands: the series before any
+/// folder has said how many volumes it holds, then the volumes, then the wait for the server,
+/// then what is left to answer, then ready.
+struct DropCounts
+{
+    int foldersRead;
+    int foldersToRead;
+    int reading;
+    qint64 checked;
+    qint64 toCheck;
+    bool hashing;
+    int deciding;
+    int listed;
+};
+QString dropProgress(const DropCounts &counts);
+/// « Suivant s’active à la fin » — beside the count, for as long as it counts.
+QString startWaits();
+/// What the greyed « Suivant » says when it is hovered.
+QString startWaitsHint();
+/// The commands along the bottom, in the order they appear and change.
 QString cancel();
 QString goBack();
+/// « Suivant » — the way on from the first step and from the second.
 QString next();
-QString startImport();
+/// « Précédent » — the way back from the second step and from the third.
+QString previous();
+/// « Importer » — the third step's button, the one that starts the transfer.
+QString importIt();
 
 /// « En attente », « Envoi », « Rangé »… — one word per stage, for the row that shows it.
 QString importStage(Importing stage);
@@ -961,13 +1263,7 @@ QString couldNotBeRead(const QString &name);
 /// would stop every other row from sending over one session the server would not drop.
 QString couldNotCleanUp(const QString &name);
 
-/// « créera la série « Elfes » » — one line per container a dropped folder would bring into
-/// being, from the contract's own word. A kind this version has never heard of is shown by
-/// its name alone rather than dropped: the server may learn a word before the client does,
-/// and a silent line is a container created that nobody was told about.
-QString willCreate(const QString &kind, const QString &name);
-/// « Accepter » — the answer to that announcement, and the only way past it. Nothing is
-/// created until somebody has read the list.
+/// « Accepter » — the answer to the list of what an import would create.
 QString acceptCreations();
 
 /// « « Elfes » est déjà dans « Mangas » — le ranger ici l'y déplacera » — the sixth case of
@@ -982,6 +1278,8 @@ QString alreadyElsewhere(const QString &name, const QString &folder);
 /// person who asked for the option had to ask what it did. A checkbox whose own author
 /// cannot read it from its label is a checkbox that will be left at whatever it came with.
 /// So the label names the outcome, and the line under it names the mechanism and the cost.
+/// Per page, and not per file: the server rewrites an archive as it installs it, and the
+/// pages are what survives that, so they are what the result is compared with.
 ///
 /// Checked by default: a volume that travelled wrong is worse than one that did not travel,
 /// because nothing afterwards would say so.
@@ -1012,6 +1310,12 @@ QString chooseFolderTitle();
 /// Both are named, and by what tells them apart: « Death Note » twice would help nobody, so
 /// it is the path from the dropped folder that is shown.
 QString sameDestination(const QString &one, const QString &other);
+
+/// « « Terres d’Arran » est dit par universe.json là où il ne peut pas être. Impossible : pas
+/// d’univers dans un univers. Corrigez ce fichier, puis déposez le dossier à nouveau. » — a
+/// declaration the server refuses at the announcement, said before anything is sent. `why`
+/// is the `impossible…` sentence of the rule it breaks.
+QString declaredOutOfPlace(const QString &name, const QString &file, const QString &why);
 
 // ——— The levels of the model, and what a node of the import tree says it holds ————————
 
@@ -1149,19 +1453,32 @@ QString holdsReplacements(int count, int chosen);
 QString size(qint64 bytes);
 
 /// « 34 tomes · 4,1 Gio » — what a node holds. Empty when it holds nothing, because a line
-/// reading « 0 tome · 0 o » says nothing a reader needs.
+/// reading « 0 tome · 0 o » says nothing a reader needs. The space before « · » does not
+/// break, as in `fileDetail` beside it in the same column.
 QString nodeHolds(qint64 volumes, qint64 bytes);
+/// A series in a list: « 2 éditions · 76 tomes · 1,2 Gio ».
+QString seriesHolds(int editions, qint64 volumes, qint64 bytes);
+/// A volume called by its number and its title: « Tome 1 · Son Gokû et ses amis ».
+QString titled(const QString &name, const QString &title);
+
+/// « blue_period_13.cbz · 48 Mio » — what a file's line of the checking frame says under its
+/// title: the name it has on disk, and its weight. The space before « · » does not break, so
+/// a narrow column never opens its second line on the separator.
+QString fileDetail(const QString &fileName, qint64 bytes);
 
 /// « Vérification · 12/68 tomes ». The count is what tells a wait from a freeze: the word
 /// alone, fixed for thirty seconds, has already made the application look crashed for long
 /// enough that the desktop offered to kill it.
 QString checking(qint64 done, qint64 whole);
+/// « Lecture · 23/50 tomes » — the same count when no checksum is computed. The walk still
+/// opens every archive to read what it says about itself, which takes long enough on a real
+/// series to need a count, and is not a verification: « Vérification » would name a hash
+/// nobody is computing.
+QString reading(qint64 done, qint64 whole);
 
 /// « En attente » — a folder at `Stage::Asking` that is not the one the pool is actually
 /// walking: still queued behind another one (`describeNext` reads a single folder at a
-/// time), or being read without a checksum, where `describe()` never sets the walking token
-/// at all. « Vérification » names a hash in progress, and the spec is explicit that neither
-/// of these is one.
+/// time). « Vérification » and « Lecture » name a walk in progress, and this is not one.
 QString waitingToBeChecked();
 
 /// « Vérifié… » — the folder has been read to the last byte and the server is being told
@@ -1182,13 +1499,6 @@ QString announcing();
 /// byte. A card in this state goes when « Importer » is pressed: it has nothing to do, and
 /// leaving it in a list of things being sent is one more thing to read for nothing.
 QString nothingToSend();
-
-/// « Déposer autre chose » — the way from watching a transfer back to the drop zone.
-///
-/// Its own sentence rather than `chooseLead`'s « ou choisir », which is a fragment written
-/// to sit in front of the two pickers and says nothing standing alone. Worded from the drop
-/// zone it leads to — « Déposez vos fichiers ici » — so the two read as the same place.
-QString dropSomethingElse();
 
 // ——— What a file or a folder could not say about itself ——————————————————————————————
 //
@@ -1224,6 +1534,9 @@ QString sidecarCompressedInAnUnknownWay();
 
 /// Deflate said no. The archive is readable, this one member is not.
 QString sidecarCouldNotBeInflated();
+/// Why a volume's members could not be hashed, as opposed to its sidecar read.
+QString memberCompressedInAnUnknownWay();
+QString memberCouldNotBeRead();
 
 /// The walk stopped: a folder deeper than the model goes, which on a real disk means a
 /// symbolic link pointing back at a parent.
@@ -1524,6 +1837,10 @@ QString askWhoReads();
 
 /// Heading of the list of the other devices.
 QString otherDevices();
+/// « Vu le 19 octobre 2026, 14:32 »: when that device last asked the server, to the minute.
+/// Absolute, as `moment` — a device left on a shelf for a month is told by its date. Empty
+/// until the server has heard from it.
+QString deviceSeen(qint64 milliseconds);
 
 /// What one of them opens on.
 QString opensOn(const QString &name);
@@ -1587,7 +1904,7 @@ QString appShortcutsScope();
 
 /// What the À propos tab says of this client and of the server it talks to. One label each,
 /// and the values are the screen's: a version, an address, a count.
-enum class AboutFact { Version, Device, Qt, System, State, Access, Api, Format };
+enum class AboutFact { Version, Device, Qt, System, State, Access, Api, Format, ServerVersion };
 QString aboutFact(AboutFact which);
 
 /// « Fermé : il faut une clé » / « Ouvert, sur cet ordinateur seulement ».
@@ -1596,6 +1913,770 @@ QString libraryAccess(bool closed);
 /// Under the server's card: what the two numbers are, since neither says so on its own.
 QString apiExplained();
 
+// ——— What an import sheet doubts, and what it could not read ——————————————————————————
+//
+// Said under a field or over a sheet of the checking step (`Facts`). A doubt is not a
+// refusal: it is why the step stops on a series instead of letting it through unseen.
 
+/// « Un autre fichier porte aussi le numéro 4 » — under the number of each of two files of
+/// one edition that claim the same place. Said on both, since either may be the wrong one.
+QString sameNumberTwice(double number);
+
+
+/// « Ordre « tout », étape 2 : « nowhere » n’est pas un ordre de cet univers » — an inclusion the
+/// announcement would refuse, by the order's declared id and the step counted from 1 as a reader
+/// counts. `target` is what was named, or the order whose inclusion would close a loop.
+QString orderRefused(const QString &order, int step, Orders::Refusal why, const QString &target);
+
+/// « Cet univers a plus d’ordres, ou d’étapes, que le serveur n’en lit : le reste est laissé de
+/// côté » — under the orders of a universe past the ceilings. A doubt, not a refusal.
+QString ordersPastTheCeiling();
+
+/// « 5 séries · 7 étapes, dont 3 recopiées » — the line under an order. `flat` is what it reads
+/// once its inclusions are read in place; `copied` is the steps that are not its own to write:
+/// read from an included order when it `includes` one (« incluses »), written again from
+/// another otherwise (« recopiées »). Told by its steps and not by its counts: an order of one
+/// inclusion reading one step writes as many steps as it reads, and was said to copy it.
+QString orderLine(int works, int flat, int copied, bool includes);
+
+/// Over the sheet of an archive that did not open: `why` is the archive's own trouble, and
+/// what follows is what it costs — a number from the name, and nothing else.
+QString archiveUnreadable(const QString &why);
+
+/// Beside a volume whose ComicInfo.xml could not be read: it stays in the archive, since
+/// nothing is removed that was not read.
+QString comicInfoUnreadable();
+
+/// Over the sheet of a folder whose sidecar is not a JSON object: neither read nor completed.
+QString sidecarUnreadable(const QString &name);
+
+/// Beside an archive whose `oneshot.json` is not a JSON object, or could not be read: it
+/// stays in the archive, and the archive is read as the server will read it — not a book.
+QString oneShotUnreadable();
+
+// ——— The checking frame —————————————————————————————————————————————————————————————
+//
+// What `Review` hands the frame: its tree, its list, its counters, its sheet and its footer.
+// They are here so that their spaces and apostrophes are swept like every other.
+
+/// Where an import's values come from, as the line under « Importer » names it. One source
+/// when every file and declaration agrees on it, `Several` when Leaf sidecars and ComicInfo
+/// sit side by side, `Nothing` when neither says anything.
+enum class Source { Leaf, ComicInfo, Nothing, Several };
+
+/// « 1 univers · 2 séries · 42 fichiers · JSON Leaf ». No universe is not « 0 univers ».
+QString apportSummary(int universes, int series, int files, Source source);
+
+/// « Manquant » — what a required field nobody gave reads, and a line lacking several.
+QString missing();
+
+/// « Titre », « Sens de lecture », « Tomes prévus » — a sheet's field by its JSON key, on the
+/// sheet of a `level`: the authors of a volume or a book are its « Scénario » (the drawing is
+/// the « Dessin » beside it), and those of a series are the « Auteurs » of all its volumes. A
+/// key this client has not been taught comes back as itself rather than as nothing.
+QString fieldLabel(const QString &key, Manifest::Level level);
+
+/// « Non renseigné » — what an empty field shows inside itself, so that a value nobody said
+/// is never a blank box that looks like one still loading.
+QString notFilledIn();
+
+/// The frame's four filters, and the groups its list is split into. Its own vocabulary and
+/// not `Review::Filter`, for the reason `KeyFrom` gives: `Words` is a leaf.
+enum class Reviewed { All, ToReview, Ready, Identical };
+QString reviewFilter(Reviewed which);
+/// « À revoir · 2 » — the line over one group of the list.
+QString reviewGroup(Reviewed which, int count);
+/// « Identiques · 12 · 1,2 Gio non renvoyés » — the folded group says how many and what
+/// they spare, which is what tells a quick import from one that skipped something.
+QString identicalGroup(int count, qint64 bytes);
+QString showIt();
+QString hideIt();
+/// « Chercher une série, un auteur… » — what the search over the frame's list looks in.
+QString searchTheDrop();
+/// « 15 identiques : 22,0 Gio non renvoyés » — over the whole drop, a shelf or « Sans
+/// univers », what its identical lines spare, said beside the list they are folded in.
+QString identicalSpared(int count, qint64 bytes);
+/// The ticks of the frame's list, and what is applied to the series ticked. « cochée »
+/// agrees with the count; « Tout » ticks the lines shown, or unticks them all.
+QString forTicked(int count);
+QString applyToTicked(int count);
+QString leaveUnchanged();
+QString groupedActions();
+QString groupedNote();
+QString tickAll();
+/// « Revoir la suivante » — to the next series that still asks something, in the tree's order.
+QString reviewNext();
+/// « 4 séries cochées » — what a tick box says aloud, the number it leaves ticked.
+QString tickedCount(int count);
+/// What applying did: how many series changed, how many already held every value given,
+/// and how many could no longer be corrected — each said only when there is one.
+QString groupedOutcome(int changed, int alreadyThere, int refused);
+/// « Échec » — the chip of a card refused, on its line, in place of how its values were
+/// said: a card that will never go has no values worth weighing.
+QString failedChip();
+/// « Retirer » — what takes a refused card out of the queue, from its sheet.
+QString removeIt();
+/// Opens the window that corrects what the library holds of the volume or series aimed at.
+QString editInformation();
+
+/// The tree's caption and its two nodes that are no folder: the whole drop, and the series
+/// dropped outside any universe.
+QString apport();
+QString wholeApport();
+QString withoutUniverse();
+
+/// Over the list: « Séries de l’univers », « Tomes de Blue Period ».
+QString seriesOfTheUniverse();
+QString volumesOf(const QString &name);
+
+/// Under the tree, when ComicInfo.xml will be converted: how many of the files that travel
+/// carry one, and what becomes of it.
+QString comicInfoConverted(int files);
+/// Under the tree, when every value of the drop is said already.
+QString everythingSaid();
+
+/// « Blue Period existe déjà : 12 tomes sur 14 » — over the list of a series of which the
+/// library already holds some files.
+QString alreadyHeld(const QString &name, int held, int whole);
+
+/// Under a sheet's title: its level, and where most of its values came from — « Série · lue
+/// dans ComicInfo.xml », « Tome · deviné d’après son nom », « Édition · rien n’est dit »
+/// when `from` is empty. The participle agrees with the level.
+QString sheetSubtitle(Manifest::Level level, const QString &from, bool guessedFromName);
+
+/// The sentence on a sheet whose reading direction nobody said. It blocks, because a series
+/// read the wrong way round is not noticed until page forty.
+QString readingDirectionUnsaid();
+
+/// « Scénario manquant pour 41 tomes » — on a series some of whose volumes nobody is said to
+/// have written (`authors`) or drawn (`artists`), neither they nor the series: the one place a
+/// name typed releases them all. The role and not the person, as the field is labelled.
+QString creditLacking(const QString &key, int volumes);
+
+/// Under a number field, when what was typed does not read as a number (`whole`: as a whole
+/// number). Quoted, so that what was typed is seen as typed.
+QString notANumber(const QString &typed, bool whole);
+
+/// Under a field with a choice (the reading direction, the status), when what was given is
+/// none of its values.
+QString notAChoice(const QString &typed);
+
+/// The footer: what still stops the step, and how many archives the server will rewrite.
+QString reviewFooter(int missing, int rewritten);
+/// Its first half alone — « Rien ne manque », « 2 valeurs manquent encore » — for the footer
+/// that has something else to say after it.
+QString lackingValues(int missing);
+
+/// « Importer 2 tomes » — the button, counting what will travel. « Importer » alone when no
+/// volume travels and something still will be written: a declaration that changed.
+QString importVolumes(int count);
+/// « Rien à importer » — the same button when everything dropped is already there.
+QString nothingToImport();
+
+/// « Tome 13 », « Chapitre 686,5 » — a file of the list by its number, its name otherwise.
+QString fileTitle(Manifest::Level level, std::optional<double> number, const QString &fileName);
+
+// ——— The way through an import ——————————————————————————————————————————————————————
+
+/// « Choisir », « Vérifier », « Appliquer » — the three numbered steps over the window, from 1.
+QString importStep(int step);
+/// The grip of a volume in the list, for a reader who cannot see it: dragging changes its number.
+QString moveVolume();
+/// « Fermer » — the frame's button when there is nothing left to import.
+QString closeIt();
+
+// ——— What the shape of a folder suggests ————————————————————————————————————————————
+
+/// « Étagère », « Univers », « Série », « Édition », « Tome », « Livre », « Non lu » — the
+/// label on a role's chip, so it begins with its capital.
+QString role(Shape::Role role);
+
+/// « probable », « à confirmer » — and nothing for a certain role, which asks nothing: a
+/// folder holding archives is a series whatever it is called, and saying « certain » beside
+/// every one would teach somebody to stop reading the word.
+QString confidence(Shape::Confidence confidence);
+
+/// « 1 série · 2 éditions · 84 tomes » — what a reading makes of the drop, in the order of
+/// `Shape::Reading`. A count of zero drops out with its separator. The space before « · »
+/// does not break.
+QString readingSummary(int universes, int works, int editions, qint64 volumes);
+
+/// « Une série, deux éditions », « Un univers, deux séries » — a reading by the role it gives
+/// its folder and what that folder then holds. Spelled out to ten, as French writes a small
+/// count in a sentence.
+QString readingName(Shape::Role root, int universes, int works, int editions);
+
+/// The clues, one sentence each, as « Pourquoi » lists them.
+///
+/// « Perfect et Original sont des mots d’édition connus. »
+QString clueEditionWords(const QStringList &names);
+/// « Les deux numérotent leurs tomes de 1 à 42 : probablement la même œuvre en deux
+/// présentations. » — the count of folders written out, so three editions are not « les deux ».
+QString clueSameNumbers(int folders, double from, double to);
+/// « Des numérotations différentes, 6 et 2 tomes : plutôt des séries distinctes. » — 1 to 6
+/// beside 7 to 8, which share no number.
+QString clueOtherNumbers(const QList<int> &counts);
+/// What two series would have and two editions do not: the ✕ under an edition reading.
+QString clueProperNames();
+/// The same fact seen from the other side: proper names and no edition word, the ✓ of a
+/// reading that makes them series. Three names at most, then how many others.
+QString clueDistinctNames(const QStringList &names);
+/// Archives sitting in the folder: the scan's own rule for a series. Without numbers when no
+/// file name gives one.
+QString clueArchivesHere(double from, double to);
+QString clueArchivesHere();
+QString clueNoSubfolder();
+/// « « Mangas » ne ressemble pas au titre d’une œuvre. » — a reason for a shelf.
+QString clueGenericName(const QString &name);
+/// The same fact on a series, where it is a fault to mend: « … : il faut en donner un. »
+QString clueNameToGive(const QString &name);
+/// Archives further down than universe, series and edition go: no role holds them.
+QString clueTooDeep();
+QString clueHoldsUniverse(const QString &name);
+/// A folder made a shelf by a click, under a folder of series: a universe holds series only.
+QString clueHoldsAShelf(const QString &name);
+QString clueManySeries(int count);
+QString clueNoUniverseInUniverse();
+/// The reservation on a universe that would be the dropped folder itself.
+QString clueDropped();
+/// A folder whose every subfolder declares a series or a universe: the scan walks it through.
+QString clueAllDeclared();
+/// A folder whose every subfolder declares an edition: it is their series.
+QString clueEditionsDeclared();
+
+// ——— The role menu ———————————————————————————————————————————————————————————————————————
+
+/// What a role is, under its name in the menu: « Une œuvre, avec une seule édition si rien
+/// d’autre n’est dit. » The line a possible role carries where an impossible one carries its
+/// reason, so a menu reads the same way whichever it is.
+QString roleDetail(Shape::Role role);
+
+/// « Dit par work.json : à changer dans le fichier. » — every other role of a folder that
+/// declares itself. The import cannot take a sidecar out of the library, and a second one
+/// beside the first would be read after it.
+QString saidBy(const QString &file);
+
+/// Why a role is greyed where it is, one sentence each, « Impossible : … ».
+QString impossibleNoSubfolder();
+QString impossibleHoldsFiles();
+/// An edition anywhere but under a series: making it the edition of a series beside it means
+/// moving the folder, which this step does not do.
+QString impossibleEditionAlone();
+QString impossibleUniverseInUniverse();
+QString impossibleFolderInUniverse();
+QString impossibleShelfInSeries();
+QString impossibleUniverseInSeries();
+QString impossibleSeriesInSeries();
+/// « Impossible : une édition ne contient que ses fichiers. » — anything declared inside an
+/// edition, which the server refuses at the announcement.
+QString impossibleInsideAnEdition();
+/// A series whose nearest archives are further down than its editions: it would hold nothing
+/// the scan reads.
+QString impossibleFilesTooDeep();
+/// Under an edition, under a folder of a series that holds no archive, or under a universe
+/// with no archive within a series and its editions: the scan stops there, and no role
+/// reaches what sits below.
+QString impossibleBeyondTheModel();
+/// The same fact as the line of the one role left there, Étagère, which is possible and so
+/// says no « Impossible ».
+QString roleBeyondTheModel();
+/// A universe whose nearest archive is deeper than its editions' — `layout::MODEL_DEPTH`.
+QString impossibleFilesTooDeepForAUniverse();
+QString impossibleNotAFolder();
+QString impossibleBookIsAnArchive();
+/// « Tome d’une série » on an archive at a universe's root: filing it is moving it.
+QString impossibleFilingMoves();
+/// A role above a declared folder that the model cannot hold it under — the server would
+/// refuse the whole import for it.
+QString impossibleDeclaredBelow(const QString &name, const QString &file);
+
+// ——— The checking frame, once roles are read from the shape ————————————————————————————
+
+/// « Apport · rôle proposé » — the tree's caption once a role in it is not said by a file.
+QString proposedApport();
+/// Under the tree, in that case: how a role is changed, and what changing it does below.
+QString roleHint();
+/// Beside the filters, when no file of the drop says anything and the roles come from the
+/// shape of its folders alone.
+QString nothingSaid();
+/// Beside the filters, when an archive sits at a universe's root: the one kind the scan reads
+/// there.
+QString onlyABookAtTheRoot();
+
+/// « 1 dossier · 100 fichiers · ni JSON ni ComicInfo.xml » — the line under the title while
+/// the roles are still guesses: counting universes and series would count the guesses as if
+/// they were what was dropped.
+QString dropSummary(int folders, int files, Source source);
+/// « 1 univers · 5 séries · 2 archives à sa racine » — the archives at a universe's root are
+/// what that drop is about, and are counted apart from the series.
+QString rootSummary(int universes, int series, int atRoot);
+
+/// « Un univers · probable », « Une série · à confirmer », « Une série · nom à donner » — a
+/// card's line, by the reading it was given. A name still to give is said before the
+/// confidence: the reading confirmed, the name is still missing. Certain, it is the role
+/// alone.
+QString readingChip(Shape::Role role, Shape::Confidence confidence, bool titleMissing);
+/// « 2 dossiers : Elfes (4 tomes), Mages (3 tomes) », « 9 fichiers directement dedans » —
+/// what a folder read as a whole holds, folder by folder, three named at most.
+QString foldersHeld(const QList<std::pair<QString, qint64>> &folders, qint64 filesHere);
+
+/// The badge of a reading: the first of two, or one whose series has a name to give.
+QString mostLikely();
+QString nameToGive();
+/// Over the clues: « Pourquoi la première » when there are two readings, « Pourquoi » else.
+QString whyTheFirst();
+QString why();
+/// « entry.json × 84 » — one line of « Ce qui sera écrit ».
+QString writtenTimes(const QString &name, int count);
+/// Under « Ce qui sera écrit »: why those files, and why it matters that they are written.
+QString writesNote();
+
+/// « Ce qui sera écrit » — over the files a reading writes, on its folder's sheet.
+QString whatWillBeWritten();
+/// The mark before a clue: ✓ for the reading it supports, ✕ against it. Words and not a
+/// drawing, so a screen reader says them with the sentence they open.
+QString clueForMark();
+QString clueAgainstMark();
+
+/// Under the tree while the role menu is open: why some of its lines are greyed.
+QString greyedRolesHint();
+/// « Pas maintenant : un dossier que ce choix touche est encore lu, ou déjà parti. » — a role
+/// the cards it would change cannot take now (`Carrier::correctable`): offered, it was a
+/// click that did nothing.
+QString roleWaitsForTheCards();
+/// « Vrac, Série » — a role chip as a screen reader names it: the role alone said nothing of
+/// the folder it ends, on a tree of chips all called « Série ».
+QString roleSpoken(const QString &name, const QString &role);
+/// « Grisé : Univers. Impossible : … » for each greyed role, label and reason — what the menu
+/// shows and its arrows pass over, said on the chip that opens it.
+QString rolesGreyed(const QList<std::pair<QString, QString>> &greyed);
+/// « Deux lectures possibles » — under the title of a folder read two ways.
+QString readingsPossible(int readings);
+/// « Archive » — under the title of a file at a universe's root that no role reads: what it
+/// is, since it is no volume of anything. Its pages are not counted — no archive is opened
+/// for that.
+QString anArchive();
+
+/// A role as its menu names it: « Livre seul », « Tome d’une série », and the others as
+/// their chip does — the menu says what a click makes of it, the chip what it is.
+QString roleOption(Shape::Role role);
+/// « Livre seul » greyed on an archive whose `oneshot.json` does not read: nothing is
+/// written over what was not read.
+QString oneShotUnreadableReason();
+/// The two places offered to an archive at a universe's root, and what the first one does.
+QString declareABook();
+QString declareABookDetail();
+QString fileInASeries();
+/// Over the sheet of an archive at a universe's root that says it is no book.
+QString unreadAtTheRoot();
+/// « Aucun rôle : il ne sera pas lu » — that archive's line in the list.
+QString noRoleNotRead();
+/// « À la racine · 2 » — the group of a universe's archives, before its series.
+QString atTheRoot(int count);
+/// « Dans « BD » » — over the list of a shelf's cards.
+QString insideOf(const QString &name);
+
+/// « 1 archive sans rôle ne sera pas lue ».
+QString leftOutCount(int archives);
+/// « Confirmer les 3 lectures » — the button while a reading is left to confirm.
+QString confirmReadings(int readings);
+/// « Rien n’est envoyé avant que les 3 lectures soient confirmées. » — the footer then.
+QString nothingSentBeforeReadings(int readings);
+/// The footer, `leftOutCount` first when an archive will not be read, then `rest`.
+QString afterLeftOut(int leftOut, const QString &rest);
+/// « 23 / 50 dossiers lus » — how far the walk has come, while it lasts.
+QString foldersRead(int read, int of);
+/// The frame's subtitle `summary`, then `foldersRead` while a folder is still to read.
+QString whileRead(const QString &summary, int read, int of);
+/// « 3 séries attendent : 2 à compléter, 1 encore en lecture. Elles ne retiennent pas les
+/// autres. » — said before the footer, so that what « Importer » leaves behind is not taken
+/// for what holds it back. Empty when nothing waits.
+QString waitingSeries(int blocked, int reading, int failed);
+
+// ——— Credits and reading orders in the checking frame ——————————————————————————————————
+
+/// « Scénario : Auteur A · Dessin : Auteur B » — a volume's line in the list of a series
+/// whose volumes are not all credited alike. A part nobody is credited for is left out.
+QString creditsLine(const QStringList &authors, const QStringList &artists);
+/// « Tomes d’Elfes · crédits » — over that list.
+QString volumesCredited(const QString &name);
+/// « 12 auteurs au total » — its footer: the people of the series, each once. With `lacking`
+/// values still missing that hold a series back, they come first — « 2 valeurs manquent
+/// encore · 12 auteurs au total ». It counted « 1 crédit manque encore » apart, for a volume
+/// that lacked what its neighbours had: a second count of red beside the first, and
+/// « Aucun crédit ne manque » beside forty-one volumes credited by nobody.
+QString creditsFooter(int people, int lacking = 0);
+/// « Auteur A, Auteur B, Auteur C et 9 autres » — the people a series computes, three named.
+QString creditsListed(const QStringList &people);
+
+/// « 1 univers · 5 séries · universe.json et 2 ordres de lecture » — the line under the title
+/// when a universe of the drop declares its reading orders.
+QString ordersSummary(int universes, int series, int orders);
+/// « « Tout Aquilon » recopie les étapes de « Terres d’Arran » ; … » — under the orders of a
+/// universe one of which writes again every step of another: two places to keep in step.
+QString ordersCopied(const QString &of, const QString &into);
+
+/// « + Étiquette », « Ajouter un nom », « + Genre » — what an empty list field of a sheet offers
+/// to add.
+QString addWord(const QString &key);
+/// What the green asterisk after a field's name means, at the right of the sheet's bar.
+QString requiredLegend();
+/// « Étiquettes : retirer « Terres d’Arran » » — the × of one word, as a screen reader names
+/// it: the word alone said nothing of the field it would leave.
+QString removeWordFrom(const QString &field, const QString &word);
+/// The section of a series' sheet that says whom it is credited to, and its pieces.
+QString seriesCredits();
+/// The way to see every person of the series, and to fold them back.
+QString showEveryCredit();
+QString foldTheCredits();
+/// « Ordres de lecture » — the section of a universe's sheet listing them.
+QString readingOrders();
+/// The arcs of a series on its sheet: the section, its button (« Éditer les arcs · 2 », or
+/// the invitation when there are none), the window and its columns.
+QString arcsSection();
+QString arcsEdit(int count);
+QString arcsWindowTitle();
+QString arcsAdd();
+/// The chapters of a volume, as the sheet and the window that edits them say them.
+QString chaptersSection();
+QString chaptersEdit(int count);
+QString chaptersWindowTitle(const QString &volume);
+QString chaptersAdd();
+QString chaptersKeep();
+QString chaptersColumn(const QString &which);
+QString chaptersRefused();
+/// « 12 chapitres · 188 pages » — beside the title of a volume's chapters window; the pages
+/// left out when the file was not counted (-1).
+QString chaptersCount(int chapters, int pages);
+/// « chapitres 1 à 14, sur 3 tomes » — an arc already running when a volume opens, said with
+/// its whole span and the volumes of its edition that hold it.
+QString chaptersArcRuns(double from, double to, int volumes);
+/// « chapitre 7, page 114 » — an arc opening inside a volume, at its chapter.
+QString chaptersArcStarts(double chapter, std::optional<int> page);
+/// « commence ici » or « se poursuit », after the arc's name.
+QString chaptersArcState(bool starts);
+/// Under the chapters: the arcs are shown there and changed on the series.
+QString chaptersArcsNote();
+QString chaptersArcsEdit();
+QString chaptersArcLabel();
+QString chaptersNumberFrom();
+/// « Chap. {n} » — what a series' chapters are called when its `work.json` says nothing: the
+/// server's `DEFAULT_CHAPTER_LABEL`, shown greyed in the empty box.
+QString defaultChapterLabel();
+/// Under a series' chapter label, in grey: how a form is written — `{n}`, its zeros, and the
+/// number that follows a form without it (the server's `compose`).
+QString chapterLabelHint();
+/// Where an arc falls in the volumes of the drop, « tome 1, p. 4 → chapitre 194, tome 17, p. 90 »,
+/// or « tomes 18 à 31 » for an arc counted in volumes. Empty when the volumes do not say.
+QString arcsFallsInChapters(const QString &fromVolume, std::optional<int> fromPage, double toChapter,
+                            const QString &toVolume, std::optional<int> toPage);
+QString arcsFallsInVolumes(int from, int to);
+QString arcsAddSaga();
+/// « + Aucune saga » — the separator that ends the saga above it.
+QString arcsAddNone();
+/// « Arc » / « Saga » — what a line is, said before its name.
+QString arcsKind(const QString &kind);
+/// « 3 sagas · 9 arcs » beside the window's title; the sagas left out when there are none.
+QString arcsCount(int sagas, int arcs);
+/// « 3 arcs · chapitres 2 à 194 » — a saga's line, its range that of the arcs under it.
+QString arcsSagaSpan(int count, const QString &unit, int from, int to);
+/// « chapitres 113 à 135 · aucun arc » — the chapters no arc covers between two arcs.
+QString arcsGap(int from, int to);
+/// « Aucune saga » — the separator's name, which nobody types.
+QString arcsNoSaga();
+/// « Commencer à l’arc… » — the menu that places the chosen separator before an arc.
+QString arcsStartAt();
+/// « Pages et tomes de » before the edition whose pages the window gives, and the column's head.
+QString arcsEditionPick();
+QString arcsInEdition();
+/// « Séparateur choisi : ↑ ↓ pour le déplacer, ou » — said while a separator is chosen.
+QString arcsMoveHint();
+QString arcsKeep();
+QString arcsRemove();
+QString arcsColumn(const QString &which);
+QString arcsUnit(const QString &unit);
+QString arcsNote();
+QString arcsRefused();
+/// The badge of the order read when none is chosen, and of one another order holds.
+QString defaultOrder();
+QString subsetOrder();
+
+// ——— The order editor ——————————————————————————————————————————————————————
+
+/// « 5 étapes écrites · 7 une fois aplati » — under the steps of the order being written:
+/// what it says itself, and what the reader reads once its inclusions are read in place.
+QString orderFooter(int written, int flat);
+/// « Enregistrer l’ordre », « Enregistrer les ordres » — by the orders a save would write.
+QString saveOrders(int orders);
+/// « Dans « Terres d’Arran », inclure « Tout Aquilon » ramènerait à « Terres d’Arran ». » —
+/// why an order is greyed among those `of` may include: `through` already reads `of`.
+QString includeWouldLoop(const QString &of, const QString &through);
+/// « Lu dans « Terres d’Arran » · se modifie là-bas » — under the steps an inclusion reads.
+QString inheritedFrom(const QString &order);
+/// « Inclure « Terres d’Arran » » — the line of a step that reads another order.
+QString includeStep(const QString &order);
+/// « Œuvre entière », « Tomes », « Chapitres » — a step's unit, "", "VOLUME" or "CHAPTER".
+QString orderUnit(const QString &unit);
+/// A range whose first number is past its last: the scan leaves such a step out.
+QString rangeBackwards();
+/// A range of volumes on a work of several editions, which does not say which one it counts.
+QString rangeNeedsEdition(const QString &work);
+/// A range of chapters that names an edition: the server refuses one.
+QString chapterRangeNamesNoEdition();
+/// A change that would take the orders past what the server reads of a universe.
+QString orderPastTheCeiling();
+/// The order editor's own words, over its tabs, its table, its sheet and its rail.
+QString orderDragHint();
+QString orderStepColumn();
+QString orderUnitColumn();
+QString orderFromColumn();
+QString orderToColumn();
+/// « Proposé » — an inclusion offered in place of the steps it would read, not yet kept.
+QString proposedStep();
+QString addWorkStep();
+QString addIncludeStep();
+QString universeHeading();
+QString ordersHeading();
+QString seriesHeading();
+/// « Étape 2 », over the sheet of the step selected, counted from 1 as a reader counts.
+QString stepNumbered(int step);
+QString includeAnother();
+QString includeInstead();
+/// « L’étape nomme un ordre du même univers ; … » — what an inclusion is, under the heading.
+QString includeExplained();
+QString includedOrder();
+QString inheritedSteps();
+QString flatOrder();
+/// « 7 étapes », « 1 étape » — an order once flattened.
+QString flatSteps(int steps);
+/// « Si « Terres d’Arran » change, « Tout Aquilon » suit. »
+QString followsIt(const QString &included, const QString &order);
+QString nothingCopied();
+QString loopRefused();
+QString loopExplained();
+/// An order bearing the id of one written before it, which the scan disregards.
+QString orderDisregarded(const QString &order);
+/// « Aucune » — the edition of a step that names none.
+QString noEdition();
+/// What « Ordre inclus » says while the inclusion names no order it can read.
+QString chooseIncludedOrder();
+/// « Garder l’inclusion » — the proposal kept as it is, without saving yet.
+QString keepInclusion();
+QString stepWork();
+QString stepEdition();
+/// A step whose work this drop does not hold, and why it is kept.
+QString absentFromDrop();
+/// « Retirer « Elfes » » — the × of a step, as a screen reader names it.
+QString removeStep(const QString &step);
+/// How a step is moved and removed from the keys, said with the step.
+QString stepKeys();
+
+// ——— Réimporter : le cadre d'un tome ou d'une série visés ——————————————————————————————
+
+/// « Réimporter le tome 2 » — over the frame of a reimport aimed at a volume.
+QString reimportVolume(const QString &number);
+/// « Réimporter Blue Period » — aimed at anything else.
+QString reimportTitle(const QString &name);
+/// « Blue Period · Édition française » — a volume, under the series and edition it is in.
+QString reimportVolumeUnder(const QString &work, const QString &edition);
+/// « Série · Édition française · 12 tomes dans la bibliothèque » — the series aimed at.
+QString reimportSeriesHolds(const QString &edition, int volumes);
+
+/// The title of the import that adds editions to the series `name`, and the line under it
+/// saying what a file dropped there becomes: an edition, never a volume of the one already held.
+QString addEditionsTitle(const QString &name);
+
+/// The line under the name field of an edition an import adds, what the edition holds
+/// meanwhile, and the sentences that say what is wrong with a name.
+QString editionNameHelp();
+QString unnamedEdition();
+QString currentEdition();
+QString editionNameMissing();
+QString editionNameTaken(const QString &with);
+QString addEditionsSubtitle();
+
+/// « Série · 42 tomes dans la bibliothèque » — what the window says under the title of a
+/// reimport while it waits for the files, so that the name it asks about is a name with a size.
+QString reimportHolds(int volumes);
+/// « Cible » — over the way down to what is aimed at.
+QString aimedRail();
+/// Under that way down, for a volume and for a series.
+QString aimedRailNoteVolume();
+QString aimedRailNoteSeries();
+/// « Cible : le tome 2 » — over the toolbar, for a volume aimed at.
+QString aimedVolumeNote(const QString &number);
+/// « 2 ajoutés · 2 remplacés · 1 absent » — a part left out where it is nought.
+QString aimedChanges(int added, int replaced, int absent);
+/// « Ce que vous apportez » and « Tomes qui changent » — over the list.
+QString aimedListVolume();
+QString aimedListSeries();
+/// « Tome 2 », the line of a volume.
+QString volumeNumbered(const QString &number);
+/// « Chapitre 12 », what a chapter file is called when nobody gave it a title: a webtoon is
+/// downloaded as `Chapitre 012.cbz` and a list of empty lines names nothing to open.
+QString chapterNamed(double number);
+/// The name under a volume's tile: « 12 · Le Titre » when it has a title worth reading,
+/// « Tome 12 » or « Chapitre 12 » when it has none, the title or the file's name when it has no
+/// number. Its number alone was « 12 · » over every untitled volume, and « 12 · Chapitre 12 »
+/// over every chapter a webtoon is downloaded as.
+QString tileCaption(const Api::Entry &file);
+/// The word over the number a borrowed cover carries, in an edition that mixes volumes and
+/// chapters: « TOME », « CHAPITRE ». Written in capitals and not raised by a `toUpper`, for
+/// the reason the header gives: a word is spelled here, once.
+QString coverWord(Api::Entry::Kind kind);
+/// « 42 % » under a webtoon chapter being read, rounded down: its pages are one long strip
+/// and their count says nothing; 100 is for what is finished.
+QString percentRead(double fraction);
+/// The chips of the lines: Remplacer, Mettre à jour, Ajouter, Garder, Autre tome, Autre
+/// série, Sans numéro, Deux fois.
+enum class Aim { Replace, Update, Add, Keep, OtherNumber, OtherSeries, Unnumbered, Twice, Same };
+QString aimChip(Aim which);
+/// « 196 → 200 pages · progression gardée » and its parts.
+QString pagesGoFromTo(int before, int after, bool placeKept);
+QString titleAdded(const QString &title);
+QString titleChanged(const QString &title);
+QString chaptersChanged();
+QString newVolume(int pages);
+QString absentFromTheDrop();
+QString sameAsHeld();
+QString comicInfoSays(const QString &number, int pages);
+QString saysItBelongsTo(const QString &series);
+QString withoutNumber();
+QString numberTwice();
+/// « Bibliothèque » and « Apport », the two sides of a comparison, and its row labels.
+QString heldSide();
+QString arrivingSide();
+QString pagesLabel();
+QString chaptersLabel();
+QString progressLabel();
+QString comicInfoLabel();
+/// « 3 (5 à 7) » and « page 112 » and « sera retiré ».
+QString chaptersSpan(int count, const QString &first, const QString &last);
+QString pageNumbered(int page);
+QString comicInfoRemoved();
+/// « Ce fichier est le tome 5, pas le tome 2. » and what goes under it.
+QString fileIsAnotherVolume(const QString &own, const QString &aimed);
+QString nothingWasModified();
+QString fileBelongsToAnotherSeries(const QString &series);
+/// The two ways out of a file that is another volume.
+QString filePutAtVolume(const QString &number);
+QString recommended();
+QString volumeIsAdded(const QString &number, const QString &aimed);
+QString volumeIsReplaced(const QString &number, const QString &aimed);
+QString replaceAnyway(const QString &aimed);
+QString pagesGoFromToSentence(int before, int after);
+/// « Votre progression appartient au tome 2 : elle ne bouge pas. » and the question put when
+/// the pages change by much.
+QString progressStays(const QString &number);
+QString keepProgress();
+QString resetProgress();
+/// A volume the drop does not bring: it stays.
+QString volumeNotInTheDrop(const QString &number);
+QString volumeStaysInTheLibrary();
+/// « Non renseigné » — a value the library's declaration does not carry.
+QString notDeclared();
+/// « 4 infos modifiées » — over the sheet of the series aimed at.
+QString infosChanged(int count);
+/// The footer, and « Appliquer 8 changements ».
+QString aimedFooter();
+QString applyChanges(int count);
+QString identicalNothingToDo(int count);
+/// The parts of a line's detail, set apart by « · ».
+QString joinDetails(const QStringList &parts);
+/// What the drop zone of a reimport expects, by what it is aimed at.
+QString aimedDrop(const QString &kind);
+/// « Autre fichier » — back to the drop zone, aimed at the same place.
+QString anotherFile();
+/// « Nouveau » — the chip of the value the drop brings, beside « Garder ».
+QString newValue();
+/// « Réimporter le tome 2 » or « Réimporter Blue Period », from what the menu knew.
+QString reimportAsked(const QString &kind, const QString &name);
+
+
+// ——— Remplacer un chapitre ———————————————————————————————————————————————————————————
+/// « Remplacer un chapitre du tome 2 » — over the frame of a chapter aimed at.
+QString replaceChapterTitle(const QString &volume);
+/// « Chapitres du tome 2 » — over the list of the chapters of the volume.
+QString chaptersOfVolume(const QString &volume);
+/// « 6 · Couleurs froides », or whichever of the two the chapter says.
+QString chapterListed(const QString &number, const QString &title);
+/// « pages 63 à 121 » — pages counted from 1, as a reader counts them.
+QString pagesRange(int from, int to);
+/// « pages 63 à 121 → 63 à 124 ».
+QString pagesRangeChange(int from, int to, int becomesFrom, int becomesTo);
+QString chapterReplaced();
+QString chapterKept();
+QString chapterShifted(int by);
+/// « 3 pages en plus », « 2 pages en moins », « Même longueur ».
+QString spliceExtra(int delta);
+/// « Le tome 2 passe de 188 à 191 pages ; les chapitres suivants sont décalés. »
+QString spliceVolumeNote(const QString &volume, int before, int after);
+/// « Votre progression, page 112, reste dans le chapitre 6 : elle est gardée. »
+QString spliceProgressKept(int page, const QString &chapter);
+/// « Votre progression, page 112, est ramenée à la page 124. »
+QString spliceProgressBrought(int page, int becomes);
+/// « Source : blue_period_t02_v2.cbz ».
+QString spliceSource(const QString &file);
+/// « L’archive du tome 2 est réécrite une fois. »
+QString spliceFooter(const QString &volume);
+/// « Remplacer le chapitre ».
+QString replaceChapterLabel();
+/// The two ends of the range, « De » and « à », and the two sides, « Actuel » and « Source ».
+QString spliceFromLabel();
+QString spliceToLabel();
+QString spliceCurrentSide();
+QString spliceSourceSide();
+
+
+// ——— Un univers visé, et une série déjà là ——————————————————————————————————————————
+/// « Réimporter l’univers « Dragon Ball »… » — the entry of a series header's menu.
+QString reimportUniverse(const QString &name);
+/// « Univers · 3 séries dans la bibliothèque · 4 dans l’apport ».
+QString universeSubtitle(int held, int arriving);
+/// « à la racine, 18 → 20 tomes dans l’univers », or « dans « BD », … ».
+QString moveDetail(const QString &from, int held, int arriving);
+/// « nouvelle série · 26 tomes ».
+QString newSeriesDetail(int volumes);
+/// « absente de l’apport · 3 tomes ».
+QString absentSeriesDetail(int volumes);
+/// « 2 tomes modifiés · 1 ajouté ».
+QString changedSeriesDetail(int changed, int added);
+/// « 20 tomes identiques ».
+QString identicalSeriesDetail(int volumes);
+QString seriesMoveChip();
+QString seriesNewChip();
+QString seriesKeepChip();
+QString seriesChangedChip();
+QString seriesIdenticalChip();
+QString seriesExistsChip();
+/// « Séries », over the lines of an universe.
+QString aimedListUniverse();
+QString universeRailNote();
+QString universeFooter();
+/// « Univers + ordre nommé ajouté ».
+QString universeOrdersNote();
+/// « Elle existe déjà, à la racine. » / « … dans « BD ». »
+QString existsAlreadyAt(const QString &from);
+QString moveItWithReadings();
+QString moveIntoUniverse();
+/// « 18 tomes gardent leur progression ; 2 sont ajoutés. »
+QString moveKeepsDetail(int kept, int added);
+QString createSecondSeries();
+QString existingStaysPut();
+/// « « Blue Period » est déjà dans la bibliothèque. »
+QString alreadyInLibrary(const QString &name);
+/// « Réimporter sur « Blue Period » ».
+QString reimportOnto(const QString &name);
+/// « Nouvelle édition de « Blue Period » » and what it does, beside « Réimporter sur… ».
+QString newEditionOf(const QString &name);
+QString newEditionDetail();
+/// « Sera rangé sous Blue Period › Originale » — the folder as the server says it.
+QString filedUnder(const QString &folder);
+/// « 42 tomes → passent dans Blue Period › Originale et prennent ce nom, lecture conservée ».
+QString reshelved(int count, const QString &edition);
+/// « ancien.cbz → serie_edition_tome_001.cbz » — one volume, as it was called and as it will be.
+QString renamedExample(const QString &was, const QString &now);
+/// « Deux fichiers prendraient le même nom : a.cbz et b.cbz. »
+QString namesMeet(const QString &first, const QString &second);
 
 } // namespace Words

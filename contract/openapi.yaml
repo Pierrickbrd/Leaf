@@ -686,6 +686,30 @@ paths:
         "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
 
+  /profile/export:
+    get:
+      operationId: exportReading
+      tags: [profiles]
+      summary: The calling profile's shelf and places, as a JSON file to keep.
+      description: |
+        Every series the profile may see — under its own age ceiling, so a child's file holds
+        what the child sees — with its volumes and where this profile stands in each: read
+        status, page, times finished, when the place was last written. The caller's own
+        places only, never another profile's.
+
+        **What is left out on purpose:** paths on the disk, file names, sizes, keys, codes,
+        devices, the other profiles and every preference. It is a record of reading, not a
+        copy of the deployment. Answered as an attachment (`leaf-lecture.json`).
+      responses:
+        "200":
+          description: The file.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReadingExport" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
   /devices:
     get:
       operationId: listDevices
@@ -771,6 +795,7 @@ paths:
         - { $ref: "#/components/parameters/FilterWork" }
         - { $ref: "#/components/parameters/FilterUniverse" }
         - { $ref: "#/components/parameters/FilterAuthor" }
+        - { $ref: "#/components/parameters/FilterArtist" }
         - { $ref: "#/components/parameters/FilterGenre" }
         - { $ref: "#/components/parameters/FilterMedium" }
         - { $ref: "#/components/parameters/FilterStatus" }
@@ -866,8 +891,14 @@ paths:
         whose orders also lose every step it may not: the two must read the same.
 
         A step that could not be resolved — a work the universe does not hold, a volume
-        range naming no edition, a range running backwards — is left out here and reported
-        by the scan instead. An order is therefore always walkable.
+        range naming no edition in a work that has several, a range running backwards — is
+        left out here and reported by the scan instead. An order is therefore always walkable.
+
+        A step may include another order of the same universe instead of naming a work: the
+        included order's steps are served here in its place, so a client never has to follow
+        an inclusion. An inclusion that names no order, that carries anything besides the
+        order it includes, or that closes a loop is left out like any other unresolvable step
+        and reported by the scan.
       parameters:
         - { $ref: "#/components/parameters/Id" }
       responses:
@@ -969,7 +1000,15 @@ paths:
       summary: Edit what the files say about a series.
       description: |
         Writes the sidecar and rescans the work it belongs to — not the library, which
-        would cost as much as the library is big. Requires the **import** right.
+        would cost as much as the library is big. Requires the **edit** right.
+
+        **A field is left alone when absent, set when given a value, and taken away when
+        `null`.** Absent and `null` are different things here: a client that cannot say
+        « nothing » cannot correct a wrong value, only replace it. A list is emptied with `[]`.
+        `editionSummary` is the description of *this printing* and `summary` the work's:
+        the answer's `summary` is the first when there is one, else the second, and
+        `ownSummary` says which. An edition with no folder of its own has no description of
+        its own, and is refused a `editionSummary` with a 400.
 
         404 in both cases: the series was not there to patch, or the rescan removed it.
         Answering **200 with an error body** is the easy mistake here — the patch did
@@ -996,8 +1035,8 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
         "404": { $ref: "#/components/responses/NotFound" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "409": { $ref: "#/components/responses/ChooseAProfile" }
-      x-leaf-permission: import
+        "409": { $ref: "#/components/responses/ChooseAProfileOrRenameBlocked" }
+      x-leaf-permission: edit
 
     delete:
       operationId: eraseSeries
@@ -1112,7 +1151,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "404": { $ref: "#/components/responses/NotFound" }
-      x-leaf-permission: import
+      x-leaf-permission: edit
 
   /series/{id}/cover:
     parameters:
@@ -1122,7 +1161,16 @@ paths:
       operationId: getSeriesCover
       tags: [reading]
       summary: The tile of a grid.
-      description: One request, not one to find the first entry and another for its cover.
+      description: |
+        One request, not one to find the first entry and another for its cover.
+
+        In order: the image chosen with `PUT` (`leaf-cover.*` in the folder); the cover of the
+        volume the series itself names (`coverVolume`, set with `PATCH /series/{id}`), chosen as
+        for `/entries/{id}/cover`; an image named for the folder (`cover.jpg`), which speaks for
+        the whole series; otherwise the cover of its first volume, its page 0 even when
+        numbered from `001`, since there is nothing left to borrow. The last choice made wins:
+        sending an image forgets the volume, and choosing a volume removes the image the server
+        wrote (never a `cover.jpg` placed by hand).
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/ChooseAProfile" }
@@ -1130,6 +1178,55 @@ paths:
         "200": { $ref: "#/components/responses/Image" }
         "304": { $ref: "#/components/responses/NotModified" }
         "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      operationId: putSeriesCover
+      tags: [records]
+      summary: Choose an image from the caller's own disk as the cover.
+      description: |
+        The body is the image itself, sent by the client; the server never takes a path.
+        It is decoded in full before anything is written, and refused with a 400 unless it
+        is a JPEG, PNG or WebP of at most 20 MB and 64 million pixels.
+
+        It is written into the series' folder (beside the archive, for a one-shot), atomically, under the name `leaf-cover` — `leaf-cover.png`,
+        `leaf-cover.jpg` or `leaf-cover.webp` — and the scan looks for that name before any
+        other, so it is the cover at once, with no scan to wait for, and it survives a rebuilt
+        index. An image sent in another format replaces the first; **a file somebody put
+        there by hand (`cover.jpg`, `Tome 1.jpg`) is never overwritten or removed**: it loses
+        to the chosen image while that exists.
+
+        The last choice made wins: sending an image forgets the `coverVolume` chosen before.
+      requestBody:
+        required: true
+        content:
+          image/jpeg: { schema: { type: string, format: binary } }
+          image/png: { schema: { type: string, format: binary } }
+          image/webp: { schema: { type: string, format: binary } }
+      responses:
+        "204": { description: The cover is chosen. }
+        "400":
+          description: Not an image the server accepts, or too large.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
+        "413": { description: The body is larger than the ceiling. }
+      x-leaf-permission: edit
+    delete:
+      operationId: deleteSeriesCover
+      tags: [records]
+      summary: Go back to the default cover.
+      description: |
+        Removes the image the server wrote, and **only that one**: a cover somebody put in
+        the folder stays, and speaks again. Nothing to remove is not an error. The
+        `coverVolume` is forgotten too, so the folder's own image or the first volume speaks.
+      responses:
+        "204": { description: The default cover is back. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
+      x-leaf-permission: edit
 
   /series/{id}/progress:
     parameters: [{ $ref: "#/components/parameters/Id" }]
@@ -1246,6 +1343,18 @@ paths:
       operationId: patchEntry
       tags: [records]
       summary: Edit what a file says about itself.
+      description: |
+        Requires the **edit** right, and rewrites the archive: the `entry.json` inside it is
+        replaced. Absent leaves a field alone and `null` takes it away, as for a series;
+        `number` can be changed and not taken away.
+
+        `coverPage` picks the page the volume shows as its cover, counted from 0 like
+        `/entries/{id}/pages/{number}`; `null` goes back to an image beside the archive,
+        otherwise page 0. A page the archive does not hold is a **400**, and so is a negative
+        one.
+
+        A `number` another file of the same edition already holds is a **400**, before the
+        archive is touched. Not a 409: that one means « choose a profile » to every client.
       requestBody:
         required: true
         content:
@@ -1253,7 +1362,7 @@ paths:
             schema: { $ref: "#/components/schemas/EntryPatch" }
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
-        "409": { $ref: "#/components/responses/ChooseAProfile" }
+        "409": { $ref: "#/components/responses/ChooseAProfileOrRenameBlocked" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: The entry as it now stands.
@@ -1261,7 +1370,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Entry" }
         "404": { $ref: "#/components/responses/NotFound" }
-      x-leaf-permission: import
+      x-leaf-permission: edit
 
     delete:
       operationId: eraseEntry
@@ -1374,7 +1483,17 @@ paths:
       operationId: getEntryCover
       tags: [reading]
       summary: The cover, small by default.
-      description: A thumbnail is a page asked for narrow. There is no separate thing.
+      description: |
+        A thumbnail is a page asked for narrow. There is no separate thing.
+
+        Which page, in order: the `coverPage` the volume's own `entry.json` names; otherwise
+        an image sitting beside the archive under the same name (`Tome 1.jpg` for
+        `Tome 1.cbz`), the one chosen with `PUT` (`Tome 1.leaf-cover.png`) before one placed
+        by hand; otherwise page 0 — unless the file's pages are numbered from `001`: it then
+        has no cover page, and answers with its series' cover. When a page and an image both exist the page wins, and
+        `PUT` clears the page so that the image sent last is the one shown. The archive's own word comes first because it is
+        the deliberate one — someone opened the volume and picked a page — and the only one
+        that travels with the file.
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/ChooseAProfile" }
@@ -1382,6 +1501,63 @@ paths:
         "200": { $ref: "#/components/responses/Image" }
         "304": { $ref: "#/components/responses/NotModified" }
         "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      operationId: putEntryCover
+      tags: [records]
+      summary: Choose an image from the caller's own disk as the cover.
+      description: |
+        The body is the image itself, sent by the client; the server never takes a path.
+        It is decoded in full before anything is written, and refused with a 400 unless it
+        is a JPEG, PNG or WebP of at most 20 MB and 64 million pixels.
+
+        **It becomes the volume's page `000`, inside the archive** — the cover the format
+        names, which travels with the file. A volume that has a `000` has it replaced, under
+        the new image's extension, and nothing else moves. A volume numbered from `001` has
+        none: the page is added before the first, and everything that counts pages moves down
+        one place in the same operation — each profile's place in the volume, the first page
+        of every chapter, including those a ComicInfo declares, which `entry.json` then holds.
+        The new archive is read back before it replaces the old one. **The cover it replaces
+        is not kept**, and `DELETE` cannot bring it back.
+
+        `coverPage` is cleared, since a page chosen before would otherwise keep winning;
+        choosing a page afterwards wins over the image again. **An image somebody placed
+        beside the archive (`Tome 1.jpg`) is read before page 0 and is never removed**, so a
+        volume that has one refuses the cover with a 400 rather than answer that it is done
+        and show nothing. An image an earlier version wrote beside the archive
+        (`leaf-cover.*`) is taken back.
+      requestBody:
+        required: true
+        content:
+          image/jpeg: { schema: { type: string, format: binary } }
+          image/png: { schema: { type: string, format: binary } }
+          image/webp: { schema: { type: string, format: binary } }
+      responses:
+        "204": { description: The cover is chosen. }
+        "400":
+          description: Not an image the server accepts, or too large.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
+        "413": { description: The body is larger than the ceiling. }
+      x-leaf-permission: edit
+    delete:
+      operationId: deleteEntryCover
+      tags: [records]
+      summary: Go back to the default cover.
+      description: |
+        Removes the image an earlier version wrote beside the archive, and **only that one**:
+        a cover somebody put in the folder stays, and speaks again. The chosen `coverPage` is
+        cleared as well. Nothing to remove is not an error. A cover sent now is written into
+        the archive as its page `000`, which this does not undo.
+      responses:
+        "204": { description: The default cover is back. }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
+      x-leaf-permission: edit
 
   /entries/{id}/file:
     parameters: [{ $ref: "#/components/parameters/Id" }]
@@ -1416,6 +1592,85 @@ paths:
               description: |
                 The size of the archive. The bytes are streamed rather than held whole, and
                 this is what lets a client show how far along it is.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /series/{id}/folders:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    get:
+      operationId: listSeriesFolders
+      tags: [reading]
+      summary: What a series holds on the disk — its folders with their sidecars, and its files.
+      description: |
+        What an export carries. `folders` first. A volume alone says nothing of what it
+        belongs to: the universe, the work and the edition are folders with a file each, and
+        those files decide what a folder *is* — `Dragon Ball/{Perfect, Original}` and
+        `Terres d'Arran/{Elfes, Mages}` have the same shape on disk and opposite meanings.
+
+        Outermost first: the universe when there is one, the work, then the edition. An
+        edition whose volumes sit in the work's own folder is not a level and is not listed.
+        A sidecar that is not there is not made up from the index — the folder is listed
+        without `sidecar` and `content`. A one-shot has neither a work folder nor an edition
+        folder, its archive being both: its chain is its universe if it has one, else empty.
+
+        `files` is what the series keeps in those folders, in the order of its volumes: each
+        archive, then the cover images the scan reads beside it (`<name>.jpg`,
+        `<name>.leaf-cover.png`), then the series' own images in the edition's folder (the
+        work's, for an edition with no folder of its own — never another edition's):
+        `cover|default|folder|poster|series.*` and `leaf-cover.*`. Each `path` is relative,
+        `/` between names, under the last folder of the chain (at the root when the chain is
+        empty); the position in the list is the `index` of `GET /series/{id}/files/{index}`.
+
+        Refused to a restricted profile, like the volumes it goes with.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The chain of folders and the files below it.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [folders, files]
+                properties:
+                  folders:
+                    type: array
+                    items: { $ref: "#/components/schemas/Folder" }
+                  files:
+                    type: array
+                    items: { $ref: "#/components/schemas/ExportFile" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /series/{id}/files/{index}:
+    parameters:
+      - { $ref: "#/components/parameters/Id" }
+      - name: index
+        in: path
+        required: true
+        schema: { type: integer, minimum: 0 }
+    get:
+      operationId: downloadSeriesFile
+      tags: [reading]
+      summary: One file of the listing of `/series/{id}/folders`, by its place in it.
+      description: |
+        The bytes of `files[index]`, streamed. An archive goes through the same path as
+        `GET /entries/{id}/file`, stamp included; an image is served as it is. The listing is
+        read again at each call, so an index is only as good as the listing it came from.
+
+        Refused to a restricted profile, like the volumes it goes with.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "200":
+          description: The file.
+          headers:
+            Content-Length:
+              schema: { type: integer }
+              description: The size of the file, which is what a client shows progress against.
           content:
             application/octet-stream:
               schema: { type: string, format: binary }
@@ -1578,6 +1833,7 @@ paths:
         - { $ref: "#/components/parameters/FilterRead" }
         - { $ref: "#/components/parameters/FilterUniverse" }
         - { $ref: "#/components/parameters/FilterAuthor" }
+        - { $ref: "#/components/parameters/FilterArtist" }
         - { $ref: "#/components/parameters/FilterGenre" }
         - { $ref: "#/components/parameters/FilterMedium" }
         - { $ref: "#/components/parameters/FilterStatus" }
@@ -1891,6 +2147,22 @@ paths:
         A manifest never means "here is everything that exists" unless its scope says so.
         The desktop is a workbench, not a mirror: a series imported and then deleted
         locally can no longer be announced in full.
+
+        With a `target`, the folder dropped is laid on the folder aimed at, whatever it is
+        called on the sender's disk; each archive lands on the volume of its number, under
+        the name of that volume's file. Landing on that name keeps the entry, and with it
+        every profile's place in it, its read marks and its date of arrival. `root` in the
+        answer is then the library folder it lands under, and `volumes` says what each
+        archive is to what the target holds; `absent`, what the target holds that the drop
+        does not bring — which stays.
+
+        Without a target, an archive that carries `found` and arrives in a folder the
+        library knows as an edition is matched the same way, so a folder dropped again onto
+        a series it holds replaces its volumes rather than adding them a second time. An
+        archive without `found` lands at its path, as it always did.
+
+        Every path in the answer is the one announced: what lands where is the server's
+        business, and the client knows its files by their own paths.
       requestBody:
         required: true
         content:
@@ -1900,13 +2172,49 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/ChooseAProfile" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
+        "413":
+          description: |
+            The announcement is larger than 32 MiB. The files travel separately; this is
+            their paths, sizes and checksums and the declarations' text, which for a whole
+            library stays far below it.
         "200":
           description: What to send, and what is already there.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ImportOpened" }
+        "404":
+          description: |
+            The `target` is not there for this caller: unknown, or hidden from the profile
+            asking, as `/series/{id}` answers for it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "400":
           description: |
+            A `target` the announcement does not fit: an `ENTRY` or a `CHAPTER` target with
+            more or fewer than one archive; a declaration at the root of the drop that is
+            not the target's own — a `work.json` on an edition of its own, an `edition.json`
+            on a work's folder, anything but a `universe.json` on a universe; a `splice`
+            without a `CHAPTER` target, a `CHAPTER` target whose archive has no `splice` or
+            asks for a `rewrite` too, a `splice` backwards or longer than 10 000 pages, a
+            chapter that does not say which page it starts on, or one followed by a chapter
+            that does not before the next that does — its pages would go with it. Two paths
+            that would land on one, once a series of a universe is found to be another
+            folder, named both. An archive path with no file name to land under. Refused
+            before a byte moves.
+
+            A path, of a file or of a declaration, that is not one place of its own under the
+            root: empty, absolute, ending in `/`, holding a NUL, climbing above where it
+            starts, announced twice once `.` is read, or the folder of another path
+            announced. A file whose name is a declaration — `universe.json`, `work.json`,
+            `edition.json` — goes in `sidecars`, never in `files`. Refused before any
+            session exists.
+
+            A `rewrite` that cannot be honoured: on a file that is not a `.cbz` or `.zip`,
+            with an `entryJson` or a `oneShotJson` that is not a JSON object, or removing
+            a name that is empty or holds `/`, `\` or `..`. Refused the same way, before a
+            byte moves.
+
             A declaration in `sidecars` that is not a JSON object. Refused here, before a
             byte moves, rather than skipped at commit: one the server cannot read carries
             no metadata — the scan ignores it — so writing it over one the library can
@@ -1916,6 +2224,27 @@ paths:
             The scan tolerates a malformed sidecar and this refuses one, which is not a
             contradiction: reading a library that already exists has to keep working,
             writing a file into one is a different act.
+
+            Declarations that contradict each other: two of `universe.json`, `work.json` and
+            `edition.json` in the same folder. Refused before a byte moves, naming the folder.
+            A `universe.json` beside `.cbz` or `.zip` files is not one: an archive carrying
+            `oneshot.json` is a book of that universe, and that declaration is inside the
+            archive, so the scan decides — and reports, rather than reads, the archives there
+            that carry none.
+
+            Declarations nested where the model has no room: a `universe.json` below a folder
+            that declares a universe, a series or an edition; a `work.json` below a series or
+            an edition; any declaration below an edition. Refused before a byte moves, naming
+            both folders. Only the folders the announcement declares are compared, so an
+            edition whose series is already in the library is not refused for lacking it.
+
+            Reading orders that cannot be read: in a `universe.json` of the announcement, a
+            step that includes an order the file does not hold, an including step that
+            carries a work or a range beside `include`, or inclusions that close a loop.
+            Refused before a byte moves, naming the file, the order and the step (counted
+            from 1) and the reason. Two orders under one identifier, and a step naming a work
+            the announcement does not carry, are not refused: the scan keeps the first and
+            says so, and the library may already hold the work.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1963,7 +2292,9 @@ paths:
         - name: path
           in: query
           required: true
-          description: Relative to the manifest root. Never escapes it.
+          description: |
+            One of the paths the announcement listed, exactly as it listed it. Never escapes
+            the root.
           schema: { type: string }
         - name: Content-Range
           in: header
@@ -1993,6 +2324,13 @@ paths:
                 anyOf:
                   - { $ref: "#/components/schemas/BadOffset" }
                   - { $ref: "#/components/schemas/Error" }
+        "400":
+          description: |
+            A path the announcement did not list, or one that climbs out of its root:
+            nothing but the announced files is received.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "404": { $ref: "#/components/responses/NotFound" }
       x-leaf-permission: import
 
@@ -2015,6 +2353,22 @@ paths:
         — which is what the announcement promised, and the only order that works: the commit
         writes the declarations, so the destination would already be there afterwards and
         the move would be refused.
+
+        A file landing on a volume the library holds takes its name, so the volume stays the
+        same volume. The new version is made beside it, the old file is linked aside under
+        `replaced/<id>/` in the inbox and the replacement recorded, then the new one is
+        renamed over the old, and only then are the places in it settled, once: a commit
+        stopped at any point leaves either the old volume or the new one, whole, and the same
+        commit — or abandoning the session — finishes the work or undoes it. If something else
+        replaced the volume in between, nothing of it is touched: the path stays in
+        `pending` and the copy set aside stays under `replaced/`. A volume the index has
+        not read yet is not replaced, and stays in `pending`; so does an addition whose name
+        a file took since the announcement. A replacement that is not an archive the server
+        can read is `corrupt`, and the rest of the drop installs.
+
+        A file replacing a chapter rewrites the volume it is in — its pages copied as they
+        are, renamed in reading order — and is a replacement like any other: named in
+        `replace`, the old volume set aside, the record written and the places moved once.
       requestBody:
         required: false
         content:
@@ -2032,6 +2386,15 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ImportResult" }
+        "400":
+          description: |
+            A `splice` outside the pages the file sent has, or a volume whose chapters are no
+            longer where they were at the announcement — read again from its own
+            `entry.json` — or that declares none. Nothing is touched: the file stays in the
+            session, the volume as it was.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "404": { $ref: "#/components/responses/NotFound" }
       x-leaf-permission: import
 
@@ -2063,6 +2426,33 @@ paths:
                 required: [removed]
       x-leaf-permission: import
 
+  /cache:
+    delete:
+      operationId: purgeCache
+      tags: [maintenance]
+      summary: Empty the disk cache of resized pages and covers.
+      description: |
+        Removes every file of the cache the server keeps for pages and covers at the widths
+        clients asked for, and the markers saying a page was not worth resizing. The
+        library's files, the index and every profile's progress are untouched: the next
+        request for a page resizes it again, which is the only cost. The principal only.
+        `files` and `bytes` count what was removed, `bytes` at what the disk was charged.
+      responses:
+        "200":
+          description: What was removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  files: { type: integer }
+                  bytes: { type: integer }
+                required: [files, bytes]
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/ChooseAProfile" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+      x-leaf-permission: import
+
   /works/{id}/move:
     parameters: [{ $ref: "#/components/parameters/Id" }]
     post:
@@ -2089,7 +2479,7 @@ paths:
             schema: { $ref: "#/components/schemas/MoveRequest" }
       responses:
         "403": { $ref: "#/components/responses/Forbidden" }
-        "409": { $ref: "#/components/responses/ChooseAProfile" }
+        "409": { $ref: "#/components/responses/ChooseAProfileOrRenameBlocked" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "200":
           description: Where the work is now.
@@ -2109,9 +2499,73 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-      x-leaf-permission: import
+      x-leaf-permission: edit
 
   # -------------------------------------------------------------- maintenance
+
+  /series/{id}/rescan:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    post:
+      operationId: rescanSeries
+      tags: [maintenance]
+      summary: Read a series again from its files.
+      description: |
+        Rescans the **work** the series belongs to — the smallest thing the scanner can be aimed
+        at — and not the library, which costs as much as the library is big. Answers at once
+        and reads behind, through the same runner as `POST /scan`: `GET /scan` says where it
+        is, and one at a time. Requires the **edit** right.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: |
+            A scan is already running, and reads the same disk; or the device must choose a
+            profile first (`error` is `choose a profile`).
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - { $ref: "#/components/schemas/ScanStatus" }
+                  - { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "202":
+          description: Started.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScanStatus" }
+      x-leaf-permission: edit
+
+  /entries/{id}/rescan:
+    parameters: [{ $ref: "#/components/parameters/Id" }]
+    post:
+      operationId: rescanEntry
+      tags: [maintenance]
+      summary: Read a volume again from its files.
+      description: |
+        Rescans the **work** the volume belongs to — the smallest thing the scanner can be aimed
+        at — and not the library, which costs as much as the library is big. Answers at once
+        and reads behind, through the same runner as `POST /scan`: `GET /scan` says where it
+        is, and one at a time. Requires the **edit** right.
+      responses:
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: |
+            A scan is already running, and reads the same disk; or the device must choose a
+            profile first (`error` is `choose a profile`).
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - { $ref: "#/components/schemas/ScanStatus" }
+                  - { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "202":
+          description: Started.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScanStatus" }
+      x-leaf-permission: edit
 
   /scan:
     get:
@@ -2166,8 +2620,8 @@ components:
         thing that holds.
 
         **Keys carry rights.** The desktop imports, the phone only reads. Operations marked
-        `x-leaf-permission: import` need a key that carries that right; everything else
-        needs only a recognised key. Lose the phone and whoever finds it gets to look at
+        `x-leaf-permission: import` or `edit` need a key that carries that right; everything
+        else needs only a recognised key. Lose the phone and whoever finds it gets to look at
         comics, not to write to the disk.
 
         Recording progress deliberately needs only the read right: otherwise the phone
@@ -2229,6 +2683,14 @@ components:
       schema: { type: array, items: { type: string } }
       style: form
       explode: true
+    FilterArtist:
+      name: artist
+      in: query
+      description: |
+        By who drew it, folded like `author`. Repeatable: two drawers are either of them.
+      schema: { type: array, items: { type: string } }
+      style: form
+      explode: true
     FilterGenre:
       name: genre
       in: query
@@ -2253,7 +2715,7 @@ components:
       description: Repeatable.
       schema:
         type: array
-        items: { type: string, enum: [ongoing, completed] }
+        items: { type: string, enum: [ongoing, completed, hiatus, cancelled] }
       style: form
       explode: true
     FilterLanguage:
@@ -2329,6 +2791,21 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    ChooseAProfileOrRenameBlocked:
+      description: |
+        Two different refusals share this status; `error` tells them apart.
+
+        `choose a profile`: the profile this device sat on was deleted — see
+        `ChooseAProfile`.
+
+        Otherwise the change would have renamed files or folders (a series retitled, a
+        volume renumbered, a series filed into a universe) and the library cannot take the
+        rename: files that are not the library's are where a volume would go, the disk is
+        read-only, or a folder's identity cannot be written into it. **Nothing was changed,
+        sidecars included.** `error` says which, and names the files in the way.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
     TooManyCodes:
       description: |
         Too many wrong codes from this device: ten in five minutes, and the routes that take
@@ -2378,7 +2855,45 @@ components:
             `false`, nobody reaches the library but its own machine, and a client offers
             neither to link another device nor to unlink this one, which would leave it
             nowhere to link back from.
+        version:
+          type: string
+          examples: ["0.1.0"]
+          description: |
+            Only to a key the server recognises, like `relay`: the release that answers, as
+            the repository's `VERSION` file spells it. Withheld from a stranger, to whom a
+            build number would say which known flaws to try.
       required: [status, api, format, library, linked]
+
+    ReadingExport:
+      type: object
+      properties:
+        exportedAt: { type: integer, description: Milliseconds since the epoch. }
+        series:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              work: { type: string }
+              edition: { type: string }
+              universe: { type: string }
+              entries:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    type: { type: string, enum: [VOLUME, CHAPTER] }
+                    number: { type: number }
+                    title: { type: string }
+                    pageCount: { type: integer }
+                    readStatus: { type: string, enum: [UNREAD, IN_PROGRESS, READ] }
+                    page: { type: integer, description: 0 when nothing was opened. }
+                    timesFinished: { type: integer }
+                    updatedAt: { type: integer, description: Absent for a volume never opened. }
+                  required: [id, type, pageCount, readStatus, page, timesFinished]
+            required: [id, work, entries]
+      required: [exportedAt, series]
 
     LinkRequest:
       type: object
@@ -2578,7 +3093,11 @@ components:
 
     ReadingPreferences:
       type: object
-      description: The client's own, kept as they were sent.
+      description: |
+        The client's own, kept as they were sent. The desktop client writes five keys:
+        `layout` (`single`, `double`, `auto`), `fit` (`height`, `width`, `original`),
+        `backdrop` (`black`, `grey`, `white`), `motion` (`slide`, `fade`, `instant`) and
+        `volumesAsGrid` (boolean). A key it does not know is kept and left alone.
       additionalProperties: true
 
     DeviceEntry:
@@ -2643,11 +3162,31 @@ components:
         authors:
           type: array
           items: { type: string }
-          description: The writers. Several populate — *Les Terres d'Arran* carries five.
+          description: |
+            The writers. Several populate — *Les Terres d'Arran* carries five. Everyone its
+            volumes are credited with, each once, once every volume that names nobody has
+            taken `declaredAuthors`: a series whose script changes hands is credited to all
+            of them. `declaredAuthors` alone for a series that holds no volume.
         artists:
           type: array
           items: { type: string }
-          description: The illustrators — penciller, inker and cover artist in one.
+          description: |
+            The illustrators — penciller, inker and cover artist in one, on the same terms
+            as `authors`.
+        declaredAuthors:
+          type: array
+          items: { type: string }
+          default: []
+          description: |
+            What `work.json` declares, and only that: who a volume that names nobody is
+            credited with. Empty when nothing is declared, even when every volume is
+            credited by a ComicInfo. What « edit the series » starts from — starting from
+            `authors` froze every writer who ever took over into the default.
+        declaredArtists:
+          type: array
+          items: { type: string }
+          default: []
+          description: The illustrators `work.json` declares, on the same terms as `declaredAuthors`.
         medium:
           type: [string, "null"]
           enum: [manga, bd, comics, manhwa, manhua, webtoon, artbook, other, null]
@@ -2661,9 +3200,16 @@ components:
             What the reader chose instead of `readingDirection`, which is what the files
             declare, and **the calling profile's own**: another profile may have chosen
             otherwise. `null` is "by default". Set through `PUT /series/{id}/reading-direction`.
+        coverImage:
+          type: boolean
+          default: false
+          description: |
+            Whether an image was chosen for this series with `PUT /series/{id}/cover`, as
+            opposed to a `cover.jpg` placed in its folder by hand: it says whether `DELETE`
+            on the same path has anything to take back.
         status:
           type: [string, "null"]
-          enum: [ongoing, completed, null]
+          enum: [ongoing, completed, hiatus, cancelled, null]
           description: Decides whether an extra volume files itself or asks.
         summary:
           type: [string, "null"]
@@ -2680,6 +3226,12 @@ components:
             The fallback happens here, when the answer is read, and never by copying the
             work's sentence into the edition's row: copied, the day somebody edits the work
             its editions would go on saying what it used to say.
+        ownSummary:
+          type: [string, "null"]
+          description: |
+            The part of `summary` that is the edition's own, when it has one. A client editing
+            the description edits this when it is there and the work's otherwise, and never
+            copies the work's sentence into the edition.
         readStatus:
           type: string
           enum: [UNREAD, IN_PROGRESS, READ]
@@ -2778,6 +3330,10 @@ components:
         colour:
           type: [boolean, "null"]
           description: Positive form, never blackAndWhite.
+        coverVolume:
+          type: number
+          description: |
+            The `number` of the volume chosen as the series' cover; absent when none was.
         language: { type: [string, "null"] }
         addedAt:
           type: [integer, "null"]
@@ -2858,10 +3414,12 @@ components:
         seriesId:
           type: string
           description: |
-            The edition a VOLUME range is counted in — an id of `/series`. Always present on
-            a VOLUME step and never on a CHAPTER one: "volumes 1 to 7" is different content
-            in a 42-volume edition and a 34-volume one, while a chapter number identifies
-            the same story in both.
+            The edition a VOLUME range is counted in — an id of `/series`: the edition the
+            step names, or the only one the work has. Always present on a VOLUME step and
+            never on a CHAPTER one: "volumes 1 to 7" is different content in a 42-volume
+            edition and a 34-volume one, while a chapter number identifies the same story in
+            both. The ambiguity only exists from two editions on, and an edition kept
+            beside the archives has no name to write.
         series: { type: string }
         from: { type: number }
         to: { type: number }
@@ -2877,6 +3435,15 @@ components:
         statuses: { type: array, items: { $ref: "#/components/schemas/Facet" } }
         languages: { type: array, items: { $ref: "#/components/schemas/Facet" } }
         publishers: { type: array, items: { $ref: "#/components/schemas/Facet" } }
+        tags:
+          type: array
+          items: { $ref: "#/components/schemas/Facet" }
+          description: |
+            With `artists` and `collections`: the vocabulary an editing window suggests from,
+            so that a name already in the library is picked rather than retyped with a typo.
+            Filled over series only, and not offered as a filter.
+        artists: { type: array, items: { $ref: "#/components/schemas/Facet" } }
+        collections: { type: array, items: { $ref: "#/components/schemas/Facet" } }
 
     Entry:
       type: object
@@ -2894,6 +3461,14 @@ components:
         pageCount: { type: integer }
         chapterCount: { type: integer }
         file: { type: string, description: "The file name alone, never a path." }
+        downloadName:
+          type: string
+          description: |
+            The name a copy is offered under, `universe_series_edition_tome_012.cbz`, worked out
+            from where the file sits in the library and never stored: renaming an indexed
+            file loses its reading position. A universe the series name already holds, an
+            edition with no sibling, and every field that is empty are left out. The same
+            name is the download's `Content-Disposition`.
         size: { type: integer, description: Bytes. }
         isbn: { type: [string, "null"] }
         publishedOn: { type: [string, "null"], examples: ["2011-03-04"] }
@@ -2907,6 +3482,51 @@ components:
           type: boolean
           default: false
           description: Whether a cover was chosen on disk rather than taken from page 0.
+        coverImage:
+          type: boolean
+          default: false
+          description: |
+            Whether an image was chosen for this volume with `PUT /entries/{id}/cover`, as
+            opposed to one placed beside the archive by hand (`ownCover` is true for both).
+        coverPage:
+          type: [integer, "null"]
+          minimum: 0
+          description: |
+            The page the volume's `entry.json` names as its cover, counted from 0 like
+            `/entries/{id}/pages/{number}`. Null when none was chosen: the cover is then an
+            image beside the archive (`ownCover`), otherwise page 0. Which of the three wins
+            is written under `/entries/{id}/cover`.
+        borrowedCover:
+          type: boolean
+          default: false
+          description: |
+            Whether the volume has no cover of its own — no `coverPage`, no image beside the
+            archive, and a first page named `001` — so that `/entries/{id}/cover` serves its
+            series' cover in its place. A tile showing a borrowed cover writes the volume's
+            number over it: a shelf of chapters is otherwise one picture many times over.
+        authors:
+          type: array
+          items: { type: string }
+          default: []
+          description: |
+            Who wrote this volume: what its `entry.json` lists, else — on a library never
+            imported — what its ComicInfo gives, else its series' `declaredAuthors`. A volume
+            that names someone replaces the series' writers, it does not join them.
+        artists:
+          type: array
+          items: { type: string }
+          default: []
+          description: Who drew it, on the same terms as `authors`, field by field.
+        authorsInherited:
+          type: boolean
+          default: false
+          description: |
+            `authors` came from the series because the volume names nobody: changing the
+            series' default changes them, and a client shows them as the series' word.
+        artistsInherited:
+          type: boolean
+          default: false
+          description: The same for `artists`.
       required: [id, type, pageCount, chapterCount, file, size]
 
     Chapter:
@@ -2937,6 +3557,38 @@ components:
             not know" rather than as zero.
         entryId: { type: string }
       required: [id, raw, label, kind, position, entryId]
+
+    Folder:
+      type: object
+      required: [path, level]
+      properties:
+        path:
+          type: string
+          description: |
+            From the outermost folder of the chain, `/` between names: where it goes in a
+            copy.
+        level: { type: string, enum: [UNIVERSE, WORK, EDITION] }
+        sidecar:
+          type: string
+          enum: [universe.json, work.json, edition.json]
+          description: The file this level carries. Absent when the folder has none.
+        content:
+          type: string
+          description: The text of that file, as it is on the disk.
+
+    ExportFile:
+      type: object
+      required: [path, kind, size]
+      properties:
+        path:
+          type: string
+          description: Relative, `/` between names, under the last folder of the chain.
+        kind: { type: string, enum: [VOLUME, IMAGE] }
+        entryId:
+          type: string
+          description: |
+            The volume it is, or the one it sits beside. Absent for the series' own images.
+        size: { type: integer, format: int64, description: Its length in bytes. }
 
     Arc:
       type: object
@@ -3152,40 +3804,73 @@ components:
         rather than written into a sidecar the server would then serve against its own schema.
       properties:
         name: { type: string }
-        title: { type: string }
+        title: { type: [string, "null"] }
         medium:
-          type: string
-          enum: [manga, bd, comics, manhwa, manhua, webtoon, artbook, other]
+          type: [string, "null"]
+          enum: [manga, bd, comics, manhwa, manhua, webtoon, artbook, other, null]
         author:
           type: string
           description: The former singular. `authors` is what a client should send.
-        authors: { type: array, items: { type: string }, description: The writers. }
-        artists: { type: array, items: { type: string }, description: The illustrators. }
-        status: { type: string, enum: [ongoing, completed] }
-        readingDirection: { type: string, enum: [LEFT_TO_RIGHT, RIGHT_TO_LEFT, VERTICAL] }
+        authors:
+          type: array
+          items: { type: string }
+          description: The writers, written in `work.json`; they then replace those the volumes credit.
+        artists:
+          type: array
+          items: { type: string }
+          description: The illustrators, written in `work.json`, on the same terms as `authors`.
+        status: { type: [string, "null"], enum: [ongoing, completed, hiatus, cancelled, null] }
+        readingDirection: { type: [string, "null"], enum: [LEFT_TO_RIGHT, RIGHT_TO_LEFT, VERTICAL, null] }
         genres: { type: array, items: { type: string } }
         tags:
           type: array
           items: { type: string }
           description: Beside genres, never folded into them.
-        ageRating: { type: string, description: 'A free string, never an enum: "16+", "T".' }
-        summary: { type: string }
-        publisher: { type: string }
-        collection: { type: string, description: The publisher's imprint, beside publisher. }
-        volumeCount: { type: integer }
-        format: { type: string }
-        language: { type: string }
-        colour: { type: boolean, description: Positive form, never blackAndWhite. }
+        ageRating: { type: [string, "null"], description: 'A free string, never an enum: "16+", "T".' }
+        summary: { type: [string, "null"] }
+        publisher: { type: [string, "null"] }
+        collection: { type: [string, "null"], description: The publisher's imprint, beside publisher. }
+        volumeCount: { type: [integer, "null"] }
+        format: { type: [string, "null"] }
+        language: { type: [string, "null"] }
+        colour: { type: [boolean, "null"], description: Positive form, never blackAndWhite. }
+        coverVolume:
+          type: [number, "null"]
+          description: |
+            The `number` of the volume whose cover is the series'. `null` takes the choice
+            away; a number the series does not hold is a 400.
+        editionSummary:
+          type: [string, "null"]
+          description: |
+            What this printing is, kept in its own `edition.json`; `null` gives the description
+            back to the work's. Refused on an edition with no folder of its own.
 
     EntryPatch:
       type: object
-      description: Every field optional; absent means unchanged.
+      description: Every field optional; absent means unchanged and `null` takes the field away.
       properties:
         number: { type: number }
-        title: { type: string }
-        isbn: { type: string }
-        publishedOn: { type: string }
-        summary: { type: string }
+        title: { type: [string, "null"] }
+        isbn: { type: [string, "null"] }
+        publishedOn: { type: [string, "null"] }
+        summary: { type: [string, "null"] }
+        coverPage:
+          type: [integer, "null"]
+          minimum: 0
+          description: |
+            The page shown as the cover, from 0 like `/entries/{id}/pages/{number}`. `null`
+            takes the choice away; a page the archive does not hold is a 400.
+        authors:
+          type: array
+          items: { type: string }
+          description: |
+            Who wrote this volume, written into its `entry.json`; it replaces the series'
+            writers for this volume. An empty list takes the volume's own away, and its
+            series' `declaredAuthors` speak for it again (`authorsInherited`).
+        artists:
+          type: array
+          items: { type: string }
+          description: Who drew it, on the same terms as `authors`.
 
     DropListing:
       type: object
@@ -3363,7 +4048,202 @@ components:
             pending rather than going into the library.
 
             Without one, only the size is compared, in both directions.
+        found:
+          $ref: "#/components/schemas/FoundInFile"
+          description: |
+            Optional. What the client read in the file. An archive that carries it is
+            matched by its kind and number to the volumes of the edition it arrives in.
+        splice:
+          $ref: "#/components/schemas/Splice"
+          description: |
+            The pages of this file that replace the chapter a `CHAPTER` target aims at:
+            required with such a target, refused with any other. The chapter's pages are
+            the ones from its first to the page before the next chapter's, or to the last;
+            the volume is rewritten with these in their place, under its own name, and the
+            chapters after it, its cover and every reader's place in it move by what the
+            range gained or lost. Checked against the pages the file has once it arrived.
+        rewrite:
+          $ref: "#/components/schemas/ArchiveRewrite"
+          description: |
+            Optional. Asks for the archive to be rewritten when it is installed: the file
+            that reaches the library is not the one that was sent. Only an archive — a path
+            ending in `.cbz` or `.zip` — can ask; anything else is refused at the
+            announcement.
+
+            `size` and `checksum` still describe the file as it is **sent**, since that is
+            what is compared and verified on arrival. The server remembers the rewrite with
+            them: the same file announced again with the same rewrite is already there, and
+            with another `entryJson` or other names to remove it is to be sent again.
+        members:
+          type: array
+          items: { $ref: "#/components/schemas/ManifestMember" }
+          description: |
+            Optional, and sent with `checksum` when the sender asked for the volumes to be
+            verified. What every member of the archive decompresses to, as the sender read
+            it: the pages are among them, and the server keeps the ones it recognises as
+            pages by their leading bytes.
+
+            It covers what `checksum` cannot: the file written here when the server rewrites
+            the archive or splices a chapter into it. The `checksum` proves the file
+            reached the server; the pages are what the result is checked against, matched
+            by content and never by name, since a splice renames them. For a rewrite the
+            file written must hold exactly the pages of the file received; for a splice,
+            those of the volume outside the chapter replaced and the ones taken from the
+            file received. The pages of the file received are first compared with these, so
+            that the reference is the sender's. Any difference refuses the file like a
+            wrong `checksum`: it is reported in `corrupt`, nothing is installed and the
+            copy is dropped to be sent again.
+
+            Left out when the sender could not read every member (Zip64, a compression it
+            does not know, a member that does not inflate): a list with a hole in it would
+            refuse a volume that is whole. Without it, or for a file installed as it arrived,
+            nothing changes.
       required: [path, size]
+
+    ManifestMember:
+      type: object
+      properties:
+        name: { type: string, description: Its path inside the archive, folders included. }
+        size: { type: integer, description: Its length once decompressed. }
+        checksum:
+          type: string
+          description: SHA-256 of the decompressed bytes, lowercase hex.
+      required: [name, size, checksum]
+
+    ArchiveRewrite:
+      type: object
+      properties:
+        entryJson:
+          type: string
+          description: |
+            The `entry.json` to put inside the archive, as text. It must be a JSON object;
+            one the server cannot read is refused at the announcement, for the same reason
+            a malformed sidecar is.
+        remove:
+          type: array
+          items: { type: string }
+          description: |
+            Names of members to drop from the archive. Every member of that name goes, in
+            any folder of the archive and whatever its case: `ComicInfo.xml` also removes
+            `scans/comicinfo.XML`. A bare name: one holding `/`, `\` or `..` is refused, and
+            so is an empty one, which would name nothing.
+        oneShotJson:
+          type: string
+          description: |
+            Optional. The `oneshot.json` to put inside the archive, as text, beside its
+            `entry.json`; absent, the archive receives none and keeps the one it carries.
+            It must be a JSON object, refused at the announcement like `entryJson`.
+
+            An archive that carries one is a book standing alone. At the root of a universe
+            that is the only kind of archive the scan reads there: without it the file is
+            filed by nobody and reported as disregarded.
+
+            It is part of what was asked for: the same file announced again with the same
+            `oneShotJson` is already there, and with another it is to be sent again.
+      required: [entryJson, remove]
+
+    ImportTarget:
+      type: object
+      description: What a reimport is aimed at. `SERIES` is an edition, as in `/series/{id}`.
+      properties:
+        kind:
+          type: string
+          enum: [ENTRY, SERIES, UNIVERSE, CHAPTER, SERIES_NEW_EDITIONS]
+          description: |
+            `SERIES_NEW_EDITIONS` adds editions to the series: every folder dropped is an
+            edition of its own, filed beside the ones it holds, and `id` is any of them.
+        id: { type: string }
+      required: [kind, id]
+
+    FoundInFile:
+      type: object
+      description: |
+        What the client read in a file, after the corrections a person made: the number and
+        kind it will carry once installed. A volume is matched on its kind and its exact
+        number — never on its name or its size. Every field is optional; one left out says
+        nothing.
+      properties:
+        number: { type: number }
+        kind:
+          type: string
+          description: |
+            `VOLUME` or `CHAPTER`; absent is `VOLUME`. Any other word, the empty string
+            included, matches no held volume.
+        title: { type: string }
+        series:
+          type: string
+          description: |
+            The series the file names. Compared without case, accents or extra spaces, but
+            with its punctuation: one that is none of the aimed work's names is
+            `OTHER_SERIES`.
+        pages: { type: integer, minimum: 0 }
+        chapters: { type: array, items: { type: number } }
+        guessed:
+          type: boolean
+          default: false
+          description: |
+            The number was read off the file's name, not declared in the file nor confirmed
+            by a person. It is shown, never landed on: the file is `UNNUMBERED` until it is
+            announced again without this flag.
+
+    Splice:
+      type: object
+      description: A range of pages, counted from 0 as `/pages/{number}` counts them.
+      properties:
+        from: { type: integer, minimum: 0 }
+        to: { type: integer, minimum: 0 }
+      required: [from, to]
+
+    HeldVolume:
+      type: object
+      description: A volume the library holds, shown beside the file that would take its place.
+      properties:
+        entryId: { type: string }
+        number: { type: number }
+        title: { type: string }
+        file: { type: string, description: Relative to the edition's folder. }
+        size: { type: integer }
+        pages: { type: integer }
+        chapters: { type: array, items: { type: number } }
+        page: { type: integer, description: The asking profile's place in it. }
+        finished: { type: boolean }
+        others: { type: integer, description: How many other profiles have a place in it. }
+      required: [entryId, file, size, pages, finished, others]
+
+    Arriving:
+      type: object
+      description: What the file says of itself, for the comparison. Absent is unsaid.
+      properties:
+        pages: { type: integer }
+        title: { type: string }
+        chapters: { type: array, items: { type: number } }
+
+    VolumeMatch:
+      type: object
+      description: |
+        What one file of a reimport becomes. `SAME` is the file that is there, byte for
+        byte, under whatever name: nothing is sent, renamed, set aside or recorded for it,
+        even where `lands` names it. `UNNUMBERED` and `TWICE` land nowhere.
+      properties:
+        path: { type: string, description: The path as announced. }
+        lands:
+          type: string
+          description: |
+            Where it is installed, relative to the edition's folder: the file name of the
+            volume it replaces, or a free name for an addition. Absent where it lands nowhere.
+        outcome:
+          type: string
+          enum: [SAME, REPLACE, UPDATE, ADD, OTHER_NUMBER, OTHER_SERIES, UNNUMBERED, TWICE]
+        number: { type: number }
+        entryId: { type: string, description: The held volume it is or replaces. }
+        wanted: { type: string, description: The volume aimed at, when this file is another. }
+        present: { $ref: "#/components/schemas/HeldVolume" }
+        arriving: { $ref: "#/components/schemas/Arriving" }
+        differs:
+          type: array
+          items: { type: string, enum: [pages, title, chapters] }
+          description: What the file declares otherwise than `present`; absent when nothing.
+      required: [path, outcome, arriving]
 
     ImportRequest:
       type: object
@@ -3378,6 +4258,16 @@ components:
             ADDITION — I am bringing these files and say nothing about the rest.
             COMPLETE — here is the whole series; whatever is not in it is reported as an
             orphan. Never deleted, only reported.
+        target:
+          $ref: "#/components/schemas/ImportTarget"
+          description: |
+            Optional. What this import reimports. The folder dropped is laid on the target's
+            folder, and `root` is then only the name the client knows it by.
+        currentEditionName:
+          type: string
+          description: |
+            With `SERIES_NEW_EDITIONS` on a series that declares no edition: the name its
+            current edition takes when it gets a folder of its own.
         sidecars:
           type: array
           items: { $ref: "#/components/schemas/ManifestSidecar" }
@@ -3427,7 +4317,7 @@ components:
           description: |
             What it will be called, read from the declaration and not from the folder name.
             The two are allowed to differ, and the declaration is the one that wins.
-        at: { type: string, description: Where under the root, relative to it. }
+        at: { type: string, description: Which folder of the drop, relative to the folder announced. }
       required: [kind, name, at]
 
     PreflightRequest:
@@ -3555,10 +4445,141 @@ components:
             A folder every volume of which the library already holds still carries its
             `work.json`, and installing it over a title or a summary edited through `PATCH`
             is a decision, not a side effect of dropping the folder again.
-        toSend: { type: array, items: { type: string } }
-        alreadyThere: { type: array, items: { type: string } }
+        target:
+          $ref: "#/components/schemas/TargetPlace"
+          description: Absent without a target.
+        volumes:
+          type: array
+          items: { $ref: "#/components/schemas/VolumeMatch" }
+          description: |
+            What each archive compared with the volumes of its edition is found to be, by
+            the path it was announced under. Absent when none was compared.
+        absent:
+          type: array
+          items: { $ref: "#/components/schemas/HeldVolume" }
+          description: |
+            What the target holds and the drop does not bring: the series' other volumes,
+            or the volume aimed at when the file brought is another. They stay — nothing is
+            removed by being left out. Only with a target; absent when there is none.
+        splice:
+          $ref: "#/components/schemas/SpliceOutcome"
+          description: Only with a `CHAPTER` target.
+        absentSeries:
+          type: array
+          items: { $ref: "#/components/schemas/AbsentSeries" }
+          description: |
+            The series of the universe aimed at that the drop does not bring, each folder of
+            the drop having been matched with a work by the identity its `work.json` carries,
+            then its folder name, then its folded title. Only with a universe target; absent
+            when the drop brings every one.
+        resembles:
+          type: array
+          items: { $ref: "#/components/schemas/Resemblance" }
+          description: |
+            The series the drop would create that are named like one the library holds.
+            Only without a target — a target already says which series the drop is; absent
+            when there is none.
+        toSend:
+          type: array
+          items: { type: string }
+          description: |
+            What to send, by announced path. A `SAME`, `UNNUMBERED` or `TWICE` archive is
+            never here: it is installed nowhere.
+        alreadyThere:
+          type: array
+          items: { type: string }
+          description: What the library already holds, by announced path, `SAME` included.
         bytesToSend: { type: integer }
-      required: [id, root, creates, replaces, declarations, toSend, alreadyThere, bytesToSend]
+        landsAs:
+          type: array
+          items: { $ref: "#/components/schemas/Landing" }
+          description: |
+            Per file that will be filed, where and under which name: the name the library
+            gives a volume, not the one it arrived with. A file filed nowhere is not here.
+        collisions:
+          type: array
+          items: { $ref: "#/components/schemas/NamesMeet" }
+          description: Files whose names would meet. Neither is filed.
+        reshelved:
+          type: array
+          items: { $ref: "#/components/schemas/Reshelved" }
+          description: Volumes already held that the import moves into another edition.
+        editionsNeedingAName:
+          type: array
+          items: { $ref: "#/components/schemas/NeedsAName" }
+          description: |
+            With `SERIES_NEW_EDITIONS`: the editions the drop adds that have no name, and the
+            series' current edition when it declares none. Always present, possibly empty.
+        problems:
+          type: array
+          items: { $ref: "#/components/schemas/NameProblem" }
+          description: Names that are empty or taken. The commit is refused while any remains.
+      required: [id, root, creates, replaces, declarations, toSend, alreadyThere, bytesToSend, landsAs, collisions, reshelved, editionsNeedingAName, problems]
+
+    NeedsAName:
+      type: object
+      properties:
+        path: { type: string, description: "The folder of the drop; empty for files dropped loose, `@current` for the edition the series holds." }
+        current: { type: boolean }
+      required: [path, current]
+
+    NameProblem:
+      type: object
+      properties:
+        path: { type: string }
+        kind: { type: string, enum: [EMPTY, DUPLICATE] }
+        with: { type: string, description: The name it shares, for DUPLICATE. }
+      required: [path, kind]
+
+    Landing:
+      type: object
+      properties:
+        path: { type: string, description: The path as announced. }
+        folder: { type: string, description: « Série › Édition », readable. }
+        file: { type: string, description: The name it will carry. }
+        wasCalled: { type: string, description: The name it arrived with. }
+      required: [path, folder, file, wasCalled]
+
+    NamesMeet:
+      type: object
+      description: Two announced files that would be filed under one name.
+      properties:
+        path: { type: string }
+        with: { type: string, description: The announced file whose name it would take. }
+      required: [path, with]
+
+    Reshelved:
+      type: object
+      properties:
+        edition: { type: string, description: « Série › Édition » they move into. }
+        count: { type: integer }
+      required: [edition, count]
+
+    TargetPlace:
+      type: object
+      description: The target as the answer names it, with the way down to it.
+      properties:
+        kind: { type: string, enum: [ENTRY, SERIES, UNIVERSE, CHAPTER] }
+        id: { type: string }
+        name: { type: string }
+        trail:
+          type: array
+          items: { $ref: "#/components/schemas/TrailStep" }
+          description: From the universe, when there is one, down to the target, last.
+      required: [kind, id, name, trail]
+
+    TrailStep:
+      type: object
+      properties:
+        kind: { type: string, enum: [UNIVERSE, WORK, SERIES, ENTRY, CHAPTER] }
+        id: { type: string }
+        name: { type: string }
+        count:
+          type: integer
+          description: |
+            What the level holds: the works of a universe, the editions of a work, the
+            volumes of a series, the pages of a volume. A chapter holds none.
+      required: [kind, id, name, count]
 
     Replacement:
       type: object
@@ -3568,7 +4589,7 @@ components:
         bytes apart differ inside a declaration nobody can see from a file listing, and
         without `presentTitle` the only way to find out is to open both by hand.
       properties:
-        path: { type: string, description: Where it would land, relative to the root. }
+        path: { type: string, description: The path the file was announced under. }
         size: { type: integer, description: What the arriving file weighs. }
         presentSize: { type: integer, description: What the library's own file weighs. }
         presentTitle:
@@ -3595,7 +4616,7 @@ components:
         The field names, not the values: a summary is four hundred words and a screen has one
         line, and « résumé, arcs » says what is at stake where the values would not fit.
       properties:
-        path: { type: string, description: The sidecar, relative to the root. }
+        path: { type: string, description: The sidecar, as it was announced. }
         presentName:
           type: [string, "null"]
           description: What the library's own declaration calls itself — its title or name.
@@ -3606,12 +4627,20 @@ components:
             The fields the two declarations disagree about, by their name in the sidecar.
             `id` is never among them: it is kept from the library's own copy whatever the
             arriving one says.
-      required: [path, differs]
+        present:
+          type: object
+          additionalProperties: true
+          description: |
+            What the library's own declaration holds under each field of `differs`, as it
+            stands in the sidecar. A field it does not carry is not here — « non renseigné »,
+            and not an empty value. « éditeur » says something differs; « Pika » says what a
+            rewrite would lose, which is what a reader decides on.
+      required: [path, differs, present]
       additionalProperties: false
 
     Relocation:
       type: object
-      required: [workId, name, from, at]
+      required: [workId, name, from, at, matched]
       properties:
         workId:
           type: string
@@ -3622,7 +4651,85 @@ components:
           description: The folder it is in now, so a reader can see what is about to change.
         at:
           type: string
-          description: Where under the root it would go, the same way a Creation says it.
+          description: Which folder of the drop it would go to, the same way a Creation says it.
+        matched:
+          type: string
+          enum: [IDENTITY, TITLE]
+          description: |
+            How the folder was known to be this work: by the identity its `work.json`
+            carries, or by its title alone. A title two series can share, so a move matched
+            by `TITLE` is one a reader confirms — and the client then writes the work's
+            identity into the `work.json` it sends, which is what a commit moves it by.
+
+    SpliceOutcome:
+      type: object
+      description: |
+        What replacing a chapter does to its volume, said before a byte moves. Pages are
+        counted from 0, both ends of a range included.
+      properties:
+        pagesBefore: { type: integer }
+        pagesAfter: { type: integer }
+        chapters:
+          type: array
+          items: { $ref: "#/components/schemas/ChapterSplice" }
+          description: Every chapter of the volume that says where it starts, in reading order.
+        page:
+          type: [integer, "null"]
+          description: The asking profile's place in the volume, if it has one.
+        pageBecomes:
+          type: [integer, "null"]
+          description: Where that place will be.
+      required: [pagesBefore, pagesAfter, chapters]
+      additionalProperties: false
+
+    ChapterSplice:
+      type: object
+      properties:
+        id: { type: string }
+        number: { type: [number, "null"] }
+        title: { type: [string, "null"] }
+        from: { type: integer }
+        to: { type: integer }
+        becomesFrom: { type: integer }
+        becomesTo: { type: integer }
+        outcome:
+          type: string
+          enum: [KEEP, REPLACE, SHIFT]
+          description: |
+            `REPLACE` for the chapter aimed at — and a bonus filed on its first page —, whose
+            pages become the ones taken; `SHIFT` for one after it, moved by what the range
+            gained or lost; `KEEP` for the rest.
+      required: [id, number, title, from, to, becomesFrom, becomesTo, outcome]
+      additionalProperties: false
+
+    AbsentSeries:
+      type: object
+      description: |
+        A series of the universe aimed at that the drop does not bring. It stays: nothing is
+        removed by being left out.
+      properties:
+        workId: { type: string }
+        seriesId: { type: string }
+        name: { type: string }
+        volumes: { type: integer, description: The volumes it holds. }
+      required: [workId, seriesId, name, volumes]
+      additionalProperties: false
+
+    Resemblance:
+      type: object
+      description: |
+        A series the drop would create whose title, folded without case or accents, is the
+        title of one the library holds. « blue period » beside « Blue Period » is two folders
+        on the disk and, almost always, one series typed twice.
+      properties:
+        at:
+          type: string
+          description: Which folder of the drop, the same way a Creation says it; empty for the folder announced.
+        seriesId: { type: string, description: The series it resembles. }
+        name: { type: string }
+        from: { type: string, description: The folder the series it resembles is in. }
+      required: [at, seriesId, name, from]
+      additionalProperties: false
 
     ImportState:
       type: object
@@ -3655,10 +4762,15 @@ components:
           type: array
           items: { type: string }
           description: |
-            Arrived complete and did not match the checksum announced for them. Left in the
-            inbox rather than installed, and the session is kept so they can be sent again:
-            a volume that travelled wrong is worse than one that did not travel, because
-            nothing afterwards would tell you.
+            Arrived complete and cannot be installed as announced: they did not match the
+            checksum announced for them, or they asked for a `rewrite` and are not an archive
+            the server can read. Not installed, and the copy that arrived is dropped, so the
+            session is kept with them listed as missing and they can be sent again: a volume
+            that travelled wrong is worse than one that did not travel, because nothing
+            afterwards would tell you.
+
+            A disk that refuses the rewrite — full, or not writable — is not a corrupt file:
+            the commit fails as an error and the copy that arrived stays as it was.
         pending:
           type: array
           items: { type: string }
@@ -3674,7 +4786,32 @@ components:
             The session is still there. Send what is pending against the same id and commit
             again; the bytes already transferred are not sent twice. False when everything
             went home and the session was cleared.
+        replaced:
+          type: array
+          items: { $ref: "#/components/schemas/ReplacedFile" }
+          description: |
+            What this commit installed over a volume the library held, and where the old file
+            waits. Absent when nothing was replaced. A replacement destroys nothing: the new
+            file takes the old one's name, so the volume keeps every reader's place, its read
+            marks and its arrival date, and the old file is kept aside under the inbox.
       required: [root, installed, orphans, open]
+
+    ReplacedFile:
+      type: object
+      properties:
+        path:
+          type: string
+          description: The path the announcement gave the file that replaced it.
+        entryId:
+          type: string
+          description: |
+            The volume whose file was replaced; absent for a file that is no volume — a
+            cover, a page — set aside all the same.
+        keptAt:
+          type: string
+          description: |
+            Where the old file waits, relative to the inbox: `replaced/<id>/<landing>`.
+      required: [path, keptAt]
 
     CleanupRequest:
       type: object
@@ -3817,6 +4954,13 @@ components:
             that arrived whole and is not named here is left in the inbox and reported in
             `pending`, the same as one that never finished arriving: refused is not the
             same as missing, and neither is silently skipped.
+        reset:
+          type: array
+          items: { type: string }
+          description: |
+            Among the paths replaced, those whose volume the asking profile starts again from
+            the first page. Only that profile's place: every other reader keeps theirs,
+            brought back to the last page if the new file is shorter.
       additionalProperties: false
 
     MoveRequest:

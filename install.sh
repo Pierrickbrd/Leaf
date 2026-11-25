@@ -767,7 +767,7 @@ install_client() {
     install_apt build-essential cmake ninja-build zlib1g-dev qt6-base-dev qt6-declarative-dev \
         libqt6svg6-dev qml6-module-qtquick qml6-module-qtquick-controls \
         qml6-module-qtquick-layouts qml6-module-qtquick-templates qml6-module-qtqml \
-        qml6-module-qtqml-workerscript qml6-module-qt5compat-graphicaleffects \
+        qml6-module-qtqml-models qml6-module-qtqml-workerscript qml6-module-qt5compat-graphicaleffects \
         qt6-image-formats-plugins qtkeychain-qt6-dev
 
     cmake -S "$LEAF_ROOT/desktop" -B "$LEAF_ROOT/desktop/build" -G Ninja \

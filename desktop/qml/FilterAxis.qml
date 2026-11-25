@@ -31,7 +31,12 @@ Item {
     /// a library with three hundred authors would otherwise make one axis nine thousand
     /// pixels tall, and build three hundred items to draw the five anybody can see.
     readonly property int atMostOnScreen: 5
-    readonly property int rowHeight: 30
+    /// A value's row, from its words: a literal 30 round a name that follows the desktop's
+    /// text size cut its descenders at half as large again.
+    readonly property int rowHeight: Math.max(Widths.scale.size(30),
+                                              Math.ceil(valueFont.height) + Widths.space.row)
+    /// Where the titles and the values' marks start, past the chevron: one column for both.
+    readonly property int indent: Widths.scale.size(28)
     /// Whether the axis gets a field to search itself — and it is the same threshold, on
     /// purpose. It used to be its own number, twelve, which left six to twelve values in the
     /// worst of both: a list you cannot see whole, in a window five rows tall, with nothing
@@ -57,12 +62,19 @@ Item {
     width: parent ? parent.width : 0
     height: head.height + (open ? body.height : 0)
 
+    FontMetrics {
+        id: valueFont
+
+        font.family: Theme.textFamily
+        font.pixelSize: Widths.scale.body(14)
+    }
+
     Rectangle {
         id: head
 
         objectName: "filter-axis-head-" + axisItem.axis
         width: parent.width
-        height: 34
+        height: Math.max(Widths.scale.size(34), axisTitle.implicitHeight + Widths.space.row)
         radius: 8
         color: pointer.hovered ? Theme.onPaper : "transparent"
 
@@ -80,6 +92,7 @@ Item {
         FocusRing {
             objectName: head.objectName + "-focus"
             cornerRadius: head.radius
+            inside: true
         }
 
         HoverHandler {
@@ -93,41 +106,50 @@ Item {
             onTapped: axisItem.open = !axisItem.open
         }
 
-        Text {
+        // An icon and not the « ⌄ » and « › » characters it was: those are drawn by the text
+        // font, on its own baseline, and the open one sat lower than the closed one and lower
+        // than the title beside it. Both symbols share one box, centred on the heading.
+        Glyph {
             objectName: "filter-axis-chevron-" + axisItem.axis
-            x: 8
+            x: Widths.space.compact + (Widths.scale.icon(14) - width) / 2
             anchors.verticalCenter: parent.verticalCenter
-            width: 14
-            text: axisItem.open ? "⌄" : "›"
-            color: Theme.inkFaint
-            font.family: Theme.textFamily
-            font.pixelSize: 15
-            horizontalAlignment: Text.AlignHCenter
+            side: Widths.scale.icon(18)
+            source: "assets/icons/" + (axisItem.open ? "expand_more" : "chevron_right") + ".svg"
+            tint: Theme.inkFaint
         }
 
         Text {
+            id: axisTitle
+
             objectName: "filter-axis-title-" + axisItem.axis
             anchors.left: parent.left
-            anchors.leftMargin: 28
+            anchors.leftMargin: axisItem.indent
+            anchors.right: tally.left
+            anchors.rightMargin: Widths.space.label
             anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
             text: axisItem.title
+            elide: Text.ElideRight
             color: Theme.ink
             font.family: Theme.textFamily
-            font.pixelSize: 14
+            font.pixelSize: Widths.scale.body(14)
             font.weight: axisItem.litHere > 0 ? Font.Medium : Font.Normal
         }
 
         // What the axis is doing, without opening it: how many of its values are lit, or
         // how many there are to choose from when none is.
         Text {
+            id: tally
+
             objectName: "filter-axis-tally-" + axisItem.axis
             anchors.right: parent.right
-            anchors.rightMargin: 10
+            anchors.rightMargin: Widths.space.row
             anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
             text: axisItem.litHere > 0 ? String(axisItem.litHere) : String(axisItem.values.length)
             color: axisItem.litHere > 0 ? Theme.emerald : Theme.inkFaint
             font.family: Theme.textFamily
-            font.pixelSize: 13
+            font.pixelSize: Widths.scale.body(13)
             font.weight: axisItem.litHere > 0 ? Font.Medium : Font.Normal
         }
     }
@@ -146,22 +168,22 @@ Item {
         // the same wash as the field's own surface and the two became a single shape.
         Item {
             width: 1
-            height: 7
+            height: Widths.space.compact
             visible: axisItem.searchable
         }
 
         LeafSearchLine {
             objectName: "filter-axis-search-" + axisItem.axis
-            x: 8
-            width: parent.width - 16
+            x: Widths.space.compact
+            width: parent.width - 2 * x
             visible: axisItem.searchable
-            placeholder: Captions.quotedAxis(axisItem.title)
+            placeholder: BarCaptions.quotedAxis(axisItem.title)
             onAsked: text => axisItem.looking = text
         }
 
         Item {
             width: 1
-            height: 7
+            height: Widths.space.compact
             visible: axisItem.searchable
         }
 
@@ -188,6 +210,7 @@ Item {
 
                 width: rows.width
                 height: axisItem.rowHeight
+                indent: axisItem.indent
                 value: modelData.value
                 label: modelData.label
                 lit: axisItem.lit(modelData.value)
@@ -204,21 +227,22 @@ Item {
 
         Text {
             objectName: "filter-axis-none-" + axisItem.axis
-            x: 28
-            width: parent.width - 36
+            x: axisItem.indent
+            width: parent.width - x - Widths.space.compact
             visible: axisItem.showing.length === 0 && axisItem.looking.trim().length > 0
-            text: Captions.noValueByThatNameLabel
+            textFormat: Text.PlainText
+            text: BarCaptions.noValueByThatNameLabel
             color: Theme.inkSoft
             font.family: Theme.textFamily
-            font.pixelSize: 13
+            font.pixelSize: Widths.scale.body(13)
             wrapMode: Text.Wrap
-            topPadding: 4
-            bottomPadding: 8
+            topPadding: Widths.scale.size(4)
+            bottomPadding: Widths.space.compact
         }
 
         Item {
             width: 1
-            height: 6
+            height: Widths.scale.size(6)
         }
     }
 }

@@ -37,11 +37,26 @@ Item {
 
     signal opened()
     signal reimportAsked()
+    signal chapterAsked()
+    property int chapters: 0
+    /// Who made this volume, when it is not who the series says: a grey line under the title.
+    property string credits: ""
 
     // Opening a file is reading it: the line and the cover both lead to the reader, at the
     // page where reading stopped. Here rather than where the row is placed, so the list and
     // the grid cannot open one book two ways.
     onOpened: Navigation.open(Navigation.Reader, { "series": row.seriesId, "entry": row.entryId })
+
+    /// Picked with others, to be commanded together: see `Selection`.
+    readonly property bool picked: Selection.ids.includes(row.entryId)
+
+    /// Opens, unless something is already picked: then it picks one more. See `SeriesTile`.
+    function activate() {
+        if (Selection.active)
+            Selection.toggle(row.entryId, row.seriesId)
+        else
+            row.opened()
+    }
 
     objectName: "volume-" + (row.entryId.length > 0 ? row.entryId : "missing-" + row.number)
     implicitHeight: 46
@@ -49,6 +64,7 @@ Item {
     Accessible.role: Accessible.ListItem
     Accessible.name: row.number + " " + row.title
     Accessible.description: row.missing ? row.title : row.pages
+    Accessible.selected: row.picked
 
     /// A stop of the page's walk — see `KeyWalk` — unless it is a hole, which opens nothing.
     readonly property bool keyStop: !row.missing
@@ -56,7 +72,10 @@ Item {
     Keys.onPressed: event => {
         if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
                 || event.key === Qt.Key_Enter) {
-            row.opened()
+            if (event.modifiers & (Qt.ControlModifier | Qt.ShiftModifier))
+                Selection.toggle(row.entryId, row.seriesId)
+            else
+                row.activate()
             event.accepted = true
         } else if (event.key === Qt.Key_Menu
                    || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
@@ -82,8 +101,22 @@ Item {
 
     TapHandler {
         gesturePolicy: TapHandler.ReleaseWithinBounds
+        acceptedModifiers: Qt.NoModifier
         enabled: !row.missing
-        onTapped: row.opened()
+        onTapped: row.activate()
+    }
+
+    PickHandler {
+        enabled: !row.missing
+        onToggled: Selection.toggle(row.entryId, row.seriesId)
+    }
+
+    // The secondary button opens the same menu as the three dots, under the pointer.
+    TapHandler {
+        acceptedButtons: Qt.RightButton
+        gesturePolicy: TapHandler.ReleaseWithinBounds
+        enabled: !row.missing
+        onTapped: point => commands.showAt(row, point.position)
     }
 
     // The one being read wears the wash, which is how this client says « here » everywhere
@@ -101,6 +134,19 @@ Item {
         radius: 8
         color: row.state === 1 ? Theme.emeraldWash
                                : (row.hovered ? Theme.onPaper : "transparent")
+    }
+
+    // Picked is a ring, not a wash: the wash already says « being read », and a picked line
+    // that is also the one in progress must show both.
+    Rectangle {
+        objectName: "picked-" + row.entryId
+        anchors.fill: parent
+        radius: 8
+        visible: row.picked
+        color: "transparent"
+        border.color: Theme.emerald
+        border.width: 2
+        antialiasing: true
     }
 
     // A hole in a collection is hatched rather than coloured: it is not a state of a file,
@@ -156,6 +202,7 @@ Item {
             id: no
 
             width: 28
+            textFormat: Text.PlainText
             text: row.number
             color: row.missing ? Theme.inkFaint : Theme.inkSoft
             font.family: Theme.displayFamily
@@ -165,22 +212,41 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
         }
 
-        Text {
+        Column {
             // What is left once everything with a fixed width has taken its share: the two
             // margins, the four gaps, the number, the pages, the state and the menu.
             width: row.width - 12 - 40 - no.width - weight.width - mark.width - commands.width
-            text: row.title
-            color: row.missing ? Theme.alert : Theme.ink
-            font.family: Theme.textFamily
-            font.pixelSize: 15
-            font.italic: !row.missing && row.title.length === 0
-            elide: Text.ElideRight
             anchors.verticalCenter: parent.verticalCenter
+            spacing: 2
+
+            Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: row.title
+                color: row.missing ? Theme.alert : Theme.ink
+                font.family: Theme.textFamily
+                font.pixelSize: 15
+                font.italic: !row.missing && row.title.length === 0
+                elide: Text.ElideRight
+            }
+
+            Text {
+                objectName: "volume-credits-" + row.entryId
+                width: parent.width
+                visible: row.credits.length > 0
+                text: row.credits
+                color: Theme.inkFaint
+                font.family: Theme.textFamily
+                font.pixelSize: 13
+                elide: Text.ElideRight
+                textFormat: Text.PlainText
+            }
         }
 
         Text {
             id: weight
 
+            textFormat: Text.PlainText
             text: row.pages
             color: Theme.inkFaint
             font.family: Theme.textFamily
@@ -195,6 +261,7 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
 
             Text {
+                textFormat: Text.PlainText
                 text: row.timesFinished
                 color: Theme.inkFaint
                 font.family: Theme.textFamily
@@ -205,6 +272,7 @@ Item {
             // Written in full where the other two carry a ring: an empty cell at the end of a
             // line reads as an information that is missing, not as a state.
             Text {
+                textFormat: Text.PlainText
                 text: row.neverReadWord
                 visible: row.state === 0
                 color: Theme.inkFaint
@@ -228,13 +296,16 @@ Item {
             id: commands
 
             anchors.verticalCenter: parent.verticalCenter
+            onAWash: true
             opacity: row.missing ? 0 : 1
             enabled: !row.missing
             seriesId: row.seriesId
             entryId: row.entryId
             fileName: row.fileName
             label: row.title
+            chapters: row.chapters
             onReimportAsked: row.reimportAsked()
+            onChapterAsked: row.chapterAsked()
         }
     }
 }

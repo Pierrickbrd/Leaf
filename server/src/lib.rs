@@ -12,4 +12,5 @@ pub mod config;
 pub mod metadata;
 pub mod net;
 pub mod scan;
+pub mod serving;
 pub mod store;

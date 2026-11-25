@@ -2,9 +2,11 @@
 
 #include "Words.h"
 
+#include <QDir>
 #include <QFileInfo>
 #include <QVariantMap>
 
+#include <algorithm>
 #include <utility>
 
 using namespace Qt::StringLiterals;
@@ -62,7 +64,7 @@ struct Answered {
 /// `alreadyThere` says what is not, but only a *file* answer either way — nothing in the
 /// contract ever names a container as "already there" on its own, because the server does
 /// not need to. A reader does, and this is what supplies it from what the files already say.
-QSet<QString> containersOf(const QStringList &paths)
+QSet<QString> containersOf(const QSet<QString> &paths)
 {
     QSet<QString> out;
     for (const QString &path : paths) {
@@ -276,8 +278,14 @@ bool Card::nothingToDo() const
     return road.creates.isEmpty() && road.filing.isEmpty() && road.declaring.isEmpty();
 }
 
-QVariantList Card::nodes() const
+namespace {
+
+/// What the server answered about a card, arranged for `stateOfNode`. One place for it: the
+/// tree draws a node by it and the line of the third step says the card's own root by it, and
+/// two copies of this arrangement would be two chances to disagree about « sera créée ».
+Answered answeredBy(const Card &card)
 {
+    const Card::Road &road = card.road;
     Answered answered;
     for (const Api::Creation &created : road.creates)
         answered.creates.insert(created.at);
@@ -294,14 +302,77 @@ QVariantList Card::nodes() const
     answered.declaring = road.declaring;
     answered.holdsAlready = containersOf(road.alreadyThere);
     answered.at = road.at;
-    answered.moving = stage == Card::Stage::Sending;
-    answered.done = stage == Card::Stage::Filed;
-    answered.failed = stage == Card::Stage::Failed;
-    answered.announced = !id.isEmpty();
+    answered.moving = card.stage == Card::Stage::Sending;
+    answered.done = card.stage == Card::Stage::Filed;
+    answered.failed = card.stage == Card::Stage::Failed;
+    answered.announced = !card.id.isEmpty();
+    return answered;
+}
 
+/// How many nodes of `level` stand under `node`, itself left out.
+int below(const Manifest::Node &node, Manifest::Level level)
+{
+    int total = 0;
+    for (const Manifest::Node &child : node.children)
+        total += (child.level == level ? 1 : 0) + below(child, level);
+    return total;
+}
+
+/// The reason some archive's members could not be hashed, or empty.
+QString digestTroubleOf(const Manifest::Folder &tree)
+{
+    for (const Manifest::Entry &entry : tree.files) {
+        if (!entry.members.digestTrouble.isEmpty())
+            return entry.members.digestTrouble;
+    }
+    return {};
+}
+
+} // namespace
+
+QVariantList Card::nodes() const
+{
     QVariantList out;
-    flatten(road.node, road.open, 0, out, answered);
+    flatten(road.node, road.open, 0, out, answeredBy(*this));
     return out;
+}
+
+double Card::fraction() const
+{
+    if (stage == Stage::Filed)
+        return 1.0;
+    if (size <= 0)
+        return 0.0;
+    return std::clamp(double(sent) / double(size), 0.0, 1.0);
+}
+
+QString Card::about() const
+{
+    if (!folder)
+        return Words::levelTitle(Manifest::Level::Volume);
+    // How the sheets were read, as `Imports` names it for its legend: said by a Leaf
+    // declaration, taken from a ComicInfo, or nothing at all.
+    int origin = -1;
+    if (!road.sheets.isEmpty()) {
+        using enum Facts::Origin;
+        bool said = false;
+        bool taken = false;
+        for (const Facts::Sheet &sheet : road.sheets) {
+            for (const Facts::Field &field : sheet.fields) {
+                said = said || field.origin == Said;
+                taken = taken || field.origin == Taken;
+            }
+        }
+        Facts::Origin read = Missing;
+        if (said)
+            read = Said;
+        else if (taken)
+            read = Taken;
+        origin = std::to_underlying(read);
+    }
+    return Words::lineAbout(road.node.level, below(road.node, Manifest::Level::Work),
+                            below(road.node, Manifest::Level::Edition),
+                            stateOfNode(road.node, answeredBy(*this)).text, origin);
 }
 
 QString Card::checking(quint64 walking) const
@@ -320,17 +391,93 @@ QString Card::checking(quint64 walking) const
     // gigabytes go past has no other way to know the verification is over.
     if (road.checked)
         return Words::announcing();
-    // And only for the one folder actually on the pool does the word name a hash in
-    // progress. Everything else reaching here is « en attente », for one of two
-    // reasons that read the same from this side: a shelf of a dozen series queues
-    // every one of them at `Asking` and only walks one at a time, so the eleven still
-    // waiting their turn are not stuck — showing them a count frozen at zero would say
-    // they were; and a walk with `verifying` off never sets `m_walkingToken` at all
-    // (see `describe()`), because a stat-only pass is over before a second progress
-    // report could matter, which is also exactly why the spec is explicit that without
-    // checksums no card passes through « Vérification » — the finding alone suffices.
-    return token == walking ? Words::checking(road.hashed, road.node.volumes())
-                            : Words::waitingToBeChecked();
+    // And only the one folder actually on the pool carries a count. A shelf of a dozen
+    // series queues every one of them at `Asking` and walks one at a time, so the eleven
+    // still waiting their turn are not stuck — showing them a count frozen at zero would
+    // say they were. The one walking says « Vérification » when it hashes and « Lecture »
+    // when it does not: without a checksum it still opens every archive, which is not a
+    // verification and is no longer over before a second report could matter.
+    if (token != walking)
+        return Words::waitingToBeChecked();
+    return road.hashing ? Words::checking(road.hashed, road.node.volumes())
+                        : Words::reading(road.hashed, road.node.volumes());
+}
+
+QVariantMap Card::progress(quint64 walking) const
+{
+    using enum Card::Counting;
+    // A file, or a folder that failed, holds nothing to count: its volumes would otherwise
+    // weigh in the drop's total without ever being read.
+    const bool counts = folder && stage != Stage::Failed;
+    const qint64 whole = counts ? road.node.volumes() : 0;
+    Counting state = None;
+    qint64 done = 0;
+    QString uncovered;
+    if (counts) {
+        if (road.described) {
+            state = Over;
+            done = whole;
+            // A walk that hashed and could not hash the members of some archive sent that
+            // volume as a file alone: its pages are not covered, and the line must not say
+            // « Vérifié » as if they were.
+            if (road.hashing)
+                uncovered = digestTroubleOf(road.tree);
+        } else if (token == walking) {
+            // The one on the pool. The others are queued behind it and have read nothing:
+            // a count frozen at zero on each of them would say they were stuck.
+            state = Walking;
+            done = road.hashed;
+        } else {
+            state = Waiting;
+        }
+    }
+    return {{u"state"_s, std::to_underlying(state)},
+            {u"done"_s, done},
+            {u"whole"_s, whole},
+            {u"hashing"_s, road.hashing},
+            {u"uncovered"_s, uncovered}};
+}
+
+bool Card::walked(const QString &relative) const
+{
+    const auto named = [&relative](const Manifest::Entry &entry) { return entry.path == relative; };
+    return std::ranges::any_of(road.tree.files, named)
+           || std::ranges::any_of(road.tree.covers, named) || !pickedSource(relative).isEmpty();
+}
+
+QString Card::pickedSource(const QString &relative) const
+{
+    for (const CoverPick &one : road.picked) {
+        if (one.entry.path == relative)
+            return one.source;
+    }
+    return {};
+}
+
+bool Card::coverPicked(const QString &at) const
+{
+    return road.picked.contains(at);
+}
+
+QString Card::coverOf(const QString &at) const
+{
+    if (const auto one = road.picked.constFind(at); one != road.picked.cend())
+        return one->source;
+    for (const Manifest::Entry &cover : road.tree.covers) {
+        const qsizetype slash = cover.path.lastIndexOf(u'/');
+        if ((slash < 0 ? QString() : cover.path.left(slash)) == at)
+            return QDir(path).filePath(cover.path);
+    }
+    return {};
+}
+
+QString Card::coversSaid() const
+{
+    QStringList said;
+    for (const auto &[at, one] : road.picked.asKeyValueRange())
+        said << at + u'\n' + one.source;
+    said.sort();
+    return said.join(u'\n');
 }
 
 qint64 Card::sizeOf(const QString &relative) const
@@ -338,6 +485,14 @@ qint64 Card::sizeOf(const QString &relative) const
     for (const Manifest::Entry &entry : road.tree.files) {
         if (entry.path == relative)
             return entry.size;
+    }
+    for (const Manifest::Entry &entry : road.tree.covers) {
+        if (entry.path == relative)
+            return entry.size;
+    }
+    for (const CoverPick &one : road.picked) {
+        if (one.entry.path == relative)
+            return one.entry.size;
     }
     return 0;
 }

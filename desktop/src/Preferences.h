@@ -33,6 +33,7 @@ class Preferences : public QObject
     /// and the palette it resolves to is the desktop's business.
     Q_PROPERTY(Appearance appearance READ appearance NOTIFY changed)
     Q_PROPERTY(QString appearanceTitle READ appearanceTitle CONSTANT)
+    Q_PROPERTY(QString readerDefaultsTitle READ readerDefaultsTitle CONSTANT)
     /// `[{ value, label, icon }]`, in the order they are offered.
     Q_PROPERTY(QVariantList appearances READ appearances CONSTANT)
 
@@ -73,8 +74,8 @@ class Preferences : public QObject
     Q_PROPERTY(QString cornerLabel READ cornerLabel NOTIFY changed)
     Q_PROPERTY(bool anythingBubbles READ anythingBubbles NOTIFY changed)
 
-    /// How the reader lays pages out and what it fits them to, kept per device like the rest:
-    /// a window and a screen are this machine's, not the library's.
+    /// How the reader lays pages out and what it fits them to. Kept on this machine and, once a
+    /// profile is reading, on the server under that profile (see `synced`).
     Q_PROPERTY(PageLayout pageLayout READ pageLayout NOTIFY changed)
     Q_PROPERTY(Fit fit READ fit NOTIFY changed)
     /// What is behind the pages, and how a page that comes takes the place of the one that
@@ -83,6 +84,16 @@ class Preferences : public QObject
     /// this desk like the layout.
     Q_PROPERTY(Backdrop backdrop READ backdrop NOTIFY changed)
     Q_PROPERTY(Motion motion READ motion NOTIFY changed)
+    /// A webtoon's reading, on this desk and for every webtoon (the card says so): how far a
+    /// notch of the wheel or a stroke of the pad moves the strip, and how fast its A goes —
+    /// eleven steps each, 0 to 10, the choice of 24/11/2026 (between ten and fifteen, and no
+    /// values running to infinity) — then when its bars go and come back.
+    Q_PROPERTY(int stripSensitivity READ stripSensitivity NOTIFY changed)
+    Q_PROPERTY(int stripAutoSpeed READ stripAutoSpeed NOTIFY changed)
+    Q_PROPERTY(StripControls stripControls READ stripControls NOTIFY changed)
+    /// The bars come back after five seconds without scrolling as well — with `Discreet` or
+    /// `OnTheWayUp`; with `OnClick` scrolling never sends them away to begin with.
+    Q_PROPERTY(bool stripAtRest READ stripAtRest NOTIFY changed)
 
 public:
     enum class Appearance { System, Light, Dark };
@@ -123,6 +134,15 @@ public:
     /// read — so `Slide`, and the reader who wants less says it here.
     enum class Motion { Slide, Fade, Instant };
     Q_ENUM(Motion)
+    /// When a webtoon's bars go: going down, back at a click or Tab (`Discreet`); going down,
+    /// back after a quarter of a screen going up as well (`OnTheWayUp`); never by scrolling
+    /// (`OnClick`). « Always there » was refused on 24/11/2026.
+    enum class StripControls { Discreet, OnTheWayUp, OnClick };
+    Q_ENUM(StripControls)
+    /// The middle of the eleven steps, and the A's third: slow enough to read at the first try.
+    static constexpr int MiddleStep = 5;
+    static constexpr int AutoStep = 3;
+    static constexpr int LastStep = 10;
 
     explicit Preferences(QObject *parent = nullptr);
 
@@ -130,6 +150,7 @@ public:
 
     Appearance appearance() const { return m_appearance; }
     QString appearanceTitle() const;
+    QString readerDefaultsTitle() const;
     QVariantList appearances() const;
 
     Q_INVOKABLE void chooseAppearance(Appearance wanted);
@@ -138,10 +159,32 @@ public:
     Q_INVOKABLE void choosePageLayout(PageLayout wanted);
     Fit fit() const { return m_fit; }
     Q_INVOKABLE void chooseFit(Fit wanted);
+    /// What a webtoon's strip keeps on this device, in logical pixels, 0 for nothing kept: the
+    /// width its chapters are drawn at, the width it started at (its 100 %), and the width
+    /// one chapter keeps apart from the others. A width and not a factor: a series mixes
+    /// chapters scanned at 720 and at 1080 pixels, and one factor drew them at two widths.
+    /// Not synced — a width in pixels is this screen's, and another device's would be wrong.
+    struct Strip
+    {
+        double width = 0;
+        double base = 0;
+        double chapter = 0;
+    };
+    Strip strip(const QString &series, const QString &entry) const;
+    /// Writes all three; a `chapter` of 0 forgets the chapter's own.
+    void keepStrip(const QString &series, const QString &entry, const Strip &kept);
     Backdrop backdrop() const { return m_backdrop; }
     Q_INVOKABLE void chooseBackdrop(Backdrop wanted);
     Motion motion() const { return m_motion; }
     Q_INVOKABLE void chooseMotion(Motion wanted);
+    int stripSensitivity() const { return m_stripSensitivity; }
+    Q_INVOKABLE void chooseStripSensitivity(int step);
+    int stripAutoSpeed() const { return m_stripAutoSpeed; }
+    Q_INVOKABLE void chooseStripAutoSpeed(int step);
+    StripControls stripControls() const { return m_stripControls; }
+    Q_INVOKABLE void chooseStripControls(StripControls wanted);
+    bool stripAtRest() const { return m_stripAtRest; }
+    Q_INVOKABLE void chooseStripAtRest(bool wanted);
     /// What `Auto` resolves to for this window; a fixed choice ignores the window.
     Spreads::Layout layoutFor(QSizeF window) const;
 
@@ -152,6 +195,23 @@ public:
     /// Remembers where a picker was used. Takes the folder itself, or the folder a chosen
     /// file sits in — what a reader wants next time is the place, not the thing.
     Q_INVOKABLE void rememberPlace(const QUrl &place);
+    /// How the window stood when it was closed, `{width, height, maximized}`; empty before
+    /// it ever was. Written at the close and not at every resize: a harness that resizes its
+    /// window would otherwise hand the next window the size of the last.
+    Q_INVOKABLE QVariantMap windowFrame() const;
+    Q_INVOKABLE void rememberWindow(int width, int height, bool maximized);
+
+    /// The few choices that follow the reader rather than the machine, as the words they are
+    /// written under: `{layout, fit, backdrop, motion, volumesAsGrid}`. The window, the
+    /// appearance (a lit room is this desk's), the bubbles and the picker's place stay here:
+    /// they describe this machine and its desktop, and a profile that read on another one
+    /// would be handed a window it does not fit.
+    QVariantMap synced() const;
+    /// Takes what the server holds for the profile now reading. A key that is missing keeps
+    /// what this machine has — a profile that never chose is not reset to the defaults, which
+    /// is also how an existing install keeps its choices the first time — and a key this
+    /// version does not know is left alone. Said back to nobody: it is the server's own word.
+    void adopt(const QVariantMap &held);
 
     QVariantList warnings() const;
     QString warningsTitle() const;
@@ -183,8 +243,13 @@ signals:
     /// The choice moved. `Theme` listens: it is the one that knows what a palette is, and
     /// this is the one that knows what was asked for.
     void appearanceChosen(Appearance wanted);
+    /// One of `synced()`'s choices was made here, by the reader, and the server should hear
+    /// it. Not said for `adopt`: echoing the server's answer back to it is a write for nothing.
+    void syncedChanged(const QVariantMap &kept);
 
 private:
+    void announce();
+    bool m_adopting = false;
     /// Its own file, named here rather than in the constructor's list: one place says
     /// where Leaf's preferences live, and it is the line that declares the member.
     QSettings m_file{QSettings::IniFormat, QSettings::UserScope, QStringLiteral("Leaf"),
@@ -196,6 +261,12 @@ private:
     Fit m_fit = Fit::Height;
     Backdrop m_backdrop = Backdrop::Black;
     Motion m_motion = Motion::Slide;
+    int m_stripSensitivity = MiddleStep;
+    int m_stripAutoSpeed = AutoStep;
+    StripControls m_stripControls = StripControls::Discreet;
+    bool m_stripAtRest = false;
+    /// Writes one of a webtoon's choices, which this desk keeps and the profile does not.
+    void keepHere(const QString &key, const QVariant &value);
     /// Everything on, except the desktop for a download: a copy saved in two seconds wakes
     /// nobody. It is being pestered that makes somebody open this screen, not silence.
     QHash<Warns, bool> m_bubbles;

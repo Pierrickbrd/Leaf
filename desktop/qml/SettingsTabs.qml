@@ -2,12 +2,15 @@
 //
 // The same shape and not a new one: a screen with one grammar of choosing between views is
 // a screen a reader learns once. What differs is what they hold, which is the only thing
-// that should differ.
+// that should differ — and so they stand on the same `PageStrip`: centred in a band of 56,
+// these stood 11 pixels under the bar where the search's stood 9 and the shelf's band 16.
+// And with no rule under them, as the search's have none: the one strip with a rule made two
+// pages two grammars. The way back leads them, as it leads the series page's strip.
 
 import QtQuick
 import Leaf
 
-Item {
+PageStrip {
     id: tabs
 
     /// `[{ name, label }]`, worded in C++ like everything else a reader sees.
@@ -15,12 +18,8 @@ Item {
     property int currentIndex: 0
 
     signal selected(int index)
-    /// The way out of this page. It sits with the tabs and not in the application bar: a
-    /// control that leaves a page belongs to that page, and the bar's row is the shelf's.
-    signal wentBack()
 
     objectName: "settings-tabs"
-    height: 56
 
     function tabAt(position) {
         return tabRepeater.itemAt(position)
@@ -31,29 +30,18 @@ Item {
         return back.visible ? back : tabRepeater.itemAt(0)
     }
 
-    Rectangle {
-        anchors.fill: parent
-        color: Theme.paper
-    }
-
-    BarButton {
+    BackButton {
         id: back
 
-        objectName: "back-button"
-        x: Widths.shelfMargin
-        anchors.verticalCenter: parent.verticalCenter
-        visible: Navigation.canGoBack
+        // Qt's own Tab order walks this page, as it walks the tabs after it.
         activeFocusOnTab: visible
-        source: "assets/icons/arrow_back.svg"
-        label: Navigation.backLabel
-        onTriggered: tabs.wentBack()
     }
 
     Row {
-        x: back.visible ? back.x + back.width + 14 : Widths.shelfMargin
-        anchors.verticalCenter: parent.verticalCenter
+        id: tabRow
+
         height: 34
-        spacing: 6
+        spacing: Widths.space.pill
 
         Repeater {
             id: tabRepeater
@@ -117,6 +105,7 @@ Item {
 
                     objectName: tab.objectName + "-text"
                     anchors.centerIn: parent
+                    textFormat: Text.PlainText
                     text: tab.modelData.label
                     color: tab.chosen ? Theme.emerald : Theme.inkSoft
                     font.family: Theme.textFamily
@@ -125,14 +114,5 @@ Item {
                 }
             }
         }
-    }
-
-    Rectangle {
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        height: 1
-        color: Theme.rule
-        opacity: Theme.dark ? 0.7 : 0.45
     }
 }

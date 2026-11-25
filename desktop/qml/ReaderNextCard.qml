@@ -37,6 +37,11 @@ Item {
     signal stayRequested()
 
     readonly property bool followed: Reader.next.entryId !== undefined
+    /// 22, and not the 16 of every other card (`Widths.space.card`), on purpose: this is the
+    /// one card that is the whole screen for as long as it is up — alone over a veiled page,
+    /// a cover and a filled button inside it — and it is given the room of a page, not of a
+    /// panel. Kept by name when the reader's two other cards took the common padding (spacing
+    /// audit, 23/10/2026).
     readonly property int padding: Widths.scale.size(22)
 
     /// Whether a point of the view is on the card itself and not on the veil round it.
@@ -179,6 +184,9 @@ Item {
 
                     LeafTextAction {
                         objectName: "reader-end-back"
+                        // A stop, as the button above it is: Enter reached that one alone,
+                        // and the two ways out were the hand's.
+                        activeFocusOnTab: visible
                         label: ReaderCaptions.backToSeries
                         quiet: true
                         scaled: true
@@ -187,6 +195,7 @@ Item {
 
                     LeafTextAction {
                         objectName: "reader-end-stay"
+                        activeFocusOnTab: visible
                         label: ReaderCaptions.stayHere
                         quiet: true
                         scaled: true

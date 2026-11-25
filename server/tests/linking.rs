@@ -49,6 +49,62 @@ async fn a_library_with_no_key_and_no_device_is_open_on_the_loopback() {
     assert_eq!(StatusCode::OK, status);
 }
 
+/// The same request, naming the host it was addressed to.
+fn addressed_to(host: &str) -> Request<Body> {
+    Request::builder()
+        .uri("/series")
+        .header("host", host)
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_open_library_answers_only_to_a_name_of_this_machine() {
+    // A page in a browser on this machine can have a name of its own resolve to 127.0.0.1
+    // (DNS rebinding) and then read and delete as the open library allows: the browser's
+    // protection is the origin, and the origin is that name. Only a name of this machine
+    // opens the door, whatever port or brackets it carries.
+    let server = Server::new();
+    for host in [
+        "localhost:8081",
+        "127.0.0.1:9099",
+        "[::1]:8081",
+        "LocalHost",
+    ] {
+        let (status, _) = server.send_to(keyless(&server), addressed_to(host)).await;
+        assert_eq!(StatusCode::OK, status, "{host} is this machine");
+    }
+    for host in [
+        "evil.example",
+        "evil.example:8081",
+        "127.0.0.1.evil.example",
+        "10.0.0.5:8081",
+    ] {
+        let (status, _) = server.send_to(keyless(&server), addressed_to(host)).await;
+        assert_ne!(StatusCode::OK, status, "{host} is not this machine");
+    }
+}
+
+#[tokio::test]
+async fn every_answer_forbids_the_guessing_of_its_type() {
+    use tower::ServiceExt;
+    let server = Server::new();
+    for uri in ["/health", "/series", "/no/such/route"] {
+        let response = leaf_server::api::routes::router(keyless(&server))
+            .oneshot(anonymous(uri))
+            .await
+            .expect("a response");
+        assert_eq!(
+            Some("nosniff"),
+            response
+                .headers()
+                .get("x-content-type-options")
+                .and_then(|v| v.to_str().ok()),
+            "{uri}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn linking_the_first_device_closes_a_library_that_was_open() {
     let server = Server::new();
@@ -376,6 +432,34 @@ async fn an_expired_code_is_a_410_and_counts_against_the_throttle() {
     let fresh = a_terminal_code(&server);
     let (status, _) = server.send_to(state, exchange(&fresh, "Liseuse")).await;
     assert_eq!(StatusCode::TOO_MANY_REQUESTS, status);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_burst_of_wrong_codes_gets_the_allowance_and_not_one_guess_more() {
+    // Checked and then counted, the allowance was only looked at before the check: forty
+    // requests sent together all passed it, and all were answered. Counted as they begin, a
+    // guess in flight holds its place, and what is past the allowance is refused unread.
+    let server = Server::new();
+    let state = keyless(&server);
+
+    let answers = futures_util::future::join_all((0..40).map(|_| {
+        let state = state.clone();
+        let server = &server;
+        async move {
+            server
+                .send_to(state, exchange("ABCD-EFGH", "Liseuse"))
+                .await
+                .0
+        }
+    }))
+    .await;
+
+    let guessed = answers.iter().filter(|s| **s == StatusCode::GONE).count();
+    assert!(
+        guessed <= 10,
+        "{guessed} guesses were answered, ten are allowed"
+    );
+    assert!(answers.contains(&StatusCode::TOO_MANY_REQUESTS));
 }
 
 #[tokio::test]
@@ -949,6 +1033,27 @@ async fn health_tells_a_linked_device_whether_another_one_can_be_linked() {
     );
     let (_, body) = server.send_to(network, keyed(&key)).await;
     assert_eq!(serde_json::json!(true), body["relay"], "{body}");
+}
+
+#[tokio::test]
+async fn health_tells_a_recognised_key_which_release_answers() {
+    let server = Server::new();
+    let key = server.linked_device("PC du salon");
+    let (_, body) = server
+        .send_to(
+            through_a_tunnel(server.state()),
+            request("GET", "/health", &key).body(Body::empty()).unwrap(),
+        )
+        .await;
+    // The file the release is cut from, not a literal: the build refuses a Cargo.toml that
+    // disagrees with it, so this is the one number there is.
+    let released =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../VERSION")).unwrap();
+    assert_eq!(
+        serde_json::json!(released.trim()),
+        body["version"],
+        "{body}"
+    );
 }
 
 #[tokio::test]

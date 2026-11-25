@@ -3,104 +3,10 @@
 #include "Words.h"
 
 #include <QDebug>
-#include <QJsonArray>
 #include <QUrlQuery>
 #include <QVariantMap>
 
 using namespace Qt::StringLiterals;
-
-namespace {
-
-/// One `{label, value}` pair, or nothing when the value is not recorded. « Collection : — »
-/// is a line that says a fact is missing; leaving it out says the same and takes no room.
-void pair(QVariantList &into, Words::Fact which, const QString &value)
-{
-    if (value.trimmed().isEmpty())
-        return;
-    into.append(QVariantMap{{u"label"_s, Words::fact(which)}, {u"value"_s, value}});
-}
-
-/// The same, for the one line that is painted in the alert colour rather than in ink.
-void alarming(QVariantList &into, const QString &label, const QString &value)
-{
-    if (value.isEmpty())
-        return;
-    into.append(QVariantMap{{u"label"_s, label}, {u"value"_s, value}, {u"alarming"_s, true}});
-}
-
-QVariantList credits(const Api::Series &one)
-{
-    using enum Words::Fact;
-    QVariantList said;
-    const Api::Credits &by = one.credits;
-    QStringList writers = by.authors;
-    if (writers.isEmpty() && by.author.has_value())
-        writers << *by.author;
-    pair(said, Writers, writers.join(u", "_s));
-    pair(said, Artists, by.artists.join(u", "_s));
-    pair(said, Publisher, one.publication.publisher.value_or(QString()));
-    pair(said, Collection, one.publication.collection.value_or(QString()));
-    if (const auto &tag = one.publication.language; tag && !tag->isEmpty())
-        pair(said, Language, Words::language(*tag));
-    return said;
-}
-
-QVariantList nature(const Api::Series &one)
-{
-    using enum Words::Fact;
-    QVariantList said;
-    if (one.medium.has_value())
-        pair(said, Kind, Words::medium(*one.medium));
-    if (one.readingDirection.has_value())
-        pair(said, Direction, Words::readingDirection(*one.readingDirection));
-    if (one.run.has_value()) {
-        QString said_ =
-            Words::editionStatus(*one.run == Api::Run::Completed ? u"completed"_s
-                                                                    : u"ongoing"_s);
-        // What the publisher announces, beside the state of the run — the two are one line
-        // because « en cours » alone leaves « of how many? » unanswered.
-        if (const auto declared = one.publication.declaredVolumes; declared.has_value())
-            said_ += u" · "_s + Words::volumes(*declared, one.medium)
-                     + (*declared >= 2 ? u" annoncés"_s : u" annoncé"_s);
-        pair(said, Status, said_);
-    }
-    pair(said, Age, one.ageRating.value_or(QString()));
-    if (one.colour.has_value())
-        pair(said, Colour, Words::colour(*one.colour));
-    return said;
-}
-
-QVariantList holding(const Api::Series &one)
-{
-    using enum Words::Fact;
-    QVariantList said;
-    const Api::Holding &has = one.holding;
-    const int ceiling = one.publication.declaredVolumes.value_or(0);
-    pair(said, Held, Words::heldOutOf(has.ownedVolumes, ceiling));
-    // The only place that says a volume is missing, and the only line painted in alert.
-    alarming(said, Words::missingLabel(int(has.missingVolumes.size())),
-             Words::missingVolumes(has.missingVolumes));
-    if (has.readEntries > 0 || has.partRead > 0.0) {
-        const bool open = has.partRead > 0.0;
-        pair(said, Read,
-             Words::readEntries(has.readEntries, open, has.readEntries + 1));
-    }
-    return said;
-}
-
-QVariantList received(const Api::Series &one)
-{
-    using enum Words::Fact;
-    QVariantList said;
-    const Api::Holding &has = one.holding;
-    if (has.addedAt.has_value())
-        pair(said, FirstReceived, Words::moment(*has.addedAt));
-    if (has.lastAddedAt.has_value())
-        pair(said, LastReceived, Words::moment(*has.lastAddedAt));
-    return said;
-}
-
-} // namespace
 
 Series *Series::create(QQmlEngine *engine, QJSEngine *)
 {
@@ -116,6 +22,7 @@ Series *Series::create(QQmlEngine *engine, QJSEngine *)
 Series::Series(Server *server, QObject *parent)
     : QObject(parent)
     , m_server(server)
+    , m_description(new Description(this))
 {
 }
 
@@ -139,6 +46,11 @@ QString Series::edition() const
     return m_one && m_one->edition ? *m_one->edition : QString();
 }
 
+bool Series::webtoon() const
+{
+    return m_one && m_one->medium == Api::Medium::Webtoon;
+}
+
 QString Series::cover() const
 {
     if (!m_one || !m_server)
@@ -146,43 +58,7 @@ QString Series::cover() const
     // Resolved server-side — « one request, not one to find the first entry and another for
     // its cover ». And it is the edition's own: the Intégrale shows its first volume, not the
     // albums'.
-    return m_server->address() + u"/series/"_s + m_one->id + u"/cover"_s;
-}
-
-QString Series::makers() const
-{
-    return m_one ? Words::makers(*m_one) : QString();
-}
-
-QString Series::weights() const
-{
-    return m_one ? Words::weights(*m_one) : QString();
-}
-
-QStringList Series::genres() const
-{
-    if (!m_one)
-        return {};
-    // Genres and tags, in that order and never folded together: measured, a work carries one
-    // genre and seven tags with nothing in common between the two lists.
-    QStringList said = m_one->genres;
-    said += m_one->tags;
-    return said;
-}
-
-QString Series::summary() const
-{
-    return m_one && m_one->summary ? *m_one->summary : QString();
-}
-
-QVariantMap Series::facts() const
-{
-    if (!m_one)
-        return {};
-    return {{u"credits"_s, credits(*m_one)},
-            {u"nature"_s, nature(*m_one)},
-            {u"holding"_s, holding(*m_one)},
-            {u"received"_s, received(*m_one)}};
+    return m_server->address() + u"/series/"_s + Server::segment(m_one->id) + u"/cover"_s;
 }
 
 QVariantList Series::editions() const
@@ -199,10 +75,10 @@ QVariantList Series::editions() const
             // An implicit edition has no name of its own — nothing would ever show it — so
             // the work's name stands in rather than a blank pill.
             {u"name"_s, one.edition.value_or(one.work)},
-            {u"detail"_s, Words::volumes(one.holding.ownedVolumes, one.medium)},
+            {u"detail"_s, Words::holdings(one)},
             {u"cover"_s, m_server == nullptr
                              ? QString()
-                             : m_server->address() + u"/series/"_s + one.id + u"/cover"_s},
+                             : m_server->address() + u"/series/"_s + Server::segment(one.id) + u"/cover"_s},
             {u"inProgress"_s, one.holding.readStatus == Api::ReadStatus::InProgress},
             {u"howFarRead"_s, Api::howFarRead(one)},
             {u"here"_s, one.id == m_id},
@@ -229,6 +105,11 @@ QVariantList Series::missingVolumes() const
     for (const double one : m_one->holding.missingVolumes)
         said.append(one);
     return said;
+}
+
+int Series::volumeCount() const
+{
+    return m_one.has_value() ? m_one->holding.ownedVolumes : 0;
 }
 
 int Series::arcCount() const

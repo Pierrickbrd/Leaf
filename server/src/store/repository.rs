@@ -12,10 +12,11 @@ use rusqlite::Row;
 use std::collections::HashMap;
 
 use crate::api::dto::{
-    ArcDto, ChapterDto, EntryDto, FacetDto, FacetsDto, PageDto, ReadingOrderDto, ReadingStepDto,
-    SearchHitDto, SearchPageDto, SeriesDto, SeriesFilter, SeriesSort, SortDirection, UniverseDto,
-    UNREAD,
+    ArcDto, ChapterDto, EntryDto, ExportedEntryDto, ExportedSeriesDto, FacetDto, FacetsDto,
+    PageDto, ReadingExportDto, ReadingOrderDto, ReadingStepDto, SearchHitDto, SearchPageDto,
+    SeriesDto, SeriesFilter, SeriesSort, SortDirection, UniverseDto, UNREAD,
 };
+use crate::store::naming::{file_name, Parts};
 use crate::store::text::{composed_name, gaps, nearest, search_key, tolerance};
 use crate::store::{Cx, Db};
 
@@ -228,6 +229,14 @@ impl<'a> Repository<'a> {
             ));
             args.extend(filter.authors.iter().map(|a| Value::Text(search_key(a))));
         }
+        if !filter.artists.is_empty() {
+            // The facet of drawers was offered and choosing one filtered nothing.
+            clauses.push(format!(
+                "EXISTS (SELECT 1 FROM work_artist a WHERE a.work_id = w.id AND a.key IN ({}))",
+                marks(filter.artists.len())
+            ));
+            args.extend(filter.artists.iter().map(|a| Value::Text(search_key(a))));
+        }
         clauses.extend(ceiling.on_work("w"));
 
         Where {
@@ -319,10 +328,11 @@ impl<'a> Repository<'a> {
         };
 
         let sql = format!(
-            "SELECT e.id, e.name AS edition, COALESCE(e.status, w.status) AS status, e.volume_count,
-                    e.publisher, e.language, e.collection, e.colour,
+            "SELECT e.id, e.name AS edition, e.cover_file, COALESCE(e.status, w.status) AS status, e.volume_count,
+                    e.publisher, e.language, e.collection, e.colour, e.cover_volume,
                     w.id AS work_id, w.name AS work,
-                    w.age_rating, COALESCE(e.summary, w.summary) AS summary,
+                    w.declared_authors, w.declared_artists,
+                    w.age_rating, COALESCE(e.summary, w.summary) AS summary, e.summary AS own_summary,
                     COALESCE(e.medium, w.medium) AS medium,
                     COALESCE(e.reading_direction, w.reading_direction) AS reading_direction,
                     rc.reading_direction AS reading_direction_chosen,
@@ -393,15 +403,21 @@ impl<'a> Repository<'a> {
                     universe_id: r.get("universe_id")?,
                     one_shot_entry: r.get("one_shot_entry")?,
                     summary: r.get("summary")?,
+                    own_summary: r.get("own_summary")?,
                     universe,
                     work,
                     edition,
                     author: None,
                     authors: Vec::new(),
                     artists: Vec::new(),
+                    declared_authors: names(r.get("declared_authors")?),
+                    declared_artists: names(r.get("declared_artists")?),
                     medium: r.get("medium")?,
                     reading_direction: r.get("reading_direction")?,
                     reading_direction_chosen: r.get("reading_direction_chosen")?,
+                    cover_image: r
+                        .get::<_, Option<String>>("cover_file")?
+                        .is_some_and(|f| crate::scan::covers::is_own(&f)),
                     status: r.get("status")?,
                     read_status: r.get("read_status")?,
                     declared_volumes: r.get("volume_count")?,
@@ -419,6 +435,7 @@ impl<'a> Repository<'a> {
                     publisher: r.get("publisher")?,
                     collection: r.get("collection")?,
                     colour: colour.map(|c| c != 0),
+                    cover_volume: r.get("cover_volume")?,
                     language: r.get("language")?,
                     added_at: r.get("added_at")?,
                     last_added_at: r.get("last_added_at")?,
@@ -874,6 +891,9 @@ impl<'a> Repository<'a> {
             statuses: self.facet("COALESCE(e.status, w.status)", ceiling)?,
             languages: self.facet("e.language", ceiling)?,
             publishers: self.facet("e.publisher", ceiling)?,
+            tags: self.name_facet("work_tag", ceiling)?,
+            artists: self.name_facet("work_artist", ceiling)?,
+            collections: self.facet("e.collection", ceiling)?,
         })
     }
 
@@ -899,6 +919,7 @@ impl<'a> Repository<'a> {
             publishers: self.file_facet("e.publisher", "", query, c)?,
             authors: self.file_name_facet("work_author", query, c)?,
             genres: self.file_name_facet("work_genre", query, c)?,
+            ..FacetsDto::default()
         })
     }
 
@@ -1026,12 +1047,16 @@ impl<'a> Repository<'a> {
     pub fn entries(&self, edition_id: &str, ceiling: &Ceiling) -> Result<Option<Vec<EntryDto>>> {
         let sql = format!(
             "SELECT x.id AS present, x.*,
-                    (SELECT COUNT(*) FROM chapter c WHERE c.entry_id = x.id) AS chapter_count
+                    (SELECT COUNT(*) FROM chapter c WHERE c.entry_id = x.id) AS chapter_count,
+                    {NAMING}, {}, {}
              FROM edition ed
              JOIN work w ON w.id = ed.work_id
+             LEFT JOIN universe u ON u.id = w.universe_id
              LEFT JOIN entry x ON x.edition_id = ed.id
              WHERE ed.id = ?1{}
              ORDER BY x.sort_key, x.file",
+            credits_of("x"),
+            opening_of("x"),
             ceiling.and_work("w")
         );
         let rows = self
@@ -1040,10 +1065,97 @@ impl<'a> Repository<'a> {
         Ok(held(rows))
     }
 
+    /// Every series the caller may see with each of its files and the profile's place in it,
+    /// in one statement however large the library: a statement per series is the cost that
+    /// only shows on a library nobody tested.
+    pub fn reading_export(
+        &self,
+        profile: &str,
+        ceiling: &Ceiling,
+        exported_at: i64,
+    ) -> Result<ReadingExportDto> {
+        let mine = literal(profile);
+        let sql = format!(
+            "SELECT ed.id, w.name, ed.name, u.name,
+                    x.id, x.type, x.volume_number, x.title, x.page_count,
+                    p.page, p.finished, p.times_finished, p.updated_at
+             FROM edition ed
+             JOIN work w ON w.id = ed.work_id
+             LEFT JOIN universe u ON u.id = w.universe_id
+             LEFT JOIN entry x ON x.edition_id = ed.id
+             LEFT JOIN progress p ON p.entry_id = x.id AND p.profile_id = {mine}
+             WHERE 1 = 1{}
+             ORDER BY LOWER(w.name), LOWER(COALESCE(ed.name, '')), ed.id, x.sort_key, x.file",
+            ceiling.and_work("w")
+        );
+        let rows = self.db.read(|cx| {
+            cx.query(&sql, [], |r| {
+                let entry = if r.get_ref(4)? == rusqlite::types::ValueRef::Null {
+                    None
+                } else {
+                    let page = r.get::<_, Option<i64>>(9)?.unwrap_or(0);
+                    let finished = r.get::<_, Option<bool>>(10)?.unwrap_or(false);
+                    Some(ExportedEntryDto {
+                        id: r.get(4)?,
+                        kind: r.get(5)?,
+                        number: r.get(6)?,
+                        title: r.get(7)?,
+                        page_count: r.get(8)?,
+                        read_status: if finished {
+                            "READ"
+                        } else if page > 0 {
+                            "IN_PROGRESS"
+                        } else {
+                            "UNREAD"
+                        },
+                        page,
+                        times_finished: r.get::<_, Option<i64>>(11)?.unwrap_or(0),
+                        updated_at: r.get(12)?,
+                    })
+                };
+                Ok((
+                    ExportedSeriesDto {
+                        id: r.get(0)?,
+                        work: r.get(1)?,
+                        edition: r.get(2)?,
+                        universe: r.get(3)?,
+                        entries: Vec::new(),
+                    },
+                    entry,
+                ))
+            })
+        })?;
+        let mut series: Vec<ExportedSeriesDto> = Vec::new();
+        for (head, entry) in rows {
+            if series.last().map(|s| &s.id) != Some(&head.id) {
+                series.push(head);
+            }
+            if let (Some(entry), Some(last)) = (entry, series.last_mut()) {
+                last.entries.push(entry);
+            }
+        }
+        Ok(ReadingExportDto {
+            exported_at,
+            series,
+        })
+    }
+
+    /// The name a copy of one entry is offered under, for the download itself.
+    pub fn download_name(&self, id: &str, ceiling: &Ceiling) -> Result<Option<String>> {
+        Ok(self.entry(id, ceiling)?.map(|one| one.download_name))
+    }
+
     pub fn entry(&self, id: &str, ceiling: &Ceiling) -> Result<Option<EntryDto>> {
         let sql = format!(
-            "SELECT e.*, (SELECT COUNT(*) FROM chapter c WHERE c.entry_id = e.id) AS chapter_count
-             FROM entry e WHERE e.id = ?1{}",
+            "SELECT e.*, (SELECT COUNT(*) FROM chapter c WHERE c.entry_id = e.id) AS chapter_count,
+                    {NAMING}, {}, {}
+             FROM entry e
+             JOIN edition ed ON ed.id = e.edition_id
+             JOIN work w ON w.id = ed.work_id
+             LEFT JOIN universe u ON u.id = w.universe_id
+             WHERE e.id = ?1{}",
+            credits_of("e"),
+            opening_of("e"),
             ceiling.and_edition("e.edition_id")
         );
         self.db.read(|cx| cx.query_one(&sql, [id], to_entry))
@@ -1215,6 +1327,46 @@ impl<'a> Repository<'a> {
 
 type Grouped<T> = std::collections::HashMap<String, Vec<T>>;
 
+/// The columns `to_entry` needs to name a copy, read in the same statement as the entry: a
+/// separate question per entry would cost the list one more for each of its rows.
+const NAMING: &str = "u.name AS n_universe, w.name AS n_work, ed.name AS n_edition,
+                    (SELECT COUNT(*) FROM edition s WHERE s.work_id = w.id) AS n_editions";
+
+/// Who wrote and who drew the entry under `alias`, read in the statement that reads it, in
+/// the order the scan met them. A question per volume would make the list of a hundred
+/// volumes a hundred questions longer than the list of two.
+fn credits_of(alias: &str) -> String {
+    let list = |table: &str| {
+        format!(
+            "(SELECT json_group_array(name) FROM
+                (SELECT name FROM {table} WHERE entry_id = {alias}.id ORDER BY rowid))"
+        )
+    };
+    format!(
+        "{} AS c_authors, {} AS c_artists",
+        list("entry_author"),
+        list("entry_artist")
+    )
+}
+
+/// The name the first page of the entry under `alias` has inside its archive, read in the
+/// statement that reads it: whether the volume has a cover of its own is written in it
+/// (`archive::opens_without_cover`), and a list asking that once per volume would ask a
+/// hundred times for a hundred volumes.
+fn opening_of(alias: &str) -> String {
+    format!(
+        "(SELECT p.entry_name FROM page p WHERE p.entry_id = {alias}.id AND p.number = 0)
+            AS first_page_name"
+    )
+}
+
+/// A list of names kept as JSON — a series' declared default, or a volume's credits.
+/// Nothing, or something unreadable, is nobody.
+fn names(json: Option<String>) -> Vec<String> {
+    json.and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default()
+}
+
 fn to_entry(r: &Row<'_>) -> rusqlite::Result<EntryDto> {
     let file: String = r.get("file")?;
     Ok(EntryDto {
@@ -1228,12 +1380,45 @@ fn to_entry(r: &Row<'_>) -> rusqlite::Result<EntryDto> {
         // The file name alone, never a path: the client has no use for where it sits on
         // this machine, and it is not a thing to hand out.
         file: file.rsplit('/').next().unwrap_or(&file).to_string(),
+        download_name: {
+            let universe: Option<String> = r.get("n_universe")?;
+            let work: String = r.get("n_work")?;
+            let edition: Option<String> = r.get("n_edition")?;
+            let number: Option<f64> = r.get("volume_number")?;
+            let title: Option<String> = r.get("title")?;
+            let kind: String = r.get("type")?;
+            file_name(&Parts {
+                universe: universe.as_deref(),
+                work: &work,
+                edition: edition.as_deref(),
+                editions: r.get("n_editions")?,
+                chapter: kind == "CHAPTER",
+                number,
+                title: title.as_deref(),
+                file: &file,
+            })
+        },
         size: r.get("size")?,
         isbn: r.get("isbn")?,
         published_on: r.get("published_on")?,
         summary: r.get("summary")?,
         added_at: r.get("added_at")?,
         own_cover: r.get::<_, Option<String>>("cover_file")?.is_some(),
+        cover_image: r
+            .get::<_, Option<String>>("cover_file")?
+            .is_some_and(|f| crate::scan::covers::is_own(&f)),
+        cover_page: r.get("cover_page")?,
+        // What `/entries/{id}/cover` does with the same three columns: nothing chosen and
+        // a first page numbered `001` is the series' cover, shown in this volume's place.
+        borrowed_cover: r.get::<_, Option<i64>>("cover_page")?.is_none()
+            && r.get::<_, Option<String>>("cover_file")?.is_none()
+            && crate::archive::opens_without_cover(
+                r.get::<_, Option<String>>("first_page_name")?.as_deref(),
+            ),
+        authors: names(r.get("c_authors")?),
+        artists: names(r.get("c_artists")?),
+        authors_inherited: r.get("authors_inherited")?,
+        artists_inherited: r.get("artists_inherited")?,
     })
 }
 
@@ -1669,8 +1854,15 @@ impl Repository<'_> {
         let found = self.grouped(ids, |cx, part| {
             cx.query(
                 &format!(
-                    "SELECT e.*, (SELECT COUNT(*) FROM chapter c WHERE c.entry_id = e.id) AS chapter_count
-                     FROM entry e WHERE e.id IN ({}){visible}",
+                    "SELECT e.*, (SELECT COUNT(*) FROM chapter c WHERE c.entry_id = e.id) AS chapter_count,
+                            {NAMING}, {}, {}
+                     FROM entry e
+                     JOIN edition ed ON ed.id = e.edition_id
+                     JOIN work w ON w.id = ed.work_id
+                     LEFT JOIN universe u ON u.id = w.universe_id
+                     WHERE e.id IN ({}){visible}",
+                    credits_of("e"),
+                    opening_of("e"),
                     marks(part.len())
                 ),
                 rusqlite::params_from_iter(part.iter()),

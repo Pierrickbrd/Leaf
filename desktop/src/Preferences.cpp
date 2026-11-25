@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 
+#include <QScopeGuard>
 #include <QVariantMap>
 #include <memory>
 #include <utility>
@@ -138,6 +140,14 @@ QString spell(Preferences::Fit which)
     return u"height"_s;
 }
 
+/// A width read back from the file: nothing that is not a positive number is one.
+double aWidth(const QVariant &held)
+{
+    bool number = false;
+    const double width = held.toDouble(&number);
+    return number && std::isfinite(width) && width > 0 ? width : 0;
+}
+
 Preferences::Fit readFit(const QString &word)
 {
     using enum Preferences::Fit;
@@ -196,6 +206,38 @@ Preferences::Motion readMotion(const QString &word)
     return Slide;
 }
 
+QString spell(Preferences::StripControls which)
+{
+    using enum Preferences::StripControls;
+    switch (which) {
+    case OnTheWayUp:
+        return u"up"_s;
+    case OnClick:
+        return u"click"_s;
+    case Discreet:
+        break;
+    }
+    return u"discreet"_s;
+}
+
+Preferences::StripControls readStripControls(const QString &word)
+{
+    using enum Preferences::StripControls;
+    for (const Preferences::StripControls which : {Discreet, OnTheWayUp, OnClick}) {
+        if (spell(which) == word)
+            return which;
+    }
+    return Discreet;
+}
+
+/// One of the eleven steps, from what the file holds; anything else is `fallback`.
+int aStep(const QVariant &held, int fallback)
+{
+    bool number = false;
+    const int step = held.toInt(&number);
+    return number ? std::clamp(step, 0, Preferences::LastStep) : fallback;
+}
+
 } // namespace
 
 Preferences *Preferences::create(QQmlEngine *, QJSEngine *)
@@ -226,6 +268,10 @@ Preferences::Preferences(QObject *parent)
     m_fit = readFit(m_file.value(u"reader/fit"_s).toString());
     m_backdrop = readBackdrop(m_file.value(u"reader/backdrop"_s).toString());
     m_motion = readMotion(m_file.value(u"reader/motion"_s).toString());
+    m_stripSensitivity = aStep(m_file.value(u"strip/sensitivity"_s), MiddleStep);
+    m_stripAutoSpeed = aStep(m_file.value(u"strip/autoSpeed"_s), AutoStep);
+    m_stripControls = readStripControls(m_file.value(u"strip/controls"_s).toString());
+    m_stripAtRest = m_file.value(u"strip/atRest"_s, false).toBool();
     m_corner = readCorner(m_file.value(u"corner"_s).toString());
 }
 
@@ -351,6 +397,11 @@ QString Preferences::appearanceTitle() const
     return Words::appearance();
 }
 
+QString Preferences::readerDefaultsTitle() const
+{
+    return Words::readerDefaults();
+}
+
 QVariantList Preferences::appearances() const
 {
     return {
@@ -388,6 +439,28 @@ void Preferences::rememberPlace(const QUrl &place)
     m_file.setValue(u"lastPlace"_s, place.toString());
 }
 
+QVariantMap Preferences::windowFrame() const
+{
+    const int width = m_file.value(u"window/width"_s, 0).toInt();
+    const int height = m_file.value(u"window/height"_s, 0).toInt();
+    if (width <= 0 || height <= 0)
+        return {};
+    return {{u"width"_s, width},
+            {u"height"_s, height},
+            {u"maximized"_s, m_file.value(u"window/maximized"_s, false).toBool()}};
+}
+
+void Preferences::rememberWindow(int width, int height, bool maximized)
+{
+    // A maximised window keeps the size it had before, which is the one to come back to when
+    // it is restored: the screen's own is no choice of the reader's.
+    if (!maximized && width > 0 && height > 0) {
+        m_file.setValue(u"window/width"_s, width);
+        m_file.setValue(u"window/height"_s, height);
+    }
+    m_file.setValue(u"window/maximized"_s, maximized);
+}
+
 void Preferences::showVolumesAsGrid(bool asGrid)
 {
     if (asGrid == m_volumesAsGrid)
@@ -398,6 +471,7 @@ void Preferences::showVolumesAsGrid(bool asGrid)
     // Once. It was said before the write and again after it, which is two notifications for
     // one fact and one redraw of everything bound to this object for nothing.
     emit changed();
+    announce();
 }
 
 void Preferences::choosePageLayout(PageLayout wanted)
@@ -408,6 +482,7 @@ void Preferences::choosePageLayout(PageLayout wanted)
     m_file.setValue(u"reader/layout"_s, spell(wanted));
     m_file.sync();
     emit changed();
+    announce();
 }
 
 void Preferences::chooseFit(Fit wanted)
@@ -418,6 +493,28 @@ void Preferences::chooseFit(Fit wanted)
     m_file.setValue(u"reader/fit"_s, spell(wanted));
     m_file.sync();
     emit changed();
+    announce();
+}
+
+Preferences::Strip Preferences::strip(const QString &series, const QString &entry) const
+{
+    const QString at = u"strips/"_s + series;
+    return {aWidth(m_file.value(at + u"/width"_s)), aWidth(m_file.value(at + u"/base"_s)),
+            aWidth(m_file.value(at + u"/chapters/"_s + entry))};
+}
+
+void Preferences::keepStrip(const QString &series, const QString &entry, const Strip &kept)
+{
+    if (series.isEmpty())
+        return;
+    const QString at = u"strips/"_s + series;
+    m_file.setValue(at + u"/width"_s, kept.width);
+    m_file.setValue(at + u"/base"_s, kept.base);
+    if (kept.chapter > 0 && !entry.isEmpty())
+        m_file.setValue(at + u"/chapters/"_s + entry, kept.chapter);
+    else if (!entry.isEmpty())
+        m_file.remove(at + u"/chapters/"_s + entry);
+    m_file.sync();
 }
 
 void Preferences::chooseBackdrop(Backdrop wanted)
@@ -426,6 +523,49 @@ void Preferences::chooseBackdrop(Backdrop wanted)
         return;
     m_backdrop = wanted;
     m_file.setValue(u"reader/backdrop"_s, spell(wanted));
+    m_file.sync();
+    emit changed();
+    announce();
+}
+
+void Preferences::chooseStripSensitivity(int step)
+{
+    const int kept = std::clamp(step, 0, LastStep);
+    if (kept == m_stripSensitivity)
+        return;
+    m_stripSensitivity = kept;
+    keepHere(u"strip/sensitivity"_s, kept);
+}
+
+void Preferences::chooseStripAutoSpeed(int step)
+{
+    const int kept = std::clamp(step, 0, LastStep);
+    if (kept == m_stripAutoSpeed)
+        return;
+    m_stripAutoSpeed = kept;
+    keepHere(u"strip/autoSpeed"_s, kept);
+}
+
+void Preferences::chooseStripControls(StripControls wanted)
+{
+    if (wanted == m_stripControls)
+        return;
+    m_stripControls = wanted;
+    keepHere(u"strip/controls"_s, spell(wanted));
+}
+
+void Preferences::chooseStripAtRest(bool wanted)
+{
+    if (wanted == m_stripAtRest)
+        return;
+    m_stripAtRest = wanted;
+    keepHere(u"strip/atRest"_s, wanted);
+}
+
+void Preferences::keepHere(const QString &key, const QVariant &value)
+{
+    // Not `announce`d: these follow the desk, not the profile.
+    m_file.setValue(key, value);
     m_file.sync();
     emit changed();
 }
@@ -438,6 +578,42 @@ void Preferences::chooseMotion(Motion wanted)
     m_file.setValue(u"reader/motion"_s, spell(wanted));
     m_file.sync();
     emit changed();
+    announce();
+}
+
+QVariantMap Preferences::synced() const
+{
+    return {{u"layout"_s, spell(m_pageLayout)},
+            {u"fit"_s, spell(m_fit)},
+            {u"backdrop"_s, spell(m_backdrop)},
+            {u"motion"_s, spell(m_motion)},
+            {u"volumesAsGrid"_s, m_volumesAsGrid}};
+}
+
+void Preferences::announce()
+{
+    if (!m_adopting)
+        emit syncedChanged(synced());
+}
+
+void Preferences::adopt(const QVariantMap &held)
+{
+    // The ordinary setters, with the echo switched off: one place writes each choice, and a
+    // word this version does not know falls back to the default through the same readers the
+    // file is read by.
+    const QScopeGuard done([this] { m_adopting = false; });
+    m_adopting = true;
+    if (held.contains(u"layout"_s))
+        choosePageLayout(readLayout(held.value(u"layout"_s).toString()));
+    if (held.contains(u"fit"_s))
+        chooseFit(readFit(held.value(u"fit"_s).toString()));
+    if (held.contains(u"backdrop"_s))
+        chooseBackdrop(readBackdrop(held.value(u"backdrop"_s).toString()));
+    if (held.contains(u"motion"_s))
+        chooseMotion(readMotion(held.value(u"motion"_s).toString()));
+    // A flag is a flag: anything else is not an answer to this question.
+    if (held.value(u"volumesAsGrid"_s).typeId() == QMetaType::Bool)
+        showVolumesAsGrid(held.value(u"volumesAsGrid"_s).toBool());
 }
 
 Spreads::Layout Preferences::layoutFor(QSizeF window) const

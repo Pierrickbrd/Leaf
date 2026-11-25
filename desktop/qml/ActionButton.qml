@@ -49,14 +49,21 @@ Rectangle {
     property bool scaled: false
 
     function sized(drawn: real): int {
-        return pill.scaled ? Widths.scale.size(drawn) : drawn
+        return pill.scaled ? Widths.scale.fit(drawn) : drawn
     }
 
     readonly property bool hovered: pointer.hovered
 
+    /// The room at each end of the pill. A pill that holds only a word has the same as the quiet
+    /// one beside it (`QuietButton`, 20): « Choisir un dossier » and « Importer tout » stood
+    /// at 22 on the left of the word and 14 on the right, because the 8 that follows a glyph was
+    /// laid even where there is none. With a glyph, the glyph's side is the tighter 14.
+    readonly property real pad: pill.sized(glyphs.width > 0 ? 14 : 20)
+    /// From the glyph to the word: only when there is a glyph to be apart from.
+    readonly property real apart: glyphs.width > 0 ? pill.sized(8) : 0
+
     height: pill.sized(32)
-    width: compact ? height
-                   : pill.sized(36) + glyphs.width + word.implicitWidth
+    width: compact ? height : 2 * pill.pad + glyphs.width + pill.apart + word.implicitWidth
     radius: height / 2
     color: !ready ? Theme.onPaper : (danger ? Theme.alert : Theme.emerald)
     opacity: ready ? 1.0 : 0.7
@@ -97,7 +104,11 @@ Rectangle {
             return
         if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
                 || event.key === Qt.Key_Enter) {
-            pill.triggered()
+            // Once for a key held down: the repeats the system sends after it go to whatever
+            // has the keys by then — the window this opened, its default button — and a press
+            // is one decision, not one per repeat.
+            if (!event.isAutoRepeat)
+                pill.triggered()
             event.accepted = true
         }
     }
@@ -113,7 +124,7 @@ Rectangle {
         objectName: pill.objectName + "-glyph"
         width: childrenRect.width
         height: childrenRect.height
-        x: pill.compact ? Math.round((pill.width - width) / 2) : pill.sized(14)
+        x: pill.compact ? Math.round((pill.width - width) / 2) : pill.pad
         anchors.verticalCenter: parent.verticalCenter
     }
 
@@ -122,7 +133,7 @@ Rectangle {
 
         objectName: pill.objectName + "-text"
         anchors.left: glyphs.right
-        anchors.leftMargin: pill.sized(8)
+        anchors.leftMargin: pill.apart
         anchors.verticalCenter: parent.verticalCenter
         text: pill.label
         // « Supprimer X » carries a profile's name, which is shown as typed, never as markup.

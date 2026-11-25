@@ -64,10 +64,10 @@ QVariantMap Elsewhere::tileOf(const Api::Series *one, const QString &name,
             {u"name"_s, name},
             {u"detail"_s, !detail.isEmpty() || one == nullptr
                               ? detail
-                              : Words::volumes(one->holding.ownedVolumes, one->medium)},
+                              : Words::holdings(*one)},
             {u"cover"_s, identifier.isEmpty() || m_server == nullptr
                              ? QString()
-                             : m_server->address() + u"/series/"_s + identifier + u"/cover"_s},
+                             : m_server->address() + u"/series/"_s + Server::segment(identifier) + u"/cover"_s},
             {u"inProgress"_s,
              one != nullptr && one->holding.readStatus == Api::ReadStatus::InProgress},
             {u"howFarRead"_s, one == nullptr ? 0.0 : Api::howFarRead(*one)},

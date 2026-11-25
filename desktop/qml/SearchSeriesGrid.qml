@@ -34,7 +34,9 @@ GridView {
 
     cellWidth: (width - 2 * viewportClearance + Widths.shelfGap)
                / Math.max(1, columns)
-    cellHeight: Math.ceil(Theme.focusGap + 2 + coverHeight + 6 + 40 + 2 + 18
+    // The shelf's own measure of the words under a cover — see `TileLines`.
+    readonly property TileLines tileLines: TileLines { }
+    cellHeight: Math.ceil(Theme.focusGap + 2 + coverHeight + tileLines.under
                           + Widths.shelfGap)
     cacheBuffer: preview ? 0 : cellHeight
 

@@ -1,6 +1,7 @@
 #include "Boot.h"
 
 #include "Covers.h"
+#include "DesktopText.h"
 #include "Doorbell.h"
 #include "Fonts.h"
 #include "Linking.h"
@@ -9,6 +10,10 @@
 #include "Profiles.h"
 #include "Theme.h"
 #include "Toasts.h"
+#include "Warnings.h"
+#include "Widths.h"
+
+#include <memory>
 
 #include <QCoreApplication>
 #include <QDebug>
@@ -43,16 +48,28 @@ protected:
             m_cursor->setProperty("pointerDown", true);
             m_cursor->setProperty("pointerTookOver", true);
             break;
-        case QEvent::KeyPress:
+        case QEvent::KeyPress: {
+            const auto *key = static_cast<QKeyEvent *>(event);
             // Enter goes to what has the focus, after a click as after a key. It used to be
             // taken from it once the pointer had been used — a click anywhere, a cover hovered
             // — to bring the hidden ring back and do nothing else, so the first Enter after a
             // click did nothing at all, which a reader reads as Enter not working. The ring
             // comes back here, on the way, and the key goes on to the focused item.
-            if (activates(static_cast<QKeyEvent *>(event), watched)
-                && m_cursor->property("pointerTookOver").toBool())
+            if (activates(key, watched) && m_cursor->property("pointerTookOver").toBool())
                 QMetaObject::invokeMethod(m_cursor, "resumeKeyboard");
+            // Tab is the keys asking where the focus is, wherever it lands. The other walking
+            // keys light the ring only if they move the focus: in the reader an arrow turns
+            // the page, and the button clicked a moment before is not where anybody looks.
+            if (key->key() == Qt::Key_Tab || key->key() == Qt::Key_Backtab)
+                m_cursor->setProperty("pointerTookOver", false);
+            if (walks(key)) {
+                m_cursor->setProperty("keyDown", true);
+                QMetaObject::invokeMethod(
+                    m_cursor, [cursor = m_cursor] { cursor->setProperty("keyDown", false); },
+                    Qt::QueuedConnection);
+            }
             break;
+        }
         case QEvent::MouseButtonRelease:
         case QEvent::TouchEnd:
             // After the release has been delivered and not before: a control that takes the
@@ -68,6 +85,26 @@ protected:
     }
 
 private:
+    /// A key that moves through the page rather than acting on what is focused.
+    static bool walks(const QKeyEvent *key)
+    {
+        switch (key->key()) {
+        case Qt::Key_Tab:
+        case Qt::Key_Backtab:
+        case Qt::Key_Left:
+        case Qt::Key_Right:
+        case Qt::Key_Up:
+        case Qt::Key_Down:
+        case Qt::Key_Home:
+        case Qt::Key_End:
+        case Qt::Key_PageUp:
+        case Qt::Key_PageDown:
+            return true;
+        default:
+            return false;
+        }
+    }
+
     /// Enter, or Space outside a field, where Space is typing.
     static bool activates(const QKeyEvent *key, QObject *watched)
     {
@@ -188,7 +225,48 @@ void run(QQmlApplicationEngine &engine, const QGuiApplication &application,
         };
         QObject::connect(reading, &Profiles::changed, kept, follow);
         follow();
+
+        // How the reader lays pages out follows the profile, not the machine. Asked when a
+        // profile starts reading, applied when the server answers, and written back when the
+        // reader chooses. Nothing is written before the answer: the object is replaced whole,
+        // and a write that beat the read would erase what the server held. Offline, nothing
+        // is heard, and the machine's own values stand.
+        auto asked = std::make_shared<QString>();
+        auto heard = std::make_shared<bool>(false);
+        QObject::connect(reading, &Profiles::changed, kept, [reading, asked, heard] {
+            const QString now = reading->active().value(u"id"_s).toString();
+            if (now.isEmpty() || now == *asked)
+                return;
+            *asked = now;
+            *heard = false;
+            reading->reading();
+        });
+        QObject::connect(reading, &Profiles::readingHeard, kept, [reading, kept, heard] {
+            *heard = true;
+            kept->adopt(reading->readingPreferences());
+        });
+        QObject::connect(kept, &Preferences::syncedChanged, reading,
+                         [reading, heard](const QVariantMap &chosen) {
+                             if (!*heard)
+                                 return;
+                             // Over what the server holds, so that a key another version
+                             // wrote is not lost with the replacement.
+                             QVariantMap whole = reading->readingPreferences();
+                             whole.insert(chosen);
+                             reading->keepReading(whole);
+                         });
     }
+
+    // The desktop's text size, read on the bus the desktop half speaks on and followed from
+    // then on. Resolved after the load for the reason the `Theme` is, and before the event
+    // loop paints anything, so the first frame is already laid out at the size asked for.
+    // Owned by the engine: it is read for as long as anything that draws words exists.
+    if (auto *widths = engine.singletonInstance<Widths *>(qmlTypeId("Leaf", 1, 0, "Widths")))
+        widths->follow(new DesktopText(notifications, qgetenv("XDG_CURRENT_DESKTOP"), &engine));
+    else
+        qWarning().noquote()
+            << u"error resolving the Widths singleton — words will not follow the desktop's "
+               u"text size"_s;
 
     // A clicked link, from the command line or from a launch that found this one already
     // there. Resolved after the load for the reason the `Theme` is: the module does not exist
@@ -224,11 +302,25 @@ void run(QQmlApplicationEngine &engine, const QGuiApplication &application,
             engine.singletonInstance<Toasts *>(qmlTypeId("Leaf", 1, 0, "Toasts"))) {
         QObject::connect(toasts, &Toasts::escalated,
                          new Notifier(std::move(notifications), &engine), &Notifier::show);
-        // Covers and pages arrive as WebP, read through a plugin Ubuntu packages apart from
-        // Qt: without it, 22/10/2026, every image on the shelf failed on its own and
-        // nothing named the one package missing. Said here, once, before anything is drawn.
-        toasts->readsImages(QImageReader::supportedImageFormats());
+        // Whenever the profile read as differs from the last one seen, announced or not: a
+        // reseat that does not announce still seats someone else.
+        if (reading) {
+            auto last = std::make_shared<QString>(reading->active().value(u"id"_s).toString());
+            QObject::connect(reading, &Profiles::changed, toasts, [reading, toasts, last] {
+                const QString now = reading->active().value(u"id"_s).toString();
+                if (now != *last) {
+                    *last = now;
+                    toasts->forget();
+                }
+            });
+        }
     }
+    // Covers and pages arrive as WebP, read through a plugin Ubuntu packages apart from Qt:
+    // without it, 22/10/2026, every image on the shelf failed on its own and nothing named
+    // the one package missing. Said here, once, before anything is drawn.
+    if (auto *warnings =
+            engine.singletonInstance<Warnings *>(qmlTypeId("Leaf", 1, 0, "Warnings")))
+        warnings->readsImages(QImageReader::supportedImageFormats());
 }
 
 } // namespace Boot

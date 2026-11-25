@@ -58,7 +58,7 @@ Rectangle {
         if (!key.code.digits)
             return
         Isbn.copy(key.code.digits)
-        Toasts.isbnCopied(key.code.digits)
+        Warnings.isbnCopied(key.code.digits)
     }
 
     implicitHeight: face.height + key.lip
@@ -153,6 +153,7 @@ Rectangle {
 
             Text {
                 objectName: "reader-volume-isbn-label"
+                textFormat: Text.PlainText
                 text: ReaderCaptions.factIsbn
                 color: Theme.barcodeInk
                 opacity: 0.8
@@ -188,6 +189,7 @@ Rectangle {
 
             Text {
                 objectName: "reader-volume-isbn-hint"
+                textFormat: Text.PlainText
                 text: ReaderCaptions.copyIsbn
                 color: Theme.barcodeInk
                 opacity: 0.8

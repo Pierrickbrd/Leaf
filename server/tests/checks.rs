@@ -27,7 +27,7 @@ fn only<T>(mut found: Vec<T>) -> T {
 
 #[test]
 fn a_sound_work_raises_nothing() {
-    assert!(checks::work("Death Note", Some(&sound_work())).is_empty());
+    assert!(checks::work("Death Note", Some(&sound_work()), false, false).is_empty());
 }
 
 #[test]
@@ -38,6 +38,8 @@ fn names_every_required_field_that_is_missing() {
             leaf: Some(1),
             ..Default::default()
         }),
+        false,
+        false,
     ));
     for field in [
         "title",
@@ -53,7 +55,7 @@ fn names_every_required_field_that_is_missing() {
 
 #[test]
 fn an_absent_file_is_itself_the_problem() {
-    assert!(only(checks::work("Essai", None)).contains("missing"));
+    assert!(only(checks::work("Essai", None, false, false)).contains("missing"));
 }
 
 #[test]
@@ -62,7 +64,7 @@ fn a_file_without_a_version_marker_is_flagged() {
         leaf: None,
         ..sound_work()
     };
-    assert!(only(checks::work("Essai", Some(&work))).contains("leaf"));
+    assert!(only(checks::work("Essai", Some(&work), false, false)).contains("leaf"));
 }
 
 #[test]
@@ -72,7 +74,7 @@ fn a_file_from_a_later_format_is_flagged_too() {
         leaf: Some(99),
         ..sound_work()
     };
-    assert!(only(checks::work("Essai", Some(&work))).contains("format 99"));
+    assert!(only(checks::work("Essai", Some(&work), false, false)).contains("format 99"));
 }
 
 #[test]
@@ -241,6 +243,20 @@ fn a_type_that_is_neither_is_said_rather_than_guessed_at() {
 }
 
 #[test]
+fn a_cover_page_the_archive_does_not_hold_is_said_and_one_it_holds_is_not() {
+    let at = |page| {
+        declaring(EntryJson {
+            cover_page: Some(page),
+            ..Default::default()
+        })
+    };
+    // The archive of `declaring` holds 20 pages, counted from 0.
+    assert!(at(19).is_empty());
+    assert!(only(at(20)).contains("coverPage is 20"));
+    assert!(only(at(-1)).contains("coverPage is -1"));
+}
+
+#[test]
 fn a_volume_that_came_from_a_volume_is_not_a_thing() {
     let found = declaring(EntryJson {
         volume: Some(3.0),
@@ -340,7 +356,7 @@ fn a_work_that_declares_itself_and_says_nothing_is_named_field_by_field() {
         leaf: Some(1),
         ..Default::default()
     };
-    let said = leaf_server::scan::checks::work("Bleach", Some(&empty));
+    let said = leaf_server::scan::checks::work("Bleach", Some(&empty), false, false);
     let all = said.join(" ");
     for field in [
         "title",
@@ -402,4 +418,25 @@ fn an_entry_claiming_an_edition_it_does_not_sit_in_is_said_out_loud() {
     let all = said.join(" ");
     assert!(all.contains("Perfect Edition"), "{all}");
     assert!(all.contains("Édition Originale"), "{all}");
+}
+
+/// A series credited volume by volume has authors and artists; asking its work.json for them
+/// reported every such series as missing what it has.
+#[test]
+fn credits_the_volumes_carry_are_not_missing_from_the_work() {
+    let bare = WorkJson {
+        leaf: Some(1),
+        ..sound_work()
+    };
+    let bare = WorkJson {
+        authors: Vec::new(),
+        artists: Vec::new(),
+        author: None,
+        ..bare
+    };
+    let found = only(checks::work("Essai", Some(&bare), true, false));
+    assert!(
+        found.contains("artists") && !found.contains("authors"),
+        "{found}"
+    );
 }

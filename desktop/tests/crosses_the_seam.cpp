@@ -11,19 +11,31 @@
 #include "Boot.h"
 #include "CardCaptions.h"
 #include "Commands.h"
+#include "CoverTone.h"
+#include "DesktopText.h"
 #include "ImportCaptions.h"
+#include "ImportOffers.h"
+#include "ImportQueue.h"
+#include "ImportTally.h"
 #include "Imports.h"
 #include "Preferences.h"
+#include "ReaderCaptions.h"
 #include "Profiles.h"
 #include "Reader.h"
+#include "Carrier.h"
+#include "Review.h"
 #include "Toasts.h"
+#include "Warnings.h"
 #include "Entries.h"
 #include "Erasure.h"
 #include "Filters.h"
 #include "Navigation.h"
+#include "OrderEditor.h"
 #include "Series.h"
+#include "Server.h"
 #include "Settings.h"
 #include "Pretend.h"
+#include "Zip.h"
 
 #include <QDBusConnection>
 
@@ -35,9 +47,11 @@
 #include "Words.h"
 
 #include <QAccessible>
+#include <cmath>
 #include <QBuffer>
 #include <QClipboard>
 #include <QColor>
+#include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -50,16 +64,22 @@
 #include <QPalette>
 #include <QPointer>
 #include <QScopeGuard>
+#include <QSet>
 #include <QSignalSpy>
 #include <QQmlApplicationEngine>
+#include <QQmlComponent>
 #include <QQuickItem>
 #include <QQuickStyle>
 #include <QQuickWindow>
 #include <QStandardPaths>
 #include <QTcpServer>
 #include <QMutex>
+#include <QNativeGestureEvent>
+#include <QPointingDevice>
+#include <QSettings>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTextLayout>
 #include <QUrl>
 #include <QWheelEvent>
 #include <QWindow>
@@ -85,6 +105,49 @@ void wheel(QWindow *window, const QPoint &at, const QPoint &angle, const QPoint 
     QGuiApplication::sendEvent(window, &event);
 }
 
+/// Two fingers on a touchpad as the desktop sends them: the updates are « synthesized by the
+/// system », a hundred or so a swipe of two or three pixels, between a begin and an end that
+/// are not. A `WheelHandler` never heard these; the strip's own list scrolled by itself.
+void swipe(QWindow *window, const QPoint &at, int updates, int pixels)
+{
+    static const QPointingDevice pad(u"touchpad"_s, 4243, QInputDevice::DeviceType::TouchPad,
+                                     QPointingDevice::PointerType::Finger,
+                                     QInputDevice::Capability::Position
+                                         | QInputDevice::Capability::PixelScroll
+                                         | QInputDevice::Capability::Scroll,
+                                     1, 0);
+    const auto send = [&](Qt::ScrollPhase phase, const QPoint &px, const QPoint &angle,
+                          Qt::MouseEventSource source) {
+        QWheelEvent event(QPointF(at), QPointF(window->mapToGlobal(at)), px, angle, Qt::NoButton,
+                          Qt::NoModifier, phase, false, source, &pad);
+        QGuiApplication::sendEvent(window, &event);
+    };
+    send(Qt::ScrollBegin, {}, {}, Qt::MouseEventNotSynthesized);
+    for (int i = 0; i < updates; ++i) {
+        send(Qt::ScrollUpdate, QPoint(0, pixels), QPoint(0, pixels * 12),
+             Qt::MouseEventSynthesizedBySystem);
+        QTest::qWait(4);
+    }
+    send(Qt::ScrollEnd, {}, {}, Qt::MouseEventNotSynthesized);
+}
+
+/// Two fingers of a touchpad pinching by `value` at `at`, from begin to end, as the desktop
+/// sends them: the gesture is the window's, which handles it before this returns. A touchpad
+/// of the test's own, since a pinch from a mouse is no pinch to a `PinchHandler`.
+void pinch(QWindow *window, const QPointF &at, qreal value)
+{
+    static const QPointingDevice pad(u"touchpad"_s, 4242, QInputDevice::DeviceType::TouchPad,
+                                     QPointingDevice::PointerType::Finger,
+                                     QInputDevice::Capability::Position, 2, 0);
+    const QPointF global = window->mapToGlobal(at);
+    for (const auto &[type, step] : {std::pair{Qt::BeginNativeGesture, 0.0},
+                                     std::pair{Qt::ZoomNativeGesture, value},
+                                     std::pair{Qt::EndNativeGesture, 0.0}}) {
+        QNativeGestureEvent event(type, &pad, 2, at, at, global, step, {});
+        QGuiApplication::sendEvent(window, &event);
+    }
+}
+
 /// Puts the process-wide palette back on scope exit, failed assertion included — see
 /// `keeps_its_contrast.cpp`'s `RestoresThePalette`, which this copies rather than shares: two
 /// four-line classes cost less than a header neither test otherwise needs.
@@ -96,6 +159,23 @@ public:
 
 private:
     QPalette m_was;
+};
+
+/// A desktop whose text size the test sets, as someone moves the slider in its settings —
+/// `knows_its_widths.cpp`'s, copied for the reason `RestoresThePalette` is.
+class SomeText : public SystemText
+{
+public:
+    explicit SomeText(qreal factor) : m_factor(factor) {}
+    qreal factor() const override { return m_factor; }
+    void becomes(qreal factor)
+    {
+        m_factor = factor;
+        emit changed();
+    }
+
+private:
+    qreal m_factor;
 };
 
 QJsonObject aSeries(const QString &id, const QString &name, int volumes, bool inProgress)
@@ -234,6 +314,22 @@ QList<QQuickItem *> itemsNamed(QQuickItem *root, const QString &name)
     return all;
 }
 
+/// Every visible label of a sheet's field under `root`, walked as `itemsNamed` walks.
+void labelsUnder(QQuickItem *root, QList<QQuickItem *> &into)
+{
+    if (root->objectName().startsWith(u"review-label-"_s) && root->isVisible())
+        into.append(root);
+    for (QQuickItem *child : root->childItems())
+        labelsUnder(child, into);
+}
+
+QList<QQuickItem *> labelsUnder(QQuickItem *root)
+{
+    QList<QQuickItem *> all;
+    labelsUnder(root, all);
+    return all;
+}
+
 /// Every binding loop Qt reported while a test ran.
 ///
 /// A loop is not an error to Qt: it warns, four times per layout, and carries on. Two of
@@ -303,6 +399,20 @@ void forgetLoops()
 /// between two lines of one test — an axis found, its own tally gone — and the run ended
 /// in SIGSEGV where a failed comparison would have named what was missing.
 QString textNamed(QQuickItem *root, const QString &name);
+/// The first `text` found in an item or below it: a chip or a row is a shape around its word.
+QString textIn(QQuickItem *item)
+{
+    if (!item)
+        return {};
+    const QVariant own = item->property("text");
+    if (own.isValid() && !own.toString().isEmpty())
+        return own.toString();
+    for (QQuickItem *child : item->childItems()) {
+        if (const QString found = textIn(child); !found.isEmpty())
+            return found;
+    }
+    return {};
+}
 
 /// A bus that goes nowhere, and why every boot here is handed one.
 ///
@@ -313,6 +423,89 @@ QString textNamed(QQuickItem *root, const QString &name);
 QDBusConnection nowhere()
 {
     return QDBusConnection(u"leaf-tests-speak-to-nobody"_s);
+}
+
+/// How many characters each line of a wrapped text holds, laid out as the item lays it: its
+/// text, its font, its width. A width compared with a number of pixels says nothing about a
+/// measure; a count of characters is what the eye carries from one line to the next.
+QList<int> charactersPerLine(const QQuickItem *text)
+{
+    QTextLayout layout(text->property("text").toString(),
+                       text->property("font").value<QFont>());
+    QTextOption option;
+    option.setWrapMode(QTextOption::WordWrap);
+    layout.setTextOption(option);
+    QList<int> lines;
+    layout.beginLayout();
+    for (QTextLine line = layout.createLine(); line.isValid(); line = layout.createLine()) {
+        line.setLineWidth(text->width());
+        lines << line.textLength();
+    }
+    layout.endLayout();
+    return lines;
+}
+
+/// A series page with everything its description tab draws — a long summary, both columns
+/// of facts, the card of what the library holds — a genre it leaves to the header, and a
+/// second edition with a long name, so the last tab has a tile whose name wraps. The two
+/// tests of those tabs read it.
+QByteArray aDescribedSeries(const QByteArray &request)
+{
+    const auto reply = [](const QByteArray &body) {
+        return "HTTP/1.1 200 .\r\nContent-Type: application/json\r\nContent-Length: "
+               + QByteArray::number(body.size()) + "\r\n\r\n" + body;
+    };
+    const auto anEdition = [](const QString &id, const QString &edition) {
+        return QJsonObject{
+            {u"id"_s, id},
+            {u"workId"_s, u"w-elfes"_s},
+            {u"name"_s, u"Terres d'Arran · Elfes"_s},
+            {u"work"_s, u"Elfes"_s},
+            {u"edition"_s, edition},
+            {u"medium"_s, u"bd"_s},
+            {u"ownedVolumes"_s, 2},
+            {u"entryCount"_s, 2},
+            {u"chapterCount"_s, 0},
+            {u"arcCount"_s, 0},
+        };
+    };
+    if (request.startsWith("GET /next") || request.contains("/cover"))
+        return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+    if (request.contains("/entries ") || request.contains("/progress ")
+        || request.contains("/arcs "))
+        return reply("[]");
+    if (request.startsWith("GET /series/")) {
+        QJsonObject one = anEdition(u"albums"_s, u"Albums"_s);
+        one[u"summary"_s] =
+            u"Les elfes des Terres d'Arran sont cinq peuples que tout sépare : les Elfes "
+            "bleus des côtes, les Elfes sylvains des forêts profondes, les Elfes blancs des "
+            "montagnes, les Elfes des sables et les Elfes noirs des cités souterraines. "
+            "Chaque album raconte une histoire complète, écrite et dessinée par une équipe "
+            "différente, et chacune éclaire un pan de l'histoire de ce monde où les hommes, "
+            "les orcs, les nains et les elfes se disputent des terres qu'aucun d'eux n'a "
+            "jamais su partager. Lus dans l'ordre, ils dessinent la guerre qui vient."_s;
+        one[u"authors"_s] = QJsonArray{u"Jean-Luc Istin"_s, u"Olivier Peru"_s};
+        one[u"artists"_s] = QJsonArray{u"Kyko Duarte"_s, u"Stéphane Bileau"_s};
+        one[u"genres"_s] = QJsonArray{u"Fantasy"_s};
+        one[u"publisher"_s] = u"Soleil"_s;
+        one[u"collection"_s] = u"Fantastique"_s;
+        one[u"language"_s] = u"fr"_s;
+        one[u"readingDirection"_s] = u"LEFT_TO_RIGHT"_s;
+        one[u"status"_s] = u"ongoing"_s;
+        one[u"declaredVolumes"_s] = 40;
+        one[u"missingVolumes"_s] = QJsonArray{3, 7};
+        one[u"addedAt"_s] = 1767225600000.0;
+        one[u"lastAddedAt"_s] = 1782864000000.0;
+        return reply(QJsonDocument(one).toJson(QJsonDocument::Compact));
+    }
+    const QJsonArray editions{
+        anEdition(u"albums"_s, u"Albums"_s),
+        anEdition(u"integrale"_s, u"Intégrale en couleurs, revue et augmentée"_s)};
+    return reply(QJsonDocument(QJsonObject{{u"items"_s, editions},
+                                           {u"total"_s, editions.size()},
+                                           {u"page"_s, 0},
+                                           {u"size"_s, editions.size()}})
+                     .toJson(QJsonDocument::Compact));
 }
 
 QQuickItem *itemNamed(QQuickItem *root, const QString &name)
@@ -402,15 +595,19 @@ void typeInto(QQuickWindow *window, const QString &text)
 /// Rows and columns place their children at the next frame, not when one appears: a click
 /// aimed before it lands where the button is about to stop being. Two frames, because the
 /// threaded render loop may swap one it had already taken before the change.
+///
+/// Counted, and not `drawn.wait()` twice: two frames swapped during the first wait left the
+/// second one returning at once with nothing, and a frame opened by a second import in the
+/// same run failed on a test that had nothing wrong with it.
 bool laidOut(QQuickWindow *window)
 {
     QSignalSpy drawn(window, &QQuickWindow::frameSwapped);
-    for (int frame = 0; frame < 2; ++frame) {
-        window->update();
-        if (!drawn.wait())
-            return false;
-    }
-    return true;
+    window->update();
+    return QTest::qWaitFor([window, &drawn] {
+        if (drawn.count() < 2)
+            window->update();
+        return drawn.count() >= 2;
+    });
 }
 
 /// A reader, kept on this device, and a principal whose code also guards the way back to it
@@ -560,6 +757,16 @@ void clickOn(QQuickWindow *window, QQuickItem *item)
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, middle.toPoint());
 }
 
+/// The field of a `LeafSelect`, what is clicked and what holds the keys while it is shut: the
+/// one child drawn with an edge.
+QQuickItem *fieldOf(QQuickItem *select)
+{
+    const QList<QQuickItem *> children = select ? select->childItems() : QList<QQuickItem *>();
+    const auto found = std::ranges::find_if(
+        children, [](QQuickItem *child) { return child->property("border").isValid(); });
+    return found == children.end() ? nullptr : *found;
+}
+
 /// Whether the item of that name is there and shown — false, rather than a crash, when it
 /// is not there at all.
 bool shownNamed(QQuickItem *root, const QString &name)
@@ -581,6 +788,15 @@ QString focusedName(QQuickWindow *window)
 {
     QQuickItem *one = window->activeFocusItem();
     return one ? one->objectName() : QString();
+}
+
+/// Puts the keys in charge, as a key a reader pressed would: a focus given by a program lights
+/// no ring any more, since one given after a click lit a ring the pointer had not asked for.
+void keysInCharge(QQuickWindow *window)
+{
+    auto *cursor = window->property("navigationCursor").value<QObject *>();
+    QVERIFY(cursor);
+    cursor->setProperty("pointerTookOver", false);
 }
 
 /// Whether the keys are somewhere inside `root`.
@@ -1004,13 +1220,13 @@ QQuickItem *aReaderAtHand(QQmlApplicationEngine &engine, Reader *&reader)
 }
 
 /// The windows the reader is tried in: the 1920 × 1200 and its neighbours, the usual
-/// laptops, a short window, and one in the narrow band.
+/// laptops, a short window, and the smallest there is, 800 × 560.
 struct AWindow {
     int width;
     int height;
 };
 const AWindow theWindows[] = {{900, 600},   {1280, 720},  {1366, 768}, {1920, 1080},
-                              {1920, 1200}, {2560, 1440}, {560, 700}};
+                              {1920, 1200}, {2560, 1440}, {800, 560}};
 
 /// Laid out for this window: resized, and the view at its width and height.
 bool laidOutFor(QQuickItem *view, const AWindow &at)
@@ -1149,7 +1365,7 @@ std::function<QByteArray(const QByteArray &)> anElfesPage(bool editions)
                     {u"chapterCount"_s, 0}, {u"file"_s, u"T1.cbz"_s}, {u"size"_s, 1}},
         QJsonObject{{u"id"_s, u"v2"_s}, {u"type"_s, u"VOLUME"_s}, {u"number"_s, 2},
                     {u"title"_s, u"L'Honneur"_s}, {u"pageCount"_s, 54},
-                    {u"chapterCount"_s, 0}, {u"file"_s, u"T2.cbz"_s}, {u"size"_s, 1}},
+                    {u"chapterCount"_s, 0}, {u"file"_s, u"T2.cbz"_s}, {u"downloadName"_s, u"elfes_tome_002.cbz"_s}, {u"size"_s, 1}},
     }).toJson(QJsonDocument::Compact);
     const QByteArray states = QJsonDocument(QJsonArray{
         QJsonObject{{u"entryId"_s, u"v1"_s}, {u"page"_s, 53}, {u"pageCount"_s, 54},
@@ -1192,11 +1408,1254 @@ bool pressedUntil(QQuickWindow *window, const QString &name, Qt::Key key = Qt::K
     }
     return holderName(window) == name;
 }
+
+/// The volume window of « L'Honneur » (`v2`) opened from its menu, as a profile that may edit
+/// opens it — or null, for the caller to refuse.
+QQuickItem *entryEditOpened(QQuickWindow *window, QQmlApplicationEngine &engine)
+{
+    auto *navigation =
+        engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+    if (!navigation
+        || !navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}))
+        return nullptr;
+    QQuickItem *page = nullptr;
+    QQuickItem *dots = nullptr;
+    QQuickItem *edit = nullptr;
+    QQuickItem *dialog = nullptr;
+    if (!QTest::qWaitFor([&] { return (page = itemNamed(window->contentItem(), u"series-view"_s)); })
+        || !QTest::qWaitFor([&] { return shownNamed(page, u"volume-v2"_s) && laidOut(window); })
+        || !QTest::qWaitFor([&] { return (dots = itemNamed(page, u"commands-v2"_s)); })
+        || !QMetaObject::invokeMethod(dots, "show"))
+        return nullptr;
+    if (!QTest::qWaitFor([&] {
+            return (edit = itemNamed(window->contentItem(), u"command-edit-v2"_s))
+                   && edit->isVisible();
+        }) || !QMetaObject::invokeMethod(edit, "triggered"))
+        return nullptr;
+    // The body is what shows last: the surface is drawn before the lines are, and a line
+    // focused before the window has settled its focus is taken back from it (`DialogBody`).
+    if (!QTest::qWaitFor([&] {
+            return (dialog = itemNamed(window->contentItem(), u"entry-edit-body"_s))
+                   && dialog->isVisible();
+        }) || !laidOut(window))
+        return nullptr;
+    QTest::qWait(1);
+    return dialog;
+}
+
+/// The way of changing a cover, opened: the item called `<prefix>-<way>` of the menu that
+/// « Changer… » shows, or null when it was not shown. The items live in a popup, so they are
+/// not there to be found until it is open.
+QQuickItem *coverWay(QQuickWindow *window, const QString &prefix, const QString &way)
+{
+    QQuickItem *change = itemNamed(window->contentItem(), prefix + u"-change"_s);
+    if (!change || !QMetaObject::invokeMethod(change, "pressed"))
+        return nullptr;
+    QQuickItem *found = nullptr;
+    return QTest::qWaitFor([&] {
+        return (found = itemNamed(window->contentItem(), prefix + u"-"_s + way)) && found->isVisible();
+    }) ? found : nullptr;
+}
+
+/// The window of a series, opened as a profile that may edit, with a server that takes the edit
+/// and keeps what it heard. `chosen` is the volume the series already names as its cover, when
+/// it names one.
+struct SeriesEdit
+{
+    Pretend pretend;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = nullptr;
+    QQuickItem *chooser = nullptr;
+
+    bool open(std::optional<double> chosen = std::nullopt)
+    {
+        if (!pretend.listen(QHostAddress::LocalHost))
+            return false;
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true, 0, true, true)},
+            u"p"_s, false);
+        const auto rest = anElfesPage(false);
+        pretend.answerFor = [seat, rest, chosen](const QByteArray &request) {
+            if (request.startsWith("PATCH /series/albums ")
+                || request.startsWith("PUT /series/albums/cover ")
+                || request.startsWith("DELETE /series/albums/cover "))
+                return QByteArray("HTTP/1.1 204 .\r\nContent-Length: 0\r\n\r\n");
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            if (chosen && request.startsWith("GET /series/albums ")) {
+                const QByteArray answer = rest(request);
+                QJsonObject series =
+                    QJsonDocument::fromJson(answer.mid(answer.indexOf("\r\n\r\n") + 4)).object();
+                series.insert(u"coverVolume"_s, *chosen);
+                return aReply(200, "application/json",
+                              QJsonDocument(series).toJson(QJsonDocument::Compact));
+            }
+            return rest(request);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+        window = shown(engine);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        if (!window || !navigation
+            || !navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}))
+            return false;
+        QQuickItem *page = nullptr;
+        QQuickItem *dots = nullptr;
+        QQuickItem *edit = nullptr;
+        if (!QTest::qWaitFor([&] { return (page = named(u"series-view"_s)); })
+            || !QTest::qWaitFor([&] { return (dots = itemNamed(page, u"commands-albums"_s)); })
+            || !QMetaObject::invokeMethod(dots, "show")
+            || !QTest::qWaitFor([&] {
+                   return (edit = named(u"command-edit-albums"_s)) && edit->isVisible();
+               })
+            || !QMetaObject::invokeMethod(edit, "triggered"))
+            return false;
+        // Loaded: the series and its volumes both answered.
+        return QTest::qWaitFor([&] {
+            return (chooser = named(u"series-edit-cover"_s))
+                   && chooser->property("volumes").toList().size() == 2
+                   && (!chosen || chooser->property("kept").toBool());
+        });
+    }
+
+    QQuickItem *named(const QString &name) const { return itemNamed(window->contentItem(), name); }
+    QString said(const QString &name) const
+    {
+        QQuickItem *item = named(name);
+        return item ? item->property("text").toString() : QString();
+    }
+};
+
+/// The window of a volume, opened as a profile that may edit, with a server that takes the
+/// edit and keeps what it heard.
+struct EntryEdit
+{
+    Pretend pretend;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = nullptr;
+    QQuickItem *dialog = nullptr;
+
+    /// With `credited`, the series declares René Goscinny and Morris, and « L'Honneur » names
+    /// its own writer, Morris, and draws on the series for its drawing.
+    bool open(bool credited = false)
+    {
+        if (!pretend.listen(QHostAddress::LocalHost))
+            return false;
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true, 0, true, true)},
+            u"p"_s, false);
+        const auto rest = anElfesPage(false);
+        pretend.answerFor = [seat, rest, credited](const QByteArray &request) {
+            if (request.startsWith("PATCH /entries/v2 ") || request.startsWith("PUT /entries/v2/cover ")
+                || request.startsWith("DELETE /entries/v2/cover "))
+                return QByteArray("HTTP/1.1 204 .\r\nContent-Length: 0\r\n\r\n");
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            const QByteArray answer = rest(request);
+            if (!credited || !answer.startsWith("HTTP/1.1 200"))
+                return answer;
+            const QJsonDocument read =
+                QJsonDocument::fromJson(answer.mid(answer.indexOf("\r\n\r\n") + 4));
+            if (request.contains("/entries ")) {
+                QJsonArray files = read.array();
+                QJsonObject honour = files.at(1).toObject();
+                honour.insert(u"authors"_s, QJsonArray{u"Morris"_s});
+                honour.insert(u"artists"_s, QJsonArray{u"Morris"_s});
+                honour.insert(u"artistsInherited"_s, true);
+                files.replace(1, honour);
+                return aReply(200, "application/json",
+                              QJsonDocument(files).toJson(QJsonDocument::Compact));
+            }
+            if (request.startsWith("GET /series/albums ")) {
+                QJsonObject series = read.object();
+                series.insert(u"authors"_s, QJsonArray{u"René Goscinny"_s, u"Morris"_s});
+                series.insert(u"artists"_s, QJsonArray{u"Morris"_s});
+                series.insert(u"declaredAuthors"_s, QJsonArray{u"René Goscinny"_s});
+                series.insert(u"declaredArtists"_s, QJsonArray{u"Morris"_s});
+                return aReply(200, "application/json",
+                              QJsonDocument(series).toJson(QJsonDocument::Compact));
+            }
+            return answer;
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+        window = shown(engine);
+        return window && (dialog = entryEditOpened(window, engine));
+    }
+
+    QQuickItem *named(const QString &name) const { return itemNamed(window->contentItem(), name); }
+
+    /// What a line holds after the keys: its text selected, then replaced by what is typed.
+    void type(const QString &name, const QString &text)
+    {
+        QQuickItem *field = named(name);
+        QVERIFY(field);
+        field->forceActiveFocus();
+        QVERIFY(QMetaObject::invokeMethod(field, "selectAll"));
+        if (text.isEmpty())
+            QTest::keyClick(window, Qt::Key_Delete);
+        else
+            typeInto(window, text);
+    }
+
+    /// The calendar opened from its button, the way the keys do: the button has the focus and
+    /// Space presses it. The grid takes the focus once the calendar is shown.
+    void openCalendar()
+    {
+        QQuickItem *button = named(u"entry-edit-published-calendar-button"_s);
+        QVERIFY(button);
+        button->forceActiveFocus(Qt::TabFocusReason);
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_COMPARE(holderName(window), u"entry-edit-published-calendar-grid"_s);
+    }
+
+    /// Whether a day of the calendar is on the screen.
+    bool shows(const QString &iso) const
+    {
+        QQuickItem *day = named(u"entry-edit-published-calendar-"_s + iso);
+        return day && day->isVisible();
+    }
+
+    /// What the date line holds, as typed.
+    QString written() const
+    {
+        return named(u"entry-edit-published-field"_s)->property("text").toString();
+    }
+
+    QString chosen() const
+    {
+        return named(u"entry-edit-published"_s)->property("value").toString();
+    }
+
+    /// What a line says is wrong with it, or nothing when it says nothing.
+    QString said(const QString &name) const
+    {
+        QQuickItem *problem = named(name);
+        return problem && problem->isVisible() ? problem->property("text").toString() : QString();
+    }
+};
+
 } // namespace
+
+/// Where a popup's own item stands in the window, and every word in it whole: empty when it
+/// fits with `gutter` all round, and what is cut otherwise.
+QString whatACutDialog(QQuickWindow *window, QObject *dialog, qreal gutter)
+{
+    auto *content = dialog->property("contentItem").value<QQuickItem *>();
+    if (content == nullptr || content->parentItem() == nullptr)
+        return u"%1 has no item"_s.arg(dialog->objectName());
+    QQuickItem *box = content->parentItem();
+    const QRectF at = box->mapRectToItem(window->contentItem(),
+                                         QRectF(0, 0, box->width(), box->height()));
+    if (at.left() < gutter - 0.5 || at.top() < gutter - 0.5
+        || at.right() > window->width() - gutter + 0.5
+        || at.bottom() > window->height() - gutter + 0.5)
+        return u"%1 stands at %2,%3 %4×%5 in %6×%7, gutter %8"_s
+            .arg(dialog->objectName())
+            .arg(at.x()).arg(at.y()).arg(at.width()).arg(at.height())
+            .arg(window->width()).arg(window->height()).arg(gutter);
+    QList<QQuickItem *> walk{box};
+    while (!walk.isEmpty()) {
+        QQuickItem *one = walk.takeLast();
+        if (!one->isVisible())
+            continue;
+        walk.append(one->childItems());
+        if (!one->inherits("QQuickText"))
+            continue;
+        if (one->property("text").toString().isEmpty())
+            continue;
+        const bool wraps = one->property("wrapMode").toInt() != 0;
+        const bool elides = one->property("elide").toInt() != 0;
+        const qreal wide = one->property("implicitWidth").toReal();
+        const qreal tall = one->property("implicitHeight").toReal();
+        const QRectF words = one->mapRectToItem(box, QRectF(0, 0, one->width(),
+                                                            one->height()));
+        if (tall > one->height() + 1
+            || (!wraps && !elides && wide > one->width() + 1)
+            || words.left() < -0.5 || words.right() > box->width() + 0.5)
+            return u"« %1 » in %2 is cut: %3×%4 for %5×%6 at %7"_s
+                .arg(one->property("text").toString(), dialog->objectName())
+                .arg(wide).arg(tall).arg(one->width()).arg(one->height())
+                .arg(words.x());
+    }
+    return {};
+}
+
+/// Whether `item` wears a `FocusRing` that is shown — by the ring's type and not its name,
+/// which each control spells its own way.
+bool ringed(QQuickItem *item)
+{
+    for (QQuickItem *child : item->childItems()) {
+        if (QByteArray(child->metaObject()->className()).startsWith("FocusRing"))
+            return child->isVisible();
+    }
+    return false;
+}
+
+/// A folder dropped on the import window, as a reader drops one: written on disk, walked,
+/// announced to a server that holds none of it, and the window left on the step that follows.
+///
+/// Two folders, the two the checking frame was drawn for. **Complete** says everything in Leaf's
+/// own files — a `work.json` with its title and its reading direction, an `entry.json` with its
+/// number in each archive — and stops nowhere. **Komga** says everything in a `ComicInfo.xml` and
+/// its reading direction nowhere, which is what a Komga library leaves and what stops the step.
+///
+/// And two that say nothing of their roles, read from the shape of their folders. **Shelf** is a
+/// folder of three: a universe of two series, a series in two editions, and a folder of scans
+/// with no title. **Universe** declares itself and holds a series, a whole book that declares
+/// itself one, and at its root an archive that says nothing — the one kind the scan leaves
+/// unread there.
+/// The words the sheet shown holds in its list field `key`.
+QStringList wordsOn(Review *review, const QString &key)
+{
+    for (const QVariant &one : review->sheet().value(u"fields"_s).toList()) {
+        if (one.toMap().value(u"key"_s).toString() == key)
+            return one.toMap().value(u"words"_s).toStringList();
+    }
+    return {u"<aucun champ "_s + key + u'>'};
+}
+
+/// What the sheet holds for `key`, as the model hands it: a value typed is on the card once
+/// this says it, which the box showing it does not prove.
+QString textOn(Review *review, const QString &key)
+{
+    for (const QVariant &one : review->sheet().value(u"fields"_s).toList()) {
+        if (one.toMap().value(u"key"_s).toString() == key)
+            return one.toMap().value(u"text"_s).toString();
+    }
+    return u"<aucun champ "_s + key + u'>';
+}
+
+QString spokenName(QQuickItem *item)
+{
+    QAccessibleInterface *accessible = item ? QAccessible::queryAccessibleInterface(item) : nullptr;
+    return accessible ? accessible->text(QAccessible::Name) : QString();
+}
+
+/// A field of words alone in the window, over whatever it shows: what the keys do to it is
+/// the component's, whichever screen holds it — the sheet of an import or a series' window.
+struct ATokenField {
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = nullptr;
+    std::unique_ptr<QQuickItem> holder;
+    QQuickItem *field = nullptr;
+
+    bool open(const QStringList &vocabulary, const QStringList &words = {}, bool readOnly = false)
+    {
+        window = shown(engine);
+        if (!window)
+            return false;
+        QQmlComponent component(&engine);
+        component.setData("import QtQuick\nimport Leaf\n"
+                          "Item { width: 400; height: 400; z: 1000\n"
+                          "    TokenField { objectName: \"tokens\"; name: \"Genres\" } }\n",
+                          QUrl());
+        holder.reset(qobject_cast<QQuickItem *>(component.create()));
+        if (!holder)
+            return false;
+        holder->setParentItem(window->contentItem());
+        field = holder->findChild<QQuickItem *>(u"tokens"_s);
+        if (!field)
+            return false;
+        field->setProperty("vocabulary", vocabulary);
+        field->setProperty("words", words);
+        field->setProperty("readOnly", readOnly);
+        field->setProperty("createLabel", u"Créer « %1 »"_s);
+        QQuickItem *box = named(u"tokens-field"_s);
+        if (readOnly)
+            return true;
+        box->forceActiveFocus(Qt::TabFocusReason);
+        return QTest::qWaitFor([box] { return box->hasActiveFocus(); });
+    }
+
+    QQuickItem *named(const QString &name) const { return itemNamed(holder.get(), name); }
+    QStringList words() const
+    {
+        QVariant held = field->property("words");
+        if (held.canConvert<QJSValue>())
+            held = held.value<QJSValue>().toVariant();
+        return held.toStringList();
+    }
+    void enter(const QString &text) const
+    {
+        typeInto(window, text);
+        QTest::keyClick(window, Qt::Key_Return);
+    }
+};
+
+struct ADroppedFolder {
+    /// `Arrivage`: a series in two editions and one of its own under a name of no shelf, read
+    /// one universe to confirm, whose other reading — a shelf — makes two cards of one.
+    /// `Tagged`: a universe of five series, three tagged « Terres d’Arran », with two reading
+    /// orders. `Credited`: a series of nine volumes each credited in its own `entry.json`,
+    /// twelve people in all, volume 3 drawn by nobody.
+    /// `Fifty`: a shelf of fifty series — three universes of eight, eight and seven series that
+    /// say everything, and twenty-seven series without universe, twenty of them as a Komga
+    /// library leaves them (« Monster », « Demon Slayer » and « Mon voisin » among them) and
+    /// seven that say everything. Thirty cards.
+    /// `Edited`: a series that says its reading direction, holding one edition that says its
+    /// status and nothing more.
+    enum class Kind { Complete, Komga, Shelf, Universe, Arrivage, Tagged, Credited, Fifty, Edited };
+
+    QTemporaryDir library;
+    Pretend pretend;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = nullptr;
+    Imports *imports = nullptr;
+    ImportOffers *offers = nullptr;
+    ImportTally *tally = nullptr;
+    QObject *dialog = nullptr;
+    /// Whether a Komga library's ComicInfo says the direction but not the name: the card still
+    /// stops to be looked at, for a first volume whose `entry.json` is no object, which holds
+    /// nothing back, so that « Importer » goes on without a word typed on the sheet. Its title
+    /// read off its folder stopped it once; a value read off a name is no longer a question.
+    bool directed = false;
+    /// More of the server's answer to the announcement — a series it would move.
+    QByteArray extra;
+    /// Every file already in the library, and nothing created: a drop with nothing to do.
+    bool held = false;
+    /// A second folder dropped beside the first, whose two volumes claim one number — held
+    /// back by what it says, whatever « Importer » does with the first.
+    bool alsoDoubled = false;
+    /// A second folder dropped beside the first, a universe declared inside a declared
+    /// universe: refused before anything is read, and left in the frame with its reason.
+    bool alsoMisnested = false;
+    /// Series dropped after the first, each one heavy volume whose checksum takes the walk a
+    /// while: the first card stops while they are still read, and `drop` waits on it alone.
+    int slow = 0;
+    /// A fourth volume that is no zip at all, whose members cannot be hashed.
+    bool alsoUnhashable = false;
+
+    /// Writes the folder, boots, opens the window, drops the folder and waits until the card has
+    /// stopped where it stops — false, for the caller to refuse, at the first step that fails.
+    bool drop(Kind kind)
+    {
+        if (kind == Kind::Shelf || kind == Kind::Universe || kind == Kind::Arrivage
+            || kind == Kind::Tagged || kind == Kind::Credited || kind == Kind::Fifty
+            || kind == Kind::Edited)
+            return dropShaped(kind);
+        const bool komga = kind == Kind::Komga;
+        const QString name = komga ? u"Blue Period"_s : u"Koro"_s;
+        const QString at = library.filePath(name);
+        if (!library.isValid() || !QDir().mkpath(at))
+            return false;
+        if (!komga) {
+            QFile declaration(at + u"/work.json"_s);
+            if (!declaration.open(QIODevice::WriteOnly))
+                return false;
+            declaration.write(R"({"leaf":1,"title":"Koro Quest","readingDirection":"RIGHT_TO_LEFT",)"
+                R"("authors":["Toriyama"],"artists":["Toriyama"]})");
+        }
+        QStringList files;
+        for (int number = 1; number <= 3; ++number) {
+            const QString file = komga ? u"blue_period_%1.cbz"_s.arg(number)
+                                       : u"Tome %1.cbz"_s.arg(number);
+            files << file;
+            QFile volume(at + u'/' + file);
+            if (!volume.open(QIODevice::WriteOnly))
+                return false;
+            const QByteArray number_ = QByteArray::number(number);
+            volume.write(komga ? Zip::volume(directed && number == 1 ? QByteArray("[]")
+                                                                      : QByteArray(),
+                                             "<ComicInfo>" + QByteArray(directed ? "" : "<Series>Blue Period</Series>") + "<Number>"
+                                                     + number_
+                                                     + "</Number><Writer>Tsubasa Yamaguchi</Writer>"
+                                                       "<Penciller>Tsubasa Yamaguchi</Penciller>"
+                                                       + QByteArray(directed ? "<Manga>YesAndRightToLeft</Manga>" : "")
+                                                       + "<Publisher>Pika</Publisher></ComicInfo>")
+                               : Zip::volume(R"({"leaf":1,"number":)" + number_ + '}'));
+        }
+
+        if (alsoUnhashable) {
+            QFile volume(at + u"/Tome 4.cbz"_s);
+            if (!volume.open(QIODevice::WriteOnly))
+                return false;
+            volume.write("Ceci n’est pas un zip");
+        }
+
+        const QString doubled = library.filePath(u"Doublons"_s);
+        if (alsoDoubled) {
+            if (!QDir().mkpath(doubled))
+                return false;
+            QFile declaration(doubled + u"/work.json"_s);
+            if (!declaration.open(QIODevice::WriteOnly))
+                return false;
+            declaration.write(R"({"leaf":1,"title":"Doublons","readingDirection":"RIGHT_TO_LEFT",)"
+                R"("authors":["Toriyama"],"artists":["Toriyama"]})");
+            for (const QString &file : {u"Tome 1.cbz"_s, u"Tome 1 bis.cbz"_s}) {
+                QFile volume(doubled + u'/' + file);
+                if (!volume.open(QIODevice::WriteOnly))
+                    return false;
+                volume.write(Zip::volume(R"({"leaf":1,"number":1})"));
+            }
+        }
+
+        const QString misnested = library.filePath(u"Monde"_s);
+        if (alsoMisnested) {
+            for (const QString &folder : {misnested, misnested + u"/Arran"_s}) {
+                if (!written(folder + u"/universe.json"_s,
+                             R"({"leaf":1,"name":")" + QFileInfo(folder).fileName().toUtf8()
+                                 + R"("})"))
+                    return false;
+            }
+            if (!aSaidSeries(misnested + u"/Arran/Elfes"_s, u"Elfes"_s, 1))
+                return false;
+        }
+
+        QStringList slowFolders;
+        for (int one = 0; one < slow; ++one) {
+            const QString folder = library.filePath(u"Lent %1"_s.arg(one));
+            const QByteArray heavy = Zip::anArchive(
+                {Zip::Member{"001.jpg", QByteArray(10 * 1024 * 1024, 'x'), false, {}},
+                 Zip::Member{"entry.json", R"({"leaf":1,"number":1})", true, {}}});
+            if (!written(folder + u"/work.json"_s,
+                         R"({"leaf":1,"title":"Lent","readingDirection":"RIGHT_TO_LEFT",)"
+                         R"("authors":["Toriyama"],"artists":["Toriyama"]})")
+                || !written(folder + u"/Tome 1.cbz"_s, heavy))
+                return false;
+            slowFolders << folder;
+        }
+
+        if (!pretend.listen(QHostAddress::LocalHost))
+            return false;
+        QByteArray listed = "[";
+        for (const QString &file : files)
+            listed += (listed.size() > 1 ? ",\"" : "\"") + file.toUtf8() + '"';
+        listed += ']';
+        const QByteArray opening = aReply(
+            200, QByteArrayLiteral("application/json"),
+            "{\"id\":\"imp_d\",\"root\":\"" + name.toUtf8() + "\",\"creates\":"
+                + (komga || held ? QByteArray("[]")
+                                 : QByteArray(R"([{"kind":"WORK","name":"Koro Quest","at":""}])"))
+                + ",\"toSend\":" + (held ? QByteArray("[]") : listed) + ",\"alreadyThere\":"
+                + (held ? listed : QByteArray("[]")) + ",\"bytesToSend\":9" + extra + '}');
+        const QByteArray doubledOpening = aReply(
+            200, QByteArrayLiteral("application/json"),
+            R"({"id":"imp_e","root":"Doublons","creates":[],"toSend":["Tome 1.cbz",)"
+            R"("Tome 1 bis.cbz"],"alreadyThere":[],"bytesToSend":9})");
+        pretend.answerFor = seatedAsPrincipal([opening, doubledOpening](const QByteArray &request) {
+            if (request.startsWith("POST /import ") && request.contains("\"root\":\"Doublons\""))
+                return doubledOpening;
+            if (request.startsWith("POST /import "))
+                return opening;
+            if (request.startsWith("DELETE "))
+                return aReply(204, QByteArrayLiteral("application/json"), {});
+            // The transfer itself is never answered: the card stays where « Importer » put it.
+            if (request.startsWith("PUT ") || request.startsWith("POST /intake"))
+                return QByteArray();
+            return aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        });
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        window = shown(engine);
+        if (!window)
+            return false;
+        imports = engine.singletonInstance<Imports *>(qmlTypeId("Leaf", 1, 0, "Imports"));
+        offers = engine.singletonInstance<ImportOffers *>(qmlTypeId("Leaf", 1, 0, "ImportOffers"));
+        tally = engine.singletonInstance<ImportTally *>(qmlTypeId("Leaf", 1, 0, "ImportTally"));
+        dialog = window->findChild<QObject *>(u"import-dialog"_s);
+        if (!imports || !offers || !tally || !dialog || !QMetaObject::invokeMethod(dialog, "show"))
+            return false;
+        if (!QTest::qWaitFor([this] { return dialog->property("opened").toBool(); }))
+            return false;
+        QVariantList dropped{QUrl::fromLocalFile(at)};
+        if (alsoDoubled)
+            dropped << QUrl::fromLocalFile(doubled);
+        if (alsoMisnested)
+            dropped << QUrl::fromLocalFile(misnested);
+        for (const QString &folder : std::as_const(slowFolders))
+            dropped << QUrl::fromLocalFile(folder);
+        if (!QMetaObject::invokeMethod(dialog, "take", Q_ARG(QVariant, QVariant(dropped))))
+            return false;
+        // A volume that is no archive leaves the proposal weaker, and the card asks to be looked at.
+        const int stopsAt = int((komga && !held) || alsoUnhashable ? Imports::Stage::Reviewing
+                                                                   : Imports::Stage::Ready);
+        const auto stageOf = [this](int row) {
+            return imports->data(imports->index(row), int(Imports::Role::Stage_)).toInt();
+        };
+        return QTest::qWaitFor([this, stopsAt, stageOf] {
+            return imports->rowCount({}) == (alsoDoubled || alsoMisnested ? 2 : 1) + slow
+                   && stageOf(0) == stopsAt
+                   && (!alsoDoubled || stageOf(1) == int(Imports::Stage::Reviewing))
+                   && (!alsoMisnested || stageOf(1) == int(Imports::Stage::Failed));
+        }) && laidOut(window);
+    }
+
+    QQuickItem *named(const QString &name) const { return itemNamed(window->contentItem(), name); }
+
+    int phase() const { return dialog->property("phase").toInt(); }
+    int phaseNamed(const char *name) const { return dialog->property(name).toInt(); }
+
+    /// The reading direction a Komga library never says, given on the series' own sheet: a
+    /// series without one is held back, and the tests that go on to the send need it said.
+    bool saysTheDirection()
+    {
+        auto *review = engine.singletonInstance<Review *>(qmlTypeId("Leaf", 1, 0, "Review"));
+        return review && !imports->cards().isEmpty()
+               && review->edits()->edit(QString::number(imports->cards().at(0).token) + u'/',
+                               u"readingDirection"_s, u"RIGHT_TO_LEFT"_s);
+    }
+
+    /// The frame opened as a hand opens it — « Suivant » on the cards, the only way off
+    /// them — and laid out.
+    bool framed()
+    {
+        QQuickItem *way = named(u"import-start"_s);
+        if (!way || !QTest::qWaitFor([way] { return way->isVisible(); }) || !laidOut(window))
+            return false;
+        clickOn(window, way);
+        return QTest::qWaitFor([this] {
+            return phase() == phaseNamed("verifying") && shownNamed(window->contentItem(),
+                                                                    u"import-review"_s);
+        }) && laidOut(window);
+    }
+
+    /// « Importer » on the third step — the press that starts the transfer, one step after
+    /// « Suivant » on the frame, which sends nothing.
+    bool importNow()
+    {
+        QQuickItem *go = nullptr;
+        if (!QTest::qWaitFor([&] {
+                return (go = named(u"import-send"_s)) && go->isVisible()
+                       && go->property("ready").toBool() && laidOut(window);
+            }))
+            return false;
+        clickOn(window, go);
+        return true;
+    }
+
+    bool clicked(const QString &name)
+    {
+        QQuickItem *one = nullptr;
+        if (!QTest::qWaitFor([&] { return (one = named(name)) && one->isVisible() && laidOut(window); }))
+            return false;
+        clickOn(window, one);
+        return laidOut(window);
+    }
+
+    /// Where one zone of the frame stands in the window.
+    QRectF zone(const QString &name) const
+    {
+        QQuickItem *one = named(name);
+        return one ? one->mapRectToScene(QRectF(0, 0, one->width(), one->height())) : QRectF();
+    }
+
+    /// The volumes of each edition of the series in two, and the scans of the folder with no
+    /// title, in a **Shelf**.
+    int perEdition = 3;
+    int loose = 2;
+    /// Whether the server takes the files it asked for and files each card, rather than
+    /// leaving the first file hanging: the transfer of every card is then heard.
+    bool transfers = false;
+    /// A third order in the **Tagged** universe, « Hors-série », whose one step includes an
+    /// order nobody wrote: the announcement refuses the card for it.
+    bool refusing = false;
+    /// « Gnomes de Troy » too in the **Tagged** universe, in two editions, « Intégrale » and
+    /// « Originale »: a range of its volumes has to say which.
+    bool editions = false;
+
+    /// Archives that say nothing of their series' name, `Tome 1.cbz` to `Tome <to>.cbz`: only
+    /// who wrote and drew them and the way they read, because a series without those waits on
+    /// a name and none of these drops is about that.
+    static bool bareVolumes(const QString &folder, int to)
+    {
+        if (!QDir().mkpath(folder))
+            return false;
+        for (int number = 1; number <= to; ++number) {
+            QFile file(folder + u"/Tome %1.cbz"_s.arg(number));
+            if (!file.open(QIODevice::WriteOnly))
+                return false;
+            file.write(Zip::volume({}, "<ComicInfo><Writer>Toriyama</Writer>"
+                                       "<Penciller>Toriyama</Penciller>"
+                                       "<Manga>YesAndRightToLeft</Manga></ComicInfo>"));
+        }
+        return true;
+    }
+
+    static bool written(const QString &path, const QByteArray &bytes)
+    {
+        QFile file(path);
+        return QDir().mkpath(QFileInfo(path).path()) && file.open(QIODevice::WriteOnly)
+               && file.write(bytes) == bytes.size();
+    }
+
+    static QByteArray compact(const QJsonObject &object)
+    {
+        return QJsonDocument(object).toJson(QJsonDocument::Compact);
+    }
+
+    /// A series saying its title and direction, and `extra` besides, of `volumes` volumes
+    /// whose `entry.json` says their number.
+    static bool aSaidSeries(const QString &folder, const QString &title, int volumes,
+                            const QJsonObject &extra = {})
+    {
+        QJsonObject work{{u"leaf"_s, 1}, {u"title"_s, title},
+                         {u"readingDirection"_s, u"LEFT_TO_RIGHT"_s},
+                         {u"authors"_s, QJsonArray{u"Toriyama"_s}},
+                         {u"artists"_s, QJsonArray{u"Toriyama"_s}}};
+        for (auto it = extra.begin(); it != extra.end(); ++it)
+            work.insert(it.key(), it.value());
+        if (!written(folder + u"/work.json"_s, compact(work)))
+            return false;
+        for (int number = 1; number <= volumes; ++number) {
+            if (!written(folder + u"/Tome %1.cbz"_s.arg(number),
+                         Zip::volume(compact({{u"leaf"_s, 1}, {u"number"_s, number}}))))
+                return false;
+        }
+        return true;
+    }
+
+    /// A series as a Komga library leaves it: a ComicInfo saying its name and each number,
+    /// nothing of the direction it reads in.
+    static bool aKomgaSeries(const QString &folder, const QString &name, int volumes)
+    {
+        for (int number = 1; number <= volumes; ++number) {
+            if (!written(folder + u"/scan_%1.cbz"_s.arg(number),
+                         Zip::volume({}, "<ComicInfo><Series>" + name.toUtf8() + "</Series><Number>"
+                                             + QByteArray::number(number)
+                                             + "</Number><Writer>Yuki</Writer><Penciller>Yuki"
+                                               "</Penciller></ComicInfo>")))
+                return false;
+        }
+        return true;
+    }
+
+    static bool aShelfOfFifty(const QString &at)
+    {
+        const QList<std::pair<QString, int>> universes{
+            {u"Terres A"_s, 8}, {u"Terres B"_s, 8}, {u"Terres C"_s, 7}};
+        for (const auto &[universe, series] : universes) {
+            const QString folder = at + u'/' + universe;
+            if (!written(folder + u"/universe.json"_s,
+                         R"({"leaf":1,"name":")" + universe.toUtf8() + R"("})"))
+                return false;
+            for (int one = 1; one <= series; ++one) {
+                const QString title = universe.right(1) + QString::number(one);
+                if (!aSaidSeries(folder + u'/' + title, title, 1))
+                    return false;
+            }
+        }
+        QStringList komga{u"Monster"_s, u"Demon Slayer"_s, u"Mon voisin"_s};
+        for (int one = 4; one <= 20; ++one)
+            komga << u"Komga %1"_s.arg(one, 2, 10, QChar(u'0'));
+        for (const QString &name : std::as_const(komga)) {
+            if (!aKomgaSeries(at + u'/' + name, name, 2))
+                return false;
+        }
+        for (int one = 1; one <= 7; ++one) {
+            const QString name = u"Prête %1"_s.arg(one);
+            if (!aSaidSeries(at + u'/' + name, name, 1))
+                return false;
+        }
+        return true;
+    }
+
+    static bool aTaggedUniverse(const QString &at, bool refusing = false, bool editions = false)
+    {
+        const QString arran = u"Terres d’Arran"_s;
+        const auto step = [](const QString &work) { return QJsonObject{{u"work"_s, work}}; };
+        const QJsonArray all{step(u"Lanfeust de Troy"_s), step(u"Elfes"_s), step(u"Nains"_s),
+                             step(u"Mages"_s), step(u"Trolls de Troy"_s)};
+        const QJsonArray three{step(u"Elfes"_s), step(u"Nains"_s), step(u"Mages"_s)};
+        QJsonObject universe{
+            {u"leaf"_s, 1},
+            {u"name"_s, u"Monde d’Aquilon"_s},
+            {u"defaultOrder"_s, u"tout-aquilon"_s},
+            {u"orders"_s,
+             QJsonArray{QJsonObject{{u"id"_s, u"tout-aquilon"_s},
+                                    {u"name"_s, u"Tout Aquilon"_s},
+                                    {u"steps"_s, all}},
+                        QJsonObject{{u"id"_s, u"terres-d-arran"_s},
+                                    {u"name"_s, arran},
+                                    {u"steps"_s, three}}}}};
+        if (refusing) {
+            QJsonArray orders = universe.value(u"orders"_s).toArray();
+            orders.append(QJsonObject{
+                {u"id"_s, u"hors-serie"_s},
+                {u"name"_s, u"Hors-série"_s},
+                {u"steps"_s, QJsonArray{QJsonObject{{u"include"_s, u"nulle-part"_s}}}}});
+            universe.insert(u"orders"_s, orders);
+        }
+        const QJsonObject tagged{{u"tags"_s, QJsonArray{arran}}};
+        return written(at + u"/universe.json"_s, compact(universe))
+               && aSaidSeries(at + u"/Elfes"_s, u"Elfes"_s, 2, tagged)
+               && aSaidSeries(at + u"/Nains"_s, u"Nains"_s, 1, tagged)
+               && aSaidSeries(at + u"/Mages"_s, u"Mages"_s, 1, tagged)
+               && aSaidSeries(at + u"/Lanfeust de Troy"_s, u"Lanfeust de Troy"_s, 1)
+               && aSaidSeries(at + u"/Trolls de Troy"_s, u"Trolls de Troy"_s, 1)
+               && (!editions
+                   || (aSaidSeries(at + u"/Gnomes de Troy"_s, u"Gnomes de Troy"_s, 0)
+                       && std::ranges::all_of(
+                           QStringList{u"Intégrale"_s, u"Originale"_s},
+                           [&at](const QString &edition) {
+                               const QString folder = at + u"/Gnomes de Troy/"_s + edition;
+                               return written(folder + u"/edition.json"_s,
+                                              compact({{u"leaf"_s, 1}, {u"name"_s, edition}}))
+                                      && written(folder + u"/Tome 1.cbz"_s,
+                                                 Zip::volume(compact({{u"leaf"_s, 1},
+                                                                      {u"number"_s, 1}})));
+                           })));
+    }
+
+    static bool aCreditedSeries(const QString &at)
+    {
+        // The series names nobody itself: its credits are the union of its volumes'.
+        if (!aSaidSeries(at, u"Elfes"_s, 0,
+                         {{u"authors"_s, QJsonArray()}, {u"artists"_s, QJsonArray()}}))
+            return false;
+        const QList<std::pair<QString, QString>> credits{
+            {u"A"_s, u"B"_s}, {u"C"_s, u"D"_s}, {u"E"_s, QString()}, {u"A"_s, u"F"_s},
+            {u"G"_s, u"H"_s}, {u"I"_s, u"J"_s}, {u"K"_s, u"L"_s},    {u"C"_s, u"B"_s},
+            {u"A"_s, u"B"_s}};
+        for (int number = 1; number <= int(credits.size()); ++number) {
+            const auto &[writer, drawer] = credits.at(number - 1);
+            QJsonObject entry{{u"leaf"_s, 1},
+                              {u"number"_s, number},
+                              {u"authors"_s, QJsonArray{u"Auteur "_s + writer}}};
+            if (!drawer.isEmpty())
+                entry.insert(u"artists"_s, QJsonArray{u"Auteur "_s + drawer});
+            if (!written(at + u"/Tome %1.cbz"_s.arg(number), Zip::volume(compact(entry))))
+                return false;
+        }
+        return true;
+    }
+
+    /// The two drops read from their shape, announced to a server that opens a session for
+    /// each and asks for every file it was told of — so a file that travels is heard.
+    bool dropShaped(Kind kind)
+    {
+        if (!library.isValid())
+            return false;
+        QString at;
+        int cards = 1;
+        if (kind == Kind::Shelf) {
+            at = library.filePath(u"BD"_s);
+            cards = 3;
+            if (!bareVolumes(at + u"/Terres d'Arran/Elfes"_s, 4)
+                || !bareVolumes(at + u"/Terres d'Arran/Mages"_s, 3)
+                || !bareVolumes(at + u"/Dragon Ball/Perfect"_s, perEdition)
+                || !bareVolumes(at + u"/Dragon Ball/Original"_s, perEdition)
+                || !bareVolumes(at + u"/Vrac"_s, loose))
+                return false;
+        } else if (kind == Kind::Tagged) {
+            at = library.filePath(u"Aquilon"_s);
+            if (!aTaggedUniverse(at, refusing, editions))
+                return false;
+        } else if (kind == Kind::Credited) {
+            at = library.filePath(u"Elfes"_s);
+            if (!aCreditedSeries(at))
+                return false;
+        } else if (kind == Kind::Fifty) {
+            at = library.filePath(u"Rayon"_s);
+            cards = 30;
+            if (!aShelfOfFifty(at))
+                return false;
+        } else if (kind == Kind::Edited) {
+            // Under a universe, as a library holds it: the series is not the card's root.
+            at = library.filePath(u"Univers"_s);
+            const QString series = at + u"/Serie"_s;
+            if (!bareVolumes(series + u"/Ed"_s, 2)
+                || !written(at + u"/universe.json"_s, R"({"leaf":1,"name":"Univers"})")
+                || !written(series + u"/work.json"_s,
+                            R"({"leaf":1,"title":"Serie","readingDirection":"RIGHT_TO_LEFT",)"
+                            R"("authors":["Toriyama"],"artists":["Toriyama"],)"
+                            R"("status":"completed"})")
+                || !written(series + u"/Ed/edition.json"_s,
+                            R"({"leaf":1,"name":"Ed","status":"completed","volumeCount":2,)"
+                            R"("publisher":"Glénat","language":"fr","format":"Digital",)"
+                            R"("collection":"Shonen","chapterLabel":"Chap.{n:00}","colour":true})"))
+                return false;
+        } else if (kind == Kind::Arrivage) {
+            at = library.filePath(u"Arrivage"_s);
+            if (!bareVolumes(at + u"/Dragon Ball/Perfect"_s, 3)
+                || !bareVolumes(at + u"/Dragon Ball/Original"_s, 3)
+                || !bareVolumes(at + u"/Bleach"_s, 2))
+                return false;
+        } else {
+            at = library.filePath(u"Monde d'Aquilon"_s);
+            if (!bareVolumes(at + u"/Elfes"_s, 2))
+                return false;
+            const QList<std::pair<QString, QByteArray>> written{
+                {u"universe.json"_s, R"({"leaf":1,"name":"Monde d’Aquilon"})"},
+                {u"Elfes/work.json"_s,
+                 R"({"leaf":1,"title":"Elfes","readingDirection":"LEFT_TO_RIGHT"})"},
+                {u"le_combat.cbz"_s,
+                 Zip::volume({}, {},
+                             R"({"leaf":1,"title":"Le Combat","readingDirection":)"
+                             R"("LEFT_TO_RIGHT","authors":["Toriyama"],)"
+                             R"("artists":["Toriyama"]})")},
+                {u"scan_final.cbz"_s, Zip::volume({})}};
+            for (const auto &[path, bytes] : written) {
+                QFile file(at + u'/' + path);
+                if (!file.open(QIODevice::WriteOnly))
+                    return false;
+                file.write(bytes);
+            }
+        }
+
+        if (!pretend.listen(QHostAddress::LocalHost))
+            return false;
+        auto opened = std::make_shared<int>(0);
+        pretend.answerFor = seatedAsPrincipal([opened, this](const QByteArray &request) {
+            if (request.startsWith("POST /import ")) {
+                const QJsonObject body =
+                    QJsonDocument::fromJson(request.mid(request.indexOf("\r\n\r\n") + 4))
+                        .object();
+                QJsonArray toSend;
+                for (const QJsonValue &one : body.value(u"files"_s).toArray())
+                    toSend.append(one.toObject().value(u"path"_s));
+                const QJsonObject answer{
+                    {u"id"_s, u"imp_%1"_s.arg(++*opened)}, {u"root"_s, body.value(u"root"_s)},
+                    {u"creates"_s, QJsonArray{}},          {u"toSend"_s, toSend},
+                    {u"alreadyThere"_s, QJsonArray{}},     {u"bytesToSend"_s, 9}};
+                return aReply(200, QByteArrayLiteral("application/json"),
+                              QJsonDocument(answer).toJson(QJsonDocument::Compact));
+            }
+            if (request.startsWith("DELETE "))
+                return aReply(204, QByteArrayLiteral("application/json"), {});
+            if (transfers && request.startsWith("PUT /import/"))
+                return aReply(200, QByteArrayLiteral("application/json"),
+                              QByteArrayLiteral(R"({"path":"x","received":9})"));
+            if (transfers && request.startsWith("POST /import/") && request.contains("/commit"))
+                return aReply(200, QByteArrayLiteral("application/json"),
+                              QByteArrayLiteral(
+                                  R"({"root":"x","installed":1,"orphans":[],"open":false})"));
+            if (request.startsWith("PUT ") || request.startsWith("POST /intake"))
+                return QByteArray();
+            return aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        });
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        window = shown(engine);
+        if (!window)
+            return false;
+        imports = engine.singletonInstance<Imports *>(qmlTypeId("Leaf", 1, 0, "Imports"));
+        offers = engine.singletonInstance<ImportOffers *>(qmlTypeId("Leaf", 1, 0, "ImportOffers"));
+        tally = engine.singletonInstance<ImportTally *>(qmlTypeId("Leaf", 1, 0, "ImportTally"));
+        dialog = window->findChild<QObject *>(u"import-dialog"_s);
+        if (!imports || !offers || !tally || !dialog || !QMetaObject::invokeMethod(dialog, "show"))
+            return false;
+        if (!QTest::qWaitFor([this] { return dialog->property("opened").toBool(); }))
+            return false;
+        const QVariantList dropped{QUrl::fromLocalFile(at)};
+        if (!QMetaObject::invokeMethod(dialog, "take", Q_ARG(QVariant, QVariant(dropped))))
+            return false;
+        // A drop that says everything about itself is ready rather than stopped — an edition
+        // whose numbers are read off its file names included: they are shown, not asked about.
+        const bool said = kind == Kind::Tagged || kind == Kind::Credited || kind == Kind::Fifty
+                          || kind == Kind::Edited;
+        return QTest::qWaitFor(
+                   [this, cards, said] {
+                       if (imports->rowCount({}) != cards)
+                           return false;
+                       for (int row = 0; row < cards; ++row) {
+                           const int stage =
+                               imports->data(imports->index(row), int(Imports::Role::Stage_))
+                                   .toInt();
+                           if (stage != int(Imports::Stage::Reviewing)
+                               && !(said && stage == int(Imports::Stage::Ready)))
+                               return false;
+                       }
+                       return true;
+                   },
+                   30000)
+               && laidOut(window);
+    }
+
+    Review *review()
+    {
+        return engine.singletonInstance<Review *>(qmlTypeId("Leaf", 1, 0, "Review"));
+    }
+
+    /// The id of the node of the tree named `name`, as the frame draws it.
+    QString nodeId(const QString &name)
+    {
+        for (const QVariant &one : review()->rail()) {
+            if (one.toMap().value(u"name"_s).toString() == name)
+                return one.toMap().value(u"id"_s).toString();
+        }
+        return {};
+    }
+
+    /// The role chip at the end of the node `name`, scrolled into sight by giving its line
+    /// the keys — or null when the tree has no such node.
+    QQuickItem *chipOf(const QString &name)
+    {
+        QQuickItem *chip = named(u"role-chip-"_s + nodeId(name));
+        if (chip && chip->parentItem()) {
+            chip->parentItem()->forceActiveFocus(Qt::OtherFocusReason);
+            laidOut(window);
+        }
+        return chip;
+    }
+
+    /// What the chip of the node `name` says.
+    QString roleSaid(const QString &name)
+    {
+        QQuickItem *chip = named(u"role-chip-"_s + nodeId(name));
+        return chip ? textNamed(chip, chip->objectName() + u"-text"_s)
+                    : u"<pas d’étiquette pour "_s + name + u'>';
+    }
+
+    QObject *roleMenu() const { return window->findChild<QObject *>(u"role-menu"_s); }
+
+    OrderEditor *orderEditor()
+    {
+        return engine.singletonInstance<OrderEditor *>(qmlTypeId("Leaf", 1, 0, "OrderEditor"));
+    }
+
+    /// The editor opened on `order` as a hand opens it: the universe's sheet shown, its line
+    /// clicked — false, for the caller to refuse, at the first step that fails.
+    bool orderOpened(const QString &order)
+    {
+        review()->view()->select(nodeId(u"Monde d’Aquilon"_s));
+        QQuickItem *line = nullptr;
+        if (!QTest::qWaitFor([&] {
+                return (line = named(u"review-order-"_s + order)) && line->isVisible()
+                       && laidOut(window);
+            }))
+            return false;
+        clickOn(window, line);
+        return QTest::qWaitFor([this] { return shownNamed(window->contentItem(),
+                                                          u"order-editor"_s); })
+               && laidOut(window);
+    }
+
+    /// The `orders` of the `universe.json` the last announcement carried.
+    QJsonArray announcedOrders() const
+    {
+        const QByteArray line = "POST /import ";
+        const qsizetype last = pretend.heard.lastIndexOf(line);
+        if (last < 0)
+            return {};
+        for (const QJsonValue &one :
+             bodySent(pretend.heard.mid(last), line).value(u"sidecars"_s).toArray()) {
+            if (one.toObject().value(u"path"_s).toString() == u"universe.json"_s)
+                return QJsonDocument::fromJson(
+                           one.toObject().value(u"json"_s).toString().toUtf8())
+                    .object()
+                    .value(u"orders"_s)
+                    .toArray();
+        }
+        return {};
+    }
+
+    /// The sessions the server received a file into, by the id it gave them.
+    QSet<QByteArray> sessionsSentTo() const
+    {
+        QSet<QByteArray> out;
+        const QByteArray line = "PUT /import/";
+        for (qsizetype at = pretend.heard.indexOf(line); at >= 0;
+             at = pretend.heard.indexOf(line, at + 1)) {
+            const qsizetype from = at + line.size();
+            out.insert(pretend.heard.mid(from, pretend.heard.indexOf('/', from) - from));
+        }
+        return out;
+    }
+
+    /// How many requests that begin with `line` the server heard.
+    int heardTimes(const QByteArray &line) const
+    {
+        int times = 0;
+        for (qsizetype at = pretend.heard.indexOf(line); at >= 0;
+             at = pretend.heard.indexOf(line, at + 1))
+            ++times;
+        return times;
+    }
+};
+
+/// A drop laid on a volume or on a series already in the library, announced to a server
+/// that answers with what it compared: `volumes` and `absent` are the JSON the test types.
+struct AReimport {
+    QTemporaryDir library;
+    Pretend pretend;
+    QQmlApplicationEngine engine;
+    QQuickWindow *window = nullptr;
+    Imports *imports = nullptr;
+    QObject *dialog = nullptr;
+
+    static QByteArray held(const QByteArray &id, int number, int pages, int page = -1)
+    {
+        return "{\"entryId\":\"" + id + "\",\"number\":" + QByteArray::number(number)
+               + ",\"file\":\"T" + QByteArray::number(number) + ".cbz\",\"size\":10,\"pages\":"
+               + QByteArray::number(pages)
+               + (page >= 0 ? ",\"page\":" + QByteArray::number(page) : QByteArray())
+               + ",\"finished\":false,\"others\":0}";
+    }
+
+    static QByteArray match(const QString &path, const QByteArray &outcome,
+                            const QByteArray &rest = {}, const QByteArray &arriving = "{}")
+    {
+        return "{\"path\":\"" + path.toUtf8() + "\",\"outcome\":\"" + outcome
+               + "\",\"arriving\":" + arriving + (rest.isEmpty() ? QByteArray() : "," + rest)
+               + "}";
+    }
+
+    QQuickItem *named(const QString &name) const { return itemNamed(window->contentItem(), name); }
+
+    Review *review()
+    {
+        return engine.singletonInstance<Review *>(qmlTypeId("Leaf", 1, 0, "Review"));
+    }
+
+    /// `files` laid in a folder, or alone when `kind` is a volume, then dropped on the
+    /// target and read until the card stops. `komga` gives the files a publisher to keep.
+    bool drop(const QByteArray &kind, const QByteArray &id, const QString &name,
+              const QStringList &files, const QByteArray &volumes, const QByteArray &absent,
+              const QByteArray &extra = {}, bool komga = false)
+    {
+        if (!library.isValid() || !QDir().mkpath(library.filePath(u"Rayon"_s)))
+            return false;
+        for (const QString &file : files) {
+            QFile volume(library.filePath(u"Rayon/"_s + file));
+            if (!QDir().mkpath(QFileInfo(volume).path()) || !volume.open(QIODevice::WriteOnly))
+                return false;
+            // Every file says its writer, its drawer and its direction: a series that says
+            // none of them waits on a name, and a reimport is not what is under test here.
+            volume.write(Zip::volume({}, komga ? "<ComicInfo><Series>Blue Period</Series>"
+                                                 "<Writer>Q</Writer><Penciller>Q</Penciller>"
+                                                 "<Manga>YesAndRightToLeft</Manga>"
+                                                 "<Publisher>Pika</Publisher></ComicInfo>"
+                                               : "<ComicInfo><Writer>Q</Writer><Penciller>Q</Penciller>"
+                                                 "<Manga>YesAndRightToLeft</Manga></ComicInfo>"));
+        }
+        if (komga) {
+            QFile declaration(library.filePath(u"Rayon/work.json"_s));
+            if (!declaration.open(QIODevice::WriteOnly))
+                return false;
+            declaration.write(R"({"leaf":1,"title":"Blue Period","readingDirection":)"
+                              R"("LEFT_TO_RIGHT","authors":["Q"],"artists":["Q"],"publisher":"Pika"})");
+        }
+        QJsonArray toSend;
+        for (const QString &file : files)
+            toSend.append(file);
+        const QByteArray body =
+            "{\"id\":\"imp_r\",\"root\":\"Rayon\",\"creates\":[],\"toSend\":"
+            + QJsonDocument(toSend).toJson(QJsonDocument::Compact)
+            + ",\"alreadyThere\":[],\"bytesToSend\":9,\"target\":{\"kind\":\"" + kind
+            + "\",\"id\":\"" + id + "\",\"name\":\"" + name.toUtf8()
+            + "\",\"trail\":["
+            + (kind == "UNIVERSE"
+                   ? QByteArray("{\"kind\":\"UNIVERSE\",\"id\":\"u1\",\"name\":\"Dragon Ball\","
+                                "\"count\":3}")
+                   : QByteArray("{\"kind\":\"WORK\",\"id\":\"wk-1\",\"name\":\"Blue Period\","
+                                "\"count\":1},{\"kind\":\"SERIES\",\"id\":\"ed-1\",\"name\":"
+                                "\"Édition française\",\"count\":12}"))
+            + (kind == "ENTRY" || kind == "CHAPTER"
+                   ? ",{\"kind\":\"ENTRY\",\"id\":\"e2\",\"name\":\"2\",\"count\":188}"
+                   : QByteArray())
+            + (kind == "CHAPTER" ? ",{\"kind\":\"CHAPTER\",\"id\":\"c6\",\"name\":"
+                                   "\"Couleurs froides\",\"count\":79}"
+                                 : QByteArray())
+            + "]},\"volumes\":[" + volumes + "],\"absent\":[" + absent + "]"
+            + (extra.isEmpty() ? QByteArray() : "," + extra) + "}";
+        if (!pretend.listen(QHostAddress::LocalHost))
+            return false;
+        pretend.answerFor = seatedAsPrincipal([body](const QByteArray &request) {
+            if (request.startsWith("POST /import ") && !request.contains("/commit"))
+                return aReply(200, QByteArrayLiteral("application/json"), body);
+            if (request.startsWith("DELETE "))
+                return aReply(204, QByteArrayLiteral("application/json"), {});
+            if (request.startsWith("PUT /import/"))
+                return aReply(200, QByteArrayLiteral("application/json"),
+                              QByteArrayLiteral(R"({"path":"x","received":9})"));
+            if (request.startsWith("POST /import/") && request.contains("/commit"))
+                return aReply(200, QByteArrayLiteral("application/json"),
+                              QByteArrayLiteral(
+                                  R"({"root":"x","installed":1,"orphans":[],"open":false})"));
+            if (request.startsWith("PUT ") || request.startsWith("POST /intake"))
+                return QByteArray();
+            return aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        });
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+        window = shown(engine);
+        if (!window)
+            return false;
+        imports = engine.singletonInstance<Imports *>(qmlTypeId("Leaf", 1, 0, "Imports"));
+        dialog = window->findChild<QObject *>(u"import-dialog"_s);
+        if (!imports || !dialog
+            || !QMetaObject::invokeMethod(dialog, "showFor", Q_ARG(QVariant, QString::fromUtf8(kind)),
+                                          Q_ARG(QVariant, QString::fromUtf8(id)),
+                                          Q_ARG(QVariant, name), Q_ARG(QVariant, 0)))
+            return false;
+        if (!QTest::qWaitFor([this] { return dialog->property("opened").toBool(); }))
+            return false;
+        const QVariantList dropped{QUrl::fromLocalFile(
+            kind == "ENTRY" || kind == "CHAPTER"
+                ? library.filePath(u"Rayon/"_s + files.constFirst())
+                            : library.filePath(u"Rayon"_s))};
+        if (!QMetaObject::invokeMethod(dialog, "take", Q_ARG(QVariant, QVariant(dropped))))
+            return false;
+        return QTest::qWaitFor(
+                   [this] {
+                       return imports->rowCount({}) == 1
+                              && imports->data(imports->index(0), int(Imports::Role::Stage_))
+                                         .toInt()
+                                     == int(Imports::Stage::Reviewing);
+                   },
+                   30000)
+               && laidOut(window);
+    }
+
+    /// The frame opened by « Suivant », on the file `path`.
+    bool framed(const QString &path)
+    {
+        QQuickItem *way = named(u"import-start"_s);
+        if (!way || !QTest::qWaitFor([way] { return way->isVisible(); }) || !laidOut(window))
+            return false;
+        clickOn(window, way);
+        if (!QTest::qWaitFor([this] { return shownNamed(window->contentItem(), u"import-review"_s); })
+            || !laidOut(window))
+            return false;
+        if (!path.isEmpty())
+            review()->view()->select(path);
+        return laidOut(window);
+    }
+
+    /// « Importer » on the third step — the press that starts the transfer, one step after
+    /// « Suivant » on the frame, which sends nothing.
+    bool importNow()
+    {
+        QQuickItem *go = nullptr;
+        if (!QTest::qWaitFor([&] {
+                return (go = named(u"import-send"_s)) && go->isVisible()
+                       && go->property("ready").toBool() && laidOut(window);
+            }))
+            return false;
+        clickOn(window, go);
+        return true;
+    }
+
+    bool clicked(const QString &name)
+    {
+        QQuickItem *one = nullptr;
+        if (!QTest::qWaitFor([&] { return (one = named(name)) && one->isVisible() && laidOut(window); }))
+            return false;
+        clickOn(window, one);
+        return laidOut(window);
+    }
+
+    int heardTimes(const QByteArray &line) const
+    {
+        int times = 0;
+        for (qsizetype at = pretend.heard.indexOf(line); at >= 0;
+             at = pretend.heard.indexOf(line, at + 1))
+            ++times;
+        return times;
+    }
+
+    /// The body of the last announcement, the one the commit that followed is about.
+    QJsonObject lastAnnounced() const
+    {
+        const QByteArray line = "POST /import ";
+        return bodySent(pretend.heard.mid(pretend.heard.lastIndexOf(line)), line);
+    }
+};
 
 class CrossesTheSeam : public QObject
 {
     Q_OBJECT
+
+    QTemporaryDir m_settingsHome;
 
 private slots:
     /// `main` sets the style before it ever calls `Boot::run` — deliberately kept out of
@@ -1206,6 +2665,15 @@ private slots:
     void initTestCase()
     {
         QStandardPaths::setTestModeEnabled(true);
+        // The import queue keeps the sessions it could not let go of in `preferences`
+        // (`imports/left`), keyed by server address. Every test here starts a `Pretend` on a
+        // port the kernel hands out, and the kernel hands the same one out again soon after:
+        // a session left by the import window test was dropped by the erasing test, whose
+        // server heard a `DELETE` it never asked for — one run in ten, and never when the
+        // test ran alone. Run without ctest's per-target HOME, the same file was the
+        // developer's own. A directory of its own, emptied before each test, ends both.
+        QVERIFY(m_settingsHome.isValid());
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, m_settingsHome.path());
         QQuickStyle::setStyle(u"Basic"_s);
         passItOn = qInstallMessageHandler(watchForLoops);
     }
@@ -1215,6 +2683,7 @@ private slots:
     void init()
     {
         forgetLoops();
+        QSettings(QSettings::IniFormat, QSettings::UserScope, u"Leaf"_s, u"preferences"_s).clear();
         // Never read the developer's real config or keyring when the shelf starts asking as
         // soon as its component completes. Port 1 refuses locally and deterministically.
         qputenv("LEAF_ADDRESS", QByteArrayLiteral("http://127.0.0.1:1"));
@@ -1256,6 +2725,307 @@ private slots:
         QCOMPARE(grid->property("columns").toInt(), 7);
     }
 
+    /// The first thing on every page stands `top` under the bar and `gutter` from the left,
+    /// at the smallest window and the one the screens were drawn for. On 23/10/2026 the owner
+    /// set the shelf beside the search and found the « Reprendre » card and the « Aperçu –
+    /// Séries – Fichiers » pills at different heights: measured, 16, 14, 9, 12 and 11 pixels
+    /// under the bar on five screens, three of them literals that did not follow the window.
+    void every_page_starts_at_the_same_place()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        bool offering = true;
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"s1"_s, u"Assassination Classroom"_s, 21, true),
+                   aSeries(u"pd"_s, u"Parasite · Édition Deluxe"_s, 8, false)}));
+        const QByteArray nextReply =
+            aReply(200, QByteArrayLiteral("application/json"), anOffer());
+        const QByteArray noOffer = aReply(200, QByteArrayLiteral("application/json"), "[]");
+        const QByteArray filtersReply =
+            aReply(200, QByteArrayLiteral("application/json"), someFilters());
+        QJsonArray found;
+        for (int number = 1; number <= 3; ++number)
+            found << QJsonObject{{u"kind"_s, u"ENTRY"_s},
+                                 {u"id"_s, u"pd-v%1"_s.arg(number)},
+                                 {u"label"_s, u"Tome %1"_s.arg(number)},
+                                 {u"seriesId"_s, u"pd"_s},
+                                 {u"seriesName"_s, u"Parasite · Édition Deluxe"_s},
+                                 {u"entryId"_s, u"pd-v%1"_s.arg(number)},
+                                 {u"entryKind"_s, u"VOLUME"_s},
+                                 {u"entryNumber"_s, double(number)},
+                                 {u"entryPageCount"_s, 190}};
+        const QByteArray hitsReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            QJsonDocument(QJsonObject{{u"items"_s, found}, {u"total"_s, 3},
+                                      {u"fileTotal"_s, 3}, {u"page"_s, 0}, {u"size"_s, 50}})
+                .toJson(QJsonDocument::Compact));
+        const QByteArray seriesReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            QJsonDocument(aSeries(u"s1"_s, u"Assassination Classroom"_s, 21, true))
+                .toJson(QJsonDocument::Compact));
+        const QByteArray nothing = aReply(200, QByteArrayLiteral("application/json"), "[]");
+        const QByteArray coverReply = aReply(200, QByteArrayLiteral("image/png"), aCover());
+        pretend.answerFor = [&](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return offering ? nextReply : noOffer;
+            if (request.startsWith("GET /filters"))
+                return filtersReply;
+            if (request.startsWith("GET /search"))
+                return hitsReply;
+            if (request.startsWith("GET /series?"))
+                return pageReply;
+            if (request.startsWith("GET /series/s1 "))
+                return seriesReply;
+            if (request.startsWith("GET /series/s1/"))
+                return request.contains("/cover") ? coverReply : nothing;
+            return coverReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *widths = engine.singletonInstance<Widths *>(qmlTypeId("Leaf", 1, 0, "Widths"));
+        auto *shelf = engine.singletonInstance<Shelf *>(qmlTypeId("Leaf", 1, 0, "Shelf"));
+        auto *resume = engine.singletonInstance<QObject *>(qmlTypeId("Leaf", 1, 0, "Resume"));
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(widths);
+        QVERIFY(shelf);
+        QVERIFY(resume);
+        QVERIFY(navigation);
+        auto *bar = window->findChild<QQuickItem *>(u"app-bar"_s);
+        QVERIFY(bar);
+
+        const QList<QSize> windows{{Widths::MinimumWindowWidth, Widths::MinimumWindowHeight},
+                                   {1280, 800}};
+        const auto sizedTo = [&](QSize size) {
+            window->resize(size);
+            return QTest::qWaitFor([&] {
+                return window->width() == size.width() && widths->window() == size.width();
+            }) && aFrameDrawn(window);
+        };
+        // The one visible item of that name: the shelf and the search each draw a row of
+        // filters, and only one of the two is on screen.
+        const auto shown = [&](const QString &name) -> QQuickItem * {
+            for (QQuickItem *one : itemsNamed(window->contentItem(), name)) {
+                if (one->isVisible() && one->width() > 0)
+                    return one;
+            }
+            return nullptr;
+        };
+        const auto corner = [](QQuickItem *item) { return item->mapToScene(QPointF(0, 0)); };
+        const auto under = [&] { return bar->mapToScene(QPointF(0, bar->height())).y(); };
+        // Where the first block of every page stands, said once so every page is held to it.
+        const auto startsRight = [&](const QString &page, QQuickItem *first) {
+            QVERIFY2(first, qPrintable(page + u": nothing to measure"_s));
+            const QPointF at = corner(first);
+            QVERIFY2(qFuzzyCompare(at.y(), under() + widths->space()->top()),
+                     qPrintable(u"%1 at %2: first block at bar + %3, not bar + %4"_s.arg(page)
+                                    .arg(window->width())
+                                    .arg(at.y() - under())
+                                    .arg(widths->space()->top())));
+            QVERIFY2(qFuzzyCompare(at.x() + 1, widths->space()->gutter() + 1.0),
+                     qPrintable(u"%1 at %2: left edge at %3, not %4"_s.arg(page)
+                                    .arg(window->width())
+                                    .arg(at.x())
+                                    .arg(widths->space()->gutter())));
+        };
+
+        // The shelf, with the band and then without it.
+        QTRY_VERIFY(shown(u"resume-card"_s));
+        QTRY_VERIFY(shown(u"filter-button"_s));
+        for (const QSize size : windows) {
+            QVERIFY(sizedTo(size));
+            startsRight(u"shelf with the band"_s, shown(u"resume-card"_s));
+            if (QTest::currentTestFailed())
+                return;
+        }
+        offering = false;
+        QVERIFY(QMetaObject::invokeMethod(resume, "reload"));
+        QTRY_VERIFY(!shown(u"resume-card"_s));
+        for (const QSize size : windows) {
+            QVERIFY(sizedTo(size));
+            startsRight(u"shelf"_s, shown(u"filter-button"_s));
+            if (QTest::currentTestFailed())
+                return;
+        }
+
+        // The search, on each of its three tabs: the tabs are its first block, and the
+        // overview's heading stands at the same left edge as the covers under it.
+        shelf->searchFor(u"p"_s);
+        auto *workspace = window->findChild<QQuickItem *>(u"search-workspace"_s);
+        QVERIFY(workspace);
+        QTRY_VERIFY(workspace->isVisible());
+        QTRY_VERIFY(shown(u"overview-series-heading"_s));
+        for (int mode = 0; mode < 3; ++mode) {
+            workspace->setProperty("mode", mode);
+            for (const QSize size : windows) {
+                QVERIFY(sizedTo(size));
+                startsRight(u"search, tab %1"_s.arg(mode), shown(u"search-tab-overview"_s));
+                if (QTest::currentTestFailed())
+                    return;
+                if (mode == 0)
+                    QCOMPARE(corner(shown(u"overview-series-heading"_s)).x(),
+                             qreal(widths->space()->gutter()));
+            }
+        }
+        shelf->searchFor(QString());
+        QTRY_VERIFY(!workspace->isVisible());
+
+        // The series page: the way back is its first block, and the header comes right under
+        // its strip. In the bar beside the name from 24/10/2026, it read as the application's
+        // and not the page's (owner, 25/10/2026).
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"s1"_s}}));
+        QTRY_VERIFY(shown(u"series-header"_s));
+        for (const QSize size : windows) {
+            QVERIFY(sizedTo(size));
+            startsRight(u"series"_s, shown(u"back-button"_s));
+            if (QTest::currentTestFailed())
+                return;
+            QQuickItem *strip = shown(u"series-strip"_s);
+            QVERIFY(strip);
+            QCOMPARE(corner(shown(u"series-header"_s)).y(),
+                     strip->mapToScene(QPointF(0, strip->height())).y());
+        }
+
+        // The settings: the tabs on their strip, as the search's, with no rule under them
+        // either — the one strip with a rule made the two pages two grammars. The first card
+        // stands where the search's first heading does, right under the strip's own `block`,
+        // at the same gutter — it stood at 28, twelve pixels in from every other page — and
+        // the next card a `section` away, under it or beside it.
+        QVERIFY(navigation->open(Navigation::Destination::Settings, {}));
+        QTRY_VERIFY(shown(u"settings-tabs"_s));
+        QTRY_VERIFY(shown(u"settings-appearance"_s) && shown(u"settings-connection"_s));
+        for (const QSize size : windows) {
+            QVERIFY(sizedTo(size));
+            QQuickItem *tabs = shown(u"settings-tabs"_s);
+            QVERIFY(tabs);
+            startsRight(u"settings"_s, shown(u"back-button"_s));
+            if (QTest::currentTestFailed())
+                return;
+            QQuickItem *first = shown(u"settings-appearance"_s);
+            QQuickItem *next = shown(u"settings-connection"_s);
+            QVERIFY(first);
+            QVERIFY(next);
+            const qreal strip = tabs->mapToScene(QPointF(0, tabs->height())).y();
+            QCOMPARE(corner(first).x(), qreal(widths->space()->gutter()));
+            QCOMPARE(corner(first).y(), strip);
+            const int section = widths->space()->section();
+            // The reader's habits stand under the appearance, in the same column.
+            QQuickItem *habits = shown(u"settings-reader-defaults"_s);
+            QVERIFY(habits);
+            QCOMPARE(corner(habits).y(), corner(first).y() + first->height() + section);
+            if (corner(next).x() > corner(first).x())
+                QCOMPARE(corner(next).x(), corner(first).x() + first->width() + section);
+            else
+                QCOMPARE(corner(next).y(), corner(habits).y() + habits->height() + section);
+        }
+    }
+
+    /// The way back is the page's, and at the same place on the two pages that have one: the
+    /// head of the page's strip, at the gutter, `top` under the bar — before the settings'
+    /// tabs, alone above the series header — and nowhere on the shelf. It stood at two heights
+    /// in two pages (spacing audit, 23/10/2026), then in the bar beside the name, where it read
+    /// as the application's and not the page's (owner, 25/10/2026).
+    void the_way_back_leads_the_page_and_not_the_bar()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply =
+            aReply(200, QByteArrayLiteral("application/json"),
+                   aPage({aSeries(u"s1"_s, u"Assassination Classroom"_s, 21, true)}));
+        const QByteArray seriesReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            QJsonDocument(aSeries(u"s1"_s, u"Assassination Classroom"_s, 21, true))
+                .toJson(QJsonDocument::Compact));
+        const QByteArray nothing = aReply(200, QByteArrayLiteral("application/json"), "[]");
+        const QByteArray coverReply = aReply(200, QByteArrayLiteral("image/png"), aCover());
+        pretend.answerFor = [&](const QByteArray &request) {
+            if (request.startsWith("GET /series?"))
+                return pageReply;
+            if (request.startsWith("GET /series/s1 "))
+                return seriesReply;
+            if (request.startsWith("GET /series/s1/"))
+                return request.contains("/cover") ? coverReply : nothing;
+            if (request.startsWith("GET /next") || request.startsWith("GET /filters"))
+                return nothing;
+            return coverReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *widths = engine.singletonInstance<Widths *>(qmlTypeId("Leaf", 1, 0, "Widths"));
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(widths);
+        QVERIFY(navigation);
+        auto *bar = window->findChild<QQuickItem *>(u"app-bar"_s);
+        auto *brand = window->findChild<QQuickItem *>(u"leaf-brand"_s);
+        QVERIFY(bar);
+        QVERIFY(brand);
+
+        // The one shown button of that name, and never one of the bar's.
+        const auto theBack = [&]() -> QQuickItem * {
+            QQuickItem *found = nullptr;
+            for (QQuickItem *one : itemsNamed(window->contentItem(), u"back-button"_s)) {
+                if (bar->isAncestorOf(one))
+                    return nullptr;
+                if (one->isVisible()) {
+                    if (found)
+                        return nullptr;
+                    found = one;
+                }
+            }
+            return found;
+        };
+        const auto leadsThePage = [&](const QString &page) {
+            QQuickItem *back = nullptr;
+            QTRY_VERIFY2((back = theBack()),
+                         qPrintable(page + u": not one way back shown, outside the bar"_s));
+            const qreal under = bar->mapToScene(QPointF(0, bar->height())).y();
+            QTRY_COMPARE(back->mapToScene(QPointF(0, 0)).x(), qreal(widths->space()->gutter()));
+            QTRY_COMPARE(back->mapToScene(QPointF(0, 0)).y(), under + widths->space()->top());
+            QVERIFY(back->mapToScene(QPointF(0, 0)).x()
+                    > brand->mapToScene(QPointF(0, 0)).x() - 1);
+            QCOMPARE(back->property("label").toString(), navigation->backLabel());
+        };
+
+        QVERIFY2(!theBack(), "the shelf has a way back to nowhere");
+
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"s1"_s}}));
+        QTRY_VERIFY(itemNamed(window->contentItem(), u"series-header"_s));
+        leadsThePage(u"series"_s);
+        if (QTest::currentTestFailed())
+            return;
+        QVERIFY(QMetaObject::invokeMethod(theBack(), "triggered"));
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Shelf);
+        QTRY_VERIFY(!theBack());
+
+        QVERIFY(navigation->open(Navigation::Destination::Settings, {}));
+        QTRY_VERIFY(itemNamed(window->contentItem(), u"settings-tabs"_s));
+        leadsThePage(u"settings"_s);
+        if (QTest::currentTestFailed())
+            return;
+        // Before the tabs, on their line.
+        QQuickItem *general = itemNamed(window->contentItem(), u"settings-tab-general"_s);
+        QVERIFY(general);
+        QVERIFY(general->mapToScene(QPointF(0, 0)).x()
+                >= theBack()->mapToScene(QPointF(theBack()->width(), 0)).x());
+        QVERIFY(QMetaObject::invokeMethod(theBack(), "triggered"));
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Shelf);
+        QTRY_VERIFY(!theBack());
+    }
+
     /// The medium band changes from four columns to five without crossing one of its own
     /// edges. This reaches through the window, Widths and the QML binding in one assertion.
     void the_grid_follows_all_three_width_rules()
@@ -1269,12 +3039,92 @@ private slots:
         auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
         QVERIFY(grid);
 
+        // The window's own minimum lifted, on purpose: since 23/10/2026 nothing goes under
+        // 800, and this is about the binding carrying all three rules, the narrow one with
+        // them, from the window to the grid.
+        window->setMinimumSize(QSize(0, 0));
         window->setWidth(800);
         QTRY_COMPARE(grid->property("columns").toInt(), 5);
         window->setWidth(700);
         QTRY_COMPARE(grid->property("columns").toInt(), 4);
         window->setWidth(500);
         QTRY_COMPARE(grid->property("columns").toInt(), 2);
+    }
+
+    /// The smallest window there is, decided by the owner on 23/10/2026: under 800 × 560 the
+    /// series page showed no volume at all. Declared by the window from the numbers the tests
+    /// read, and its height fed to Widths as its width is. The window manager is what holds a
+    /// window to its minimum, and Xvfb runs none — a resize under it here would go through —
+    /// so what is asserted is what the window tells it.
+    void the_window_never_goes_under_800_by_560()
+    {
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+
+        QCOMPARE(engine.rootObjects().size(), 1);
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        const auto putBack = qScopeGuard([&] { window->resize(1100, 760); });
+        QCOMPARE(window->minimumSize(),
+                 QSize(Widths::MinimumWindowWidth, Widths::MinimumWindowHeight));
+        QCOMPARE(window->minimumSize(), QSize(800, 560));
+
+        auto *widths = engine.singletonInstance<Widths *>(qmlTypeId("Leaf", 1, 0, "Widths"));
+        QVERIFY(widths);
+        QTRY_COMPARE(widths->height(), window->height());
+        QCOMPARE(widths->systemText(), 1.0);
+
+        window->resize(1000, 600);
+        QTRY_COMPARE(widths->height(), 600);
+        QVERIFY(widths->property("short").toBool());
+        window->resize(1000, 800);
+        QTRY_COMPARE(widths->height(), 800);
+        QVERIFY(!widths->property("short").toBool());
+    }
+
+    /// Without a portal to ask, the text size is 1 on any desktop but Plasma, which says it
+    /// through its font; with one, a change in the desktop's settings lands live. Read on the
+    /// bus it is handed, so a test never reads the text size of whoever ran it.
+    void the_desktops_text_size_is_read_where_the_desktop_keeps_it()
+    {
+        DesktopText gnome(nowhere(), "ubuntu:GNOME");
+        QCOMPARE(gnome.factor(), 1.0);
+
+        const QFont was = QGuiApplication::font();
+        const auto putBack = qScopeGuard([&] { QGuiApplication::setFont(was); });
+        QFont larger = was;
+        larger.setPointSizeF(12.5);
+        QGuiApplication::setFont(larger);
+        DesktopText plasma(nowhere(), "KDE");
+        QCOMPARE(plasma.factor(), 1.25);
+        QSignalSpy said(&plasma, &SystemText::changed);
+        larger.setPointSizeF(15);
+        QGuiApplication::setFont(larger);
+        QTRY_COMPARE(said.count(), 1);
+        QCOMPARE(plasma.factor(), 1.5);
+        // Elsewhere, the font is not a text size: GNOME's is 11 pt whatever its setting.
+        DesktopText elsewhere(nowhere(), "sway");
+        QCOMPARE(elsewhere.factor(), 1.0);
+
+        // The portal's signal: only its own setting moves the size, unwrapped however deep.
+        QSignalSpy moved(&gnome, &SystemText::changed);
+        const auto setting = [&](const QString &space, const QString &key, const QVariant &v) {
+            QVERIFY(QMetaObject::invokeMethod(&gnome, "settingChanged", Q_ARG(QString, space),
+                                              Q_ARG(QString, key),
+                                              Q_ARG(QDBusVariant, QDBusVariant(v))));
+        };
+        setting(u"org.gnome.desktop.interface"_s, u"cursor-size"_s, 32.0);
+        setting(u"org.gnome.desktop.a11y"_s, u"text-scaling-factor"_s, 2.0);
+        QCOMPARE(moved.count(), 0);
+        setting(u"org.gnome.desktop.interface"_s, u"text-scaling-factor"_s, 1.25);
+        QCOMPARE(moved.count(), 1);
+        QCOMPARE(gnome.factor(), 1.25);
+        setting(u"org.gnome.desktop.interface"_s, u"text-scaling-factor"_s,
+                QVariant::fromValue(QDBusVariant(1.5)));
+        QCOMPARE(gnome.factor(), 1.5);
+        setting(u"org.gnome.desktop.interface"_s, u"text-scaling-factor"_s, u"large"_s);
+        QCOMPARE(gnome.factor(), 1.5);
+        QCOMPARE(DesktopText::numberIn(QVariant()), 0.0);
     }
 
     /// The view, not hand-written visibility code, decides which covers live. One cell of
@@ -1297,6 +3147,68 @@ private slots:
 
         grid->forceActiveFocus();
         QTRY_VERIFY(grid->hasActiveFocus());
+    }
+
+    /// A series taken off the disk does not vanish: its tile stays on the shelf under a garnet
+    /// veil while it tilts and falls, and goes at 800 ms. « Instantané » is the one setting
+    /// that takes it away at once.
+    void an_erased_tile_stays_to_leave_and_goes_at_once_when_motion_is_instant()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"dn"_s, u"Death Note"_s, 7, false),
+                   aSeries(u"kq"_s, u"Koro Quest"_s, 5, false)}));
+        const QByteArray coverReply = aReply(200, QByteArrayLiteral("image/png"), aCover());
+        pretend.answerFor = [pageReply, coverReply](const QByteArray &request) {
+            return request.startsWith("GET /series?") ? pageReply : coverReply;
+        };
+        pretend.answerFor = seatedAsPrincipal(pretend.answerFor);
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *shelf = engine.singletonInstance<Shelf *>(qmlTypeId("Leaf", 1, 0, "Shelf"));
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(shelf);
+        QVERIFY(preferences);
+        QTRY_COMPARE(shelf->count(), 2);
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(grid);
+        QTRY_COMPARE(grid->property("count").toInt(), 2);
+
+        // The preference outlives the test (it is kept on disk, in the test's own home): left on
+        // « Instant », every test after this one ran without motion, and the reader's slide and
+        // fade were asked of a screen that had been told to cut — they failed in the whole
+        // suite and passed alone.
+        const auto restoreMotion =
+            qScopeGuard([=] { preferences->chooseMotion(Preferences::Motion::Slide); });
+        preferences->chooseMotion(Preferences::Motion::Slide);
+        QTRY_VERIFY(itemNamed(grid, u"tile-dn"_s));
+        shelf->forget(u"dn"_s);
+        // Still in the model, drawn and veiled, a moment after it is told to leave: its row
+        // goes when its tile has tilted and fallen, not before.
+        QTest::qWait(100);
+        QCOMPARE(shelf->count(), 2);
+        QQuickItem *leaving = itemNamed(grid, u"tile-dn"_s);
+        QVERIFY(leaving);
+        auto *veil = itemNamed(leaving, u"erasing-veil-dn"_s);
+        QVERIFY(veil);
+        QVERIFY(veil->isVisible());
+        // Its row goes at 570 ms, and the tile with it once it has faded, at 800.
+        QTRY_COMPARE_WITH_TIMEOUT(shelf->count(), 1, 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(!itemNamed(grid, u"tile-dn"_s), 3000);
+
+        // Instant: nothing waits.
+        preferences->chooseMotion(Preferences::Motion::Instant);
+        shelf->forget(u"kq"_s);
+        QTest::qWait(50);
+        QVERIFY(!itemNamed(grid, u"tile-kq"_s));
     }
 
     void a_page_becomes_worded_tiles_with_the_mark_and_focus_the_artifact_draws()
@@ -1331,6 +3243,7 @@ private slots:
 
         QCOMPARE(engine.rootObjects().size(), 1);
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
         QVERIFY(window);
         QVERIFY(QTest::qWaitForWindowExposed(window));
         window->requestActivate();
@@ -1373,13 +3286,15 @@ private slots:
         QCOMPARE(title->property("text").toString(), u"Death Note · Black Edition"_s);
         const QFont titleFont = title->property("font").value<QFont>();
         QCOMPARE(titleFont.family(), Theme().displayFamily());
-        QCOMPARE(titleFont.pixelSize(), 16);
+        // A title drawn at 16 for a window of 1280, shrunk for this one of 1100 and never
+        // grown past 16: the window's rule for words since 23/10/2026.
+        QCOMPARE(titleFont.pixelSize(), Scale::titleFor(16, Widths::controlsFor(1100)));
         QCOMPARE(titleFont.weight(), QFont::DemiBold);
         QCOMPARE(title->property("maximumLineCount").toInt(), 2);
         QCOMPARE(volumes->property("text").toString(), u"7 tomes"_s);
         const QFont volumesFont = volumes->property("font").value<QFont>();
         QCOMPARE(volumesFont.family(), Theme().textFamily());
-        QCOMPARE(volumesFont.pixelSize(), 14);
+        QCOMPARE(volumesFont.pixelSize(), Scale::captionFor(14, Widths::controlsFor(1100)));
         QVERIFY(mark->isVisible());
         QVERIFY(!itemNamed(reading, u"finished-dn"_s)->isVisible());
 
@@ -1715,11 +3630,12 @@ private slots:
         QCOMPARE(first->property("title").toString(), u"Le Crystal"_s);
         QCOMPARE(first->property("pages").toString(), u"54 p."_s);
 
-        // The page carries its own way out, and it is a button before it is a shortcut:
-        // Escape works and always did, but a page whose only exit is a key nobody is told
-        // about is a page with no exit. It names where it goes, not where you are.
+        // The page has a way out, and it is a button before it is a shortcut: Escape works
+        // and always did, but a page whose only exit is a key nobody is told about is a page
+        // with no exit. It names where it goes, not where you are. It is the bar's, right of
+        // the name, since the series page gave up its row of 46 pixels.
         QQuickItem *back = nullptr;
-        QTRY_VERIFY((back = itemNamed(page, u"series-back"_s)));
+        QTRY_VERIFY((back = itemNamed(window->contentItem(), u"back-button"_s)));
         QVERIFY(back->isVisible());
         QCOMPARE(back->property("label").toString(), navigation->backLabel());
         QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
@@ -1738,7 +3654,7 @@ private slots:
         QTRY_COMPARE(navigation->destination(), Navigation::Destination::Shelf);
 
         // A genre goes where the universe goes: to the shelf, narrowed to it. Pressed in the
-        // header — the description draws the same pill, out of sight behind its tab.
+        // header, the one place a series draws its genres.
         auto *shelfModel = engine.singletonInstance<Shelf *>(qmlTypeId("Leaf", 1, 0, "Shelf"));
         QVERIFY(shelfModel);
         QVERIFY(navigation->open(Navigation::Destination::Series,
@@ -2104,6 +4020,122 @@ private slots:
         }
     }
 
+    /// A volume with no cover of its own carries its number on the series' picture, with the
+    /// word for its kind in an edition holding both, and every tile has its veil; the check
+    /// of a finished one sits beside the words and no longer on the cover, where it shared a
+    /// corner with the number and the bar (decision of 24/11/2026).
+    void a_borrowed_cover_carries_its_number_and_the_check_leaves_the_cover()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+
+        const QByteArray one = QJsonDocument(QJsonObject{
+            {u"id"_s, u"colorist"_s},
+            {u"workId"_s, u"colorist"_s},
+            {u"name"_s, u"Colorist"_s},
+            {u"work"_s, u"Colorist"_s},
+            {u"medium"_s, u"webtoon"_s},
+            {u"ownedVolumes"_s, 2},
+            {u"entryCount"_s, 2},
+            {u"chapterCount"_s, 1},
+            {u"arcCount"_s, 0},
+        }).toJson(QJsonDocument::Compact);
+        const QByteArray files = QJsonDocument(QJsonArray{
+            QJsonObject{{u"id"_s, u"c1"_s}, {u"type"_s, u"CHAPTER"_s}, {u"sortKey"_s, 1},
+                        {u"pageCount"_s, 40}, {u"chapterCount"_s, 1},
+                        {u"file"_s, u"Chapitre 001.cbz"_s}, {u"size"_s, 1000},
+                        {u"borrowedCover"_s, true}},
+            QJsonObject{{u"id"_s, u"v2"_s}, {u"type"_s, u"VOLUME"_s}, {u"number"_s, 2},
+                        {u"title"_s, u"Le Pinceau"_s}, {u"pageCount"_s, 40},
+                        {u"chapterCount"_s, 0}, {u"file"_s, u"Tome 2.cbz"_s},
+                        {u"size"_s, 1000}}}).toJson(QJsonDocument::Compact);
+        const QByteArray states = QJsonDocument(QJsonArray{QJsonObject{
+            {u"entryId"_s, u"c1"_s}, {u"page"_s, 39}, {u"pageCount"_s, 40},
+            {u"finished"_s, true}}}).toJson(QJsonDocument::Compact);
+        const QByteArray shelf = QJsonDocument(QJsonObject{
+            {u"items"_s, QJsonArray{}}, {u"total"_s, 0}, {u"page"_s, 0}, {u"size"_s, 0},
+        }).toJson(QJsonDocument::Compact);
+        const auto reply = [](const QByteArray &body) {
+            return "HTTP/1.1 200 .\r\nContent-Type: application/json\r\nContent-Length: "
+                   + QByteArray::number(body.size()) + "\r\n\r\n" + body;
+        };
+        pretend.answerFor = [=](const QByteArray &request) -> QByteArray {
+            if (request.contains("/entries "))
+                return reply(files);
+            if (request.contains("/progress "))
+                return reply(states);
+            if (request.contains("/cover"))
+                return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+            if (request.startsWith("GET /series/"))
+                return reply(one);
+            return reply(shelf);
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->showVolumesAsGrid(true);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation->open(Navigation::Destination::Series,
+                                 {{u"series"_s, u"colorist"_s}}));
+
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QQuickItem *borrowed = nullptr;
+        QTRY_VERIFY((borrowed = itemNamed(page, u"tile-volume-c1"_s)));
+        QQuickItem *own = nullptr;
+        QTRY_VERIFY((own = itemNamed(page, u"tile-volume-v2"_s)));
+
+        QQuickItem *number = itemNamed(borrowed, u"cover-number"_s);
+        QVERIFY(number);
+        QTRY_VERIFY(number->isVisible());
+        QCOMPARE(number->property("text").toString(), u"1"_s);
+        QQuickItem *word = itemNamed(borrowed, u"cover-word"_s);
+        QVERIFY(word && word->isVisible());
+        QCOMPARE(word->property("text").toString(), u"CHAPITRE"_s);
+        QVERIFY(!itemNamed(own, u"cover-number"_s)->isVisible());
+
+        // A webtoon says nothing of the pages of a finished chapter, and the check is out of
+        // the cover, below it, at its right.
+        QTRY_VERIFY(itemNamed(borrowed, u"finished-c1"_s)->isVisible());
+        QQuickItem *check = itemNamed(borrowed, u"finished-c1"_s);
+        QVERIFY(check->mapToItem(borrowed, QPointF(0, 0)).y() >= borrowed->width() * 1.5);
+        QCOMPARE(itemNamed(borrowed, u"count-c1"_s)->property("text").toString(), QString());
+    }
+
+    /// The colour of a borrowed cover's number is chosen from the foot of the picture, as it
+    /// is drawn under its veil: white over a dark foot, dark over a pale one — whatever the
+    /// top of the cover is, which the number never stands on.
+    void the_number_on_a_borrowed_cover_reads_the_foot_of_the_picture()
+    {
+        QImage dark(150, 224, QImage::Format_RGB32);
+        dark.fill(Qt::black);
+        QVERIFY(!CoverTone::lightUnderVeil(dark));
+        QImage pale(150, 224, QImage::Format_RGB32);
+        pale.fill(Qt::white);
+        QVERIFY(CoverTone::lightUnderVeil(pale));
+
+        QImage paleFoot = dark.copy();
+        for (int y = 112; y < 224; ++y)
+            for (int x = 0; x < 150; ++x)
+                paleFoot.setPixel(x, y, qRgb(255, 255, 255));
+        QVERIFY(CoverTone::lightUnderVeil(paleFoot));
+        QImage darkFoot = pale.copy();
+        for (int y = 112; y < 224; ++y)
+            for (int x = 0; x < 150; ++x)
+                darkFoot.setPixel(x, y, qRgb(20, 20, 20));
+        QVERIFY(!CoverTone::lightUnderVeil(darkFoot));
+        QVERIFY(!CoverTone::lightUnderVeil(QImage()));
+    }
+
     /// The list becomes a wall of covers, and the three dots reach the one confirmation in
     /// this client that unmakes a file. Both are gestures, so both are made here: a menu that
     /// opens and commands nothing, and a toggle that changes an icon and nothing else, are
@@ -2285,6 +4317,7 @@ private slots:
         // Pressed the way a keyboard presses it, because a switch is a control and not a
         // picture: the same press a reader makes with the space bar.
         lever->forceActiveFocus(Qt::TabFocusReason);
+        keysInCharge(window);
         const QQuickItem *ring = itemNamed(lever, u"warns-scans-bubble-focus"_s);
         QVERIFY(ring);
         QTRY_VERIFY(ring->isVisible());
@@ -2341,7 +4374,9 @@ private slots:
         QVERIFY(navigation->open(Navigation::Destination::Shelf, {}));
         auto *bubbles = engine.singletonInstance<Toasts *>(qmlTypeId("Leaf", 1, 0, "Toasts"));
         QVERIFY(bubbles);
-        bubbles->scanFailed(u"le disque ne répond pas"_s);
+        auto *warnings = engine.singletonInstance<Warnings *>(qmlTypeId("Leaf", 1, 0, "Warnings"));
+        QVERIFY(warnings);
+        warnings->scanFailed(u"le disque ne répond pas"_s);
 
         const auto headlineOf = [&] {
             const QQuickItem *said = itemNamed(window->contentItem(), u"toast-0-headline"_s);
@@ -2426,7 +4461,7 @@ private slots:
         // page-wide change of scale is a decision and not a drift.
         const QFont nameFont = name->property("font").value<QFont>();
         QCOMPARE(nameFont.family(), Theme().displayFamily());
-        QCOMPARE(nameFont.pixelSize(), 22);
+        QCOMPARE(nameFont.pixelSize(), Scale::titleFor(22, Widths::controlsFor(1100)));
         QCOMPARE(card->property("radius").toInt(), Theme().cardRadius());
         // A pill, and not the 12 px button radius the other two radii cover.
         QCOMPARE(action->property("radius").toDouble(), action->height() / 2);
@@ -2460,6 +4495,686 @@ private slots:
         grid->setProperty("contentY", wasAt + 100);
         QCOMPARE(band->mapToItem(nullptr, QPointF(0, 0)).y(),
                  appBar->height() - 100.0);
+    }
+
+    /// A name on two lines and the count under it, whole, once the desktop asks for text half
+    /// as large again. The cell's height was a sum of the sizes words had at 1100 —
+    /// `6 + 40 + 2 + 18` — and the title was held to 40: in the audit of 23/10/2026 the count
+    /// under a two-line name was already cut at 800, and a text size of 1.5 would have cut
+    /// the name's second line as well.
+    void a_tile_keeps_its_whole_name_at_a_larger_text_size()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"dn"_s, u"Death Note · Black Edition"_s, 7, false),
+                   aSeries(u"ac"_s, u"Assassination Classroom"_s, 21, true)}));
+        const QByteArray emptyNext =
+            aReply(200, QByteArrayLiteral("application/json"), QByteArrayLiteral("[]"));
+        const QByteArray coverReply =
+            aReply(200, QByteArrayLiteral("image/png"), aCover());
+        pretend.answerFor = [pageReply, emptyNext, coverReply](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return emptyNext;
+            return request.startsWith("GET /series?") ? pageReply : coverReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        // Declared before the engine, so it outlives the Widths that follows it.
+        SomeText desktop(1.0);
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *widths = engine.singletonInstance<Widths *>(qmlTypeId("Leaf", 1, 0, "Widths"));
+        QVERIFY(widths);
+        widths->follow(&desktop);
+        window->resize(800, 560);
+        QTRY_COMPARE(widths->window(), 800);
+
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(grid);
+        QTRY_COMPARE(grid->property("count").toInt(), 2);
+        QQuickItem *tile = nullptr;
+        QTRY_VERIFY((tile = itemNamed(grid, u"tile-dn"_s)));
+        auto *title = itemNamed(tile, u"title-dn"_s);
+        auto *volumes = itemNamed(tile, u"volumes-dn"_s);
+        QVERIFY(title);
+        QVERIFY(volumes);
+        const qreal wasCell = grid->property("cellHeight").toReal();
+
+        desktop.becomes(1.5);
+        QTRY_COMPARE(widths->systemText(), 1.5);
+        const QFont titleFont = title->property("font").value<QFont>();
+        QCOMPARE(titleFont.pixelSize(), Scale::titleFor(16, Widths::controlsFor(800), 1.5));
+        QVERIFY(titleFont.pixelSize() > Scale::titleFor(16, Widths::controlsFor(800)));
+        QTRY_VERIFY(grid->property("cellHeight").toReal() > wasCell);
+
+        // The name wraps to its two lines and keeps both; the count stands whole under it,
+        // inside its own cell — the next row's cover starts its clearance below that.
+        QCOMPARE(title->property("lineCount").toInt(), 2);
+        QVERIFY2(title->property("implicitHeight").toReal() <= title->height(),
+                 "the name is cut by a height of its own");
+        QVERIFY2(volumes->property("implicitHeight").toReal() <= volumes->height(),
+                 "the count is cut by a height of its own");
+        const qreal countBottom = volumes->mapToItem(tile, QPointF(0, volumes->height())).y();
+        QVERIFY2(countBottom <= tile->height(),
+                 qPrintable(u"the count ends at %1 in a cell of %2"_s.arg(countBottom)
+                                .arg(tile->height())));
+    }
+
+    /// At 800 × 560 the band took 145 of the 502 pixels the shelf had, and the covers under it
+    /// were cut in half (audit, 23/10/2026). Bounded to column(760) on a wide window as well,
+    /// it covered less than half of a 1920 window and stopped short of the edge the covers
+    /// keep (owner, 25/10/2026). The page's width between its gutters, one line on a short
+    /// window, and a whole row of covers under it either way.
+    void the_resume_band_spans_the_page_and_leaves_room_for_covers()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"ac"_s, u"Assassination Classroom"_s, 21, true),
+                   aSeries(u"dn"_s, u"Death Note · Black Edition"_s, 7, false)}));
+        const QByteArray nextReply =
+            aReply(200, QByteArrayLiteral("application/json"), anOffer());
+        const QByteArray coverReply =
+            aReply(200, QByteArrayLiteral("image/png"), aCover());
+        pretend.answerFor = [pageReply, nextReply, coverReply](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return nextReply;
+            return request.startsWith("GET /series?") ? pageReply : coverReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *widths = engine.singletonInstance<Widths *>(qmlTypeId("Leaf", 1, 0, "Widths"));
+        QVERIFY(widths);
+        auto *band = window->findChild<QQuickItem *>(u"resume-band"_s);
+        QVERIFY(band);
+        QTRY_VERIFY(band->isVisible());
+        auto *card = itemNamed(band, u"resume-card"_s);
+        auto *name = itemNamed(band, u"resume-name"_s);
+        auto *action = itemNamed(band, u"resume-action"_s);
+        auto *beside = itemNamed(band, u"resume-where-beside"_s);
+        auto *track = itemNamed(band, u"resume-progress"_s);
+        QVERIFY(card);
+        QVERIFY(name);
+        QVERIFY(action);
+        QVERIFY(beside);
+        QVERIFY(track);
+
+        window->resize(1920, 1200);
+        QTRY_COMPARE(widths->window(), 1920);
+        // From one gutter to the other, as the covers below it.
+        QTRY_COMPARE(card->width(), qreal(1920 - 2 * widths->shelfMargin()));
+        QCOMPARE(card->mapToItem(nullptr, QPointF(0, 0)).x(), qreal(widths->shelfMargin()));
+        QVERIFY(action->x() + action->width() <= card->width());
+        QVERIFY(!beside->isVisible());
+        QVERIFY(track->isVisible());
+
+        window->resize(800, 560);
+        QTRY_COMPARE(widths->height(), 560);
+        QVERIFY(widths->property("short").toBool());
+        // One line: the name and where one was side by side, no track, a round button.
+        QTRY_VERIFY(beside->isVisible());
+        QVERIFY(!track->isVisible());
+        QCOMPARE(action->width(), action->height());
+        auto *where = itemNamed(band, u"resume-where"_s);
+        QVERIFY(where);
+        QVERIFY(!where->isVisible());
+        QCOMPARE(beside->property("text").toString(), where->property("text").toString());
+        QVERIFY(!beside->property("text").toString().isEmpty());
+        QVERIFY(card->height() <= widths->scale()->size(56) + 1);
+        QVERIFY(name->property("implicitHeight").toReal() <= card->height());
+
+        // And a whole tile — cover, name and count — under it, without a scroll.
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(grid);
+        QQuickItem *tile = nullptr;
+        QTRY_VERIFY((tile = itemNamed(grid, u"tile-ac"_s)));
+        QVERIFY(grid->property("atYBeginning").toBool());
+        auto *volumes = itemNamed(tile, u"volumes-ac"_s);
+        QVERIFY(volumes);
+        const qreal bottom = volumes->mapToItem(nullptr, QPointF(0, volumes->height())).y();
+        QVERIFY2(bottom <= window->height(),
+                 qPrintable(u"the first tile ends at %1 in a window of %2"_s.arg(bottom)
+                                .arg(window->height())));
+    }
+
+    /// An empty library drew a bar, a row of pills and four hundred and fifty pixels of bare
+    /// paper (audit, 23/10/2026): not a word to tell it from a screen that failed. It says so
+    /// now, in the middle of the shelf, and says something else when it is the filters that
+    /// emptied it.
+    void an_empty_shelf_says_why_it_is_empty()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        const QByteArray emptyNext =
+            aReply(200, QByteArrayLiteral("application/json"), QByteArrayLiteral("[]"));
+        pretend.answerFor = [pageReply, emptyNext](const QByteArray &request) {
+            return request.startsWith("GET /next") ? emptyNext : pageReply;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *shelf = engine.singletonInstance<Shelf *>(qmlTypeId("Leaf", 1, 0, "Shelf"));
+        QVERIFY(shelf);
+
+        auto *empty = window->findChild<QQuickItem *>(u"shelf-empty"_s);
+        auto *trouble = window->findChild<QQuickItem *>(u"shelf-trouble"_s);
+        QVERIFY(empty);
+        QVERIFY(trouble);
+        auto *headline = itemNamed(empty, u"shelf-empty-headline"_s);
+        auto *said = itemNamed(empty, u"shelf-empty-text"_s);
+        QVERIFY(headline);
+        QVERIFY(said);
+        QTRY_VERIFY(empty->isVisible());
+        QVERIFY(!trouble->isVisible());
+        QCOMPARE(headline->property("text").toString(), Words::emptyShelfHeadline());
+        QCOMPARE(said->property("text").toString(), Words::emptyShelf());
+        QVERIFY(headline->isVisible());
+        QVERIFY(said->isVisible());
+
+        // The headline is the subject of the screen, and the one word here that grows.
+        const QFont headlineFont = headline->property("font").value<QFont>();
+        QCOMPARE(headlineFont.pixelSize(), Scale::displayFor(28, Widths::controlsFor(1100)));
+
+        // Whole, inside the window, and holding its words: no height of its own to cut them.
+        for (QQuickItem *words : {headline, said}) {
+            const QRectF on = words->mapRectToScene(
+                QRectF(0, 0, words->width(), words->height()));
+            QVERIFY(QRectF(0, 0, window->width(), window->height()).contains(on));
+            QVERIFY(words->property("implicitHeight").toReal() <= words->height());
+        }
+        QVERIFY(empty->height() >= headline->height() + said->height());
+
+        // Narrowed to nothing: the filters, not the library.
+        shelf->filterBy({{u"read"_s, QStringList{u"UNREAD"_s}}});
+        QTRY_COMPARE(headline->property("text").toString(), Words::nothingLeftHeadline());
+        QTRY_VERIFY(empty->isVisible());
+        QCOMPARE(said->property("text").toString(), Words::nothingLeft());
+    }
+
+    /// The summary was held to 900 pixels, a hundred and thirty characters a line at 1920; the
+    /// facts under it ran the window's width, their second column starting past the summary's
+    /// right edge; and two columns of them held on at 800, 366 pixels each, because the rule
+    /// was a band and not the width they had (audit, 23/10/2026). A measure of characters
+    /// whatever the window, and one column of facts once two no longer fit.
+    void the_description_reads_at_a_measure_and_stacks_its_facts_when_narrow()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = aDescribedSeries;
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        // Declared before the engine, so it outlives the Widths that follows it.
+        SomeText desktop(1.0);
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *widths = engine.singletonInstance<Widths *>(qmlTypeId("Leaf", 1, 0, "Widths"));
+        QVERIFY(widths);
+        widths->follow(&desktop);
+        window->resize(1920, 1200);
+        QTRY_COMPARE(widths->window(), 1920);
+
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        auto *series = engine.singletonInstance<Series *>(qmlTypeId("Leaf", 1, 0, "Series"));
+        QVERIFY(navigation);
+        QVERIFY(series);
+        QVERIFY(navigation->open(Navigation::Destination::Series,
+                                 {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QTRY_VERIFY(series->available());
+
+        QQuickItem *tab = nullptr;
+        QTRY_VERIFY((tab = itemNamed(page, u"series-tab-1"_s)) && tab->width() > 0);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          tab->mapToItem(window->contentItem(),
+                                         QPointF(tab->width() / 2.0, tab->height() / 2.0))
+                              .toPoint());
+        QQuickItem *description = nullptr;
+        QTRY_VERIFY((description = itemNamed(page, u"series-description"_s))
+                    && description->isVisible());
+        auto *summary = itemNamed(description, u"series-summary"_s);
+        auto *facts = itemNamed(description, u"series-facts"_s);
+        auto *credits = itemNamed(description, u"facts-credits"_s);
+        auto *nature = itemNamed(description, u"facts-nature"_s);
+        auto *holding = itemNamed(description, u"series-holding"_s);
+        auto *held = itemNamed(description, u"holding-facts"_s);
+        QVERIFY(summary);
+        QVERIFY(facts);
+        QVERIFY(credits);
+        QVERIFY(nature);
+        QVERIFY(holding);
+        QVERIFY(held);
+        QTRY_VERIFY(summary->isVisible() && holding->isVisible());
+
+        // At 1920 a line holds what a line of prose holds, not what the window does: every
+        // line but the last between sixty and seventy-eight characters.
+        const auto aMeasure = [&] {
+            const QList<int> lines = charactersPerLine(summary);
+            if (lines.size() < 3)
+                return u"%1 lines"_s.arg(lines.size());
+            for (int at = 0; at + 1 < lines.size(); ++at) {
+                if (lines.at(at) < 60 || lines.at(at) > 78)
+                    return u"line %1 holds %2 characters"_s.arg(at).arg(lines.at(at));
+            }
+            return QString();
+        };
+        QTRY_COMPARE(aMeasure(), QString());
+        QVERIFY(summary->width() < description->width() / 2);
+
+        // The facts side by side, bounded, the second column starting inside the summary's
+        // measure; the card no wider than the facts it sits under.
+        QTRY_COMPARE(facts->property("columns").toInt(), 2);
+        QCOMPARE(facts->width(), qreal(widths->scale()->column(800)));
+        QCOMPARE(nature->y(), credits->y());
+        QVERIFY(nature->x() > credits->x() + credits->width());
+        QVERIFY2(nature->x() < summary->width(),
+                 qPrintable(u"the second column starts at %1, the summary ends at %2"_s
+                                .arg(nature->x()).arg(summary->width())));
+        QCOMPARE(holding->width(), facts->width());
+        QCOMPARE(held->property("columns").toInt(), 2);
+
+        // Three sections — the story, what the work is, what you hold of it — a `section`
+        // apart, as the settings' cards and the last tab's blocks are, and not the room(16)
+        // of a block (spacing audit, 23/10/2026). The genres are the header's alone.
+        const int section = widths->space()->section();
+        QCOMPARE(facts->y(), summary->y() + summary->height() + section);
+        QCOMPARE(holding->y(), facts->y() + facts->height() + section);
+        QVERIFY(itemNamed(itemNamed(page, u"series-header"_s), u"genre-Fantasy"_s));
+        QVERIFY(!itemNamed(description, u"genre-Fantasy"_s));
+
+        // At 800 with text half as large again, two columns no longer hold a label and a
+        // value: one column, the second under the first, and the card's the same.
+        window->resize(800, 560);
+        desktop.becomes(1.5);
+        QTRY_COMPARE(widths->window(), 800);
+        QTRY_COMPARE(widths->systemText(), 1.5);
+        QTRY_COMPARE(facts->property("columns").toInt(), 1);
+        QTRY_VERIFY(nature->y() >= credits->y() + credits->height());
+        QCOMPARE(nature->x(), credits->x());
+        QCOMPARE(held->property("columns").toInt(), 1);
+        QVERIFY(holding->height() >= held->height());
+        // And the measure is still one of characters: larger letters, the same line.
+        QTRY_COMPARE(aMeasure(), QString());
+        QVERIFY(summary->width() <= description->width());
+    }
+
+    /// The count of a block of the last tab stood a thousand pixels from its heading over
+    /// three tiles at 1100, and the names under those tiles were 12 pixels whatever the
+    /// window or the desktop (audit, 23/10/2026). The heading holds to the tiles; a name on
+    /// two lines at a larger text size keeps both, and the tile keeps them.
+    void the_last_tab_keeps_its_count_near_its_heading_and_its_names_whole()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = aDescribedSeries;
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        SomeText desktop(1.0);
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *widths = engine.singletonInstance<Widths *>(qmlTypeId("Leaf", 1, 0, "Widths"));
+        QVERIFY(widths);
+        widths->follow(&desktop);
+        window->resize(1100, 760);
+        QTRY_COMPARE(widths->window(), 1100);
+
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        QVERIFY(navigation->open(Navigation::Destination::Series,
+                                 {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QQuickItem *tab = nullptr;
+        QTRY_VERIFY((tab = itemNamed(page, u"series-tab-2"_s)) && tab->width() > 0);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          tab->mapToItem(window->contentItem(),
+                                         QPointF(tab->width() / 2.0, tab->height() / 2.0))
+                              .toPoint());
+        QQuickItem *block = nullptr;
+        QTRY_VERIFY((block = itemNamed(page, u"editions-block"_s)) && block->isVisible());
+        auto *heading = itemNamed(block, u"editions-block-heading"_s);
+        auto *count = itemNamed(block, u"block-count"_s);
+        QVERIFY(heading);
+        QVERIFY(count);
+        QQuickItem *tile = nullptr;
+        QTRY_VERIFY((tile = itemNamed(block, u"tile-integrale"_s)) && tile->width() > 0);
+        QTRY_VERIFY(!count->property("text").toString().isEmpty());
+
+        // The count ends over the last tile, or where the heading's own words end when they
+        // are wider than two tiles — never at the block's far edge.
+        const qreal countEnd = count->mapToItem(block, QPointF(count->width(), 0)).x();
+        const qreal tilesEnd = tile->mapToItem(block, QPointF(tile->width(), 0)).x();
+        const qreal words = heading->property("implicitWidth").toReal();
+        QVERIFY2(countEnd <= std::max(tilesEnd, words) + 1,
+                 qPrintable(u"the count ends at %1, the tiles at %2, the words at %3"_s
+                                .arg(countEnd).arg(tilesEnd).arg(words)));
+        QVERIFY(countEnd < block->width() / 2);
+        QVERIFY(count->property("implicitWidth").toReal() <= count->width() + 1);
+
+        // At 800 with text half as large again, the long name wraps to its two lines and
+        // keeps them, and the line under it stands whole inside the tile.
+        window->resize(800, 560);
+        desktop.becomes(1.5);
+        QTRY_COMPARE(widths->window(), 800);
+        QTRY_COMPARE(widths->systemText(), 1.5);
+        QTRY_VERIFY((tile = itemNamed(block, u"tile-integrale"_s)) && tile->width() > 0);
+        auto *name = itemNamed(tile, u"mini-name-integrale"_s);
+        auto *detail = itemNamed(tile, u"mini-detail-integrale"_s);
+        QVERIFY(name);
+        QVERIFY(detail);
+        QTRY_COMPARE(name->property("font").value<QFont>().pixelSize(),
+                     Scale::captionFor(12, Widths::controlsFor(800), 1.5));
+        QVERIFY(tile->width() >= widths->scale()->column(108) - 1);
+        QCOMPARE(name->property("lineCount").toInt(), 2);
+        QVERIFY2(name->property("implicitHeight").toReal() <= name->height(),
+                 "the name is cut by a height of its own");
+        const qreal detailEnd = detail->mapToItem(tile, QPointF(0, detail->height())).y();
+        QVERIFY2(detailEnd <= tile->height(),
+                 qPrintable(u"the line under the name ends at %1 in a tile of %2"_s
+                                .arg(detailEnd).arg(tile->height())));
+    }
+
+    /// Every menu and panel had its own inside: the sort menu 8, the filters 8, the editions
+    /// 4, the tooltip 8 by 12 (spacing audit, 23/10/2026). One role now, `compact`, read at
+    /// every window — and the filters hang `compact` under the button that opens them.
+    void a_menu_is_padded_compact_at_every_window()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray filtersReply =
+            aReply(200, QByteArrayLiteral("application/json"), someFilters());
+        pretend.answerFor = [filtersReply](const QByteArray &request) {
+            return request.startsWith("GET /filters") ? filtersReply
+                                                       : aDescribedSeries(request);
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *widths = engine.singletonInstance<Widths *>(qmlTypeId("Leaf", 1, 0, "Widths"));
+        QVERIFY(widths);
+
+        // The shelf's three first, while the shelf is the screen that draws them.
+        QObject *sort = nullptr;
+        QTRY_VERIFY((sort = window->findChild<QObject *>(u"sort-menu"_s)));
+        QQuickItem *button = nullptr;
+        QTRY_VERIFY((button = reachableFilterButton(window)));
+        auto *filters = button->findChild<QObject *>(u"filter-panel"_s);
+        QVERIFY(filters);
+        auto *tip = button->findChild<QObject *>(u"filter-button-tooltip"_s);
+        QVERIFY(tip);
+
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        QVERIFY(navigation->open(Navigation::Destination::Series,
+                                 {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QObject *editions = nullptr;
+        QTRY_VERIFY((editions = page->findChild<QObject *>(u"editions-menu"_s)));
+
+        for (const int wide : {800, 1280, 1920}) {
+            window->resize(wide, wide == 800 ? 560 : 900);
+            QTRY_COMPARE(widths->window(), wide);
+            const qreal compact = widths->space()->compact();
+            for (QObject *menu : {editions, sort, filters}) {
+                QVERIFY2(qFuzzyCompare(menu->property("padding").toReal(), compact),
+                         qPrintable(u"%1 is padded %2 at %3, compact is %4"_s
+                                        .arg(menu->objectName())
+                                        .arg(menu->property("padding").toReal())
+                                        .arg(wide)
+                                        .arg(compact)));
+            }
+            QCOMPARE(tip->property("topPadding").toReal(), compact);
+            QCOMPARE(tip->property("bottomPadding").toReal(), compact);
+            QCOMPARE(filters->property("gap").toReal(), compact);
+        }
+    }
+
+    /// At 800 × 560 the relaying dialog stood 550 pixels tall, flush with the window at the
+    /// top and the bottom, with nothing to scroll it (audit, 23/10/2026): a text a quarter
+    /// larger and its last lines were gone. Every dialog now stands inside the window less
+    /// the page's gutter on all four sides, at the smallest window and with the desktop's
+    /// text half as large again, and none of its words is cut by a box of its own.
+    void every_dialog_fits_the_smallest_window_with_its_words_whole()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        // A code to relay, so the relaying dialog draws its square, its link and its time:
+        // the tallest it gets, and the one that ran into the window's edges.
+        const QByteArray codeReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            QJsonDocument(QJsonObject{{u"id"_s, u"c1"_s},
+                                      {u"code"_s, u"7Q4K-92MX"_s},
+                                      {u"link"_s,
+                                       u"leaf://leaf.exemple.fr/lier/7Q4K-92MX?empreinte="_s
+                                           + QString(64, u'a')},
+                                      {u"localNetwork"_s, false},
+                                      {u"expiresAt"_s,
+                                       QDateTime::currentMSecsSinceEpoch() + 9 * 60 * 1000}})
+                .toJson(QJsonDocument::Compact));
+        const QByteArray waitingReply =
+            aReply(200, QByteArrayLiteral("application/json"),
+                   QByteArrayLiteral("{\"state\":\"waiting\"}"));
+        pretend.answerFor = [codeReply, waitingReply](const QByteArray &request) {
+            if (request.startsWith("POST /link/codes "))
+                return codeReply;
+            if (request.contains("/link/codes/"))
+                return waitingReply;
+            return aDescribedSeries(request);
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        SomeText desktop(1.0);
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *widths = engine.singletonInstance<Widths *>(qmlTypeId("Leaf", 1, 0, "Widths"));
+        QVERIFY(widths);
+        widths->follow(&desktop);
+        window->resize(800, 560);
+        QTRY_COMPARE(widths->window(), 800);
+        desktop.becomes(1.5);
+        QTRY_COMPARE(widths->systemText(), 1.5);
+        const qreal gutter = widths->space()->gutter();
+
+        const auto fits = [&](QObject *dialog) { return whatACutDialog(window, dialog, gutter); };
+
+        // Deleting: what the question weighs, whole.
+        auto *erasure = engine.singletonInstance<Erasure *>(qmlTypeId("Leaf", 1, 0, "Erasure"));
+        QVERIFY(erasure);
+        erasure->aboutSeries(u"albums"_s);
+        QObject *erase = nullptr;
+        QTRY_VERIFY((erase = window->findChild<QObject *>(u"erase-dialog"_s))
+                    && erase->property("opened").toBool());
+        QTRY_VERIFY(!textNamed(window->contentItem(), u"erase-question"_s).isEmpty());
+        QTest::qWait(200);
+        if (const QString cut = fits(erase); !cut.isEmpty())
+            QFAIL(qPrintable(cut));
+        erasure->dismiss();
+        QTRY_VERIFY(!erase->property("visible").toBool());
+
+        // Importing: the drop zone, its two doors and the box under it.
+        auto *import = window->findChild<QObject *>(u"import-dialog"_s);
+        QVERIFY(import);
+        QVERIFY(QMetaObject::invokeMethod(import, "show"));
+        QTRY_VERIFY(import->property("opened").toBool());
+        QTest::qWait(200);
+        if (const QString cut = fits(import); !cut.isEmpty())
+            QFAIL(qPrintable(cut));
+        QVERIFY(QMetaObject::invokeMethod(import, "close"));
+        QTRY_VERIFY(!import->property("visible").toBool());
+
+        // Relaying and unlinking, from the settings.
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        QVERIFY(navigation->open(Navigation::Destination::Settings, {}));
+        QQuickItem *screen = nullptr;
+        QTRY_VERIFY((screen = itemNamed(window->contentItem(), u"settings-view"_s)));
+        for (const QString &name : {u"relay-dialog"_s, u"unlink-dialog"_s}) {
+            QObject *dialog = nullptr;
+            QTRY_VERIFY((dialog = screen->findChild<QObject *>(name)));
+            QVERIFY(QMetaObject::invokeMethod(dialog, "open"));
+            QTRY_VERIFY(dialog->property("opened").toBool());
+            if (name == u"relay-dialog"_s) {
+                QQuickItem *square = nullptr;
+                QTRY_VERIFY((square = itemNamed(window->contentItem(), u"relay-qr"_s)) && square->isVisible());
+            }
+            QTest::qWait(300);
+            if (const QString cut = fits(dialog); !cut.isEmpty())
+                QFAIL(qPrintable(cut));
+            QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+            QTRY_VERIFY(!dialog->property("visible").toBool());
+        }
+    }
+
+    /// The profiles' four windows — the code, the profile, the removal, the recovery code —
+    /// stood 400 to 470 wide at any window and as tall as their words, with no way to scroll:
+    /// at 800 × 560 and a text a half larger the profile's ran out of the window at both ends.
+    /// They are the shared dialog now, and are held to what the others are held to.
+    void the_profiles_windows_fit_the_smallest_window_with_their_words_whole()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"sauge"_s, u"reader"_s)},
+            u"p"_s, true);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        SomeText desktop(1.0);
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *widths = engine.singletonInstance<Widths *>(qmlTypeId("Leaf", 1, 0, "Widths"));
+        QVERIFY(widths);
+        widths->follow(&desktop);
+        window->resize(800, 560);
+        QTRY_COMPARE(widths->window(), 800);
+        desktop.becomes(1.5);
+        QTRY_COMPARE(widths->systemText(), 1.5);
+        auto *profiles = engine.singletonInstance<Profiles *>(qmlTypeId("Leaf", 1, 0, "Profiles"));
+        QVERIFY(profiles);
+        QTRY_VERIFY(profiles->list().size() == 2);
+        const qreal gutter = widths->space()->gutter();
+        const QVariant reader = profiles->list().at(1);
+
+        const auto fitsOpened = [&](const QString &name, const QString &how,
+                                    const QVariantList &with) {
+            QObject *dialog = window->findChild<QObject *>(name);
+            QVERIFY2(dialog, qPrintable(name));
+            const QByteArray method = how.toUtf8();
+            bool called = false;
+            if (with.size() == 1)
+                called = QMetaObject::invokeMethod(dialog, method.constData(),
+                                                   Q_ARG(QVariant, with.at(0)));
+            else
+                called = QMetaObject::invokeMethod(dialog, method.constData(),
+                                                   Q_ARG(QVariant, with.at(0)),
+                                                   Q_ARG(QVariant, with.at(1)),
+                                                   Q_ARG(QVariant, with.at(2)));
+            QVERIFY2(called, qPrintable(name));
+            QTRY_VERIFY2(dialog->property("opened").toBool(), qPrintable(name));
+            QTest::qWait(300);
+            if (const QString cut = whatACutDialog(window, dialog, gutter); !cut.isEmpty())
+                QFAIL(qPrintable(cut));
+            QVERIFY(QMetaObject::invokeMethod(dialog, "close"));
+            QTRY_VERIFY(!dialog->property("visible").toBool());
+        };
+        fitsOpened(u"code-dialog"_s, u"ask"_s, {reader, u"switch"_s, false});
+        fitsOpened(u"profile-dialog"_s, u"show"_s, {u"new"_s, QVariant(), QString()});
+        fitsOpened(u"profile-removal"_s, u"ask"_s, {reader});
+        fitsOpened(u"recovery-dialog"_s, u"show"_s, {u"7Q4K-92MX"_s});
+    }
+
+    /// The bubbles stood 20 from the window's edge where every page stands at its gutter, and
+    /// 420 wide at any window — half the shelf at 800 × 560 (audit, 23/10/2026). They stand at
+    /// the gutter, as wide as their words, never wider than the window less two gutters.
+    void the_bubbles_stand_at_the_gutter_and_as_wide_as_their_words()
+    {
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *widths = engine.singletonInstance<Widths *>(qmlTypeId("Leaf", 1, 0, "Widths"));
+        QVERIFY(widths);
+        auto *bubbles = engine.singletonInstance<Toasts *>(qmlTypeId("Leaf", 1, 0, "Toasts"));
+        QVERIFY(bubbles);
+        auto *warnings = engine.singletonInstance<Warnings *>(qmlTypeId("Leaf", 1, 0, "Warnings"));
+        QVERIFY(warnings);
+        warnings->scanFinished(u"24 séries, 288 tomes"_s);
+        warnings->isbnCopied(u"9782505061922"_s);
+
+        QQuickItem *stack = nullptr;
+        QTRY_VERIFY((stack = itemNamed(window->contentItem(), u"toast-column"_s))
+                    && stack->isVisible());
+        for (const int wide : {800, 1280, 1920}) {
+            window->resize(wide, wide == 800 ? 560 : 900);
+            QTRY_COMPARE(widths->window(), wide);
+            const qreal gutter = widths->space()->gutter();
+            QTRY_COMPARE(stack->width(),
+                         qMin(qreal(widths->scale()->column(420)), wide - 2 * gutter));
+            QTRY_VERIFY(itemNamed(stack, u"toast-0"_s));
+            const QRectF at = stack->mapRectToItem(
+                window->contentItem(), QRectF(0, 0, stack->width(), stack->height()));
+            const qreal side = qMin(at.left(), window->width() - at.right());
+            const qreal end = qMin(at.top(), window->height() - at.bottom());
+            QVERIFY2(qAbs(side - gutter) < 0.5 || qAbs(at.center().x() - wide / 2.0) < 1,
+                     qPrintable(u"the bubbles stand %1 from the side at %2, the gutter is %3"_s
+                                    .arg(side).arg(wide).arg(gutter)));
+            QVERIFY2(qAbs(end - gutter) < 0.5,
+                     qPrintable(u"the bubbles stand %1 from the end at %2, the gutter is %3"_s
+                                    .arg(end).arg(wide).arg(gutter)));
+            QCOMPARE(itemNamed(stack, u"toast-0"_s)->width(), stack->width());
+        }
     }
 
     /// Where the band stands in the reading order: before the grid, because it is above it,
@@ -2655,13 +5370,15 @@ private slots:
         // The mark is drawn small and the word carries the name: 36 against a 25-pixel word,
         // which is the balance asked for once both were on screen — a leaf that competes with
         // its own name reads as two logos.
-        QCOMPARE(mark->width(), 36.0);
-        QCOMPARE(mark->height(), 36.0);
+        // Both follow the window as the bar does — the mark as an icon, the word as a title.
+        auto *widths = engine.singletonInstance<Widths *>(qmlTypeId("Leaf", 1, 0, "Widths"));
+        QVERIFY(widths);
+        QCOMPARE(mark->width(), qreal(widths->scale()->icon(36)));
+        QCOMPARE(mark->height(), qreal(widths->scale()->icon(36)));
         auto *word = window->findChild<QQuickItem *>(u"brand-word"_s);
         QVERIFY(word);
-        QCOMPARE(word->property("font").value<QFont>().pixelSize(), 25);
-        QVERIFY2(word->x() - (mark->x() + mark->width()) >= 10,
-                 "the word is not crowded against the mark");
+        QCOMPARE(word->property("font").value<QFont>().pixelSize(), widths->scale()->title(25));
+        QCOMPARE(word->x() - (mark->x() + mark->width()), qreal(widths->space()->label()));
         QVERIFY(mark->property("source").toUrl().toString().contains(u"leaf-mark-"_s));
 
         // And the name is not crowded against the field either. The field is a pill whose
@@ -2669,10 +5386,14 @@ private slots:
         // to rest on the "f" of Leaf and the two read as one object.
         auto *field = window->findChild<QQuickItem *>(u"search-field"_s);
         QVERIFY(field);
-        const qreal wordRight =
-            word->mapToItem(window->contentItem(), QPointF(word->width(), 0)).x();
+        auto *brand = window->findChild<QQuickItem *>(u"leaf-brand"_s);
+        QVERIFY(brand);
+        const qreal nameRight =
+            brand->mapToItem(window->contentItem(), QPointF(brand->width(), 0)).x();
         const qreal fieldLeft = field->mapToItem(window->contentItem(), QPointF(0, 0)).x();
-        QVERIFY2(fieldLeft - wordRight >= 30, "the field is crowded against the name");
+        QCOMPARE(fieldLeft - nameRight, qreal(widths->space()->section()));
+        QVERIFY(word->mapToItem(window->contentItem(), QPointF(word->width(), 0)).x()
+                <= nameRight);
 
         auto *tip = filterButton->findChild<QObject *>(u"filter-button-tooltip"_s);
         QVERIFY(tip);
@@ -2774,7 +5495,16 @@ private slots:
         // the kind of book, each left to right.
         auto *said = itemNamed(pills, u"chip-UNREAD-text"_s);
         QVERIFY(said);
-        QCOMPARE(said->property("text").toString(), u"Non lues 12"_s);
+        // The word, and the count in a badge of its own, centred on the height of the pill.
+        QCOMPARE(said->property("text").toString(), u"Non lues"_s);
+        auto *unreadPill = itemNamed(pills, u"chip-UNREAD"_s);
+        auto *tally = itemNamed(pills, u"chip-UNREAD-tally"_s);
+        QVERIFY(unreadPill);
+        QVERIFY(tally);
+        QVERIFY(tally->isVisible());
+        QCOMPARE(tally->childItems().value(0)->property("text").toString(), u"12"_s);
+        QVERIFY(qAbs(tally->mapToItem(unreadPill, QPointF(0, tally->height() / 2.0)).y() * 2
+                     - unreadPill->height()) <= 1.01);
 
         // A series marked read moves two numbers, and the chips carrying them change their
         // words where they stand. Each was rebuilt from nothing whenever any number moved —
@@ -2788,9 +5518,10 @@ private slots:
                 engine.singletonInstance<Filters *>(qmlTypeId("Leaf", 1, 0, "Filters"));
             QVERIFY(filters);
             filters->refresh();
-            QTRY_COMPARE(said->property("text").toString(), u"Non lues 11"_s);
-            QCOMPARE(itemNamed(pills, u"chip-READ-text"_s)->property("text").toString(),
-                     u"Terminées 5"_s);
+            QTRY_COMPARE(tally->childItems().value(0)->property("text").toString(), u"11"_s);
+            QCOMPARE(said->property("text").toString(), u"Non lues"_s);
+            QCOMPARE(itemNamed(pills, u"chip-READ-tally"_s)->childItems().value(0)
+                         ->property("text").toString(), u"5"_s);
             QVERIFY(sameUnread);
             QVERIFY(sameManga);
             QCOMPARE(itemNamed(pills, u"chip-UNREAD"_s), sameUnread.data());
@@ -2986,6 +5717,7 @@ private slots:
         QVERIFY(firstRing);
         QTest::mouseMove(window, QPoint(window->width() - 2, 2), 20);
         unread->forceActiveFocus(Qt::TabFocusReason);
+        keysInCharge(window);
         QTRY_VERIFY(unreadRing->isVisible());
 
         const auto centreOf = [](QQuickItem *item) {
@@ -3145,8 +5877,14 @@ private slots:
         QVERIFY(QMetaObject::invokeMethod(panel, "close"));
         QTRY_VERIFY(!panel->property("visible").toBool());
         window->setWindowState(Qt::WindowNoState);
-        window->resize(900, 400);
-        QTRY_COMPARE(window->height(), 400);
+        // 360 high, under the smallest window there is since 23/10/2026, with the minimum
+        // lifted on purpose: at 560 this test's few filters fit whole, and the rule is about a
+        // panel taller than its room, which a real library's filters still are at 560. It was
+        // 400 until the bar and its buttons followed the window down, and gave the panel back
+        // the dozen pixels that made it fit there.
+        window->setMinimumSize(QSize(0, 0));
+        window->resize(900, 360);
+        QTRY_COMPARE(window->height(), 360);
         QTRY_VERIFY((button = reachableFilterButton(window)));
         QVERIFY(QMetaObject::invokeMethod(panel, "open"));
         QTRY_VERIFY(panel->property("opened").toBool());
@@ -3219,7 +5957,9 @@ private slots:
             const QQuickItem *text = itemNamed(pills, name);
             return text == nullptr ? QString() : text->property("text").toString();
         };
-        QTRY_COMPARE(said(u"chip-READ-text"_s), u"Terminées 1"_s);
+        QTRY_COMPARE(said(u"chip-READ-text"_s), u"Terminées"_s);
+        QTRY_COMPARE(itemNamed(pills, u"chip-READ-tally"_s)->childItems().value(0)
+                         ->property("text").toString(), u"1"_s);
         QQuickItem *tile = nullptr;
         QTRY_VERIFY((tile = itemNamed(grid, u"tile-kq"_s)));
         QVERIFY(!itemNamed(tile, u"finished-kq"_s)->isVisible());
@@ -3231,8 +5971,15 @@ private slots:
         commands->markSeries(u"kq"_s, true);
 
         QTRY_VERIFY(itemNamed(tile, u"finished-kq"_s)->isVisible());
-        QTRY_COMPARE(said(u"chip-READ-text"_s), u"Terminées 2"_s);
-        QCOMPARE(said(u"chip-UNREAD-text"_s), u"Non lues 1"_s);
+        const auto counted = [&](const QString &name) {
+            const QQuickItem *badge = itemNamed(pills, name);
+            return badge == nullptr ? QString()
+                                    : badge->childItems().value(0)->property("text").toString();
+        };
+        QTRY_COMPARE(counted(u"chip-READ-tally"_s), u"2"_s);
+        QCOMPARE(said(u"chip-READ-text"_s), u"Terminées"_s);
+        QCOMPARE(counted(u"chip-UNREAD-tally"_s), u"1"_s);
+        QCOMPARE(said(u"chip-UNREAD-text"_s), u"Non lues"_s);
         // Long enough for anything else to have gone out.
         QTest::qWait(300);
         const QByteArray &heard = pretend.heard;
@@ -3354,14 +6101,28 @@ private slots:
         QVERIFY(scopeFilters);
         QVERIFY(!scopeFilters->isVisible());
 
-        // A preview is exactly one row. At a two-column width, six matches therefore leave
-        // one explicit route to the complete scope instead of growing a second row in place.
+        // A preview is exactly one row. At the smallest window there is, six matches therefore
+        // leave one explicit route to the complete scope instead of growing a second row in
+        // place.
         const QSize originalSize = window->size();
-        window->resize(580, originalSize.height());
+        window->resize(Widths::MinimumWindowWidth, originalSize.height());
         auto *seeAllSeries = itemNamed(workspace, u"see-all-series"_s);
         QVERIFY(seeAllSeries);
         QTRY_VERIFY(seeAllSeries->isVisible());
         QCOMPARE(seeAllSeries->property("label").toString(), u"Voir les 6 séries"_s);
+        // The two ways to a whole scope are drawn alike: as wide as their words, chevron
+        // included, from the same left edge. The series' ran the window's width and the
+        // files' the column's, each chevron far from its words and at its own place.
+        auto *seeAllFiles = itemNamed(workspace, u"see-all-files"_s);
+        QVERIFY(seeAllFiles);
+        QTRY_VERIFY(seeAllFiles->isVisible());
+        for (QQuickItem *link : {seeAllSeries, seeAllFiles}) {
+            QCOMPARE(link->width(), link->implicitWidth());
+            QVERIFY2(link->width() < link->parentItem()->width() / 2,
+                     qPrintable(link->objectName()));
+        }
+        QCOMPARE(seeAllSeries->mapToScene(QPointF(0, 0)).x(),
+                 seeAllFiles->mapToScene(QPointF(0, 0)).x());
         window->resize(originalSize);
 
         workspace->setProperty("mode", 1);
@@ -3862,8 +6623,9 @@ private slots:
         QVERIFY(rows);
         QTRY_COMPARE(rows->property("count").toInt(), 300);
 
-        // Seven rows tall whatever the three hundred, and only a handful of them built.
-        QCOMPARE(rows->height(), 5.0 * 30.0);
+        // Five rows tall whatever the three hundred, and only a handful of them built. A
+        // row's height is the axis's own, which follows the window and the text size.
+        QCOMPARE(rows->height(), 5.0 * axis->property("rowHeight").toReal());
         QVERIFY2(itemsNamed(rows, u"filter-value-Auteur 0001"_s).size() == 1,
                  "the first row was not built");
         QVERIFY2(itemsNamed(rows, u"filter-value-Auteur 0300"_s).isEmpty(),
@@ -3875,7 +6637,7 @@ private slots:
         QVERIFY(field->isVisible());
         axis->setProperty("looking", u"0042"_s);
         QTRY_COMPARE(rows->property("count").toInt(), 1);
-        QCOMPARE(rows->height(), 30.0);
+        QCOMPARE(rows->height(), axis->property("rowHeight").toReal());
     }
 
     /// Clicking the button that opened a popup closes it. The press counted as outside, so
@@ -4116,12 +6878,11 @@ private slots:
         QVERIFY(QMetaObject::invokeMethod(back, "triggered"));
         QTRY_VERIFY(grid->isVisible());
         QCOMPARE(window->findChild<QQuickItem *>(u"shelf-grid"_s), grid);
-        // And the way back went with the page it belonged to. Asserted by looking for it
-        // again rather than by asking the pointer whether it is still shown: the button
-        // moved out of the bar and into the settings' own tabs, so the Loader deletes it
-        // on the way out — `back->isVisible()` here read freed memory, and did it for
-        // however long the allocator left the bytes recognisable.
-        QTRY_VERIFY(!window->findChild<QQuickItem *>(u"back-button"_s));
+        // And the way back went with the page it belonged to. The bar's own button, so it is
+        // hidden and not deleted — but looked for again rather than kept: while it led the
+        // settings' tabs the Loader deleted it on the way out, and `back->isVisible()` here
+        // read freed memory for however long the allocator left the bytes recognisable.
+        QTRY_VERIFY(!window->findChild<QQuickItem *>(u"back-button"_s)->isVisible());
 
         // And Escape does the same, rather than being spent on a page nobody saw.
         QVERIFY(QMetaObject::invokeMethod(button, "triggered"));
@@ -4361,6 +7122,13 @@ private slots:
         QTRY_VERIFY(trouble->isVisible());
         QVERIFY(!grid->property("activeFocusOnTab").toBool());
         QVERIFY(!said->property("text").toString().isEmpty());
+        // The empty shelf's words, with a headline over the trouble, and the empty shelf's
+        // own sentence nowhere: it is not an empty library.
+        auto *headline = itemNamed(trouble, u"shelf-trouble-headline"_s);
+        QVERIFY(headline);
+        QVERIFY(headline->isVisible());
+        QCOMPARE(headline->property("text").toString(), Words::shelfTroubleHeadline());
+        QVERIFY(!window->findChild<QQuickItem *>(u"shelf-empty"_s)->isVisible());
     }
 
     /// No address: the shelf says so in its card, and the band above it said the same
@@ -4503,13 +7271,225 @@ private slots:
         QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, box.toPoint());
         QTRY_VERIFY(!imports->verifying());
         QVERIFY(!check->property("checked").toBool());
+        // The box answers on itself and its words, not on the paper after them: the item is
+        // as wide as the window so that its words can wrap.
+        qreal pastWords = 0;
+        for (const QString &words : {u"import-verify-label"_s, u"import-verify-aside"_s}) {
+            QQuickItem *text = itemNamed(check, words);
+            QVERIFY(text);
+            pastWords = qMax(pastWords, text->mapToItem(check, QPointF(
+                text->property("contentWidth").toReal(), 0)).x());
+        }
+        QVERIFY(check->width() - pastWords > 12);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          check->mapToScene(QPointF((pastWords + check->width()) / 2, 8))
+                              .toPoint());
+        QTest::qWait(200);
+        QVERIFY(!imports->verifying());
+    }
+
+    /// A folder read is counted on its own line — « Vérifié · 3 / 3 » — and the whole drop is
+    /// said once under the zone: the button that goes on is greyed for as long as it counts,
+    /// and a reader who saw the grey with nothing saying why took it for broken.
+    void a_dropped_folder_is_counted_on_its_line_and_said_ready_under_the_zone()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+
+        QTRY_COMPARE(textNamed(drop.window->contentItem(), u"import-status-words"_s),
+                     Words::readyAll(1));
+        // Nothing left to count: the bar and the button's word went with the count.
+        QVERIFY(hiddenNamed(drop.window->contentItem(), u"import-status-bar"_s));
+        QVERIFY(hiddenNamed(drop.window->contentItem(), u"import-status-waits"_s));
+
+        auto *rows = drop.window->findChild<QQuickItem *>(u"import-lines"_s);
+        QVERIFY(rows);
+        QTRY_VERIFY(shownNamed(rows, u"import-row-Koro Quest-count"_s));
+        QQuickItem *line = itemNamed(rows, u"import-row-Koro Quest"_s);
+        QVERIFY(line);
+        QTRY_COMPARE(textNamed(rows, u"import-row-Koro Quest-count-words"_s),
+                     Words::lineChecked(true, 3, line->property("brief").toBool()));
+    }
+
+    /// A volume whose members could not be hashed is announced as a file alone, and its line says
+    /// so — « Fichier vérifié, pages non vérifiées », with the reason under it — instead of the
+    /// « Vérifié · 4 / 4 » that would tell the reader the pages were covered.
+    void a_line_whose_members_could_not_be_hashed_does_not_say_verified()
+    {
+        ADroppedFolder drop;
+        drop.alsoUnhashable = true;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+
+        auto *rows = drop.window->findChild<QQuickItem *>(u"import-lines"_s);
+        QVERIFY(rows);
+        QTRY_VERIFY(shownNamed(rows, u"import-row-Koro Quest-count"_s));
+        QQuickItem *line = itemNamed(rows, u"import-row-Koro Quest"_s);
+        QVERIFY(line);
+        QTRY_COMPARE(textNamed(rows, u"import-row-Koro Quest-count-words"_s),
+                     Words::lineCheckedFileOnly(line->property("brief").toBool()));
+        QTRY_COMPARE(textNamed(rows, u"import-row-Koro Quest-reason"_s), Words::notAnArchive());
+    }
+
+    /// While the server has not answered the greyed button says why, in the one line under the
+    /// zone and in its own tooltip. The answer is never given here, so the wait does not end
+    /// before it has been looked at.
+    void the_start_button_says_why_it_waits_for_the_count_and_the_answer()
+    {
+        QTemporaryDir library;
+        QVERIFY(library.isValid());
+        QVERIFY(ADroppedFolder::aSaidSeries(library.filePath(u"Koro"_s), u"Koro"_s, 3));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = seatedAsPrincipal([](const QByteArray &request) {
+            // The announcement is never answered: the card stays asked.
+            if (request.startsWith("POST /import "))
+                return QByteArray();
+            return aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        });
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *imports = engine.singletonInstance<Imports *>(qmlTypeId("Leaf", 1, 0, "Imports"));
+        auto *dialog = window->findChild<QObject *>(u"import-dialog"_s);
+        QVERIFY(imports);
+        QVERIFY(dialog);
+        QVERIFY(QMetaObject::invokeMethod(dialog, "show"));
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        const QVariantList dropped{QUrl::fromLocalFile(library.filePath(u"Koro"_s))};
+        QVERIFY(QMetaObject::invokeMethod(dialog, "take", Q_ARG(QVariant, QVariant(dropped))));
+        QTRY_COMPARE(dialog->property("phase").toInt(), dialog->property("proposing").toInt());
+        QTRY_COMPARE(imports->foldersToRead(), 0);
+        auto *tally = engine.singletonInstance<ImportTally *>(qmlTypeId("Leaf", 1, 0, "ImportTally"));
+        QVERIFY(tally);
+        QVERIFY(tally->reading() > 0);
+        QVERIFY(laidOut(window));
+
+        QQuickItem *root = window->contentItem();
+        QTRY_COMPARE(textNamed(root, u"import-status-words"_s), Words::announcing());
+        QVERIFY(shownNamed(root, u"import-status-bar"_s));
+        QQuickItem *start = itemNamed(root, u"import-start"_s);
+        QVERIFY(start);
+        QVERIFY(!start->property("ready").toBool());
+
+        // Hovered, the greyed button says what it waits for.
+        const QPointF over = start->mapToScene(QPointF(start->width() / 2, start->height() / 2));
+        QTest::mouseMove(window, over.toPoint());
+        auto *hint = window->findChild<QObject *>(u"import-start-hint"_s);
+        QVERIFY(hint);
+        QTRY_VERIFY(hint->property("visible").toBool());
+        QCOMPARE(hint->property("text").toString(), Words::startWaitsHint());
+    }
+
+    /// The box that asks for the fingerprints stays once the cards are shown, and is then only
+    /// read: they were computed while the folder was walked, and ticking it after cannot
+    /// give a session announced without them what it never had.
+    void the_box_asking_for_fingerprints_stays_but_cannot_change_once_a_folder_is_taken()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QQuickItem *check = drop.named(u"import-verify"_s);
+        QVERIFY(check);
+        QVERIFY(check->isVisible());
+        QVERIFY(!check->isEnabled());
+        QVERIFY(drop.imports->verifying());
+        clickOn(drop.window, check);
+        QTest::qWait(150);
+        QVERIFY(drop.imports->verifying());
+        QVERIFY(check->property("checked").toBool());
+    }
+
+    /// A window as short as the app lets it be gives up, in this order, the sentence under the
+    /// zone (the footer says it in fewer words) and the paragraph under the box's title —
+    /// and a taller one has both.
+    void a_short_window_loses_the_sentence_under_the_zone_and_the_words_under_the_box()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+
+        drop.window->resize(1100, 760);
+        QVERIFY(laidOut(drop.window));
+        QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"import-reassurance"_s));
+        QTRY_VERIFY(!textNamed(drop.window->contentItem(), u"import-verify-aside"_s).isEmpty());
+
+        drop.window->resize(800, 560);
+        QVERIFY(laidOut(drop.window));
+        QTRY_VERIFY(hiddenNamed(drop.window->contentItem(), u"import-reassurance"_s));
+        // The title stays, the paragraph goes: the box is still there to be read.
+        QTRY_VERIFY(textNamed(drop.window->contentItem(), u"import-verify-aside"_s).isEmpty());
+        QVERIFY(!textNamed(drop.window->contentItem(), u"import-verify-label"_s).isEmpty());
+        // And what stands at the foot of the left column stays inside the dialog.
+        const QRectF foot = drop.zone(u"import-left-bottom"_s);
+        const QRectF surface = drop.zone(u"import-dialog-surface"_s);
+        QVERIFY(surface.contains(foot));
+    }
+
+    /// A column too narrow for a count with its word gives the word up, and a narrower one
+    /// gives « Retirer » up for a cross: the cross is still the command, still named.
+    void a_narrow_column_shortens_the_count_and_turns_remove_into_a_cross()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        auto *rows = drop.window->findChild<QQuickItem *>(u"import-lines"_s);
+        QVERIFY(rows);
+
+        drop.window->resize(1400, 900);
+        QVERIFY(laidOut(drop.window));
+        QTRY_VERIFY(shownNamed(rows, u"import-row-Koro Quest-abandon"_s));
+        QVERIFY(hiddenNamed(rows, u"import-row-Koro Quest-abandon-cross"_s));
+        QTRY_COMPARE(textNamed(rows, u"import-row-Koro Quest-count-words"_s),
+                     Words::lineChecked(true, 3, false));
+
+        drop.window->resize(800, 560);
+        QVERIFY(laidOut(drop.window));
+        QTRY_VERIFY(hiddenNamed(rows, u"import-row-Koro Quest-abandon"_s));
+        QTRY_VERIFY(shownNamed(rows, u"import-row-Koro Quest-abandon-cross"_s));
+        QTRY_COMPARE(textNamed(rows, u"import-row-Koro Quest-count-words"_s),
+                     Words::lineChecked(true, 3, true));
+        // Named for whoever has the window read aloud.
+        QCOMPARE(itemNamed(rows, u"import-row-Koro Quest-abandon-cross"_s)
+                     ->property("label").toString(),
+                 Words::removeIt());
+    }
+
+    /// The note of what the library already holds stands at the foot of its column and does
+    /// not scroll with the list: forty folders moved it down the page.
+    void the_note_of_what_is_held_stays_at_the_foot_while_the_list_scrolls()
+    {
+        ADroppedFolder drop;
+        drop.held = true;
+        drop.slow = 6;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QTRY_COMPARE(drop.imports->rowCount({}), 7);
+        drop.window->resize(800, 560);
+        QVERIFY(laidOut(drop.window));
+
+        QQuickItem *list = drop.named(u"import-lines"_s);
+        QQuickItem *box = drop.named(u"import-lines-box"_s);
+        QQuickItem *held = drop.named(u"import-held"_s);
+        QVERIFY(list);
+        QVERIFY(box);
+        QVERIFY(held);
+        QTRY_VERIFY(held->isVisible());
+        // More lines than the column has room for: the list scrolls inside its box.
+        QTRY_VERIFY(list->property("interactive").toBool());
+
+        const QRectF shelf = drop.zone(u"import-shelf"_s);
+        const QRectF note = drop.zone(u"import-held"_s);
+        const QRectF listBox = drop.zone(u"import-lines-box"_s);
+        QVERIFY(qAbs(note.bottom() - shelf.bottom()) < 1.5);
+        QVERIFY(listBox.bottom() <= note.top());
+        // Scrolled to the end, the note is where it was.
+        const qreal before = note.top();
+        list->setProperty("contentY", list->property("contentHeight").toReal());
+        QVERIFY(laidOut(drop.window));
+        QCOMPARE(drop.zone(u"import-held"_s).top(), before);
     }
 
     /// A folder's card shows the tree of what it holds — a root node named after the
-    /// folder itself — and goes no further until somebody has said yes. The sentence a
-    /// later task will place on that tree is checked directly here, since this step does
-    /// not yet draw it. Creating a universe is the one thing a reader cannot undo by
-    /// deleting a file.
+    /// folder itself — and says what it would create before anything goes. Undeclared, it
+    /// stops to be checked once announced, and « Importer » (`confirm`) is the yes.
     void a_folder_shows_its_tree_before_it_creates_anything()
     {
         QTemporaryDir library;
@@ -4531,6 +7511,14 @@ private slots:
                                   R"("at":""}],"toSend":["Tome 1.cbz"],)"
                                   R"("alreadyThere":[],"bytesToSend":64})"));
             }
+            // The file itself is never answered: the card is meant to stay in flight while
+            // the assertions below look at it. It used to be given the shelf's empty list,
+            // which is not what a transfer expects back — the card went to `Failed` on its own
+            // and the test saw `Sending` only when it polled before that happened. Alone it
+            // always did; on an instrumented build sharing four cores it missed it one run in
+            // four. Nothing to say holds the connection open (see `Pretend::reply`).
+            if (request.startsWith("PUT /import/"))
+                return {};
             return aReply(200, QByteArrayLiteral("application/json"),
                           QByteArrayLiteral(R"({"items":[],"total":0})"));
         };
@@ -4569,12 +7557,17 @@ private slots:
         QTRY_COMPARE(dialog->property("phase").toInt(),
                      dialog->property("proposing").toInt());
         QTRY_COMPARE(imports->rowCount({}), 1);
+        // The keys wait on the button that sends: the pickers that held them are gone, and
+        // they were left on nothing.
+        QTRY_COMPARE(focusedName(window), u"import-start"_s);
 
         // Asked for until it is there: the model has its row before the view has built the
         // delegate that draws it. And walked down the view rather than asked of the window: a delegate has no QObject
         // parent — the delegate model owns it — so `findChild` goes straight past every
         // row the list ever draws and finds the list itself, looking like an empty queue.
-        auto *rows = window->findChild<QQuickItem *>(u"import-rows"_s);
+        // The choosing step draws one compact line per thing read, not the queue's own cards:
+        // those come back for the transfers, below.
+        auto *rows = window->findChild<QQuickItem *>(u"import-lines"_s);
         QVERIFY(rows);
 
         // Looked up again on every poll rather than captured once and read back later: the
@@ -4585,28 +7578,30 @@ private slots:
         // name (fewer, differently-timed re-layouts of the same row) it started losing that
         // race on nearly every run instead of rarely.
         //
-        // `accept` visible is waited for **before** either text is read, not after: it is
-        // what guarantees the server's answer — `creates`, and so the state a node's own
-        // line names — has actually landed, and reading a node's `state` any earlier is
-        // reading it while it is still empty, which is a real failure and not a flake.
-        QTRY_VERIFY(itemNamed(rows, u"import-row-Koro-node-root"_s)
-                    && itemNamed(rows, u"import-row-Koro-node-root"_s)->isVisible());
-        QTRY_VERIFY(itemNamed(rows, u"import-row-Koro-accept"_s)
-                    && itemNamed(rows, u"import-row-Koro-accept"_s)->isVisible());
-        QCOMPARE(textNamed(rows, u"import-row-Koro-node-root-name"_s), u"Koro"_s);
-
-        // The card's own header does not say the name a second time: it is the tree's root
-        // node, and the spec is explicit that no header repeats what that row already says.
-        QQuickItem *header = itemNamed(rows, u"import-row-Koro-name"_s);
-        QVERIFY2(!header || !header->isVisible(), "the folder's name is drawn twice");
+        // The card stopping to be checked is waited for **before** either text is read, not
+        // after: it is what guarantees the server's answer — `creates`, and so the state a
+        // node's own line names — has actually landed, and reading a node's `state` any
+        // earlier is reading it while it is still empty, which is a real failure and not a
+        // flake. Read off the model, since nothing draws that stage's command yet.
+        QTRY_VERIFY(itemNamed(rows, u"import-row-Koro-name"_s)
+                    && itemNamed(rows, u"import-row-Koro-name"_s)->isVisible());
+        QTRY_COMPARE(imports->data(imports->index(0), int(Imports::Role::Stage_)).toInt(),
+                     int(Imports::Stage::Reviewing));
+        // Built and kept hidden: stopped to be checked is not the question `accept`
+        // answers. The next test proves the same button showing on a card that does ask it.
+        QTRY_VERIFY(itemNamed(rows, u"import-row-Koro-accept"_s));
+        QVERIFY(!itemNamed(rows, u"import-row-Koro-accept"_s)->isVisible());
+        QCOMPARE(textNamed(rows, u"import-row-Koro-name"_s), u"Koro"_s);
+        // No tree to unfold on this step: the line says what it is and nothing opens.
+        QVERIFY(!itemNamed(rows, u"import-row-Koro-node-root"_s));
 
         // The tree says what a node becomes, and not only what it is: the level, the
         // server's own answer and what it weighs, joined on one line under one separator.
         // `CardCaptions::nodeLine` is what does the joining — proved alone in
         // `writes_french.cpp` — and this is where it is proved to actually reach the screen,
         // which a model-only test cannot show.
-        QCOMPARE(textNamed(rows, u"import-row-Koro-node-root-says"_s),
-                 u"Série · sera créée · 1 tome · 64 o"_s);
+        QCOMPARE(textNamed(rows, u"import-row-Koro-kind"_s),
+                 u"Série · sera créée · 1 tome\u00A0· 64 o"_s);
 
         // Closing the window decides nothing, and this is asserted **while the card is
         // still being prepared** — which is the only moment it proves anything, since
@@ -4625,19 +7620,30 @@ private slots:
         // And the card carries the one command that can stop what is moving. Asked on the
         // screen and not of the model: `Pause` is a `visible` binding, and a binding that
         // silently evaluates to false is exactly what no model test can see.
-        imports->accept(0);
-        imports->send();
+        // What the folder never says is given on its sheet first: a series with no writer, no
+        // drawer and no direction is held back, and « Importer » then sends nothing.
+        auto *review = engine.singletonInstance<Review *>(qmlTypeId("Leaf", 1, 0, "Review"));
+        QVERIFY(review);
+        const QString root = QString::number(imports->cards().at(0).token) + u'/';
+        QVERIFY(review->edits()->editWords(root, u"authors"_s, {u"Toriyama"_s}));
+        QVERIFY(review->edits()->editWords(root, u"artists"_s, {u"Toriyama"_s}));
+        QVERIFY(review->edits()->edit(root, u"readingDirection"_s, u"RIGHT_TO_LEFT"_s));
+        auto *queue = engine.singletonInstance<ImportQueue *>(qmlTypeId("Leaf", 1, 0, "ImportQueue"));
+        QVERIFY(queue);
+        queue->confirm();
         QTRY_COMPARE(imports->data(imports->index(0), int(Imports::Role::Stage_)).toInt(),
                      int(Imports::Stage::Sending));
-        QTRY_VERIFY2(itemNamed(rows, u"import-row-Koro-pause"_s)
-                         && itemNamed(rows, u"import-row-Koro-pause"_s)->isVisible(),
-                     "nothing on the card could stop a transfer that had started");
-
-        // The word is not in the QML: the elision in front of a vowel is not a rule a
-        // binding could apply, and « créera le UNIVERSE » is what leaving it there looks
-        // like.
-        QCOMPARE(cardCaptions->willCreateLabel(u"UNIVERSE"_s, u"Terres d’Arran"_s),
-                 u"créera l’univers « Terres d’Arran »"_s);
+        // The transfers are watched on the third step's list, on the step that follows: each
+        // line carries the one round button that stops what moves.
+        QMetaObject::invokeMethod(dialog, "goTo", Q_ARG(QVariant, dialog->property("watching")));
+        QTRY_COMPARE(dialog->property("phase").toInt(), dialog->property("watching").toInt());
+        auto *cards = window->findChild<QQuickItem *>(u"import-recap-lines"_s);
+        QVERIFY(cards);
+        QTRY_VERIFY2(itemNamed(cards, u"import-recap-line-Koro-go"_s)
+                         && itemNamed(cards, u"import-recap-line-Koro-go"_s)->isVisible()
+                         && itemNamed(cards, u"import-recap-line-Koro-go"_s)
+                                    ->property("kind").toString() == u"pause"_s,
+                     "nothing on the line could stop a transfer that had started");
 
         // The path the server sent, cut down to the folder a reader recognises. It is the
         // one caption that does work of its own rather than handing `Words` its arguments,
@@ -4651,17 +7657,2817 @@ private slots:
         QCOMPARE(cardCaptions->tryingAgainIn(8), Words::tryingAgainIn(8));
         QCOMPARE(cardCaptions->concern(u"page manquante"_s),
                  Words::concern(u"page manquante"_s));
+    }
+
+    /// The one card that still asks to be told yes shows the button that says it, and a
+    /// card beside it that asks nothing does not.
+    ///
+    /// A series the library holds elsewhere would move, and a reader would have to find it
+    /// again: that card stops in `Deciding`. `accept` is a `visible` binding on the stage,
+    /// and a binding that silently stopped matching is exactly what no model test sees —
+    /// so it is clicked through the window, and goes once it has been answered.
+    void a_card_that_would_move_a_series_shows_accept_and_the_others_do_not()
+    {
+        QTemporaryDir library;
+        QVERIFY(library.isValid());
+        for (const QString &series : {u"Koro"_s, u"Mira"_s}) {
+            QVERIFY(QDir().mkpath(library.filePath(series)));
+            QFile said(library.filePath(series + u"/work.json"_s));
+            QVERIFY(said.open(QIODevice::WriteOnly));
+            said.write(R"({"leaf":1,"title":")" + series.toUtf8()
+                       + R"(","readingDirection":"RIGHT_TO_LEFT",)"
+                       R"("authors":["Toriyama"],"artists":["Toriyama"]})");
+            said.close();
+            // A real archive saying its own number: nothing guessed, nothing to check.
+            QFile volume(library.filePath(series + u"/Tome 1.cbz"_s));
+            QVERIFY(volume.open(QIODevice::WriteOnly));
+            volume.write(Zip::volume(R"({"leaf":1,"number":1})"));
+        }
+
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("POST /import ") && request.contains("\"root\":\"Koro\"")) {
+                return aReply(200, QByteArrayLiteral("application/json"),
+                              QByteArrayLiteral(
+                                  R"({"id":"imp_k","root":"Koro","creates":[],)"
+                                  R"("moves":[{"workId":"w-1","matched":"IDENTITY","name":"Koro",)"
+                                  R"("from":"/srv/leaf/library/Mangas/Koro","at":""}],)"
+                                  R"("toSend":["Tome 1.cbz"],"alreadyThere":[],)"
+                                  R"("bytesToSend":64})"));
+            }
+            if (request.startsWith("POST /import ")) {
+                return aReply(200, QByteArrayLiteral("application/json"),
+                              QByteArrayLiteral(
+                                  R"({"id":"imp_m","root":"Mira","creates":[],)"
+                                  R"("toSend":["Tome 1.cbz"],"alreadyThere":[],)"
+                                  R"("bytesToSend":64})"));
+            }
+            return aReply(200, QByteArrayLiteral("application/json"),
+                          QByteArrayLiteral(R"({"items":[],"total":0})"));
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *imports =
+            engine.singletonInstance<Imports *>(qmlTypeId("Leaf", 1, 0, "Imports"));
+        auto *dialog = window->findChild<QObject *>(u"import-dialog"_s);
+        QVERIFY(imports);
+        QVERIFY(dialog);
+        dialog->setProperty("visible", true);
+        QTRY_VERIFY(dialog->property("visible").toBool());
+
+        const QVariantList dropped{QUrl::fromLocalFile(library.filePath(u"Koro"_s)),
+                                   QUrl::fromLocalFile(library.filePath(u"Mira"_s))};
+        QVERIFY(QMetaObject::invokeMethod(dialog, "take",
+                                          Q_ARG(QVariant, QVariant(dropped))));
+        QTRY_COMPARE(imports->rowCount({}), 2);
+        const auto stageNamed = [imports](const QString &name) {
+            for (int row = 0; row < imports->rowCount({}); ++row) {
+                if (imports->data(imports->index(row), int(Imports::Role::Name)).toString()
+                    == name)
+                    return imports->data(imports->index(row), int(Imports::Role::Stage_))
+                        .toInt();
+            }
+            return -1;
+        };
+        QTRY_COMPARE(stageNamed(u"Koro"_s), int(Imports::Stage::Deciding));
+        QTRY_COMPARE(stageNamed(u"Mira"_s), int(Imports::Stage::Ready));
+
+        auto *rows = window->findChild<QQuickItem *>(u"import-lines"_s);
+        QVERIFY(rows);
+        // Looked up afresh on every poll: a delegate rebuilt under a held pointer is the
+        // SIGSEGV the test above already names.
+        QTRY_VERIFY(itemNamed(rows, u"import-row-Koro-accept"_s)
+                    && itemNamed(rows, u"import-row-Koro-accept"_s)->isVisible());
+        // Mira's row is drawn — its button exists — and hides it: nothing to say yes to.
+        QTRY_VERIFY(itemNamed(rows, u"import-row-Mira-accept"_s));
+        QVERIFY(!itemNamed(rows, u"import-row-Mira-accept"_s)->isVisible());
 
         QQuickItem *accept = itemNamed(rows, u"import-row-Koro-accept"_s);
-        QVERIFY(accept);
         const QPointF on = accept->mapToItem(nullptr, QPointF(accept->width() / 2,
                                                               accept->height() / 2));
         QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, on.toPoint());
-        // Accepting is the only answer this card asks for now that the scope question is
-        // gone, so there is nothing left to check once the accept action itself is hidden.
-        // Looked up fresh once more, for the same reason as above.
-        QTRY_VERIFY(!itemNamed(rows, u"import-row-Koro-accept"_s)
-                    || !itemNamed(rows, u"import-row-Koro-accept"_s)->isVisible());
+        // Answered: the card is ready, and the question goes with the button that asked it.
+        QTRY_COMPARE(stageNamed(u"Koro"_s), int(Imports::Stage::Ready));
+        QTRY_VERIFY(!itemNamed(rows, u"import-row-Koro-accept"_s)->isVisible());
+    }
+
+    /// A folder that says everything is not stopped, and is checked all the same: the cards
+    /// have no button that sends, only « Suivant », and the import starts two steps on — the
+    /// way around the frame that « Importer » was let a reader send what they had not looked
+    /// at. The frame is the same one a Komga folder stops on, its four zones drawn and
+    /// nothing in « À revoir ».
+    void a_complete_folder_is_verified_before_it_is_imported()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        auto *review = drop.engine.singletonInstance<Review *>(qmlTypeId("Leaf", 1, 0, "Review"));
+        QVERIFY(review);
+
+        QTRY_COMPARE(textNamed(drop.window->contentItem(), u"import-start-text"_s),
+                     Words::next());
+        QCOMPARE(review->importLabel(), Words::importVolumes(3));
+        QTRY_VERIFY(drop.named(u"import-start"_s)->property("ready").toBool());
+        QCOMPARE(textNamed(drop.window->contentItem(), u"import-steps-on"_s),
+                 Words::importStep(1));
+        QCOMPARE(drop.heardTimes("/commit"), 0);
+
+        QVERIFY(drop.framed());
+        for (const QString &zone : {u"review-filters"_s, u"review-rail"_s, u"review-list"_s,
+                                    u"review-sheet"_s, u"review-footer"_s}) {
+            QVERIFY2(shownNamed(drop.window->contentItem(), zone), qPrintable(zone));
+            QVERIFY2(drop.zone(zone).width() > 0 && drop.zone(zone).height() > 0,
+                     qPrintable(zone));
+        }
+        QCOMPARE(drop.named(u"review-filter-1"_s)->property("tally").toInt(), 0);
+        QCOMPARE(textNamed(drop.window->contentItem(), u"import-steps-on"_s),
+                 Words::importStep(2));
+        // Opened on the one series, its sheet said in its own file.
+        QCOMPARE(textNamed(drop.window->contentItem(), u"review-sheet-title"_s),
+                 u"Koro Quest"_s);
+        QCOMPARE(textNamed(drop.window->contentItem(), u"review-import-text"_s), Words::next());
+    }
+
+    /// A volume dragged by its grip past the next one takes its place, and the numbers they
+    /// held between them follow: the list reads them in the new order, and the one dragged
+    /// cannot leave its group — dropped far below the last, it is the last.
+    void a_volume_dragged_by_its_grip_changes_places_and_numbers()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QVERIFY(drop.framed());
+        auto *review = drop.review();
+        review->view()->select(drop.nodeId(u"Koro Quest"_s));
+        QVERIFY(laidOut(drop.window));
+        const auto names = [&] {
+            QStringList out;
+            for (const QVariant &row : review->rows()) {
+                if (!row.toMap().value(u"header"_s).toBool())
+                    out << row.toMap().value(u"id"_s).toString();
+            }
+            return out;
+        };
+        const QStringList before = names();
+        QVERIFY2(before.size() >= 3, qPrintable(before.join(u'|')));
+
+        // The first volume's line is the one after its group's header.
+        QQuickItem *grip = nullptr;
+        QTRY_VERIFY((grip = drop.named(u"review-line-1-grip"_s)) && grip->isVisible());
+        QQuickItem *next = drop.named(u"review-line-2"_s);
+        QVERIFY(next);
+        const QPointF from = grip->mapToScene(QPointF(grip->width() / 2, grip->height() / 2));
+        const qreal travel = next->height() * 1.2;
+        QTest::mousePress(drop.window, Qt::LeftButton, Qt::NoModifier, from.toPoint());
+        for (int step = 1; step <= 8; ++step)
+            QTest::mouseMove(drop.window, QPoint(int(from.x()), int(from.y() + travel * step / 8)),
+                             15);
+        // Held, the line is the one lifted and its neighbour has made room.
+        QVERIFY(drop.named(u"review-line-1"_s)->property("lifted").toBool());
+        QTest::mouseRelease(drop.window, Qt::LeftButton, Qt::NoModifier,
+                            QPoint(int(from.x()), int(from.y() + travel)));
+
+        // The lines are named by their number, so it is the file that moved: the one dragged
+        // is now second, and holds the number its neighbour held.
+        QTRY_COMPARE_WITH_TIMEOUT(names().first(), before.at(1), 3000);
+        QCOMPARE(names().at(1), before.at(0));
+
+        // Far below the last line it stays in its group: last, not out of the list. The
+        // lines slide into their places after a drop; a grip read while they move is a press
+        // beside the line (one run in three).
+        QTest::qWait(500);
+        QQuickItem *top = nullptr;
+        QTRY_VERIFY((top = drop.named(u"review-line-1-grip"_s)) && top->isVisible());
+        const QPointF again = top->mapToScene(QPointF(top->width() / 2, top->height() / 2));
+        QTest::mousePress(drop.window, Qt::LeftButton, Qt::NoModifier, again.toPoint());
+        for (int step = 1; step <= 8; ++step)
+            QTest::mouseMove(drop.window, QPoint(int(again.x()), int(again.y() + 600.0 * step / 8)),
+                             15);
+        QTest::mouseRelease(drop.window, Qt::LeftButton, Qt::NoModifier,
+                            QPoint(int(again.x()), int(again.y() + 600)));
+        QTRY_COMPARE_WITH_TIMEOUT(names().last(), before.at(1), 3000);
+        QCOMPARE(names().size(), before.size());
+    }
+
+    /// A file laid on the menu's volume is a reimport of that volume: the window says which,
+    /// and a file that is another volume stops the card in the alert's red with the two ways
+    /// out, the file's own number chosen. One press sends it to that volume, aimed at the one
+    /// the menu named.
+    void reimport_of_a_volume_opens_on_that_volume_and_files_a_stray_by_its_own_number()
+    {
+        AReimport drop;
+        QVERIFY(drop.drop("ENTRY", "e2", u"Tome 2"_s, {u"Tome 5.cbz"_s},
+                          AReimport::match(u"Tome 5.cbz"_s, "OTHER_NUMBER", R"("number":5)"),
+                          AReimport::held("e2", 2, 188)));
+        QCOMPARE(drop.review()->title(), u"Réimporter le tome 2"_s);
+        QVERIFY(drop.framed(u"Tome 5.cbz"_s));
+
+        QVERIFY(shownNamed(drop.window->contentItem(), u"review-alarming"_s));
+        QVERIFY(drop.named(u"review-choice-own"_s));
+        QVERIFY(drop.named(u"review-choice-aimed"_s));
+        QCOMPARE(drop.review()->importLabel(), u"Ranger au tome 5"_s);
+        QVERIFY(drop.review()->importable());
+        QVERIFY(drop.clicked(u"review-import"_s));
+        QVERIFY(drop.importNow());
+
+        QTRY_VERIFY(drop.heardTimes("/commit") >= 1);
+        const QJsonObject announced = bodySent(drop.pretend.heard, "POST /import ");
+        QCOMPARE(announced.value(u"target"_s).toObject().value(u"id"_s).toString(), u"e2"_s);
+    }
+
+    /// Replacing the aimed volume anyway is one click on the other way out, and the sheet
+    /// puts the pages of both side by side so nobody does it blind.
+    void replacing_the_aimed_volume_anyway_is_one_click_and_says_the_pages()
+    {
+        AReimport drop;
+        QVERIFY(drop.drop("ENTRY", "e2", u"Tome 2"_s, {u"Tome 5.cbz"_s},
+                          AReimport::match(u"Tome 5.cbz"_s, "OTHER_NUMBER", R"("number":5)",
+                                           R"({"pages":200})"),
+                          AReimport::held("e2", 2, 188)));
+        QVERIFY(drop.framed(u"Tome 5.cbz"_s));
+
+        QVERIFY(drop.clicked(u"review-choice-aimed"_s));
+        QVERIFY(shownNamed(drop.window->contentItem(), u"review-compare"_s));
+        const QString compare = QString::fromUtf8(
+            QJsonDocument::fromVariant(drop.review()->sheet().value(u"compare"_s)).toJson());
+        QVERIFY2(compare.contains(u"188"_s) && compare.contains(u"200"_s), qPrintable(compare));
+        QCOMPARE(drop.review()->importLabel(), u"Remplacer quand même le tome 2"_s);
+        QVERIFY(drop.clicked(u"review-import"_s));
+        QVERIFY(drop.importNow());
+        QTRY_VERIFY(drop.heardTimes("/commit") >= 1);
+    }
+
+    /// A series reimport applies the lines still switched on: the volume whose switch was
+    /// cut is named nowhere in what is sent, and the button counts one change less.
+    void a_series_reimport_applies_the_switched_lines_only()
+    {
+        AReimport drop;
+        QVERIFY(drop.drop("SERIES", "ed-1", u"Édition française"_s,
+                          {u"Tome 6.cbz"_s, u"Tome 7.cbz"_s},
+                          AReimport::match(u"Tome 6.cbz"_s, "REPLACE",
+                                           R"("number":6,"differs":["pages"],"present":)"
+                                               + AReimport::held("e6", 6, 190),
+                                           R"({"pages":200})")
+                              + ","
+                              + AReimport::match(u"Tome 7.cbz"_s, "REPLACE",
+                                                 R"("number":7,"differs":["pages"],"present":)"
+                                                     + AReimport::held("e7", 7, 190),
+                                                 R"({"pages":200})"),
+                          ""));
+        QVERIFY(drop.framed({}));
+        const QString before = drop.review()->importLabel();
+        QVERIFY(drop.clicked(u"review-switch-Tome 7.cbz"_s));
+        QVERIFY(drop.review()->importLabel() != before);
+        QVERIFY(drop.clicked(u"review-import"_s));
+        QVERIFY(drop.importNow());
+
+        QTRY_VERIFY(drop.heardTimes("/commit") >= 1);
+        const QJsonArray replacing =
+            bodySent(drop.pretend.heard, "POST /import/imp_r/commit").value(u"replace"_s).toArray();
+        QCOMPARE(replacing, QJsonArray{u"Tome 6.cbz"_s});
+    }
+
+    /// Which value of the declaration stays is chosen on the sheet itself: the library's
+    /// publisher kept, the one the files bring is not written.
+    void keeping_a_value_is_chosen_on_the_sheet()
+    {
+        AReimport drop;
+        QVERIFY(drop.drop("SERIES", "ed-1", u"Édition française"_s, {u"Tome 6.cbz"_s},
+                          AReimport::match(u"Tome 6.cbz"_s, "ADD", R"("number":6)"), "",
+                          R"("declarations":[{"path":"work.json","differs":["publisher"],)"
+                          R"("present":{"publisher":"Glénat"}}])",
+                          true));
+        QVERIFY(drop.framed(u"all"_s));
+        QVERIFY(drop.clicked(u"review-keep-publisher"_s));
+        QVERIFY(drop.clicked(u"review-import"_s));
+        QVERIFY(drop.importNow());
+
+        QTRY_VERIFY(drop.heardTimes("/commit") >= 1);
+        QString kept = u"<pas de work.json>"_s;
+        for (const QJsonValue &one : drop.lastAnnounced().value(u"sidecars"_s).toArray()) {
+            if (one.toObject().value(u"path"_s).toString() == u"work.json"_s)
+                kept = one.toObject().value(u"json"_s).toString();
+        }
+        QVERIFY2(kept.contains(u"Glénat"_s) && !kept.contains(u"Pika"_s), qPrintable(kept));
+    }
+
+    /// The question about the reader's place is asked only when the pages change much: four
+    /// more is a corrected scan, thirty-eight fewer is another book.
+    void the_progress_question_is_asked_only_when_the_pages_change_much()
+    {
+        AReimport drop;
+        QVERIFY(drop.drop("SERIES", "ed-1", u"Édition française"_s,
+                          {u"Tome 1.cbz"_s, u"Tome 2.cbz"_s},
+                          AReimport::match(u"Tome 1.cbz"_s, "REPLACE",
+                                           R"("number":1,"differs":["pages"],"present":)"
+                                               + AReimport::held("e1", 1, 188, 100),
+                                           R"({"pages":150})")
+                              + ","
+                              + AReimport::match(u"Tome 2.cbz"_s, "REPLACE",
+                                                 R"("number":2,"differs":["pages"],"present":)"
+                                                     + AReimport::held("e2", 2, 196, 100),
+                                                 R"({"pages":200})"),
+                          ""));
+        QVERIFY(drop.framed(u"Tome 2.cbz"_s));
+        QVERIFY(!shownNamed(drop.window->contentItem(), u"review-progress-reset"_s));
+
+        drop.review()->view()->select(u"Tome 1.cbz"_s);
+        QVERIFY(laidOut(drop.window));
+        QVERIFY(shownNamed(drop.window->contentItem(), u"review-progress-reset"_s));
+        QVERIFY(drop.clicked(u"review-progress-reset"_s));
+        QVERIFY(drop.clicked(u"review-import"_s));
+        QVERIFY(drop.importNow());
+        QTRY_VERIFY(drop.heardTimes("/commit") >= 1);
+        QVERIFY(drop.pretend.heard.contains("\"reset\""));
+    }
+
+    /// The whole frame of a reimport is reached with the keys: Tab arrives on a switch and
+    /// Space turns it, with no pointer.
+    void the_reimport_frame_is_walked_with_the_keys_alone()
+    {
+        AReimport drop;
+        QVERIFY(drop.drop("SERIES", "ed-1", u"Édition française"_s,
+                          {u"Tome 6.cbz"_s, u"Tome 7.cbz"_s},
+                          AReimport::match(u"Tome 6.cbz"_s, "REPLACE",
+                                           R"("number":6,"differs":["pages"],"present":)"
+                                               + AReimport::held("e6", 6, 190),
+                                           R"({"pages":200})")
+                              + ","
+                              + AReimport::match(u"Tome 7.cbz"_s, "REPLACE",
+                                                 R"("number":7,"differs":["pages"],"present":)"
+                                                     + AReimport::held("e7", 7, 190),
+                                                 R"({"pages":200})"),
+                          ""));
+        QVERIFY(drop.framed({}));
+        const QString before = drop.review()->importLabel();
+        bool onASwitch = false;
+        for (int step = 0; step < 40 && !onASwitch; ++step) {
+            QTest::keyClick(drop.window, Qt::Key_Tab);
+            const QQuickItem *at = qobject_cast<QQuickItem *>(drop.window->activeFocusItem());
+            for (const QQuickItem *up = at; up && !onASwitch; up = up->parentItem())
+                onASwitch = up->objectName().startsWith(u"review-switch-"_s);
+        }
+        QVERIFY(onASwitch);
+        QTest::keyClick(drop.window, Qt::Key_Space);
+        QTRY_VERIFY(drop.review()->importLabel() != before);
+    }
+
+    /// A chapter is replaced from the pages of another volume: nothing travels while the
+    /// range is looked at, narrowing it asks the server again with the pages counted from 0,
+    /// and only « Remplacer le chapitre » sends the archive.
+    void a_chapter_is_replaced_from_a_volume_menu()
+    {
+        AReimport drop;
+        const QByteArray chapters =
+            R"([{"id":"c5","number":5,"title":null,"from":0,"to":61,"becomesFrom":0,"becomesTo":61,)"
+            R"("outcome":"KEEP"},{"id":"c6","number":6,"title":"Couleurs froides","from":62,)"
+            R"("to":120,"becomesFrom":62,"becomesTo":123,"outcome":"REPLACE"}])";
+        QVERIFY(drop.drop("CHAPTER", "c6", u"Couleurs froides"_s, {u"Tome 2 v2.cbz"_s}, "",
+                          AReimport::held("e2", 2, 188),
+                          R"("splice":{"pagesBefore":188,"pagesAfter":191,"chapters":)" + chapters
+                              + R"(,"page":111,"pageBecomes":111})"));
+        QCOMPARE(drop.review()->title(), u"Remplacer un chapitre du tome 2"_s);
+        QVERIFY(drop.framed({}));
+        QVERIFY(shownNamed(drop.window->contentItem(), u"review-splice"_s));
+        QCOMPARE(drop.heardTimes("PUT /import/"), 0);
+
+        QQuickItem *to = drop.named(u"review-splice-to"_s);
+        QVERIFY(to);
+        clickOn(drop.window, to);
+        QTest::keyClick(drop.window, Qt::Key_A, Qt::ControlModifier);
+        for (const char digit : {'1', '2', '4'})
+            QTest::keyClick(drop.window, digit);
+        // Leaving the field is what applies it, as Return does.
+        QTest::keyClick(drop.window, Qt::Key_Tab);
+        const auto asked = [&drop] {
+            return drop.lastAnnounced()
+                .value(u"files"_s)
+                .toArray()
+                .first()
+                .toObject()
+                .value(u"splice"_s)
+                .toObject()
+                .value(u"to"_s)
+                .toInt();
+        };
+        QTRY_COMPARE(asked(), 123);
+        QVERIFY(drop.heardTimes("DELETE /import/") >= 1);
+        QCOMPARE(drop.heardTimes("PUT /import/"), 0);
+
+        QCOMPARE(drop.review()->importLabel(), u"Remplacer le chapitre"_s);
+        QVERIFY(drop.clicked(u"review-import"_s));
+        QVERIFY(drop.importNow());
+        QTRY_VERIFY(drop.heardTimes("/commit") >= 1);
+    }
+
+    /// An universe is reimported from the header of one of its series: the series the
+    /// library holds elsewhere is moved in on one click, and the commit names that move
+    /// and creates nothing in its place.
+    void a_universe_is_reimported_from_a_series_header()
+    {
+        AReimport drop;
+        QVERIFY(drop.drop("UNIVERSE", "u1", u"Dragon Ball"_s,
+                          {u"Dragon Ball/Tome 01.cbz"_s, u"Dragon Ball Super/Tome 01.cbz"_s},
+                          AReimport::match(u"Dragon Ball/Tome 01.cbz"_s, "SAME") + ","
+                              + AReimport::match(u"Dragon Ball Super/Tome 01.cbz"_s, "REPLACE",
+                                                 R"("number":1,"differs":["pages"],"present":)"
+                                                     + AReimport::held("e9", 1, 180),
+                                                 R"({"pages":200})"),
+                          "",
+                          R"("moves":[{"workId":"w-super","name":"Dragon Ball Super","from":"",)"
+                          R"("at":"Dragon Ball Super","matched":"TITLE"}])"));
+        QCOMPARE(drop.review()->title(), u"Réimporter Dragon Ball"_s);
+        QVERIFY(drop.framed(u"Dragon Ball Super"_s));
+
+        QVERIFY(shownNamed(drop.window->contentItem(), u"review-alarming"_s));
+        QVERIFY(drop.clicked(u"review-choice-move"_s));
+        QTRY_VERIFY(drop.heardTimes("POST /import ") >= 2);
+        QTRY_COMPARE(drop.imports->cards().at(0).stage, Card::Stage::Reviewing);
+        QVERIFY2(drop.review()->importable(), qPrintable(drop.review()->importLabel()));
+        QVERIFY(drop.clicked(u"review-import"_s));
+        QVERIFY(drop.importNow());
+        QTRY_VERIFY(drop.heardTimes("/commit") >= 1);
+        const QJsonObject commit = bodySent(drop.pretend.heard, "POST /import/imp_r/commit");
+        QVERIFY(commit.value(u"move"_s).toArray().contains(u"w-super"_s));
+        QVERIFY(drop.lastAnnounced().value(u"target"_s).toObject().value(u"kind"_s).toString()
+                == u"UNIVERSE"_s);
+    }
+
+    /// A Komga folder stops, and the frame opens on what it lacks: the series, whose reading
+    /// direction nobody said. That is the one thing on the sheet in red — its chip on the
+    /// alert's wash, and the sentence under the fields in the alert's ink. The bar counts the
+    /// card while the window is shut, and opening it again goes back to the question rather
+    /// than to a transfer that never began.
+    void a_komga_folder_opens_on_what_it_lacks_and_says_it_in_red()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Komga));
+        auto *theme = drop.engine.singletonInstance<Theme *>(qmlTypeId("Leaf", 1, 0, "Theme"));
+        QVERIFY(theme);
+
+        QTRY_COMPARE(textNamed(drop.window->contentItem(), u"import-start-text"_s),
+                     Words::next());
+        QVERIFY(drop.framed());
+        QCOMPARE(textNamed(drop.window->contentItem(), u"review-sheet-title"_s),
+                 u"Blue Period"_s);
+        QQuickItem *lack = drop.named(u"review-lack-readingDirection"_s);
+        QVERIFY(lack && lack->isVisible());
+        QCOMPARE(lack->property("color").value<QColor>(), theme->alert());
+        QCOMPARE(spokenName(lack), Words::missing());
+        // Taken from a ComicInfo, the title says so nowhere: it shows what it holds.
+        QVERIFY(!drop.named(u"review-chip-title"_s));
+        QQuickItem *titleLack = drop.named(u"review-lack-title"_s);
+        QVERIFY(titleLack && !titleLack->isVisible());
+        QCOMPARE(textNamed(drop.window->contentItem(), u"review-sheet-note-0-text"_s),
+                 Words::readingDirectionUnsaid());
+        QQuickItem *note = drop.named(u"review-sheet-note-0-text"_s);
+        QCOMPARE(note->property("color").value<QColor>(), theme->alert());
+
+        QQuickItem *cross = drop.named(u"import-close"_s);
+        QVERIFY(cross);
+        QVERIFY(QMetaObject::invokeMethod(cross, "triggered"));
+        QTRY_VERIFY(!drop.dialog->property("visible").toBool());
+        QTRY_COMPARE(drop.named(u"import-button"_s)->property("value").toString(),
+                     Words::decisionsWaiting(1));
+        QVERIFY(QMetaObject::invokeMethod(drop.dialog, "show"));
+        QTRY_VERIFY(drop.dialog->property("opened").toBool());
+        // Shut on the frame, reopened on the frame: nothing was sent, so nothing moved the
+        // reader on.
+        QCOMPARE(drop.phase(), drop.phaseNamed("verifying"));
+    }
+
+    /// A card refused for a declaration out of place is opened on first, and its sheet's
+    /// « Retirer » takes it away from the keys alone, the way any button of the frame is
+    /// pressed: until then, nothing on screen could take a failed card out of the queue.
+    void a_failed_card_is_removed_from_its_sheet_with_the_keys()
+    {
+        ADroppedFolder drop;
+        drop.alsoMisnested = true;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QVERIFY(drop.framed());
+        QTRY_COMPARE(textNamed(drop.window->contentItem(), u"review-sheet-title"_s),
+                     u"Monde"_s);
+        QQuickItem *remove = drop.named(u"review-remove"_s);
+        QVERIFY(remove);
+        QTRY_VERIFY(remove->isVisible());
+        QCOMPARE(remove->property("label").toString(), Words::removeIt());
+        QVERIFY(remove->property("activeFocusOnTab").toBool());
+
+        remove->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(remove->hasActiveFocus());
+        QTest::keyClick(drop.window, Qt::Key_Return);
+        QTRY_COMPARE(drop.imports->rowCount({}), 1);
+        QTRY_VERIFY(!drop.named(u"review-remove"_s)->isVisible());
+        // The keys are not left on a button that is gone.
+        QTRY_VERIFY(drop.window->activeFocusItem()
+                    && drop.window->activeFocusItem()->isVisible());
+    }
+
+    /// What is typed in the sheet is what travels: Enter puts it on the card, « Importer »
+    /// drops the session it was announced with and announces the folder again carrying it,
+    /// and the window goes on to watch the transfer.
+    void a_value_typed_in_the_sheet_is_what_the_library_receives()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Komga));
+        QVERIFY(drop.saysTheDirection());
+        QVERIFY(drop.framed());
+        QQuickItem *title = drop.named(u"review-field-title"_s);
+        QVERIFY(title);
+        clickOn(drop.window, title);
+        QTRY_VERIFY(title->hasActiveFocus());
+        QTest::keyClick(drop.window, Qt::Key_A, Qt::ControlModifier);
+        typeInto(drop.window, u"Période bleue"_s);
+        drop.pretend.heard.clear();
+        QTest::keyClick(drop.window, Qt::Key_Return);
+        QTRY_COMPARE(textOn(drop.review(), u"title"_s), u"Période bleue"_s);
+        // Nothing travels on Enter: a session per key pressed is a session nobody claims.
+        QVERIFY2(!drop.pretend.heard.contains("POST /import "), drop.pretend.heard.constData());
+
+        QQuickItem *go = drop.named(u"review-import"_s);
+        QVERIFY(go);
+        QTRY_VERIFY(go->property("ready").toBool());
+        clickOn(drop.window, go);
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("watching"));
+        // « Suivant » sends nothing: the corrected card is announced again at « Importer ».
+        QVERIFY2(!drop.pretend.heard.contains("POST /import "), drop.pretend.heard.constData());
+        QVERIFY(drop.importNow());
+        QTRY_VERIFY(drop.pretend.heard.contains("POST /import "));
+        const qsizetype dropped = drop.pretend.heard.indexOf("DELETE /import/imp_d");
+        QVERIFY2(dropped >= 0, drop.pretend.heard.constData());
+        QVERIFY(drop.pretend.heard.indexOf("POST /import ") > dropped);
+        const QJsonArray sidecars =
+            bodySent(drop.pretend.heard, "POST /import ").value(u"sidecars"_s).toArray();
+        const auto work = std::ranges::find_if(sidecars, [](const QJsonValue &one) {
+            return one.toObject().value(u"path"_s).toString() == u"work.json"_s;
+        });
+        QVERIFY2(work != sidecars.end(), drop.pretend.heard.constData());
+        QCOMPARE(QJsonDocument::fromJson(work->toObject().value(u"json"_s).toString().toUtf8())
+                     .object()
+                     .value(u"title"_s)
+                     .toString(),
+                 u"Période bleue"_s);
+        QCOMPARE(textNamed(drop.window->contentItem(), u"import-steps-on"_s),
+                 Words::importStep(3));
+    }
+
+    /// The foot of each step carries two buttons, each with a capital: « Vider » and
+    /// « Suivant » over the cards, « Précédent » and « Suivant » over the frame, « Précédent »
+    /// and « Importer tout » over the transfers not yet sent. « Voir le détail » is nowhere.
+    void each_step_wears_its_two_buttons_and_the_detail_link_is_gone()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QQuickItem *root = drop.window->contentItem();
+        QCOMPARE(drop.named(u"import-back"_s)->property("label").toString(), Words::emptyTheQueue());
+        QCOMPARE(textNamed(root, u"import-start-text"_s), Words::next());
+        QVERIFY(hiddenNamed(root, u"import-send"_s));
+        QVERIFY(!itemNamed(root, u"import-see-detail"_s));
+
+        QVERIFY(drop.framed());
+        QCOMPARE(drop.named(u"review-back"_s)->property("label").toString(), Words::previous());
+        QCOMPARE(textNamed(root, u"review-import-text"_s), Words::next());
+
+        QVERIFY(drop.clicked(u"review-import"_s));
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("watching"));
+        QCOMPARE(drop.named(u"import-back"_s)->property("label").toString(), Words::previous());
+        QCOMPARE(textNamed(root, u"import-send-text"_s), Words::importAll());
+        QVERIFY(hiddenNamed(root, u"import-start"_s));
+        QVERIFY(!itemNamed(root, u"import-see-detail"_s));
+    }
+
+    /// « Suivant » over the frame goes to the third step without sending, the lines there are
+    /// ready with a round button each, and only a button starts a transfer — after which the
+    /// foot still says « Précédent » and « Importer tout » stays for what is left.
+    void the_third_step_waits_for_a_button_before_anything_is_sent()
+    {
+        ADroppedFolder drop;
+        drop.transfers = true;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QVERIFY(drop.framed());
+        QVERIFY(drop.clicked(u"review-import"_s));
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("watching"));
+        QCOMPARE(drop.imports->cards().at(0).stage, Card::Stage::Ready);
+        QVERIFY(!drop.imports->cards().at(0).road.confirmed);
+        QCOMPARE(drop.heardTimes("/commit"), 0);
+        QCOMPARE(drop.heardTimes("PUT /import/"), 0);
+        QCOMPARE(drop.tally->launched(), 0);
+
+        QVERIFY(drop.importNow());
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("watching"));
+        QTRY_VERIFY(drop.tally->launched() > 0);
+        QCOMPARE(drop.named(u"import-back"_s)->property("label").toString(), Words::previous());
+        // Nothing is left that « Importer tout » would send: the button is grey.
+        QTRY_VERIFY(!drop.named(u"import-send"_s)->property("ready").toBool());
+    }
+
+    /// « Précédent » over the transfers is the way back to the checking step whether or not a
+    /// line has gone, and it gives nothing up: the line is still in the list, still sending,
+    /// and « Suivant » over the frame — drawn read-only, the line being let go — leads back to
+    /// the transfers where the send went on. It used to turn into « Déposer autre chose »
+    /// and empty the list.
+    void going_back_from_the_transfers_keeps_the_line_and_next_comes_back_to_the_send()
+    {
+        ADroppedFolder drop;
+        drop.transfers = true;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QVERIFY(drop.framed());
+        QVERIFY(drop.clicked(u"review-import"_s));
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("watching"));
+        QVERIFY(drop.importNow());
+        QTRY_VERIFY(drop.tally->launched() > 0);
+        QTRY_VERIFY(drop.tally->started());
+        QCOMPARE(drop.named(u"import-back"_s)->property("label").toString(), Words::previous());
+        const quint64 token = drop.imports->cards().at(0).token;
+
+        QVERIFY(drop.clicked(u"import-back"_s));
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("verifying"));
+        // Nothing was given up on the way: the line is there and the send was not stopped.
+        QCOMPARE(drop.imports->count(), 1);
+        QCOMPARE(drop.imports->cards().at(0).token, token);
+        QVERIFY(drop.tally->launched() > 0);
+        QVERIFY(!Carrier::correctable(drop.imports->cards().at(0)));
+        QCOMPARE(drop.heardTimes("DELETE "), 0);
+        // The frame knows the line without letting it be corrected, and « Suivant » is on.
+        QQuickItem *next = nullptr;
+        QTRY_VERIFY((next = drop.named(u"review-import"_s)) && next->isVisible()
+                    && next->property("ready").toBool());
+        QCOMPARE(textNamed(drop.window->contentItem(), u"review-import-text"_s), Words::next());
+
+        QVERIFY(drop.clicked(u"review-import"_s));
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("watching"));
+        QCOMPARE(drop.imports->count(), 1);
+        QTRY_VERIFY(drop.named(u"import-recap-line-Koro Quest-go"_s)->isVisible());
+        QVERIFY(drop.tally->launched() > 0);
+        QCOMPARE(drop.named(u"import-back"_s)->property("label").toString(), Words::previous());
+        QCOMPARE(drop.heardTimes("DELETE "), 0);
+    }
+
+    /// The third step is one list and a total, before and after a line goes: the cards of the
+    /// queue are gone from it, and with them the ticks nobody could tell the use of.
+    void the_third_step_says_what_is_about_to_travel_in_one_list_before_and_after_it_goes()
+    {
+        ADroppedFolder drop;
+        drop.transfers = true;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QVERIFY(drop.framed());
+        QVERIFY(drop.clicked(u"review-import"_s));
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("watching"));
+
+        QTRY_VERIFY(drop.named(u"import-recap"_s)->isVisible());
+        QVERIFY(!itemNamed(drop.window->contentItem(), u"import-rows"_s));
+        QCOMPARE(textNamed(drop.window->contentItem(), u"import-recap-title"_s),
+                 Words::recapTitle(drop.tally->toSendFiles()));
+        QCOMPARE(textNamed(drop.window->contentItem(), u"import-recap-about"_s),
+                 Words::recapAbout(drop.tally->toSendBytes(), drop.imports->count()));
+
+        // The lines add up to the total above them: the same sum, asked of each card.
+        const auto roles = drop.imports->roleNames();
+        const int volumes = roles.key("volumes");
+        const int bytes = roles.key("bytes");
+        int files = 0;
+        qint64 weight = 0;
+        for (int row = 0; row < drop.imports->rowCount(); ++row) {
+            files += drop.imports->data(drop.imports->index(row), volumes).toInt();
+            weight += drop.imports->data(drop.imports->index(row), bytes).toLongLong();
+        }
+        QCOMPARE(files, drop.tally->toSendFiles());
+        QCOMPARE(weight, drop.tally->toSendBytes());
+
+        // The bar's room is kept from the start, the bar unseen in it: appearing, it pushed
+        // the banner taller and everything under it down, a jump as the first bytes went.
+        QQuickItem *bar = drop.named(u"import-recap-bar"_s);
+        QVERIFY(bar);
+        QVERIFY2(bar->isVisible(), "the bar takes no room until it shows");
+        QCOMPARE(bar->opacity(), 0.0);
+        QVERIFY(drop.importNow());
+        QTRY_VERIFY(drop.tally->launched() > 0);
+        QVERIFY(drop.named(u"import-recap"_s)->isVisible());
+        QTRY_VERIFY(textNamed(drop.window->contentItem(), u"import-recap-title"_s)
+                        .startsWith(u"Envoi"_s));
+    }
+
+    /// The three marks at the end of a line stand in slots of their own: the round button is
+    /// at one x whether the cross shows or not, « État » is centred over it, and the numbers
+    /// end where their headers do. Sending the line makes the cross appear, and nothing moves.
+    void the_round_button_does_not_move_when_the_cross_appears_and_the_cross_puts_the_line_back()
+    {
+        ADroppedFolder drop;
+        drop.transfers = true;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QVERIFY(drop.framed());
+        QVERIFY(drop.clicked(u"review-import"_s));
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("watching"));
+        QQuickItem *root = drop.window->contentItem();
+
+        QQuickItem *go = nullptr;
+        QQuickItem *cross = nullptr;
+        QTRY_VERIFY((go = drop.named(u"import-recap-line-Koro Quest-go"_s)) && go->isVisible());
+        QVERIFY((cross = drop.named(u"import-recap-line-Koro Quest-cancel"_s)));
+        QVERIFY(laidOut(drop.window));
+        const auto leftOf = [root](QQuickItem *one) { return one->mapToItem(root, QPointF()).x(); };
+        const qreal where = leftOf(go);
+        QCOMPARE(go->property("kind").toString(), u"play"_s);
+        QVERIFY(!cross->isVisible());
+
+        // « État » is centred over the button, and the numbers end under their headers.
+        QQuickItem *state = drop.named(u"import-recap-header-state"_s);
+        QVERIFY(state);
+        QVERIFY(qAbs(leftOf(state) + state->width() / 2 - (where + go->width() / 2)) <= 1.5);
+        for (const auto &[header, cell] :
+             {std::pair{u"import-recap-header-volumes"_s, u"import-recap-line-Koro Quest-count"_s},
+              std::pair{u"import-recap-header-size"_s, u"import-recap-line-Koro Quest-size"_s}}) {
+            QQuickItem *head = drop.named(header);
+            QQuickItem *number = drop.named(cell);
+            QVERIFY2(head && number, qPrintable(header));
+            QVERIFY2(qAbs(leftOf(head) + head->width() - (leftOf(number) + number->width())) <= 1.5,
+                     qPrintable(header));
+        }
+
+        clickOn(drop.window, go);
+        QTRY_COMPARE(go->property("kind").toString(), u"pause"_s);
+        QTRY_VERIFY(cross->isVisible());
+        QVERIFY(laidOut(drop.window));
+        QCOMPARE(leftOf(go), where);
+
+        clickOn(drop.window, cross);
+        QTRY_VERIFY2(drop.heardTimes("DELETE /import/") >= 1, drop.pretend.heard.constData());
+        QTRY_COMPARE(drop.imports->cards().at(0).stage, Card::Stage::Ready);
+        QTRY_COMPARE(go->property("kind").toString(), u"play"_s);
+        QTRY_VERIFY(!cross->isVisible());
+        QCOMPARE(drop.imports->count(), 1);
+        QCOMPARE(leftOf(go), where);
+        // Back to « Précédent »: nothing has gone.
+        QCOMPARE(drop.named(u"import-back"_s)->property("label").toString(), Words::previous());
+    }
+
+    /// The checking box under the list: read-only, there when the first step chose it and gone
+    /// when it did not, and its sentence is the first thing a short window drops.
+    void the_third_step_recalls_the_check_and_drops_its_sentence_first()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QVERIFY(drop.framed());
+        QVERIFY(drop.clicked(u"review-import"_s));
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("watching"));
+
+        drop.window->resize(1400, 1000);
+        QVERIFY(laidOut(drop.window));
+        QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"import-recap-verify"_s));
+        QCOMPARE(textNamed(drop.window->contentItem(), u"import-recap-verify-check-label"_s),
+                 Words::verifyEachFile());
+        QTRY_VERIFY(!textNamed(drop.window->contentItem(), u"import-recap-verify-check-aside"_s)
+                         .isEmpty());
+
+        drop.window->resize(800, 560);
+        QVERIFY(laidOut(drop.window));
+        QTRY_VERIFY(textNamed(drop.window->contentItem(), u"import-recap-verify-check-aside"_s)
+                        .isEmpty());
+        QVERIFY(shownNamed(drop.window->contentItem(), u"import-recap-verify"_s));
+
+        drop.imports->setVerifying(false);
+        QTRY_VERIFY(hiddenNamed(drop.window->contentItem(), u"import-recap-verify"_s));
+    }
+
+    /// « Précédent » over the frame goes back to the cards and loses nothing dropped; over the
+    /// transfers not yet sent it goes back to the frame, and from there to the cards again.
+    void previous_walks_back_one_step_at_a_time_and_loses_nothing()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QVERIFY(drop.framed());
+        QVERIFY(drop.clicked(u"review-import"_s));
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("watching"));
+
+        QVERIFY(drop.clicked(u"import-back"_s));
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("verifying"));
+        QVERIFY(drop.clicked(u"review-back"_s));
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("proposing"));
+        QCOMPARE(drop.imports->count(), 1);
+        QCOMPARE(textNamed(drop.window->contentItem(), u"import-steps-on"_s),
+                 Words::importStep(1));
+        QTRY_VERIFY(drop.named(u"import-start"_s)->isVisible());
+    }
+
+    /// A window shut over the first step while the reading finishes reopens on the first step:
+    /// it used to reopen on the transfers as soon as nothing was read or asked any more, for a
+    /// reader who had sent nothing.
+    void a_reading_that_ends_while_the_window_is_shut_reopens_on_the_same_step()
+    {
+        ADroppedFolder drop;
+        drop.slow = 2;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QCOMPARE(drop.phase(), drop.phaseNamed("proposing"));
+        QVERIFY(drop.imports->foldersToRead() > 0);
+        QVERIFY(QMetaObject::invokeMethod(drop.dialog, "close"));
+        QTRY_VERIFY(!drop.dialog->property("visible").toBool());
+
+        QTRY_COMPARE_WITH_TIMEOUT(drop.imports->foldersToRead(), 0, 60000);
+        QTRY_COMPARE_WITH_TIMEOUT(drop.tally->reading(), 0, 60000);
+        QCOMPARE(drop.tally->launched(), 0);
+
+        QVERIFY(QMetaObject::invokeMethod(drop.dialog, "show"));
+        QTRY_VERIFY(drop.dialog->property("opened").toBool());
+        QCOMPARE(drop.phase(), drop.phaseNamed("proposing"));
+        QCOMPARE(textNamed(drop.window->contentItem(), u"import-steps-on"_s),
+                 Words::importStep(1));
+    }
+
+    /// Left on the third step before « Importer », the window reopens there; left on the frame,
+    /// it reopens on the frame.
+    void the_window_reopens_on_the_step_it_was_left_on()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QVERIFY(drop.framed());
+        QVERIFY(QMetaObject::invokeMethod(drop.dialog, "close"));
+        QTRY_VERIFY(!drop.dialog->property("visible").toBool());
+        QVERIFY(QMetaObject::invokeMethod(drop.dialog, "show"));
+        QTRY_VERIFY(drop.dialog->property("opened").toBool());
+        QCOMPARE(drop.phase(), drop.phaseNamed("verifying"));
+
+        QVERIFY(drop.clicked(u"review-import"_s));
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("watching"));
+        QVERIFY(QMetaObject::invokeMethod(drop.dialog, "close"));
+        QTRY_VERIFY(!drop.dialog->property("visible").toBool());
+        QVERIFY(QMetaObject::invokeMethod(drop.dialog, "show"));
+        QTRY_VERIFY(drop.dialog->property("opened").toBool());
+        QCOMPARE(drop.phase(), drop.phaseNamed("watching"));
+    }
+
+    /// « Importer » over a series the library holds elsewhere does not go on to the
+    /// transfers: the card now waits for its tick, and the window goes back to the cards
+    /// where that tick is asked — it went on to watch a transfer that never began.
+    void importing_a_series_that_would_move_goes_back_to_its_question()
+    {
+        ADroppedFolder drop;
+        drop.extra = R"(,"moves":[{"workId":"w-1","matched":"IDENTITY","name":"Blue Period",)"
+                     R"("from":"/srv/leaf/library/Mangas/Blue Period","at":""}])";
+        drop.directed = true;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Komga));
+        QVERIFY(drop.framed());
+        QQuickItem *go = drop.named(u"review-import"_s);
+        QTRY_VERIFY(go->property("ready").toBool());
+        clickOn(drop.window, go);
+        QTRY_COMPARE(drop.imports->deciding(), 1);
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("proposing"));
+    }
+
+    /// « Suivant » beside a series that a duplicate number holds back does not leave the
+    /// checking step: it shows that series, field and all, and nothing moves. It used to send
+    /// the others on and the window back to the cards, to a series « À vérifier » that its
+    /// reader then had to find again.
+    void going_on_beside_a_series_held_back_shows_that_series_and_stays_on_the_step()
+    {
+        ADroppedFolder drop;
+        drop.alsoDoubled = true;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QVERIFY(drop.framed());
+        auto *review = drop.engine.singletonInstance<Review *>(qmlTypeId("Leaf", 1, 0, "Review"));
+        QVERIFY(review);
+        QTRY_COMPARE(drop.tally->blocked(), 1);
+        // Looking at the whole drop, which is not the series held back.
+        review->view()->select(u"all"_s);
+        const QString held = QString::number(drop.imports->cards().at(1).token) + u'/';
+        QVERIFY(!review->sheet().value(u"id"_s).toString().startsWith(held));
+
+        QQuickItem *go = drop.named(u"review-import"_s);
+        QTRY_VERIFY(go->property("ready").toBool());
+        clickOn(drop.window, go);
+        QTRY_VERIFY2(review->sheet().value(u"id"_s).toString().startsWith(held),
+                     qPrintable(review->sheet().value(u"id"_s).toString()));
+        QCOMPARE(drop.phase(), drop.phaseNamed("verifying"));
+        // Nothing was prepared, let go or sent on the way.
+        QCOMPARE(drop.tally->launched(), 0);
+        QCOMPARE(drop.imports->cards().at(0).stage, Card::Stage::Ready);
+        QCOMPARE(drop.heardTimes("PUT /import/"), 0);
+    }
+
+    /// Twenty heavy folders dropped behind a series to check: « Suivant » is offered as
+    /// soon as that one has stopped, and the frame opened then takes the others in as they
+    /// are read. The button waited for the whole walk, and at fifty series a reader sat in
+    /// front of a list that was ready to be looked at.
+    void the_frame_opens_while_the_drop_is_still_read()
+    {
+        ADroppedFolder drop;
+        drop.slow = 20;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Komga));
+        QQuickItem *start = drop.named(u"import-start"_s);
+        QVERIFY(start);
+        QVERIFY(drop.imports->foldersToRead() > 0);
+        QVERIFY(start->property("ready").toBool());
+
+        QVERIFY(drop.framed());
+        QVERIFY(drop.imports->foldersToRead() > 0);
+        auto *review = drop.engine.singletonInstance<Review *>(qmlTypeId("Leaf", 1, 0, "Review"));
+        QVERIFY(review);
+        const qsizetype nodes = review->rail().size();
+        QTRY_COMPARE_WITH_TIMEOUT(drop.imports->foldersToRead(), 0, 60000);
+        QTRY_VERIFY(review->rail().size() > nodes);
+    }
+
+    /// Fifty series are crossed with Tab in a bounded number of presses, each stop in the
+    /// order the frame is read: the tree and the list are one stop each, walked with the
+    /// arrows. A stop per line was a hundred presses between the filters and « Importer ».
+    void fifty_series_are_crossed_with_the_keys_in_a_bounded_number_of_presses()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Fifty));
+        QVERIFY(drop.framed());
+        // The whole drop chosen in the tree: a list of series, each with its box.
+        drop.review()->view()->select(u"all"_s);
+        QVERIFY(laidOut(drop.window));
+        keysInCharge(drop.window);
+        QQuickItem *sheet = drop.named(u"review-sheet"_s);
+        QVERIFY(sheet);
+        QVERIFY(pressedUntil(drop.window, u"review-filter-0"_s, Qt::Key_Tab, Qt::NoModifier,
+                             60));
+
+        const QStringList zones{u"review-filter-"_s, u"review-node-"_s, u"role-chip-"_s,
+                                u"review-next"_s,    u"review-tick-all"_s, u"review-line-"_s,
+                                u"<sheet>"_s,        u"review-back"_s,  u"review-import"_s};
+        const auto zoneOf = [&](QQuickItem *item) -> qsizetype {
+            for (QQuickItem *at = item; at; at = at->parentItem()) {
+                if (at == sheet)
+                    return zones.indexOf(u"<sheet>"_s);
+            }
+            const QString name = item ? item->objectName() : QString();
+            return std::ranges::find_if(zones, [&name](const QString &one) {
+                       return name.startsWith(one);
+                   }) - zones.begin();
+        };
+        QStringList walked;
+        qsizetype reached = 0;
+        int presses = 0;
+        while (focusedName(drop.window) != u"review-import"_s && presses < 40) {
+            walked << focusedName(drop.window);
+            const qsizetype at = zoneOf(drop.window->activeFocusItem());
+            QVERIFY2(at < zones.size() && at >= reached, qPrintable(walked.join(u" → "_s)));
+            reached = at;
+            QTest::keyClick(drop.window, Qt::Key_Tab);
+            ++presses;
+        }
+        walked << focusedName(drop.window);
+        QVERIFY2(presses <= 15, qPrintable(u"%1 presses: "_s.arg(presses)
+                                           + walked.join(u" → "_s)));
+        for (const QString &zone : {u"review-node-"_s, u"review-next"_s, u"review-tick-all"_s,
+                                    u"review-line-"_s}) {
+            QVERIFY2(std::ranges::any_of(walked, [&zone](const QString &one) {
+                         return one.startsWith(zone);
+                     }),
+                     qPrintable(walked.join(u" → "_s)));
+        }
+
+        // In the list, End reaches the last line and brings it in sight; Home the first.
+        for (int press = 0; press < 40 && !focusedName(drop.window).startsWith(u"review-line-"_s);
+             ++press)
+            QTest::keyClick(drop.window, Qt::Key_Tab, Qt::ShiftModifier);
+        QVERIFY(focusedName(drop.window).startsWith(u"review-line-"_s));
+        const QVariantList rows = drop.review()->rows();
+        qsizetype first = -1;
+        qsizetype last = -1;
+        for (qsizetype at = 0; at < rows.size(); ++at) {
+            if (rows.at(at).toMap().value(u"header"_s).toBool())
+                continue;
+            if (first < 0)
+                first = at;
+            last = at;
+        }
+        QVERIFY(last > first);
+        QTest::keyClick(drop.window, Qt::Key_End);
+        QTRY_COMPARE(focusedName(drop.window), u"review-line-%1"_s.arg(last));
+        QVERIFY(laidOut(drop.window));
+        QQuickItem *line = drop.window->activeFocusItem();
+        const QRectF drawn = line->mapRectToScene(QRectF(0, 0, line->width(), line->height()));
+        QTRY_VERIFY2(drop.zone(u"review-list-flick"_s).contains(
+                         line->mapRectToScene(QRectF(0, 0, line->width(), line->height()))),
+                     qPrintable(u"the last line at %1, the list down to %2"_s
+                                    .arg(drawn.bottom())
+                                    .arg(drop.zone(u"review-list-flick"_s).bottom())));
+        QTest::keyClick(drop.window, Qt::Key_Home);
+        QTRY_COMPARE(focusedName(drop.window), u"review-line-%1"_s.arg(first));
+    }
+
+    /// A card read while the list is looked at adds a line, and every line is built again:
+    /// the list stays where it was scrolled, and the line that held the keys still holds them.
+    /// They fell on the window, and the next arrow went nowhere.
+    void the_list_keeps_its_place_when_a_series_is_read_meanwhile()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Fifty));
+        QVERIFY(drop.framed());
+        drop.review()->view()->select(u"all"_s);
+        QVERIFY(laidOut(drop.window));
+        keysInCharge(drop.window);
+        for (int press = 0; press < 40 && !focusedName(drop.window).startsWith(u"review-line-"_s);
+             ++press)
+            QTest::keyClick(drop.window, Qt::Key_Tab);
+        QVERIFY(focusedName(drop.window).startsWith(u"review-line-"_s));
+        for (int press = 0; press < 15; ++press)
+            QTest::keyClick(drop.window, Qt::Key_Down);
+        QVERIFY(laidOut(drop.window));
+        QQuickItem *flick = drop.named(u"review-list-flick"_s);
+        QVERIFY(flick);
+        const qreal scrolled = flick->property("contentY").toReal();
+        QVERIFY2(scrolled > 0, "fifteen lines down, the list had not moved");
+        const qreal tall = drop.window->activeFocusItem()->height();
+        const auto heldId = [&drop] {
+            QQuickItem *held = drop.window->activeFocusItem();
+            return held && held->objectName().startsWith(u"review-line-"_s)
+                ? held->property("row").toMap().value(u"id"_s).toString() : QString();
+        };
+        const QString held = heldId();
+        QVERIFY(!held.isEmpty());
+
+        const qsizetype before = drop.review()->rows().size();
+        const QString late = drop.library.filePath(u"Zz Tardive"_s);
+        QVERIFY(ADroppedFolder::aKomgaSeries(late, u"Zz Tardive"_s, 1));
+        drop.offers->offer({late});
+        QTRY_VERIFY_WITH_TIMEOUT(drop.review()->rows().size() > before, 20000);
+        QVERIFY(laidOut(drop.window));
+        QTRY_COMPARE(heldId(), held);
+        QVERIFY2(qAbs(flick->property("contentY").toReal() - scrolled) <= tall,
+                 qPrintable(u"scrolled at %1, now at %2"_s.arg(scrolled)
+                                .arg(flick->property("contentY").toReal())));
+        // And the next arrow moves from there.
+        QTest::keyClick(drop.window, Qt::Key_Down);
+        QTRY_VERIFY(!heldId().isEmpty() && heldId() != held);
+    }
+
+    /// « Tout » under « À revoir » ticks the twenty Komga series, one direction chosen in the
+    /// panel that takes the sheet's place and « Appliquer aux 20 » write it in each, and
+    /// « Importer » announces each again carrying it — twenty sheets, one press.
+    void ticking_all_then_applying_a_direction_reaches_each_announcement()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Fifty));
+        QVERIFY(drop.framed());
+        Review *review = drop.review();
+        review->view()->select(u"all"_s);
+        QVERIFY(laidOut(drop.window));
+        QQuickItem *toReview = drop.named(u"review-filter-1"_s);
+        QVERIFY(toReview);
+        clickOn(drop.window, toReview);
+        QTRY_COMPARE(review->view()->filter(), int(Review::Filter::ToReview));
+        QVERIFY(laidOut(drop.window));
+
+        QQuickItem *all = drop.named(u"review-tick-all"_s);
+        QVERIFY(all && all->isVisible());
+        clickOn(drop.window, all);
+        QTRY_COMPARE(review->ticks()->ticked(), 20);
+        QCOMPARE(all->property("checked").toBool(), true);
+        QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"review-grouped"_s));
+        QVERIFY(!shownNamed(drop.window->contentItem(), u"review-sheet"_s));
+        // Said to a screen reader too, with the number ticked.
+        QAccessibleInterface *spoken = QAccessible::queryAccessibleInterface(all);
+        QVERIFY(spoken);
+        QCOMPARE(spoken->text(QAccessible::Description), Words::tickedCount(20));
+        QVERIFY(laidOut(drop.window));
+
+        const QVariantList fields = review->ticks()->grouped().value(u"fields"_s).toList();
+        const auto direction = std::ranges::find_if(fields, [](const QVariant &one) {
+            return one.toMap().value(u"key"_s).toString() == u"readingDirection"_s;
+        });
+        QVERIFY(direction != fields.end());
+        const QVariantList choices = direction->toMap().value(u"choices"_s).toList();
+        const qsizetype rightToLeft = std::ranges::find_if(choices, [](const QVariant &one) {
+                                          return one.toMap().value(u"value"_s).toString()
+                                                 == u"RIGHT_TO_LEFT"_s;
+                                      }) - choices.begin();
+        QVERIFY(rightToLeft < choices.size());
+        const QString select = u"review-grouped-readingDirection"_s;
+        QQuickItem *field = fieldOf(drop.named(select));
+        QVERIFY(field);
+        clickOn(drop.window, field);
+        QQuickItem *option = nullptr;
+        QTRY_VERIFY((option = drop.named(select + u'-' + QString::number(rightToLeft)))
+                    && option->isVisible());
+        QVERIFY(laidOut(drop.window));
+        clickOn(drop.window, option);
+        QQuickItem *apply = drop.named(u"review-apply"_s);
+        QVERIFY(apply);
+        QTRY_VERIFY(apply->property("ready").toBool());
+        QCOMPARE(apply->property("label").toString(), review->ticks()->grouped().value(u"applyLabel"_s));
+        clickOn(drop.window, apply);
+        QTRY_COMPARE(textNamed(drop.window->contentItem(), u"review-grouped-outcome"_s),
+                     Words::groupedOutcome(20, 0, 0));
+
+        // Each sheet says it, as its own direction.
+        int said = 0;
+        for (const Card &card : drop.imports->cards()) {
+            const auto sheet = std::ranges::find(card.road.sheets, QString(), &Facts::Sheet::at);
+            if (sheet == card.road.sheets.cend())
+                continue;
+            const auto one = std::ranges::find(sheet->fields, u"readingDirection"_s,
+                                               &Facts::Field::key);
+            if (one != sheet->fields.cend() && one->edited) {
+                QCOMPARE(one->value.toString(), u"RIGHT_TO_LEFT"_s);
+                ++said;
+            }
+        }
+        QCOMPARE(said, 20);
+
+        drop.pretend.heard.clear();
+        QQuickItem *go = drop.named(u"review-import"_s);
+        QVERIFY(go);
+        QTRY_VERIFY(go->property("ready").toBool());
+        clickOn(drop.window, go);
+        QVERIFY(drop.importNow());
+        QTRY_VERIFY_WITH_TIMEOUT(drop.heardTimes("POST /import ") >= 20, 30000);
+        int carried = 0;
+        const QByteArray line = "POST /import ";
+        for (qsizetype at = drop.pretend.heard.indexOf(line); at >= 0;
+             at = drop.pretend.heard.indexOf(line, at + 1)) {
+            const QJsonArray sidecars = bodySent(drop.pretend.heard.mid(at), line)
+                                            .value(u"sidecars"_s)
+                                            .toArray();
+            for (const QJsonValue &one : sidecars) {
+                if (one.toObject().value(u"path"_s).toString() != u"work.json"_s)
+                    continue;
+                const QJsonObject work =
+                    QJsonDocument::fromJson(one.toObject().value(u"json"_s).toString().toUtf8())
+                        .object();
+                if (work.value(u"readingDirection"_s).toString() == u"RIGHT_TO_LEFT"_s)
+                    ++carried;
+            }
+        }
+        QVERIFY2(carried == 20, qPrintable(u"%1 work.json carry it"_s.arg(carried)));
+    }
+
+    /// A volume's chapters are one line of its sheet, their name and the button that opens
+    /// their window, as the drawing has them: a list bounded beside the name showed eight of
+    /// them with their titles cut, and put the button under it, out of sight.
+    void the_chapters_of_a_volume_are_a_button_beside_their_name()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QVERIFY(drop.framed());
+        Review *review = drop.review();
+        const QVariantList rows = review->rows();
+        const auto volume = std::ranges::find_if(rows, [](const QVariant &one) {
+            return !one.toMap().value(u"header"_s).toBool();
+        });
+        QVERIFY(volume != rows.end());
+        review->view()->select(volume->toMap().value(u"id"_s).toString());
+        QVERIFY(laidOut(drop.window));
+
+        QQuickItem *button = nullptr;
+        QQuickItem *name = nullptr;
+        QTRY_VERIFY((button = drop.named(u"review-chapters-edit"_s)) && button->isVisible());
+        QVERIFY((name = drop.named(u"review-label-chapters"_s)) && name->isVisible());
+        QVERIFY(!shownNamed(drop.window->contentItem(), u"review-field-chapters"_s));
+        const qreal buttonMiddle = button->mapToScene(QPointF(0, button->height() / 2)).y();
+        const qreal nameMiddle = name->mapToScene(QPointF(0, name->height() / 2)).y();
+        QVERIFY2(qAbs(buttonMiddle - nameMiddle) <= 2,
+                 qPrintable(u"name %1, button %2"_s.arg(nameMiddle).arg(buttonMiddle)));
+    }
+
+    /// The chapters window of the drawing: its count over the list, the number of each line
+    /// following its order — « + Chapitre » the next one, « Numéroter à partir de » all of
+    /// them again — the ✕ taking a line away, and « Garder les chapitres » writing what is left.
+    void the_chapters_window_numbers_its_lines_and_keeps_them()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QVERIFY(drop.framed());
+        Review *review = drop.review();
+        const QVariantList rows = review->rows();
+        const auto volume = std::ranges::find_if(rows, [](const QVariant &one) {
+            return !one.toMap().value(u"header"_s).toBool();
+        });
+        QVERIFY(volume != rows.end());
+        review->view()->select(volume->toMap().value(u"id"_s).toString());
+        QVERIFY(laidOut(drop.window));
+        QQuickItem *button = nullptr;
+        QTRY_VERIFY((button = drop.named(u"review-chapters-edit"_s)) && button->isVisible());
+        QVERIFY(laidOut(drop.window));
+        clickOn(drop.window, button);
+        QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"review-chapters-surface"_s));
+        QCOMPARE(textNamed(drop.window->contentItem(), u"review-chapters-count"_s),
+                 Words::chaptersCount(0, review->sheet().value(u"chaptersPages"_s).toInt()));
+
+        QQuickItem *add = drop.named(u"review-chapter-add"_s);
+        QVERIFY(add && add->isVisible());
+        for (int line = 0; line < 3; ++line) {
+            clickOn(drop.window, add);
+            QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"review-chapter-number-%1"_s.arg(line)));
+            QCOMPARE(textNamed(drop.window->contentItem(), u"review-chapter-number-%1"_s.arg(line)),
+                     QString::number(line + 1));
+        }
+        QQuickItem *from = drop.named(u"review-chapters-from"_s);
+        QVERIFY(from && from->isVisible());
+        clickOn(drop.window, from);
+        QTRY_VERIFY(from->hasActiveFocus());
+        QTest::keyClick(drop.window, Qt::Key_A, Qt::ControlModifier);
+        typeInto(drop.window, u"15"_s);
+        clickOn(drop.window, drop.named(u"review-chapters-renumber"_s));
+        QTRY_COMPARE(textNamed(drop.window->contentItem(), u"review-chapter-number-2"_s), u"17"_s);
+
+        clickOn(drop.window, drop.named(u"review-chapter-remove-0"_s));
+        QTRY_VERIFY(!shownNamed(drop.window->contentItem(), u"review-chapter-number-2"_s));
+        // Taken away, a line leaves the others their numbers.
+        QCOMPARE(textNamed(drop.window->contentItem(), u"review-chapter-number-0"_s), u"16"_s);
+
+        clickOn(drop.window, drop.named(u"review-chapters-keep"_s));
+        QTRY_VERIFY(!shownNamed(drop.window->contentItem(), u"review-chapters-surface"_s));
+        const QVariantList held = review->sheet().value(u"chaptersHeld"_s).toList();
+        QCOMPARE(held.size(), 2);
+        QCOMPARE(held.at(0).toMap().value(u"number"_s).toString(), u"16"_s);
+        QCOMPARE(held.at(1).toMap().value(u"number"_s).toString(), u"17"_s);
+    }
+
+    /// A chapter is put in its place by the page it starts on, and not by a handle: typed a
+    /// page past the next line's, it goes after it once the box is left, and the numbers
+    /// follow the order.
+    void a_chapter_takes_the_place_its_first_page_says()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QVERIFY(drop.framed());
+        Review *review = drop.review();
+        const QVariantList rows = review->rows();
+        const auto volume = std::ranges::find_if(rows, [](const QVariant &one) {
+            return !one.toMap().value(u"header"_s).toBool();
+        });
+        QVERIFY(volume != rows.end());
+        review->view()->select(volume->toMap().value(u"id"_s).toString());
+        QVERIFY(laidOut(drop.window));
+        QQuickItem *button = nullptr;
+        QTRY_VERIFY((button = drop.named(u"review-chapters-edit"_s)) && button->isVisible());
+        clickOn(drop.window, button);
+        QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"review-chapters-surface"_s));
+        QQuickItem *add = drop.named(u"review-chapter-add"_s);
+        const auto typeIn = [&](const QString &name, const QString &text) {
+            QQuickItem *box = drop.named(name);
+            QVERIFY(box);
+            clickOn(drop.window, box);
+            QTRY_VERIFY(box->hasActiveFocus());
+            typeInto(drop.window, text);
+            QTest::keyClick(drop.window, Qt::Key_Tab);
+        };
+        const QStringList titles{u"Bulma"_s, u"Oolong"_s, u"Yamcha"_s};
+        const QStringList pages{u"2"_s, u"34"_s, u"50"_s};
+        for (int line = 0; line < 3; ++line) {
+            clickOn(drop.window, add);
+            QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"review-chapter-title-%1"_s.arg(line)));
+            typeIn(u"review-chapter-title-%1"_s.arg(line), titles.at(line));
+            typeIn(u"review-chapter-page-%1"_s.arg(line), pages.at(line));
+        }
+        QVERIFY(!drop.named(u"review-chapter-handle-0"_s));
+
+        // Oolong now starts after Yamcha.
+        QQuickItem *page = drop.named(u"review-chapter-page-1"_s);
+        clickOn(drop.window, page);
+        QTRY_VERIFY(page->hasActiveFocus());
+        QTest::keyClick(drop.window, Qt::Key_A, Qt::ControlModifier);
+        typeInto(drop.window, u"60"_s);
+        QTest::keyClick(drop.window, Qt::Key_Tab);
+        QTRY_COMPARE(drop.named(u"review-chapter-title-1"_s)->property("text").toString(), u"Yamcha"_s);
+        QCOMPARE(drop.named(u"review-chapter-title-2"_s)->property("text").toString(), u"Oolong"_s);
+        QCOMPARE(textNamed(drop.window->contentItem(), u"review-chapter-number-1"_s), u"2"_s);
+        QCOMPARE(textNamed(drop.window->contentItem(), u"review-chapter-number-2"_s), u"3"_s);
+
+        clickOn(drop.window, drop.named(u"review-chapters-keep"_s));
+        QTRY_VERIFY(!shownNamed(drop.window->contentItem(), u"review-chapters-surface"_s));
+        const QVariantList held = review->sheet().value(u"chaptersHeld"_s).toList();
+        QCOMPARE(held.size(), 3);
+        QCOMPARE(held.at(1).toMap().value(u"title"_s).toString(), u"Yamcha"_s);
+        QCOMPARE(held.at(2).toMap().value(u"title"_s).toString(), u"Oolong"_s);
+        QCOMPARE(held.at(2).toMap().value(u"page"_s).toString(), u"60"_s);
+        QCOMPARE(held.at(2).toMap().value(u"number"_s).toString(), u"3"_s);
+    }
+
+    /// The chapter label of a series says, in grey under its box, how a form is written: a
+    /// form typed « Level » was every chapter called « Level », and nothing said why.
+    void the_chapter_label_says_how_a_form_is_written()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QVERIFY(drop.framed());
+        QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"review-note-chapterLabel"_s));
+        QCOMPARE(textNamed(drop.window->contentItem(), u"review-note-chapterLabel"_s),
+                 Words::chapterLabelHint());
+    }
+
+    /// The series' arcs button opens their window, from the keys too: a pill nobody gave a
+    /// height to drew its word and let a click fall through, nought pixels tall, and no key
+    /// reached it.
+    void the_arcs_button_has_a_height_and_opens_their_window()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QVERIFY(drop.framed());
+        QQuickItem *button = nullptr;
+        QTRY_VERIFY((button = drop.named(u"review-arcs-edit"_s)) && button->isVisible());
+        QVERIFY(laidOut(drop.window));
+        QVERIFY(button->height() > 0);
+        // Under the fold of the sheet: reached by the keys, as anyone without a mouse would.
+        button->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(button->hasActiveFocus());
+        QTest::keyClick(drop.window, Qt::Key_Space);
+        QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"review-arcs-surface"_s));
+    }
+
+    /// The box of a series sits in the middle of its line's height: it sat on the line of the
+    /// detail under the name, half a line below the middle of the band it ticks.
+    void the_box_of_a_series_is_centred_on_its_line()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Fifty));
+        QVERIFY(drop.framed());
+        Review *review = drop.review();
+        review->view()->select(u"all"_s);
+        QVERIFY(laidOut(drop.window));
+        const QVariantList rows = review->rows();
+        const qsizetype first = std::ranges::find_if(rows, [](const QVariant &one) {
+                                    return one.toMap().value(u"checkable"_s).toBool();
+                                }) - rows.begin();
+        QVERIFY(first < rows.size());
+        QQuickItem *line = drop.named(u"review-line-%1"_s.arg(first));
+        QQuickItem *mark = drop.named(u"review-tick-%1-mark"_s.arg(first));
+        QVERIFY(line && mark && mark->isVisible());
+        const qreal lineMiddle = line->mapToScene(QPointF(0, line->height() / 2)).y();
+        const qreal markMiddle = mark->mapToScene(QPointF(0, mark->height() / 2)).y();
+        QVERIFY2(qAbs(lineMiddle - markMiddle) <= 1,
+                 qPrintable(u"line %1, box %2"_s.arg(lineMiddle).arg(markMiddle)));
+    }
+
+    /// A click on a line, while series are ticked, puts its sheet back in the panel's place —
+    /// the ticks stay, for the panel to come back with the next one.
+    void a_click_on_a_ticked_line_brings_its_sheet_back()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Fifty));
+        QVERIFY(drop.framed());
+        Review *review = drop.review();
+        review->view()->select(u"all"_s);
+        QVERIFY(laidOut(drop.window));
+        const QVariantList rows = review->rows();
+        const qsizetype first = std::ranges::find_if(rows, [](const QVariant &one) {
+                                    return one.toMap().value(u"checkable"_s).toBool();
+                                }) - rows.begin();
+        QVERIFY(first < rows.size());
+        const QString name = rows.at(first).toMap().value(u"name"_s).toString();
+        QQuickItem *box = drop.named(u"review-tick-%1"_s.arg(first));
+        QVERIFY(box && box->isVisible());
+        clickOn(drop.window, box);
+        QTRY_COMPARE(review->ticks()->ticked(), 1);
+        QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"review-grouped"_s));
+        QVERIFY(!shownNamed(drop.window->contentItem(), u"review-sheet"_s));
+
+        QQuickItem *words = drop.named(u"review-line-%1-name"_s.arg(first));
+        QVERIFY(words);
+        clickOn(drop.window, words);
+        QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"review-sheet"_s));
+        QVERIFY(!shownNamed(drop.window->contentItem(), u"review-grouped"_s));
+        QCOMPARE(textNamed(drop.window->contentItem(), u"review-sheet-title"_s), name);
+        QCOMPARE(review->ticks()->ticked(), 1);
+    }
+
+    /// Space ticks the line that holds the keys, and Maj with an arrow ticks every line it
+    /// passes from where the run began — which is where the keys came back into the list, not
+    /// where the last run ended: kept from before, Maj and Up ticked nothing new.
+    void space_and_maj_with_an_arrow_tick_from_the_keys()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Fifty));
+        QVERIFY(drop.framed());
+        Review *review = drop.review();
+        review->view()->select(u"all"_s);
+        QVERIFY(laidOut(drop.window));
+        keysInCharge(drop.window);
+        for (int press = 0; press < 40 && !focusedName(drop.window).startsWith(u"review-line-"_s);
+             ++press)
+            QTest::keyClick(drop.window, Qt::Key_Tab);
+        const QString first = focusedName(drop.window);
+        QVERIFY(first.startsWith(u"review-line-"_s));
+        QTest::keyClick(drop.window, Qt::Key_Space);
+        QTRY_COMPARE(review->ticks()->ticked(), 1);
+        QTest::keyClick(drop.window, Qt::Key_Down);
+        QTest::keyClick(drop.window, Qt::Key_Down, Qt::ShiftModifier);
+        QTest::keyClick(drop.window, Qt::Key_Down, Qt::ShiftModifier);
+        QTRY_COMPARE(review->ticks()->ticked(), 4);
+        const QString last = focusedName(drop.window);
+
+        // Out of the list and back: the keys come back on the line they left.
+        QTest::keyClick(drop.window, Qt::Key_Tab);
+        QVERIFY(focusedName(drop.window) != last);
+        QTest::keyClick(drop.window, Qt::Key_Tab, Qt::ShiftModifier);
+        QTRY_COMPARE(focusedName(drop.window), last);
+        QTest::keyClick(drop.window, Qt::Key_Space);
+        QTRY_COMPARE(review->ticks()->ticked(), 3);
+        QTest::keyClick(drop.window, Qt::Key_Up, Qt::ShiftModifier);
+        QTRY_COMPARE(review->ticks()->ticked(), 4);
+        QVERIFY(drop.window->activeFocusItem()->property("row").toMap()
+                    .value(u"checked"_s).toBool());
+    }
+
+    /// « Revoir la suivante » under the tree goes from one series to review to the next, one
+    /// press each: at twenty of them, finding the next by eye in a tree of fifty was the work.
+    void the_next_one_to_review_is_one_press_away()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Fifty));
+        QVERIFY(drop.framed());
+        QQuickItem *next = drop.named(u"review-next"_s);
+        QVERIFY(next && next->isVisible());
+        QVERIFY(next->isEnabled());
+        QCOMPARE(next->property("label").toString(), Words::reviewNext());
+        QStringList seen{textNamed(drop.window->contentItem(), u"review-sheet-title"_s)};
+        for (int press = 0; press < 2; ++press) {
+            clickOn(drop.window, next);
+            QTRY_VERIFY(!seen.contains(
+                textNamed(drop.window->contentItem(), u"review-sheet-title"_s)));
+            seen << textNamed(drop.window->contentItem(), u"review-sheet-title"_s);
+        }
+        QCOMPARE(seen.size(), 3);
+    }
+
+    /// Ctrl+F puts the keys in the search, and « mon » leaves the three series it names in the
+    /// list and in the counters — the tree keeps every node: it says where things are, and a
+    /// search that emptied it would leave nothing to stand on.
+    void typing_in_the_search_narrows_the_list()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Fifty));
+        QVERIFY(drop.framed());
+        Review *review = drop.review();
+        review->view()->select(u"all"_s);
+        QVERIFY(laidOut(drop.window));
+        const qsizetype nodes = review->rail().size();
+        const auto lines = [review] {
+            QStringList names;
+            for (const QVariant &one : review->rows()) {
+                if (!one.toMap().value(u"header"_s).toBool())
+                    names << one.toMap().value(u"name"_s).toString();
+            }
+            return names;
+        };
+        // The three universes and the twenty-seven series on their own.
+        QCOMPARE(lines().size(), 30);
+        QQuickItem *search = drop.named(u"review-search"_s);
+        QVERIFY(search);
+        QCOMPARE(search->property("placeholderText").toString(),
+                 Words::searchTheDrop());
+
+        QTest::keyClick(drop.window, Qt::Key_F, Qt::ControlModifier);
+        QTRY_COMPARE(focusedName(drop.window), u"review-search"_s);
+        typeInto(drop.window, u"mon"_s);
+        QTRY_COMPARE(lines().size(), 3);
+        QStringList found = lines();
+        found.sort();
+        QCOMPARE(found, (QStringList{u"Demon Slayer"_s, u"Mon voisin"_s, u"Monster"_s}));
+        QTRY_COMPARE(drop.named(u"review-filter-0"_s)->property("tally").toInt(), 3);
+        QCOMPARE(drop.named(u"review-filter-1"_s)->property("tally").toInt(), 3);
+        QCOMPARE(drop.named(u"review-filter-2"_s)->property("tally").toInt(), 0);
+        QCOMPARE(review->rail().size(), nodes);
+    }
+
+    /// A series refused before it was read is taken out of the frame by its sheet's
+    /// « Retirer »: nothing on that sheet can be corrected, and left there it would wait in
+    /// the queue for ever.
+    void a_failed_series_can_be_removed_from_the_frame()
+    {
+        ADroppedFolder drop;
+        drop.alsoMisnested = true;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Komga));
+        QVERIFY(drop.framed());
+        drop.review()->view()->select(drop.nodeId(u"Monde"_s));
+        QTRY_COMPARE(textNamed(drop.window->contentItem(), u"review-sheet-title"_s),
+                     u"Monde"_s);
+        QQuickItem *remove = drop.named(u"review-remove"_s);
+        QVERIFY(remove);
+        QTRY_VERIFY(remove->isVisible());
+        QCOMPARE(remove->property("alarming").toBool(), true);
+        QVERIFY(laidOut(drop.window));
+        clickOn(drop.window, remove);
+        QTRY_COMPARE(drop.imports->rowCount({}), 1);
+        QVERIFY(drop.nodeId(u"Monde"_s).isEmpty());
+        QTRY_VERIFY(textNamed(drop.window->contentItem(), u"review-sheet-title"_s)
+                    != u"Monde"_s);
+        QVERIFY(shownNamed(drop.window->contentItem(), u"review-sheet"_s));
+    }
+
+    /// The list is built once per change of the frame, and not once per line reading it —
+    /// two readings a line, and a list of a thousand lines rebuilt two thousand times — and
+    /// not at all while the frame is shut.
+    void the_frame_builds_its_list_once_per_change_and_not_while_shut()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Komga));
+        auto *review = drop.engine.singletonInstance<Review *>(qmlTypeId("Leaf", 1, 0, "Review"));
+        QVERIFY(review);
+        QVERIFY(drop.framed());
+        review->view()->select(u"all"_s);
+        QVERIFY(laidOut(drop.window));
+
+        qint64 before = Review::cost().rows;
+        review->view()->toggleIdentical();
+        QCoreApplication::processEvents();
+        QCOMPARE(Review::cost().rows - before, 1);
+
+        QQuickItem *back = drop.named(u"review-back"_s);
+        QVERIFY(back);
+        clickOn(drop.window, back);
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("proposing"));
+        QCoreApplication::processEvents();
+        before = Review::cost().rows;
+        review->view()->toggleIdentical();
+        QCoreApplication::processEvents();
+        QCOMPARE(Review::cost().rows - before, 0);
+    }
+
+    /// What is being typed in a field survives the frame changing under it — a countdown
+    /// each second, another folder read, a chunk landing: each one wiped the box back to the
+    /// value it held.
+    void what_is_being_typed_survives_a_change_of_the_frame()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Komga));
+        auto *review = drop.engine.singletonInstance<Review *>(qmlTypeId("Leaf", 1, 0, "Review"));
+        QVERIFY(review);
+        QVERIFY(drop.framed());
+        QQuickItem *title = drop.named(u"review-field-title"_s);
+        QVERIFY(title);
+        clickOn(drop.window, title);
+        QTRY_VERIFY(title->hasActiveFocus());
+        QTest::keyClick(drop.window, Qt::Key_A, Qt::ControlModifier);
+        typeInto(drop.window, u"Ao"_s);
+        QCOMPARE(title->property("text").toString(), u"Ao"_s);
+
+        review->view()->toggleIdentical();
+        QCoreApplication::processEvents();
+        QCOMPARE(title->property("text").toString(), u"Ao"_s);
+        QVERIFY(title->hasActiveFocus());
+
+        // Left, it is the value again — the one it was corrected to.
+        QTest::keyClick(drop.window, Qt::Key_Return);
+        QTRY_COMPARE(textOn(drop.review(), u"title"_s), u"Ao"_s);
+        QCOMPARE(drop.named(u"review-field-title"_s)->property("text").toString(), u"Ao"_s);
+    }
+
+    /// Everything dropped already in the library: the cards' button goes on to the frame, which
+    /// says it is all identical, and the frame's button is the one that closes — closing from
+    /// the cards hid the frame from whoever dropped a folder to see what the library held.
+    void a_drop_the_library_holds_goes_on_to_the_frame_to_close_there()
+    {
+        ADroppedFolder drop;
+        drop.held = true;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Komga));
+        QQuickItem *start = drop.named(u"import-start"_s);
+        QVERIFY(start);
+        QTRY_COMPARE(textNamed(drop.window->contentItem(), u"import-start-text"_s), Words::next());
+        QTRY_VERIFY(start->property("ready").toBool());
+        QVERIFY(drop.framed());
+        QVERIFY(drop.dialog->property("opened").toBool());
+        QTRY_COMPARE(textNamed(drop.window->contentItem(), u"review-import-text"_s),
+                     Words::closeIt());
+        clickOn(drop.window, drop.named(u"review-import"_s));
+        QTRY_VERIFY(!drop.dialog->property("opened").toBool());
+    }
+
+    /// « Retour » goes back to the cards and gives nothing up: the card is there, and so is
+    /// what was typed on its sheet. It is not « Revenir en arrière », which drops them.
+    void going_back_from_the_frame_gives_nothing_up()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Komga));
+        QVERIFY(drop.framed());
+        QQuickItem *title = drop.named(u"review-field-title"_s);
+        QVERIFY(title);
+        clickOn(drop.window, title);
+        QTRY_VERIFY(title->hasActiveFocus());
+        QTest::keyClick(drop.window, Qt::Key_A, Qt::ControlModifier);
+        typeInto(drop.window, u"Ao"_s);
+        QTest::keyClick(drop.window, Qt::Key_Return);
+        QTRY_COMPARE(textOn(drop.review(), u"title"_s), u"Ao"_s);
+
+        QQuickItem *back = drop.named(u"review-back"_s);
+        QVERIFY(back);
+        clickOn(drop.window, back);
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("proposing"));
+        QCOMPARE(drop.imports->rowCount({}), 1);
+        QTRY_COMPARE(textNamed(drop.window->contentItem(), u"import-start-text"_s),
+                     Words::next());
+        QVERIFY(drop.framed());
+        QCOMPARE(drop.named(u"review-field-title"_s)->property("text").toString(), u"Ao"_s);
+    }
+
+    /// At the smallest window, at the desktop's text size and half as large again, the tree,
+    /// the list and the sheet each keep a width and none stands over another.
+    void the_four_zones_stay_in_the_smallest_window()
+    {
+        // Before the window, so that it outlives the engine that follows it.
+        SomeText desktop(1.0);
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Komga));
+        auto *widths = drop.engine.singletonInstance<Widths *>(qmlTypeId("Leaf", 1, 0, "Widths"));
+        QVERIFY(widths);
+        widths->follow(&desktop);
+        QVERIFY(drop.framed());
+        // The smallest the window goes: anything smaller is not a window this has to fit.
+        QCOMPARE(drop.window->minimumSize(), QSize(800, 560));
+        for (const qreal text : {1.0, 1.5}) {
+            desktop.becomes(text);
+            QTRY_COMPARE(widths->systemText(), text);
+            drop.window->resize(800, 560);
+            QTRY_COMPARE(widths->window(), 800);
+            QVERIFY(laidOut(drop.window));
+            const QRectF rail = drop.zone(u"review-rail"_s);
+            const QRectF list = drop.zone(u"review-list"_s);
+            const QRectF sheet = drop.zone(u"review-sheet"_s);
+            const QString said = u"at %1: rail %2+%3, list %4+%5, sheet %6+%7"_s.arg(text)
+                                     .arg(rail.x()).arg(rail.width()).arg(list.x())
+                                     .arg(list.width()).arg(sheet.x()).arg(sheet.width());
+            QVERIFY2(rail.width() > 0 && list.width() > 0 && sheet.width() > 0, qPrintable(said));
+            QVERIFY2(rail.right() <= list.left() + 0.5 && list.right() <= sheet.left() + 0.5,
+                     qPrintable(said));
+            const QRectF box = drop.zone(u"import-review"_s);
+            QVERIFY2(sheet.right() <= box.right() + 0.5, qPrintable(said));
+            if (const QString cut = whatACutDialog(drop.window, drop.dialog,
+                                                   widths->space()->gutter());
+                !cut.isEmpty())
+                QFAIL(qPrintable(cut));
+        }
+    }
+
+    /// A tag is a pill on the sheet: « + Étiquette », a word typed, Enter, and the universe's
+    /// list has a group for it; × on each, and the series is among those that carry none.
+    /// Given to `Review.edits.edit` as text, a tag typed there was refused and nothing said so.
+    void a_tag_is_added_and_removed_as_a_chip()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Tagged));
+        QVERIFY(drop.framed());
+        Review *review = drop.review();
+        const QString arran = u"Terres d’Arran"_s;
+        const QString universe = drop.nodeId(u"Monde d’Aquilon"_s);
+        const QString elfes = drop.nodeId(u"Elfes"_s);
+        review->view()->select(elfes);
+
+        QQuickItem *box = nullptr;
+        QTRY_VERIFY((box = drop.named(u"review-words-tags-field"_s)) && box->isVisible());
+        QCOMPARE(box->property("placeholderText").toString(), Words::addWord(u"tags"_s));
+        QVERIFY(shownNamed(drop.window->contentItem(), u"review-words-tags-chip-0"_s));
+        // Given the keys first, so the sheet scrolls it into sight before the pointer goes.
+        box->forceActiveFocus(Qt::TabFocusReason);
+        QVERIFY(laidOut(drop.window));
+        clickOn(drop.window, box);
+        QTRY_VERIFY(box->hasActiveFocus());
+        typeInto(drop.window, u"Elfique"_s);
+        QTest::keyClick(drop.window, Qt::Key_Return);
+        QTRY_COMPARE(wordsOn(review, u"tags"_s), (QStringList{arran, u"Elfique"_s}));
+        QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"review-words-tags-chip-1"_s));
+
+        for (const qsizetype left : {1, 0}) {
+            QQuickItem *cross = nullptr;
+            QTRY_VERIFY((cross = drop.named(u"review-words-tags-chip-0-remove"_s))
+                        && cross->isVisible());
+            QVERIFY(laidOut(drop.window));
+            clickOn(drop.window, cross);
+            QTRY_COMPARE(wordsOn(review, u"tags"_s).size(), left);
+        }
+    }
+
+    /// A series shows whom its volumes credit, computed and read-only, folded to three names;
+    /// a drawer given to the volume that had none is counted by the series at once, with no
+    /// other gesture than going back to it.
+    void the_series_credits_are_shown_computed_and_follow_a_volume_s_correction()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Credited));
+        QVERIFY(drop.framed());
+        Review *review = drop.review();
+        const QString series = drop.nodeId(u"Elfes"_s);
+        const QString third =
+            QString::number(drop.imports->cards().at(0).token) + u"/Tome 3.cbz"_s;
+        review->view()->select(series);
+
+        QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"review-credits"_s));
+        QCOMPARE(textNamed(drop.window->contentItem(), u"review-credits-people"_s),
+                 u"Auteur A, Auteur B, Auteur C et 9 autres"_s);
+        // Whom, and not how it was reached: no « Calculé », no sentence under it.
+        QVERIFY(!drop.named(u"review-credits-computed-chip"_s));
+        QVERIFY(!drop.named(u"review-credits-note"_s));
+        // Unfolded, every one of them.
+        QQuickItem *unfold = drop.named(u"review-credits-unfold"_s);
+        QVERIFY(unfold && unfold->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(unfold, "triggered"));
+        QTRY_VERIFY(textNamed(drop.window->contentItem(), u"review-credits-people"_s)
+                        .endsWith(u"Auteur L"_s));
+        QVERIFY(textNamed(drop.window->contentItem(), u"review-footer-text"_s)
+                    .endsWith(Words::creditsFooter(12, 1)));
+
+        review->view()->select(third);
+        QQuickItem *box = nullptr;
+        QTRY_VERIFY((box = drop.named(u"review-words-artists-field"_s)) && box->isVisible());
+        box->forceActiveFocus(Qt::TabFocusReason);
+        // One letter from « Auteur B », and still the one typed: Enter took the nearest word.
+        typeInto(drop.window, u"Auteur M"_s);
+        QTest::keyClick(drop.window, Qt::Key_Return);
+        QTRY_COMPARE(wordsOn(review, u"artists"_s), QStringList{u"Auteur M"_s});
+
+        review->view()->select(series);
+        QTRY_COMPARE(textNamed(drop.window->contentItem(), u"review-footer-text"_s),
+                     Words::creditsFooter(13));
+        QTRY_COMPARE(textNamed(drop.window->contentItem(), u"review-credits-people"_s),
+                     u"Auteur A, Auteur B, Auteur C et 10 autres"_s);
+    }
+
+    /// The series' writer is a field among the others, just above its drawer: drawn apart, in
+    /// the block of whom the volumes credit, « Scénario » sat under « Étiquettes », away from
+    /// « Dessin ». And nothing « goes back to the computed »: the button emptied the field, which
+    /// on a series whose volumes name no writer left all of them without one — the × of a name
+    /// already takes it away.
+    void the_series_writer_sits_above_its_drawer()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Credited));
+        QVERIFY(drop.framed());
+        Review *review = drop.review();
+        review->view()->select(drop.nodeId(u"Elfes"_s));
+        QQuickItem *root = drop.window->contentItem();
+        QTRY_VERIFY(shownNamed(root, u"review-credits"_s));
+        QVERIFY(!drop.named(u"review-credits-back"_s));
+        // Drawn once: among the fields, and no more in the block of the computed credits.
+        QTRY_COMPARE(itemsNamed(root, u"review-label-authors"_s).size(), 1);
+
+        QQuickItem *writer = drop.named(u"review-label-authors"_s);
+        QQuickItem *drawer = drop.named(u"review-label-artists"_s);
+        QQuickItem *credits = drop.named(u"review-credits"_s);
+        QVERIFY(writer && drawer && credits);
+        QVERIFY(laidOut(drop.window));
+        const qreal writerAt = writer->mapToScene({0, 0}).y();
+        const qreal drawerAt = drawer->mapToScene({0, 0}).y();
+        QVERIFY2(writerAt < drawerAt, "Scénario is drawn below Dessin");
+        QVERIFY2(drawerAt < credits->mapToScene({0, 0}).y(),
+                 "the writer is still drawn in the block of the computed credits");
+        // Nothing drawn between them: the line just under the writer's is the drawer's.
+        const QList<QQuickItem *> labels = labelsUnder(root);
+        for (QQuickItem *one : labels) {
+            const qreal at = one->mapToScene({0, 0}).y();
+            QVERIFY2(at <= writerAt || at >= drawerAt,
+                     qPrintable(one->objectName() + u" sits between Scénario and Dessin"_s));
+        }
+        QVERIFY(labels.size() > 2);
+    }
+
+    /// A list of one name keeps the box to type in on its line, as long as the box fits there
+    /// with what it says: « Akira Toriyama » sat alone, « Ajouter un nom » on a second row
+    /// under it, with all the room in the world beside him. Out of room, the box goes under.
+    void a_name_and_the_box_after_it_share_a_line_while_they_fit()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Credited));
+        QVERIFY(drop.framed());
+        Review *review = drop.review();
+        const QString series = drop.nodeId(u"Elfes"_s);
+        // A window as wide as a desktop's, the sheet with it: the frame's smallest leaves
+        // no room beside a name, and the box goes under, rightly.
+        drop.window->resize(1600, 1000);
+        review->view()->select(series);
+        QVERIFY(review->edits()->editWords(series, u"authors"_s, {u"Akira Toriyama"_s}));
+        QQuickItem *root = drop.window->contentItem();
+        QQuickItem *chip = nullptr;
+        QQuickItem *box = nullptr;
+        QTRY_VERIFY((chip = drop.named(u"review-words-authors-chip-0"_s)) && chip->isVisible());
+        QTRY_VERIFY((box = drop.named(u"review-words-authors-field"_s)) && box->isVisible());
+        QVERIFY(laidOut(drop.window));
+        QCOMPARE(box->mapToScene({0, 0}).y(), chip->mapToScene({0, 0}).y());
+        QVERIFY(box->mapToScene({0, 0}).x() > chip->mapToScene({chip->width(), 0}).x());
+        // And no further than the frame round them.
+        QQuickItem *flow = box->parentItem();
+        QVERIFY(box->x() + box->width() <= flow->width() + 0.5);
+
+        // Names enough to fill the line: the box goes under them, the whole width.
+        QVERIFY(review->edits()->editWords(series, u"authors"_s,
+                                  {u"Akira Toriyama"_s, u"Eiichirō Oda"_s, u"Rumiko Takahashi"_s,
+                                   u"Naoki Urasawa"_s, u"Hirohiko Araki"_s}));
+        QTRY_VERIFY(itemsNamed(root, u"review-words-authors-chip-4"_s).size() == 1);
+        QVERIFY(laidOut(drop.window));
+        const QList<QQuickItem *> last = itemsNamed(root, u"review-words-authors-chip-4"_s);
+        QQuickItem *end = last.first();
+        QVERIFY2(box->y() > end->y() || box->x() > end->x() + end->width(),
+                 "the box sits over the last name");
+        QVERIFY(box->x() + box->width() <= flow->width() + 0.5);
+    }
+
+    /// The list of a select is as wide as its longest word, chosen and so in bold, and never
+    /// narrower than the field: as wide as a column of « Compté en », « Chapitres » chosen
+    /// read « Chapitr… ». The field here is narrower still, the measure of the window the
+    /// test draws in being smaller than a desktop's.
+    void a_select_s_list_holds_its_longest_word_whole()
+    {
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQmlComponent component(&engine);
+        component.setData("import QtQuick\nimport Leaf\n"
+                          "Item { width: 400; height: 400; z: 1000\n"
+                          "    LeafSelect { objectName: \"unit\"; width: 80; name: \"Compté en\"\n"
+                          "        captioned: false; chosen: 0\n"
+                          "        options: [{ value: 0, label: \"Chapitres\" },\n"
+                          "                  { value: 1, label: \"Tomes\" }] } }\n",
+                          QUrl());
+        std::unique_ptr<QQuickItem> holder(qobject_cast<QQuickItem *>(component.create()));
+        QVERIFY2(holder, qPrintable(component.errorString()));
+        holder->setParentItem(window->contentItem());
+        QQuickItem *select = itemNamed(holder.get(), u"unit"_s);
+        QVERIFY(select);
+        QVERIFY(QMetaObject::invokeMethod(select, "open"));
+        QQuickItem *row = nullptr;
+        QTRY_VERIFY((row = itemNamed(window->contentItem(), u"unit-0"_s)) && row->isVisible());
+        QVERIFY(laidOut(window));
+        QList<QQuickItem *> texts;
+        const std::function<void(QQuickItem *)> walk = [&](QQuickItem *at) {
+            if (at->property("truncated").isValid())
+                texts << at;
+            for (QQuickItem *child : at->childItems())
+                walk(child);
+        };
+        walk(row);
+        QVERIFY(!texts.isEmpty());
+        for (QQuickItem *text : texts)
+            QVERIFY2(!text->property("truncated").toBool(),
+                     qPrintable(text->property("text").toString() + u" is cut"_s));
+    }
+
+    /// A universe's sheet lists its reading orders, a line each, « Par défaut » on the one read
+    /// when none is chosen and « Sous-ensemble » on the one another holds — and no box of JSON
+    /// among its fields.
+    void the_universe_sheet_lists_its_orders()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Tagged));
+        QVERIFY(drop.framed());
+        drop.review()->view()->select(drop.nodeId(u"Monde d’Aquilon"_s));
+        QQuickItem *root = drop.window->contentItem();
+
+        QTRY_VERIFY(shownNamed(root, u"review-orders"_s));
+        QCOMPARE(textNamed(root, u"review-order-tout-aquilon-name"_s), u"Tout Aquilon"_s);
+        QCOMPARE(textNamed(root, u"review-order-tout-aquilon-line"_s),
+                 u"5 séries · 5 étapes, dont 3 recopiées"_s);
+        QVERIFY(shownNamed(root, u"review-order-tout-aquilon-badge"_s));
+        QCOMPARE(textNamed(root, u"review-order-tout-aquilon-badge-text"_s),
+                 Words::defaultOrder());
+        QCOMPARE(textNamed(root, u"review-order-terres-d-arran-badge-text"_s),
+                 Words::subsetOrder());
+        QCOMPARE(textNamed(root, u"review-orders-note"_s),
+                 Words::ordersCopied(u"Terres d’Arran"_s, u"Tout Aquilon"_s));
+        QCOMPARE(spokenName(drop.named(u"review-order-tout-aquilon"_s)),
+                 u"Tout Aquilon, 5 séries · 5 étapes, dont 3 recopiées, "_s + Words::defaultOrder());
+        QVERIFY(!drop.named(u"review-field-orders"_s));
+        QVERIFY(!drop.named(u"review-words-orders"_s));
+    }
+
+    /// Clicked on the universe's sheet, an order opens in the editor over the frame: its tabs
+    /// where the filters were, its steps in the middle, and the three steps it writes again of
+    /// « Terres d’Arran » offered as one inclusion, « Proposé », in their place.
+    void an_order_is_opened_from_the_universe_sheet_and_shows_its_proposal()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Tagged));
+        QVERIFY(drop.framed());
+        QVERIFY(drop.orderOpened(u"tout-aquilon"_s));
+        QQuickItem *root = drop.window->contentItem();
+
+        QVERIFY(shownNamed(root, u"order-tab-tout-aquilon"_s));
+        QVERIFY(shownNamed(root, u"order-tab-terres-d-arran"_s));
+        QVERIFY(hiddenNamed(root, u"review-filters"_s));
+        QVERIFY(hiddenNamed(root, u"review-list"_s));
+        QCOMPARE(textNamed(root, u"order-step-0-label"_s), u"Lanfeust de Troy"_s);
+        QCOMPARE(textNamed(root, u"order-step-1-label"_s),
+                 Words::includeStep(u"Terres d’Arran"_s));
+        QVERIFY(shownNamed(root, u"order-step-1-proposed"_s));
+        QCOMPARE(textNamed(root, u"order-step-1-proposed-text"_s), Words::proposedStep());
+        // What it reads is drawn under it, and not as steps of its own.
+        QCOMPARE(textNamed(root, u"order-step-1-inherited-0"_s), u"Elfes"_s);
+        QCOMPARE(textNamed(root, u"order-step-1-note"_s),
+                 Words::inheritedFrom(u"Terres d’Arran"_s));
+        QCOMPARE(textNamed(root, u"review-footer-text"_s), Words::orderFooter(3, 5));
+        QCOMPARE(textNamed(root, u"order-save-text"_s), Words::saveOrders(1));
+        QCOMPARE(spokenName(drop.named(u"order-step-1"_s)),
+                 Words::includeStep(u"Terres d’Arran"_s) + u", "_s + Words::proposedStep());
+    }
+
+    /// « Enregistrer l’ordre » goes back to the frame, and « Importer » announces the universe
+    /// with the inclusion in the place of the three steps.
+    void saving_an_order_returns_to_the_frame_and_sends_the_include()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Tagged));
+        QVERIFY(drop.framed());
+        QVERIFY(drop.orderOpened(u"tout-aquilon"_s));
+
+        clickOn(drop.window, drop.named(u"order-save"_s));
+        QTRY_VERIFY(hiddenNamed(drop.window->contentItem(), u"order-editor"_s));
+        QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"review-sheet"_s));
+        QVERIFY(drop.imports->cards().at(0).road.edited);
+
+        drop.pretend.heard.clear();
+        QQuickItem *go = drop.named(u"review-import"_s);
+        QTRY_VERIFY(go && go->property("ready").toBool());
+        clickOn(drop.window, go);
+        QVERIFY(drop.importNow());
+        QJsonArray orders;
+        QTRY_VERIFY((orders = drop.announcedOrders()).size() == 2);
+        QCOMPARE(orders.at(0).toObject().value(u"steps"_s).toArray().at(1).toObject(),
+                 (QJsonObject{{u"include"_s, u"terres-d-arran"_s}}));
+        QCOMPARE(orders.at(0).toObject().value(u"steps"_s).toArray().size(), 3);
+    }
+
+    /// A step is dragged by its handle, and moved again from the keys: Ctrl+↓ on the line that
+    /// holds them, the keys going with it.
+    void a_step_is_moved_with_the_mouse_and_with_the_keys()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Tagged));
+        QVERIFY(drop.framed());
+        QVERIFY(drop.orderOpened(u"tout-aquilon"_s));
+        QQuickItem *root = drop.window->contentItem();
+
+        // The handle is the pointer's alone: a button that does nothing when pressed was a
+        // stop a screen reader offered for nothing. The keys that move it are said on the line.
+        QQuickItem *handle = drop.named(u"order-step-handle-2"_s);
+        QVERIFY(handle);
+        QAccessibleInterface *grip = QAccessible::queryAccessibleInterface(handle);
+        QVERIFY(!grip || grip->role() != QAccessible::Button);
+        QCOMPARE(QAccessible::queryAccessibleInterface(drop.named(u"order-step-2"_s))
+                     ->text(QAccessible::Description),
+                 Words::stepKeys());
+        // Its unit is drawn on the line in a tone of its own, edged: in the dark theme the
+        // field and the line are the same colour, and the field was nowhere to be seen.
+        auto *edge = fieldOf(drop.named(u"order-step-2-unit"_s))->property("border").value<QObject *>();
+        QVERIFY(edge && edge->property("color").value<QColor>().alpha() > 0);
+
+        // Carried by its handle to `sceneY`, and let go there.
+        const auto carried = [&drop](int at, int sceneY) {
+            QQuickItem *by = drop.named(u"order-step-handle-%1"_s.arg(at));
+            QVERIFY(by);
+            const QPoint from = by->mapToScene(QPointF(by->width() / 2, by->height() / 2))
+                                    .toPoint();
+            QTest::mousePress(drop.window, Qt::LeftButton, Qt::NoModifier, from);
+            for (int step = 1; step <= 10; ++step) {
+                QTest::mouseMove(drop.window,
+                                 QPoint(from.x(), from.y() + (sceneY - from.y()) * step / 10),
+                                 20);
+            }
+            QTest::mouseRelease(drop.window, Qt::LeftButton, Qt::NoModifier,
+                                QPoint(from.x(), sceneY));
+        };
+        const auto top = [&drop](int at) {
+            return int(drop.named(u"order-step-%1"_s.arg(at))->mapToScene(QPointF(0, 0)).y());
+        };
+        const auto bottom = [&drop](int at) {
+            QQuickItem *line = drop.named(u"order-step-%1"_s.arg(at));
+            return int(line->mapToScene(QPointF(0, line->height())).y());
+        };
+        const auto labels = [root] {
+            return QStringList{textNamed(root, u"order-step-0-label"_s),
+                               textNamed(root, u"order-step-1-label"_s),
+                               textNamed(root, u"order-step-2-label"_s)};
+        };
+        const QString arran = Words::includeStep(u"Terres d’Arran"_s);
+        // Up, to the very top.
+        carried(2, top(0) + 2);
+        QTRY_COMPARE(labels(), (QStringList{u"Trolls de Troy"_s, u"Lanfeust de Troy"_s, arran}));
+        // Down, past the last line.
+        carried(0, bottom(2) - 2);
+        QTRY_COMPARE(labels(), (QStringList{u"Lanfeust de Troy"_s, arran, u"Trolls de Troy"_s}));
+        // Between two lines: under the first one's middle, over the second one's.
+        carried(2, (bottom(0) + top(1)) / 2);
+        QTRY_COMPARE(labels(), (QStringList{u"Lanfeust de Troy"_s, u"Trolls de Troy"_s, arran}));
+        carried(1, top(0) + 2);
+        QTRY_COMPARE(labels(), (QStringList{u"Trolls de Troy"_s, u"Lanfeust de Troy"_s, arran}));
+
+        keysInCharge(drop.window);
+        drop.named(u"order-step-0"_s)->forceActiveFocus(Qt::TabFocusReason);
+        QTest::keyClick(drop.window, Qt::Key_Down, Qt::ControlModifier);
+        QTRY_COMPARE(textNamed(root, u"order-step-1-label"_s), u"Trolls de Troy"_s);
+        QTRY_COMPARE(focusedName(drop.window), u"order-step-1"_s);
+        QVERIFY(ringed(drop.window->activeFocusItem()));
+        QTest::keyClick(drop.window, Qt::Key_Up, Qt::ControlModifier);
+        QTRY_COMPARE(textNamed(root, u"order-step-0-label"_s), u"Trolls de Troy"_s);
+        QTRY_COMPARE(focusedName(drop.window), u"order-step-0"_s);
+    }
+
+    /// Within « Terres d’Arran », which « Tout Aquilon » now includes, « Tout Aquilon » is
+    /// offered greyed with the reason under it, and clicked, nothing is added.
+    void the_order_that_would_loop_is_greyed_and_cannot_be_picked()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Tagged));
+        QVERIFY(drop.framed());
+        QVERIFY(drop.orderOpened(u"tout-aquilon"_s));
+        QQuickItem *root = drop.window->contentItem();
+        clickOn(drop.window, drop.named(u"order-tab-terres-d-arran"_s));
+        QTRY_COMPARE(textNamed(root, u"order-step-0-label"_s), u"Elfes"_s);
+        OrderEditor *editor = drop.orderEditor();
+        QCOMPARE(editor->steps().size(), 3);
+
+        QQuickItem *add = drop.named(u"order-add-include"_s);
+        QVERIFY(add);
+        clickOn(drop.window, add);
+        QQuickItem *greyed = nullptr;
+        QTRY_VERIFY((greyed = drop.named(u"order-add-include-0"_s)) && greyed->isVisible());
+        QVERIFY(laidOut(drop.window));
+        QVERIFY(!greyed->property("possible").toBool());
+        // Said unavailable, and not only in its description: a screen reader announces the
+        // state, and reads a description only when asked. The keys pass over it, as over every
+        // order here: none may be included, and they stay with the list.
+        // Qt reports a disabled item as such from 6.5: `QAccessibleQuickItem::state()` of 6.4
+        // never sets `disabled`, whatever the item, so there the row says it only in its
+        // description, which is the reason it is greyed.
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+        QVERIFY(QAccessible::queryAccessibleInterface(greyed)->state().disabled);
+#endif
+        QTest::qWait(50);
+        QVERIFY(!greyed->hasActiveFocus());
+        QVERIFY(!drop.named(u"order-add-include-1"_s)->hasActiveFocus());
+        QTRY_VERIFY(shownNamed(root, u"order-add-include-0-reason"_s));
+        QCOMPARE(textNamed(root, u"order-add-include-0-reason"_s),
+                 Words::includeWouldLoop(u"Terres d’Arran"_s, u"Tout Aquilon"_s));
+        clickOn(drop.window, greyed);
+        QTest::qWait(100);
+        QCOMPARE(editor->steps().size(), 3);
+        // Escape shuts the list, and only the list.
+        auto *list = drop.window->findChild<QObject *>(u"order-add-include-list"_s);
+        QVERIFY(list && list->property("opened").toBool());
+        QTest::keyClick(drop.window, Qt::Key_Escape);
+        QTRY_VERIFY(!list->property("opened").toBool());
+        QVERIFY(shownNamed(root, u"order-editor"_s));
+    }
+
+    /// « Retour » leaves the editor with nothing written, the draft let go, and the keys back
+    /// on the order they opened it from.
+    void back_leaves_the_editor_and_writes_nothing()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Tagged));
+        QVERIFY(drop.framed());
+        QVERIFY(drop.orderOpened(u"tout-aquilon"_s));
+        keysInCharge(drop.window);
+        drop.named(u"order-step-0"_s)->forceActiveFocus(Qt::TabFocusReason);
+        QTest::keyClick(drop.window, Qt::Key_Down, Qt::ControlModifier);
+        QTRY_COMPARE(textNamed(drop.window->contentItem(), u"order-step-1-label"_s),
+                     u"Lanfeust de Troy"_s);
+
+        clickOn(drop.window, drop.named(u"order-back"_s));
+        QTRY_VERIFY(hiddenNamed(drop.window->contentItem(), u"order-editor"_s));
+        QVERIFY(!drop.orderEditor()->open());
+        QVERIFY(!drop.imports->cards().at(0).road.edited);
+        QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"review-filters"_s));
+        QTRY_COMPARE(focusedName(drop.window), u"review-order-tout-aquilon"_s);
+    }
+
+    /// An edition once chosen can be let go with « Aucune », and a range of volumes counted in
+    /// one becomes a range of chapters without it: the line sent its edition along with the
+    /// new unit, a range of chapters naming an edition was refused, and nothing moved.
+    void an_edition_once_chosen_can_be_let_go_and_chapters_name_none()
+    {
+        ADroppedFolder drop;
+        drop.editions = true;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Tagged));
+        QVERIFY(drop.framed());
+        QVERIFY(drop.orderOpened(u"tout-aquilon"_s));
+        QQuickItem *root = drop.window->contentItem();
+        OrderEditor *editor = drop.orderEditor();
+        editor->addWork(u"Gnomes de Troy"_s);
+        QVERIFY(editor->setRange(3, u"VOLUME"_s, u"Intégrale"_s, u"1"_s, u"1"_s));
+        const auto line = [editor] { return editor->steps().value(3).toMap(); };
+
+        QQuickItem *edition = nullptr;
+        QTRY_VERIFY((edition = drop.named(u"order-sheet-edition"_s)) && edition->isVisible());
+        QCOMPARE(textNamed(root, u"order-sheet-edition-text"_s), u"Intégrale"_s);
+        const auto picked = [&drop](const QString &select, int value) {
+            QQuickItem *field = fieldOf(drop.named(select));
+            QVERIFY(field);
+            // Drawn where it now stands: the sheet has just been redrawn for the step.
+            QVERIFY(laidOut(drop.window));
+            clickOn(drop.window, field);
+            QQuickItem *option = nullptr;
+            QTRY_VERIFY((option = drop.named(select + u"-"_s + QString::number(value)))
+                        && option->isVisible());
+            QVERIFY(laidOut(drop.window));
+            clickOn(drop.window, option);
+        };
+        picked(u"order-sheet-edition"_s, 0);
+        QTRY_COMPARE(line().value(u"edition"_s).toString(), QString());
+        QCOMPARE(textNamed(root, u"order-sheet-edition-text"_s), Words::noEdition());
+        QCOMPARE(line().value(u"doubt"_s).toString(),
+                 Words::rangeNeedsEdition(u"Gnomes de Troy"_s));
+
+        picked(u"order-sheet-edition"_s, 2);
+        QTRY_COMPARE(line().value(u"edition"_s).toString(), u"Originale"_s);
+        picked(u"order-step-3-unit"_s, 2);
+        QTRY_COMPARE(line().value(u"unit"_s).toString(), u"CHAPTER"_s);
+        QCOMPARE(line().value(u"edition"_s).toString(), QString());
+        QCOMPARE(line().value(u"doubt"_s).toString(), QString());
+    }
+
+    /// An inclusion the announcement would refuse is said on its step, and the order cannot
+    /// be saved while it stands: saved, the whole card would be a 400 before its first byte.
+    void a_refused_inclusion_is_said_on_its_step_and_holds_the_save()
+    {
+        ADroppedFolder drop;
+        drop.refusing = true;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Tagged));
+        QVERIFY(drop.framed());
+        QVERIFY(drop.orderOpened(u"hors-serie"_s));
+        QQuickItem *root = drop.window->contentItem();
+
+        // By its name, as the loop is said: the id is the file's, and nobody reads it here.
+        QTRY_COMPARE(textNamed(root, u"order-step-0-doubt"_s),
+                     Words::orderRefused(u"Hors-série"_s, 1, Orders::Refusal::NamesNothing,
+                                         u"nulle-part"_s));
+        // « Ordre inclus » names none it can read, and says what to do rather than nothing.
+        QTRY_COMPARE(textNamed(root, u"order-target-text"_s), Words::chooseIncludedOrder());
+        QQuickItem *save = drop.named(u"order-save"_s);
+        QVERIFY(!save->property("ready").toBool());
+        clickOn(drop.window, save);
+        QTest::qWait(100);
+        QVERIFY(shownNamed(root, u"order-editor"_s));
+
+        // « Hors-série » may not include itself, the last order offered: End stops on the one
+        // before it, and the keys never rest on what cannot be taken.
+        keysInCharge(drop.window);
+        clickOn(drop.window, fieldOf(drop.named(u"order-add-include"_s)));
+        QTRY_COMPARE(focusedName(drop.window), u"order-add-include-0"_s);
+        QTest::keyClick(drop.window, Qt::Key_End);
+        QTRY_COMPARE(focusedName(drop.window), u"order-add-include-1"_s);
+        QTest::keyClick(drop.window, Qt::Key_Down);
+        QCOMPARE(focusedName(drop.window), u"order-add-include-1"_s);
+        QTest::keyClick(drop.window, Qt::Key_Escape);
+        QTRY_COMPARE(holderName(drop.window), u"order-add-include"_s);
+
+        drop.named(u"order-step-0"_s)->forceActiveFocus(Qt::TabFocusReason);
+        QTest::keyClick(drop.window, Qt::Key_Delete);
+        QTRY_VERIFY(save->property("ready").toBool());
+        QCOMPARE(drop.orderEditor()->steps().size(), 0);
+        // The last line gone, the keys go to the way to add one, and not to nothing.
+        QTRY_COMPARE(holderName(drop.window), u"order-add-work"_s);
+    }
+
+    /// The editor is walked with the keys alone: opened with Enter on its order, then Tab
+    /// through the tabs, the orders of the rail, the steps, the ways to add one and the way
+    /// out, each stop ringed; and Escape is « Retour », the keys back where they were.
+    void the_editor_is_walked_with_the_keys_alone()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Tagged));
+        QVERIFY(drop.framed());
+        drop.review()->view()->select(drop.nodeId(u"Monde d’Aquilon"_s));
+        QQuickItem *opener = nullptr;
+        QTRY_VERIFY((opener = drop.named(u"review-order-tout-aquilon"_s)) && opener->isVisible());
+        keysInCharge(drop.window);
+        opener->forceActiveFocus(Qt::TabFocusReason);
+        QVERIFY(ringed(opener));
+        QCOMPARE(spokenName(opener).section(u", "_s, 0, 0), u"Tout Aquilon"_s);
+        QTest::keyClick(drop.window, Qt::Key_Return);
+        QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"order-editor"_s));
+        QTRY_COMPARE(focusedName(drop.window), u"order-tab-tout-aquilon"_s);
+
+        // In the order the editor is read: what is chosen, then what it holds, then the way out.
+        const QStringList zones{u"order-tab-"_s,        u"order-rail-"_s,
+                                u"order-step-"_s,       u"order-add-work"_s,
+                                u"order-add-include"_s, u"order-target"_s,
+                                u"order-sheet-"_s,      u"order-back"_s,
+                                u"order-save"_s};
+        OrderEditor *editor = drop.orderEditor();
+        const QVariantMap looked = editor->step();
+        QStringList walked;
+        int reached = 0;
+        for (int press = 0; press < 80 && holderName(drop.window) != u"order-save"_s; ++press) {
+            const QString here = holderName(drop.window);
+            walked << here;
+            const auto zone = std::ranges::find_if(zones, [&here](const QString &one) {
+                return here.startsWith(one);
+            });
+            QVERIFY2(zone != zones.end(), qPrintable(walked.join(u" → "_s)));
+            const int at = int(zone - zones.begin());
+            QVERIFY2(at >= reached, qPrintable(walked.join(u" → "_s)));
+            reached = at;
+            // A box to type in draws its own edge in emerald; every other stop wears the ring.
+            if (!here.endsWith(u"-from"_s) && !here.endsWith(u"-to"_s))
+                QVERIFY2(ringed(drop.window->activeFocusItem()), qPrintable(here));
+            QTest::keyClick(drop.window, Qt::Key_Tab);
+        }
+        walked << holderName(drop.window);
+        // Passing through the lines shows none of them on the sheet: only Enter or a click do.
+        QCOMPARE(editor->step(), looked);
+        for (const QString &zone : {u"order-tab-"_s, u"order-rail-"_s, u"order-step-"_s,
+                                    u"order-add-work"_s, u"order-add-include"_s,
+                                    u"order-target"_s, u"order-sheet-"_s, u"order-save"_s}) {
+            QVERIFY2(std::ranges::any_of(walked, [&zone](const QString &one) {
+                         return one.startsWith(zone);
+                     }),
+                     qPrintable(walked.join(u" → "_s)));
+        }
+
+        QTest::keyClick(drop.window, Qt::Key_Escape);
+        QTRY_VERIFY(hiddenNamed(drop.window->contentItem(), u"order-editor"_s));
+        QVERIFY(drop.dialog->property("opened").toBool());
+        QTRY_COMPARE(focusedName(drop.window), u"review-order-tout-aquilon"_s);
+        QVERIFY(!drop.imports->cards().at(0).road.edited);
+    }
+
+    /// Enter keeps the word typed: « Auteur M » one letter from « Auteur B », « Morvan » inside
+    /// the more used « Jean-David Morvan », « Tarquin » before a comma, none of them the name
+    /// Enter wrote into the archive when it took the first suggestion. The same word in other
+    /// letters is still the vocabulary's spelling.
+    void the_word_typed_is_the_word_kept_unless_a_suggestion_is_chosen()
+    {
+        ATokenField tokens;
+        QVERIFY(tokens.open({u"Jean-David Morvan"_s, u"Auteur B"_s, u"Morvan"_s, u"Tarquini"_s}));
+
+        tokens.enter(u"Auteur M"_s);
+        QTRY_COMPARE(tokens.words(), QStringList{u"Auteur M"_s});
+        tokens.enter(u"Morvan"_s);
+        QTRY_COMPARE(tokens.words(), (QStringList{u"Auteur M"_s, u"Morvan"_s}));
+        typeInto(tokens.window, u"Tarquin,"_s);
+        QTRY_COMPARE(tokens.words(), (QStringList{u"Auteur M"_s, u"Morvan"_s, u"Tarquin"_s}));
+        tokens.enter(u"jean david MORVAN"_s);
+        QTRY_COMPARE(tokens.words(), (QStringList{u"Auteur M"_s, u"Morvan"_s, u"Tarquin"_s,
+                                                  u"Jean-David Morvan"_s}));
+    }
+
+    /// A suggestion is reached with ↓ and ↑, shown chosen, said where the keys are, and taken
+    /// by Enter: offered rows the keys could not reach left Enter to guess which was meant.
+    void a_suggestion_is_chosen_with_the_arrows_and_taken_with_enter()
+    {
+        ATokenField tokens;
+        QVERIFY(tokens.open({u"Horreur"_s, u"Magie"_s}));
+        QQuickItem *box = tokens.named(u"tokens-field"_s);
+        typeInto(tokens.window, u"horeur"_s);
+        QQuickItem *near = nullptr;
+        QTRY_VERIFY((near = tokens.named(u"tokens-suggestion-0"_s)) && near->isVisible());
+        QQuickItem *creation = tokens.named(u"tokens-suggestion-1"_s);
+        QVERIFY(creation);
+        QCOMPARE(spokenName(near), u"Horreur"_s);
+        QCOMPARE(spokenName(creation), u"Créer « horeur »"_s);
+        QVERIFY(!near->property("chosen").toBool());
+
+        QTest::keyClick(tokens.window, Qt::Key_Down);
+        QTRY_VERIFY(near->property("chosen").toBool());
+        QAccessibleInterface *spoken = QAccessible::queryAccessibleInterface(box);
+        QVERIFY(spoken);
+        QCOMPARE(spoken->text(QAccessible::Description), u"Horreur"_s);
+        QTest::keyClick(tokens.window, Qt::Key_Down);
+        QTRY_VERIFY(creation->property("chosen").toBool());
+        QVERIFY(!near->property("chosen").toBool());
+        QTest::keyClick(tokens.window, Qt::Key_Up);
+        QTRY_VERIFY(near->property("chosen").toBool());
+        QCOMPARE(tokens.window->activeFocusItem(), box);
+
+        QTest::keyClick(tokens.window, Qt::Key_Return);
+        QTRY_COMPARE(tokens.words(), QStringList{u"Horreur"_s});
+        // Chosen for what was typed, not for what is typed next.
+        typeInto(tokens.window, u"mag"_s);
+        QTRY_VERIFY(tokens.named(u"tokens-suggestion-0"_s)
+                    && !tokens.named(u"tokens-suggestion-0"_s)->property("chosen").toBool());
+    }
+
+    /// A word already held is not held twice: « arleston » beside « Arleston » is her again,
+    /// and was a second pill, then a second author.
+    void a_word_already_held_is_not_held_twice()
+    {
+        ATokenField tokens;
+        QVERIFY(tokens.open({u"Arleston"_s}, {u"Arleston"_s}));
+        tokens.enter(u"arleston"_s);
+        QTRY_COMPARE(tokens.named(u"tokens-field"_s)->property("text").toString(), QString());
+        QCOMPARE(tokens.words(), QStringList{u"Arleston"_s});
+    }
+
+    /// Read only, a list still says its words aloud: its × were what named them, and with them
+    /// gone the words were drawn and never said.
+    void a_read_only_list_still_says_its_words()
+    {
+        ATokenField tokens;
+        QVERIFY(tokens.open({}, {u"Arleston"_s, u"Tarquin"_s}, true));
+        QQuickItem *chip = nullptr;
+        QTRY_VERIFY((chip = tokens.named(u"tokens-chip-1"_s)) && chip->isVisible());
+        QVERIFY(!tokens.named(u"tokens-chip-1-remove"_s)->isVisible());
+        QCOMPARE(spokenName(chip), u"Tarquin"_s);
+    }
+
+    /// The pills are reached and removed with the keys alone: ← from the empty box goes to
+    /// the last word's ×, → back, Space removes it and hands the keys to the box, Enter adds,
+    /// Backspace takes the last one back — and each × says aloud the field and the word.
+    void a_chip_is_reached_and_removed_with_the_keys_alone()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Tagged));
+        QVERIFY(drop.framed());
+        Review *review = drop.review();
+        const QString arran = u"Terres d’Arran"_s;
+        review->view()->select(drop.nodeId(u"Elfes"_s));
+        keysInCharge(drop.window);
+        QQuickItem *box = nullptr;
+        QTRY_VERIFY((box = drop.named(u"review-words-tags-field"_s)) && box->isVisible());
+        box->forceActiveFocus(Qt::TabFocusReason);
+        QTRY_VERIFY(box->hasActiveFocus());
+        QCOMPARE(spokenName(box), Words::fieldLabel(u"tags"_s, Manifest::Level::Work));
+
+        QTest::keyClick(drop.window, Qt::Key_Left);
+        QTRY_COMPARE(focusedName(drop.window), u"review-words-tags-chip-0-remove"_s);
+        QVERIFY(ringed(drop.window->activeFocusItem()));
+        QCOMPARE(spokenName(drop.window->activeFocusItem()),
+                 Words::removeWordFrom(Words::fieldLabel(u"tags"_s, Manifest::Level::Work),
+                                       arran));
+        QTest::keyClick(drop.window, Qt::Key_Right);
+        QTRY_COMPARE(focusedName(drop.window), u"review-words-tags-field"_s);
+
+        typeInto(drop.window, u"Elfique"_s);
+        QTest::keyClick(drop.window, Qt::Key_Return);
+        QTRY_COMPARE(wordsOn(review, u"tags"_s), (QStringList{arran, u"Elfique"_s}));
+        QCOMPARE(focusedName(drop.window), u"review-words-tags-field"_s);
+        QTest::keyClick(drop.window, Qt::Key_Backspace);
+        QTRY_COMPARE(wordsOn(review, u"tags"_s), QStringList{arran});
+
+        // Shift+Tab reaches the × too, as Tab reaches whatever comes before a box.
+        QTest::keyClick(drop.window, Qt::Key_Tab, Qt::ShiftModifier);
+        QTRY_COMPARE(focusedName(drop.window), u"review-words-tags-chip-0-remove"_s);
+        QTest::keyClick(drop.window, Qt::Key_Space);
+        QTRY_COMPARE(wordsOn(review, u"tags"_s), QStringList());
+        QTRY_COMPARE(focusedName(drop.window), u"review-words-tags-field"_s);
+    }
+
+    /// The frame is walked with Tab alone, in the order it is read: the filters, the tree and
+    /// the button under it, « Tout », the list, the sheet's fields, the way out — and each
+    /// stop ringed as it is reached.
+    void the_frame_is_walked_with_the_keys_alone()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Komga));
+        QVERIFY(drop.framed());
+        keysInCharge(drop.window);
+        QTRY_COMPARE(focusedName(drop.window), u"review-filter-0"_s);
+
+        // A series' chip is no stop where its role cannot be changed, and a series' list of
+        // volumes has nothing to tick: neither is required.
+        const QStringList zones{u"review-filter-"_s, u"review-node-"_s, u"role-chip-"_s,
+                                u"review-next"_s, u"review-tick-all"_s, u"review-line-"_s,
+                                u"review-cover-"_s, u"review-field-"_s, u"review-arcs-edit"_s, u"review-back"_s,
+                                u"review-import"_s};
+        QStringList walked;
+        int reached = 0;
+        for (int press = 0; press < 40 && focusedName(drop.window) != u"review-import"_s;
+             ++press) {
+            const QString here = focusedName(drop.window);
+            walked << here;
+            // A list field is a field of the sheet, drawn as words.
+            const QString as = here.startsWith(u"review-words-"_s)
+                ? u"review-field-"_s + here.mid(13) : here;
+            const auto zone = std::ranges::find_if(zones, [&as](const QString &one) {
+                return as.startsWith(one);
+            });
+            QVERIFY2(zone != zones.end(), qPrintable(walked.join(u" → "_s)));
+            const int at = int(zone - zones.begin());
+            QVERIFY2(at >= reached, qPrintable(walked.join(u" → "_s)));
+            reached = at;
+            // A field draws its own edge in emerald; every other stop wears the ring.
+            if (!as.startsWith(u"review-field-"_s) || here.endsWith(u"-remove"_s))
+                QVERIFY2(ringed(drop.window->activeFocusItem()), qPrintable(here));
+            QTest::keyClick(drop.window, Qt::Key_Tab);
+        }
+        walked << focusedName(drop.window);
+        for (const QString &zone : zones) {
+            if (zone == u"role-chip-"_s || zone == u"review-tick-all"_s)
+                continue;
+            QVERIFY2(std::ranges::any_of(walked, [&zone](const QString &one) {
+                         return one.startsWith(zone);
+                     }),
+                     qPrintable(walked.join(u" → "_s)));
+        }
+        // And a node of the tree folds from the keys as from a click — the tree is one stop,
+        // and Home takes the keys to its first line.
+        for (int press = 0; press < 40 && !focusedName(drop.window).startsWith(u"review-node-"_s);
+             ++press)
+            QTest::keyClick(drop.window, Qt::Key_Tab, Qt::ShiftModifier);
+        QTest::keyClick(drop.window, Qt::Key_Home);
+        QTRY_COMPARE(focusedName(drop.window), u"review-node-0"_s);
+        auto *review = drop.engine.singletonInstance<Review *>(qmlTypeId("Leaf", 1, 0, "Review"));
+        const qsizetype nodes = review->rail().size();
+        QTest::keyClick(drop.window, Qt::Key_Left);
+        QTRY_COMPARE(review->rail().size(), 1);
+        QCOMPARE(focusedName(drop.window), u"review-node-0"_s);
+        QTest::keyClick(drop.window, Qt::Key_Right);
+        QTRY_COMPARE(review->rail().size(), nodes);
+    }
+
+    /// A shelf of folders that say nothing is read by their shape, each folder's role drawn at
+    /// the end of its line, and once the folder of scans is given the title its name does not
+    /// give, « Suivant » then « Importer » confirm the three readings and send: nothing travels
+    /// before the second — the files wait for the press, the announcements alone went.
+    void folders_without_information_are_read_by_their_shape_and_confirmed_once_titled()
+    {
+        ADroppedFolder drop;
+        drop.transfers = true;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Shelf));
+        QVERIFY(drop.framed());
+
+        for (const auto &[name, role] : {std::pair{u"BD"_s, Shape::Role::Shelf},
+                                         std::pair{u"Terres d'Arran"_s, Shape::Role::Universe},
+                                         std::pair{u"Dragon Ball"_s, Shape::Role::Work},
+                                         std::pair{u"Vrac"_s, Shape::Role::Work}})
+            QCOMPARE(drop.roleSaid(name), Words::role(role));
+        QCOMPARE(textNamed(drop.window->contentItem(), u"review-import-text"_s), Words::next());
+        QCOMPARE(drop.heardTimes("POST /import "), 3);
+
+        drop.review()->view()->select(drop.nodeId(u"Vrac"_s));
+        QQuickItem *title = nullptr;
+        QTRY_VERIFY((title = drop.named(u"review-field-title"_s)) && title->isVisible());
+        QVERIFY(laidOut(drop.window));
+        // The sheet's cover block sits above the fields, so in this window the title lies on the
+        // fold: a hand scrolls to it before it clicks, and the click is no more a click on what
+        // the foot of the sheet covers.
+        for (QQuickItem *up = title->parentItem(); up; up = up->parentItem()) {
+            if (!up->property("contentY").isValid() || !up->property("contentHeight").isValid())
+                continue;
+            const qreal over = title->mapToItem(up, QPointF(0, title->height())).y() - up->height();
+            if (over > 0)
+                up->setProperty("contentY", up->property("contentY").toReal() + over + 40);
+            break;
+        }
+        QVERIFY(laidOut(drop.window));
+        clickOn(drop.window, title);
+        QTRY_VERIFY(title->hasActiveFocus());
+        typeInto(drop.window, u"Scans divers"_s);
+        QTest::keyClick(drop.window, Qt::Key_Return);
+        QTRY_COMPARE(textOn(drop.review(), u"title"_s), u"Scans divers"_s);
+        QVERIFY2(!drop.pretend.heard.contains("PUT /import/"), drop.pretend.heard.constData());
+
+        QQuickItem *go = drop.named(u"review-import"_s);
+        QTRY_VERIFY(go->property("ready").toBool());
+        clickOn(drop.window, go);
+        QTRY_COMPARE(drop.phase(), drop.phaseNamed("watching"));
+        QVERIFY(drop.importNow());
+        // Every card's files go, each into its own session: the two whose reading was
+        // confirmed as they were announced, and the folder of scans announced again with the
+        // title typed on it — one DELETE, a fourth POST, and its new session.
+        QTRY_COMPARE_WITH_TIMEOUT(drop.sessionsSentTo().size(), 3, 20000);
+        QCOMPARE(drop.heardTimes("POST /import "), 4);
+        QCOMPARE(drop.heardTimes("DELETE /import/"), 1);
+        QVERIFY2(drop.sessionsSentTo().contains("imp_4"), drop.pretend.heard.constData());
+        for (int row = 0; row < 3; ++row)
+            QVERIFY(drop.imports->data(drop.imports->index(row), int(Imports::Role::Stage_)).toInt()
+                    != int(Imports::Stage::Reviewing));
+    }
+
+    /// The role menu opened on the last line of the tree is drawn whole, past the tree's own
+    /// edge: the tree clips at 210 and the menu's reasons ask for 290, so a menu kept inside
+    /// the column would lose the end of every one — at the smallest window, and at a text half
+    /// as large again.
+    void the_role_menu_is_drawn_whole_beyond_the_rail()
+    {
+        SomeText desktop(1.0);
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Shelf));
+        auto *widths = drop.engine.singletonInstance<Widths *>(qmlTypeId("Leaf", 1, 0, "Widths"));
+        QVERIFY(widths);
+        widths->follow(&desktop);
+        QVERIFY(drop.framed());
+        for (const qreal text : {1.0, 1.5}) {
+            desktop.becomes(text);
+            QTRY_COMPARE(widths->systemText(), text);
+            drop.window->resize(800, 560);
+            QTRY_COMPARE(widths->window(), 800);
+            QVERIFY(laidOut(drop.window));
+
+            const QVariantList nodes = drop.review()->rail();
+            const QString last = nodes.constLast().toMap().value(u"name"_s).toString();
+            QQuickItem *chip = drop.chipOf(last);
+            QVERIFY2(chip && chip->isVisible(), qPrintable(last));
+            clickOn(drop.window, chip);
+            QObject *menu = drop.roleMenu();
+            QVERIFY(menu);
+            QTRY_VERIFY(menu->property("opened").toBool());
+            QVERIFY(laidOut(drop.window));
+
+            if (const QString cut = whatACutDialog(drop.window, menu, widths->space()->gutter());
+                !cut.isEmpty())
+                QFAIL(qPrintable(u"at %1: "_s.arg(text) + cut));
+            auto *box = menu->property("contentItem").value<QQuickItem *>()->parentItem();
+            const QRectF drawn = box->mapRectToScene(QRectF(0, 0, box->width(), box->height()));
+            QVERIFY2(drawn.right() > drop.zone(u"review-rail"_s).right(),
+                     qPrintable(u"at %1: the menu ends at %2, the tree at %3"_s.arg(text)
+                                    .arg(drawn.right())
+                                    .arg(drop.zone(u"review-rail"_s).right())));
+            QList<QQuickItem *> walk{box};
+            while (!walk.isEmpty()) {
+                QQuickItem *one = walk.takeLast();
+                walk.append(one->childItems());
+                if (one->inherits("QQuickText") && one->isVisible())
+                    QVERIFY2(!one->property("truncated").toBool(),
+                             qPrintable(one->property("text").toString()));
+            }
+            QTest::keyClick(drop.window, Qt::Key_Escape);
+            QTRY_VERIFY(!menu->property("visible").toBool());
+        }
+    }
+
+    /// The tree of what is imported is a chevron, a name and a count, as the frame drew it:
+    /// a level's icon before each name took the room the name needed, and « Dragon Ball »
+    /// read « Dragon … » in a column a third of the window wide.
+    void the_imported_tree_draws_no_level_icon()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        QVERIFY(drop.framed());
+        const QVariantList nodes = drop.review()->rail();
+        QVERIFY(!nodes.isEmpty());
+        for (qsizetype at = 0; at < nodes.size(); ++at) {
+            QQuickItem *line = drop.named(u"review-node-%1"_s.arg(at));
+            QVERIFY2(line, qPrintable(QString::number(at)));
+            QList<QQuickItem *> walk = line->childItems();
+            while (!walk.isEmpty()) {
+                QQuickItem *one = walk.takeLast();
+                walk.append(one->childItems());
+                QVERIFY2(!(QString::fromUtf8(one->metaObject()->className()).startsWith(u"LevelMark")
+                           && one->isVisible()),
+                         qPrintable(nodes.at(at).toMap().value(u"name"_s).toString()));
+            }
+        }
+    }
+
+    /// A level steps ten in the tree, and the tree is 250 wide where the window has the room:
+    /// fourteen a step in a column of 210 left « Édition ori… » and « Perfect Ed… » of the
+    /// two editions of Dragon Ball, three levels down.
+    void the_imported_tree_steps_ten_a_level_in_a_column_of_250()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Complete));
+        auto *widths = drop.engine.singletonInstance<Widths *>(qmlTypeId("Leaf", 1, 0, "Widths"));
+        QVERIFY(widths);
+        drop.window->resize(1400, 860);
+        QVERIFY(drop.framed());
+        QTRY_COMPARE(drop.zone(u"review-rail"_s).width(), qreal(widths->scale()->column(250)));
+
+        const QVariantList nodes = drop.review()->rail();
+        std::optional<qreal> top, below;
+        for (qsizetype at = 0; at < nodes.size(); ++at) {
+            const int depth = nodes.at(at).toMap().value(u"depth"_s).toInt();
+            const qreal x = drop.zone(u"review-node-%1-name"_s.arg(at)).left();
+            if (depth == 0 && !top)
+                top = x;
+            if (depth == 1 && !below)
+                below = x;
+        }
+        QVERIFY(top && below);
+        QCOMPARE(*below - *top, qreal(widths->scale()->size(10)));
+    }
+
+    /// A role greyed in the menu says why where it stands, and a click on it changes
+    /// nothing: « Univers » on a folder of scans with no subfolder would be a universe of
+    /// nothing.
+    void a_greyed_role_says_why_and_cannot_be_chosen()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Shelf));
+        QVERIFY(drop.framed());
+        QQuickItem *chip = drop.chipOf(u"Vrac"_s);
+        QVERIFY(chip);
+        clickOn(drop.window, chip);
+        QObject *menu = drop.roleMenu();
+        QVERIFY(menu);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QVERIFY(laidOut(drop.window));
+
+        // While the menu is open, the box under the tree says what its greyed lines are.
+        QCOMPARE(textNamed(drop.window->contentItem(), u"review-rail-note"_s),
+                 Words::greyedRolesHint());
+        const QString name = u"role-option-%1"_s.arg(int(Shape::Role::Universe));
+        QQuickItem *universe = drop.named(name);
+        QVERIFY(universe);
+        QVERIFY(!universe->isEnabled());
+        QVERIFY(shownNamed(universe, name + u"-detail"_s));
+        QCOMPARE(textNamed(universe, name + u"-detail"_s), Words::impossibleNoSubfolder());
+        clickOn(drop.window, universe);
+        QVERIFY(laidOut(drop.window));
+        QCOMPARE(drop.roleSaid(u"Vrac"_s), Words::role(Shape::Role::Work));
+        QCOMPARE(drop.imports->rowCount({}), 3);
+    }
+
+    /// The other reading of a folder is one click on its sheet, and the tree follows at once:
+    /// Perfect and Original become series of a universe, no longer two editions of one.
+    void switching_reading_redraws_the_tree()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Shelf));
+        QVERIFY(drop.framed());
+        drop.review()->view()->select(drop.nodeId(u"Dragon Ball"_s));
+        QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"review-readings"_s));
+        QCOMPARE(drop.roleSaid(u"Perfect"_s), Words::role(Shape::Role::Edition));
+        QQuickItem *other = drop.named(u"review-reading-1"_s);
+        QVERIFY(other && other->isVisible());
+        QVERIFY(laidOut(drop.window));
+        clickOn(drop.window, other);
+        QTRY_COMPARE(drop.roleSaid(u"Perfect"_s), Words::role(Shape::Role::Work));
+        QCOMPARE(drop.roleSaid(u"Original"_s), Words::role(Shape::Role::Work));
+        QCOMPARE(drop.roleSaid(u"Dragon Ball"_s), Words::role(Shape::Role::Universe));
+    }
+
+    /// An edition draws the direction its series says and the status it says itself in the
+    /// boxes that offer them: both read « Non renseigné » beside a mark that said them.
+    void an_edition_draws_the_direction_and_the_status_it_holds()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Edited));
+        QVERIFY(drop.framed());
+        // A volume's sheet first, as a reader who clicked a line before the edition's node:
+        // the boxes are drawn again for another sheet and must not keep the first one's words.
+        for (const Facts::Sheet &sheet : drop.imports->cards().at(0).road.sheets) {
+            if (sheet.level == Manifest::Level::Volume) {
+                drop.review()->view()->select(QString::number(drop.imports->cards().at(0).token) + u'/'
+                                      + sheet.at);
+                break;
+            }
+        }
+        QTest::qWait(200);
+        drop.review()->view()->select(drop.nodeId(u"Ed"_s));
+        for (const QString &key : {u"readingDirection"_s, u"status"_s}) {
+            const auto drawn = [&] {
+                QString text;
+                if (QQuickItem *box = drop.named(u"review-field-"_s + key)) {
+                    for (QQuickItem *child : box->childItems()) {
+                        if (child->property("empty").isValid())
+                            text = child->property("text").toString();
+                    }
+                }
+                return text;
+            };
+            QTRY_VERIFY2(!drawn().isEmpty() && drawn() != Words::notFilledIn(),
+                         qPrintable(key + u" draws "_s + drawn()));
+        }
+    }
+
+    /// A reading chosen from the keys keeps them in the frame: the lone card turned a shelf
+    /// emptied the queue for an instant, which sent the dialog back to the drop zone, and the
+    /// sheet drawn again has no reading left to hold them — the tree's chosen line takes them.
+    void a_reading_chosen_from_the_keys_keeps_them()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Arrivage));
+        QVERIFY(drop.framed());
+        keysInCharge(drop.window);
+        drop.review()->view()->select(drop.nodeId(u"Arrivage"_s));
+        QTRY_VERIFY(shownNamed(drop.window->contentItem(), u"review-readings"_s));
+        QVERIFY(pressedUntil(drop.window, u"review-reading-1"_s, Qt::Key_Tab, Qt::NoModifier,
+                             60));
+
+        QTest::keyClick(drop.window, Qt::Key_Return);
+        QTRY_COMPARE(drop.imports->rowCount({}), 2);
+        QCOMPARE(drop.phase(), drop.phaseNamed("verifying"));
+        QTRY_VERIFY2(focusedName(drop.window).startsWith(u"review-node-"_s),
+                     qPrintable(focusedName(drop.window)));
+        QVERIFY(drop.window->activeFocusItem()->property("selected").toBool());
+    }
+
+    /// An archive at a universe's root that says nothing is said unread, in the alert's ink,
+    /// and is not announced: sent, it would sit on the library's disk read by nobody. Said a
+    /// book from its sheet, it travels with the `oneshot.json` that makes it one.
+    void an_archive_at_a_universe_root_is_said_unread_before_anything_is_sent()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Universe));
+        auto *theme = drop.engine.singletonInstance<Theme *>(qmlTypeId("Leaf", 1, 0, "Theme"));
+        QVERIFY(theme);
+        QVERIFY(drop.framed());
+        QCOMPARE(drop.roleSaid(u"scan_final.cbz"_s), Words::role(Shape::Role::Unread));
+        const QJsonObject first = bodySent(drop.pretend.heard, "POST /import ");
+        QVERIFY2(!first.isEmpty(), drop.pretend.heard.constData());
+        for (const QJsonValue &one : first.value(u"files"_s).toArray())
+            QVERIFY(one.toObject().value(u"path"_s).toString() != u"scan_final.cbz"_s);
+
+        drop.review()->view()->select(drop.nodeId(u"scan_final.cbz"_s));
+        QTRY_COMPARE(textNamed(drop.window->contentItem(), u"review-sheet-note-0-text"_s),
+                     Words::unreadAtTheRoot());
+        QCOMPARE(drop.named(u"review-sheet-note-0-text"_s)->property("color").value<QColor>(),
+                 theme->alert());
+        // Its line in the tree is written in the alert's ink, as its chip; its line in the list
+        // says in the same ink that it will not be read.
+        const QVariantList nodes = drop.review()->rail();
+        const qsizetype node = std::ranges::find_if(nodes, [](const QVariant &one) {
+                                   return one.toMap().value(u"name"_s).toString()
+                                          == u"scan_final.cbz"_s;
+                               }) - nodes.begin();
+        QQuickItem *name = drop.named(u"review-node-%1-name"_s.arg(node));
+        QVERIFY(name);
+        QCOMPARE(name->property("color").value<QColor>(), theme->alert());
+        drop.review()->view()->select(drop.nodeId(u"Monde d’Aquilon"_s));
+        drop.review()->view()->select(drop.nodeId(u"scan_final.cbz"_s));
+        const QVariantList rows = drop.review()->rows();
+        const qsizetype row = std::ranges::find_if(rows, [](const QVariant &one) {
+                                  return one.toMap().value(u"name"_s).toString()
+                                         == u"scan_final.cbz"_s;
+                              }) - rows.begin();
+        QQuickItem *said = nullptr;
+        QTRY_VERIFY((said = drop.named(u"review-line-%1-detail"_s.arg(row))) != nullptr);
+        QCOMPARE(said->property("text").toString(), Words::noRoleNotRead());
+        QCOMPARE(said->property("color").value<QColor>(), theme->alert());
+
+        QVERIFY(shownNamed(drop.window->contentItem(), u"review-place"_s));
+        // Filing it in a series is greyed, and says why: it would mean moving the file.
+        QQuickItem *filed = drop.named(u"review-place-1"_s);
+        QVERIFY(filed && !filed->property("possible").toBool());
+        QCOMPARE(textNamed(filed, u"review-place-1-detail"_s), Words::impossibleFilingMoves());
+        QQuickItem *book = drop.named(u"review-place-0"_s);
+        QVERIFY(book && book->isVisible());
+        QCOMPARE(textNamed(book, u"review-place-0-label"_s), Words::declareABook());
+        QVERIFY(laidOut(drop.window));
+        clickOn(drop.window, book);
+        QTRY_COMPARE(drop.roleSaid(u"scan_final"_s), Words::role(Shape::Role::Book));
+        // A book nobody wrote, drew or oriented waits on all three.
+        const QString scan = drop.nodeId(u"scan_final"_s);
+        QVERIFY(drop.review()->edits()->editWords(scan, u"authors"_s, {u"Toriyama"_s}));
+        QVERIFY(drop.review()->edits()->editWords(scan, u"artists"_s, {u"Toriyama"_s}));
+        QVERIFY(drop.review()->edits()->edit(scan, u"readingDirection"_s, u"RIGHT_TO_LEFT"_s));
+
+        drop.pretend.heard.clear();
+        QQuickItem *go = drop.named(u"review-import"_s);
+        QTRY_VERIFY(go->property("ready").toBool());
+        clickOn(drop.window, go);
+        QVERIFY(drop.importNow());
+        QTRY_VERIFY2(drop.pretend.heard.contains("POST /import "), drop.pretend.heard.constData());
+        QJsonObject rewrite;
+        for (const QJsonValue &one :
+             bodySent(drop.pretend.heard, "POST /import ").value(u"files"_s).toArray()) {
+            if (one.toObject().value(u"path"_s).toString() == u"scan_final.cbz"_s)
+                rewrite = one.toObject().value(u"rewrite"_s).toObject();
+        }
+        QVERIFY2(rewrite.value(u"oneShotJson"_s).isString(), drop.pretend.heard.constData());
+    }
+
+    /// The role menu is walked with the keys alone: Tab reaches the chip, Space opens its
+    /// menu, the arrows move in it, Escape shuts it and gives the keys back to the chip, and
+    /// Enter chooses — the chip it was opened from holds the keys again once the tree is
+    /// read anew.
+    void the_role_menu_is_walked_with_the_keys_alone()
+    {
+        ADroppedFolder drop;
+        QVERIFY(drop.drop(ADroppedFolder::Kind::Shelf));
+        QVERIFY(drop.framed());
+        keysInCharge(drop.window);
+        const QString chip = u"role-chip-"_s + drop.nodeId(u"Terres d'Arran"_s);
+        // The tree is one stop: Tab enters it, the arrows reach the line, Tab its chip.
+        const QVariantList nodes = drop.review()->rail();
+        const qsizetype node = std::ranges::find_if(nodes, [](const QVariant &one) {
+                                   return one.toMap().value(u"name"_s).toString()
+                                          == u"Terres d'Arran"_s;
+                               }) - nodes.begin();
+        for (int press = 0; press < 40 && !focusedName(drop.window).startsWith(u"review-node-"_s);
+             ++press)
+            QTest::keyClick(drop.window, Qt::Key_Tab);
+        QTest::keyClick(drop.window, Qt::Key_Home);
+        QVERIFY(pressedUntil(drop.window, u"review-node-%1"_s.arg(node), Qt::Key_Down,
+                             Qt::NoModifier, 40));
+        QTest::keyClick(drop.window, Qt::Key_Tab);
+        QTRY_COMPARE(focusedName(drop.window), chip);
+        QVERIFY(ringed(drop.window->activeFocusItem()));
+
+        QObject *menu = drop.roleMenu();
+        QVERIFY(menu);
+        QTest::keyClick(drop.window, Qt::Key_Space);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QTest::keyClick(drop.window, Qt::Key_Escape);
+        QTRY_VERIFY(!menu->property("visible").toBool());
+        QTRY_COMPARE(focusedName(drop.window), chip);
+        QVERIFY(ringed(drop.window->activeFocusItem()));
+
+        // What can be chosen there, in the menu's order: a series of two editions, the
+        // universe it was read as, and a shelf.
+        QStringList possible;
+        for (const QVariant &one : drop.review()->edits()->roleOptions(drop.nodeId(u"Terres d'Arran"_s))) {
+            if (one.toMap().value(u"possible"_s).toBool())
+                possible << u"role-option-%1"_s.arg(one.toMap().value(u"role"_s).toInt());
+        }
+        const QString work = u"role-option-%1"_s.arg(int(Shape::Role::Work));
+        const QString universe = u"role-option-%1"_s.arg(int(Shape::Role::Universe));
+        const QString shelf = u"role-option-%1"_s.arg(int(Shape::Role::Shelf));
+        QCOMPARE(possible, (QStringList{work, universe, shelf}));
+
+        // Opened on the role in force, the arrows move from there, and over nothing greyed.
+        QTest::keyClick(drop.window, Qt::Key_Space);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QTRY_COMPARE(focusedName(drop.window), universe);
+        QTest::keyClick(drop.window, Qt::Key_Down);
+        QCOMPARE(focusedName(drop.window), shelf);
+        QTest::keyClick(drop.window, Qt::Key_Down);
+        QCOMPARE(focusedName(drop.window), shelf);
+        QTest::keyClick(drop.window, Qt::Key_Up);
+        QTest::keyClick(drop.window, Qt::Key_Up);
+        QCOMPARE(focusedName(drop.window), work);
+        const int wanted = int(Shape::Role::Work);
+        QTest::keyClick(drop.window, Qt::Key_Return);
+        QTRY_VERIFY(!menu->property("visible").toBool());
+        QTRY_COMPARE(drop.roleSaid(u"Terres d'Arran"_s), Words::role(Shape::Role(wanted)));
+        QTRY_COMPARE(focusedName(drop.window), u"role-chip-"_s + drop.nodeId(u"Terres d'Arran"_s));
+        QVERIFY(ringed(drop.window->activeFocusItem()));
     }
 
     /// A line of the series page opens the book where reading stopped, over the whole
@@ -4691,9 +10497,12 @@ private slots:
         QQuickItem *row = nullptr;
         QTRY_VERIFY((row = itemNamed(window->contentItem(), u"volume-e12"_s))
                     && row->isVisible() && row->width() > 0);
-        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
-                          row->mapToScene(QPointF(row->width() / 2.0, row->height() / 2.0))
-                              .toPoint());
+        // A frame drawn since the rows appeared: a row exists a turn before the column that
+        // holds it has laid it out, and a click aimed at its first position fell on bare paper.
+        QVERIFY(aFrameDrawn(window));
+        const QPoint clicked =
+            row->mapToScene(QPointF(row->width() / 2.0, row->height() / 2.0)).toPoint();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, clicked);
 
         QTRY_COMPARE(navigation->destination(), Navigation::Destination::Reader);
         QCOMPARE(navigation->parameters().value(u"entry"_s).toString(), u"e12"_s);
@@ -4981,6 +10790,46 @@ private slots:
             QVERIFY2(placed(chapter).right() <= drawn.right() + 0.5, qPrintable(said));
             QVERIFY2(row->height() >= chapter->height(), qPrintable(said));
         }
+    }
+
+    /// A chapter of the volume's panel is reached by Tab and opened by Enter, as it is by a
+    /// click: it was a place for the hand alone.
+    void a_chapter_of_the_panel_is_reached_and_opened_from_the_keyboard()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.chapters = QJsonArray{
+            QJsonObject{{u"id"_s, u"c1"_s}, {u"label"_s, u"Chap.001"_s}, {u"number"_s, 1},
+                        {u"title"_s, u"Le début"_s}, {u"kind"_s, u"CHAPTER"_s},
+                        {u"entryId"_s, u"e12"_s}, {u"startPage"_s, 0}},
+            QJsonObject{{u"id"_s, u"c2"_s}, {u"label"_s, u"Chap.002"_s}, {u"number"_s, 2},
+                        {u"title"_s, u"La suite"_s}, {u"kind"_s, u"CHAPTER"_s},
+                        {u"entryId"_s, u"e12"_s}, {u"startPage"_s, 120}},
+        };
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s, nullptr, u"manga"_s, nullptr,
+                                nullptr, &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QTRY_VERIFY(reader->chapters().size() == 2);
+        view->setProperty("volumeOpen", true);
+        QQuickItem *panel = itemNamed(view, u"reader-volume"_s);
+        QVERIFY(panel);
+        QTRY_VERIFY(panel->isVisible());
+        QQuickItem *close = itemNamed(panel, u"reader-volume-close"_s);
+        QVERIFY(close);
+        close->forceActiveFocus(Qt::TabFocusReason);
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"reader-volume-chapter-1"_s, 20));
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(reader->firstPage() == 120 || reader->secondPage() == 120);
     }
 
     /// The end card follows the window as the dock does; see `aCardThatDoesNotFollow`.
@@ -5278,14 +11127,14 @@ private slots:
         QTRY_COMPARE(navigation->destination(), Navigation::Destination::Series);
     }
 
-    /// A webtoon is scrolled and not turned, yet it ends like any book: forward at the bottom
-    /// of the strip raises the card instead of scrolling a strip that has no more to give.
-    void the_bottom_of_a_webtoon_raises_the_card_on_the_next_forward()
+    /// A webtoon is scrolled and not turned, yet its last chapter ends like any book: forward
+    /// at the bottom of the strip raises the card instead of scrolling a strip that has no
+    /// more to give — and not the offer, which has nothing to offer.
+    void the_bottom_of_a_last_webtoon_chapter_raises_the_card_on_the_next_forward()
     {
         Pretend pretend;
         QVERIFY(pretend.listen(QHostAddress::LocalHost));
         BookExtras extras;
-        extras.followed = true;
         pretend.answerFor = [&extras](const QByteArray &request) {
             return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s, nullptr,
                                 nullptr, &extras);
@@ -5318,9 +11167,7 @@ private slots:
         QTest::keyClick(window, Qt::Key_Space);
         QTRY_VERIFY(reader->atTheEnd());
         QTRY_VERIFY(card->isVisible());
-        QTRY_COMPARE(reader->next().value(u"entryId"_s).toString(), u"e13"_s);
-        QTest::keyClick(window, Qt::Key_Space);
-        QTRY_COMPARE(reader->entryId(), u"e13"_s);
+        QVERIFY(!itemNamed(view, u"reader-next-offer"_s)->isVisible());
     }
 
     /// A turn back with the card up puts it away in a book, on the same page.
@@ -5354,13 +11201,13 @@ private slots:
         QCOMPARE(reader->entryId(), u"e12"_s);
     }
 
-    /// And in a webtoon, whose turn back used to scroll the strip and leave the card up.
+    /// And in a webtoon, whose turn back used to scroll the strip and leave the card up. The
+    /// last chapter: before one that has a next, the card never comes.
     void turning_back_closes_the_card_in_a_webtoon()
     {
         Pretend pretend;
         QVERIFY(pretend.listen(QHostAddress::LocalHost));
         BookExtras extras;
-        extras.followed = true;
         pretend.answerFor = [&extras](const QByteArray &request) {
             return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s, nullptr,
                                 nullptr, &extras);
@@ -5632,8 +11479,8 @@ private slots:
         QCOMPARE(letters(trouble), 13);
         QVERIFY(dock->width() <= view->width());
 
-        window->resize(560, 700);
-        QTRY_COMPARE(view->width(), 560.0);
+        window->resize(800, 560);
+        QTRY_COMPARE(view->width(), 800.0);
         QCOMPARE(forward->width(), 22.0);
         QCOMPARE(letters(number), 11);
         QVERIFY(dock->x() >= 0 && dock->x() + dock->width() <= view->width());
@@ -5769,9 +11616,10 @@ private slots:
         // Never more than two fifths of a window that has the pages beside it.
         QVERIFY(panel->width() <= 900 * 0.4);
 
-        window->resize(560, 700);
-        QTRY_COMPARE(view->width(), 560.0);
-        QTRY_VERIFY(panel->width() <= 560 - 2 * view->property("margin").toReal());
+        window->resize(800, 560);
+        QTRY_COMPARE(view->width(), 800.0);
+        QTRY_VERIFY(panel->width() <= 800 - 2 * Scale::roomFor(Space::Gutter,
+                                                               Widths::controlsFor(800)));
     }
 
     void a_click_in_the_middle_shows_the_bars_and_a_second_hides_them()
@@ -5835,6 +11683,58 @@ private slots:
         QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.10));
         QTRY_COMPARE(reader->display(), before + 1);
         QTRY_VERIFY(!bar->isVisible() && !dock->isVisible());
+    }
+
+    /// The bars leave with the keys on one of their buttons, and the keys still turn the page:
+    /// the button went with its bar, Qt took the focus from it and gave it to nothing, and no
+    /// arrow, Escape or Space reached the reader again until a click. Tab calls the bars back,
+    /// on the button it reaches.
+    void the_keys_still_turn_pages_after_the_bars_leave_with_the_focus_on_them()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        Reader *reader = readerOpenOnTheBook(engine);
+        QVERIFY(reader);
+        QQuickItem *view = nullptr;
+        QTRY_VERIFY((view = itemNamed(window->contentItem(), u"reader-view"_s)));
+        QTRY_VERIFY(!reader->loading() && reader->pageCount() == 190);
+        QQuickItem *bar = itemNamed(view, u"reader-bar"_s);
+        QVERIFY(bar);
+        QTRY_VERIFY(bar->isVisible());
+
+        QTest::keyClick(window, Qt::Key_Tab);
+        QVERIFY2(keysWithin(window, bar) || keysWithin(window, itemNamed(view, u"reader-dock"_s)),
+                 qPrintable(focusedName(window)));
+        QVERIFY(QMetaObject::invokeMethod(view, "sendTheBarsAway"));
+        QTRY_VERIFY(!bar->isVisible());
+        QTRY_VERIFY(!keysWithin(window, bar));
+
+        const int before = reader->display();
+        QTest::keyClick(window, Qt::Key_Left);
+        QTRY_VERIFY(reader->display() != before);
+        // Space turns the page, and does not press the way back the bars took with them.
+        const int turned = reader->display();
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY(reader->display() != turned);
+        QVERIFY(itemNamed(window->contentItem(), u"reader-view"_s));
+
+        // Tab calls them back, and lands in them.
+        QVERIFY(!view->property("barsShown").toBool());
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_VERIFY(view->property("barsShown").toBool());
+        QTRY_VERIFY(bar->isVisible());
+        QVERIFY2(!keysWithin(window, view) || window->activeFocusItem() != view,
+                 qPrintable(focusedName(window)));
     }
 
     /// Leaving straight after a turn: the volume's line shows the page just reached, once the
@@ -6640,11 +12540,11 @@ private slots:
         QCOMPARE(line->property("text").toString(), u"978 2505"_s);
 
         const qreal ratio = window->devicePixelRatio();
-        for (const AWindow &at : {AWindow{1280, 800}, AWindow{1920, 1200}, AWindow{560, 700}}) {
+        for (const AWindow &at : {AWindow{1280, 800}, AWindow{1920, 1200}, AWindow{800, 560}}) {
             QVERIFY(laidOutFor(view, at));
             const QString where = u"%1 × %2"_s.arg(at.width).arg(at.height);
             const qreal factor = Widths::controlsFor(at.width);
-            const int padding = Scale::sizeFor(18, factor);
+            const int padding = Scale::sizeFor(Space::Card, factor);
             QTRY_VERIFY2(qAbs(key->width() - (panel->width() - 2 * padding)) < 0.01,
                          qPrintable(where));
             QCOMPARE(lettersOf(label), Scale::captionFor(11, factor));
@@ -6741,10 +12641,10 @@ private slots:
         QCOMPARE(itemNamed(view, u"reader-settings-button"_s)->property("held").toBool(), false);
     }
 
-    /// A strip has no sense and no pair: the card keeps only the fit, and of the fit only the
-    /// two that mean something for an endless column — « Hauteur » would be the height of
-    /// a thing with none. « Original » draws each page at the width of its file, centred.
-    void a_webtoon_offers_only_the_fit()
+    /// A strip has no sense, no pair and no fit: the card keeps the paper, and a strip opens
+    /// the first time at its files' own width, centred, which the series keeps as its 100 %.
+    /// « Largeur » drew a laptop's strip at twice the size its panels were drawn at.
+    void a_webtoon_offers_no_fit_and_opens_at_its_files_width()
     {
         Pretend pretend;
         QVERIFY(pretend.listen(QHostAddress::LocalHost));
@@ -6763,6 +12663,7 @@ private slots:
         QVERIFY(preferences);
         const auto putBack = qScopeGuard([&] {
             preferences->chooseFit(Preferences::Fit::Height);
+            window->resize(1100, 760);
         });
         preferences->chooseFit(Preferences::Fit::Height);
         Reader *reader = readerOpenOnTheBook(engine);
@@ -6783,34 +12684,27 @@ private slots:
         QVERIFY(!shown(u"reader-direction-1"_s));
         QVERIFY(!shown(u"reader-layout"_s));
         QVERIFY(!shown(u"reader-declares"_s));
-        QVERIFY(!shown(u"reader-fit-height"_s));
-        QVERIFY(shown(u"reader-fit-width"_s));
-        QVERIFY(shown(u"reader-fit-original"_s));
-        // A fit chosen for books that means nothing here is shown as the one it behaves as.
-        QVERIFY(itemNamed(card, u"reader-fit-width"_s)->property("lit").toBool());
+        QVERIFY(!shown(u"reader-fit"_s));
+        QVERIFY(!shown(u"reader-fit-original"_s));
+        QVERIFY(!shown(u"reader-pages"_s));
+        QVERIFY(shown(u"reader-backdrop"_s));
 
-        // « Largeur » is the strip as it was: every page the width of the window.
+        // The file's own width — 1000 in a window of 1100 — centred, and kept as the series'.
         QTRY_VERIFY(itemNamed(strip, u"strip-image-46"_s));
-        QCOMPARE(itemNamed(strip, u"strip-image-46"_s)->width(), strip->width());
-
-        // « Original » is the file's own width — 1000 in a window of 1100 — centred.
-        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
-                          centreOf(itemNamed(card, u"reader-fit-original"_s)));
-        QTRY_COMPARE(preferences->fit(), Preferences::Fit::Original);
         QQuickItem *image = itemNamed(strip, u"strip-image-46"_s);
-        QVERIFY(image);
         QTRY_COMPARE(image->width(), 1000.0);
         QCOMPARE(image->x(), (strip->width() - 1000) / 2);
         QCOMPARE(image->height(), 1500.0);
-        // A file wider than the window is held to the window, not cut by it.
+        QTRY_COMPARE(reader->stripWidth(), 1000.0);
+        QCOMPARE(reader->stripBase(), 1000.0);
+
+        // A file wider than the window is held to the window, not cut by it, and what the
+        // series keeps is not the window's.
         window->resize(800, window->height());
         QTRY_COMPARE(strip->width(), 800.0);
         QTRY_COMPARE(itemNamed(strip, u"strip-image-46"_s)->width(), 800.0);
-
-        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
-                          centreOf(itemNamed(card, u"reader-fit-width"_s)));
-        QTRY_COMPARE(preferences->fit(), Preferences::Fit::Width);
-        QTRY_COMPARE(itemNamed(strip, u"strip-image-46"_s)->width(), strip->width());
+        QCOMPARE(reader->stripWidth(), 1000.0);
+        QCOMPARE(preferences->fit(), Preferences::Fit::Height);
     }
 
     /// Narrowing the window re-measures every page, and a strip left alone stays at the same
@@ -6854,8 +12748,8 @@ private slots:
         QTRY_VERIFY(offsetInPage() > 50);
         QCOMPARE(reader->firstPage(), 120);
 
-        window->resize(700, window->height());
-        QTRY_COMPARE(strip->width(), 700.0);
+        window->resize(800, window->height());
+        QTRY_COMPARE(strip->width(), 800.0);
         QTRY_COMPARE(offsetInPage(), 0.0);
         QCOMPARE(reader->firstPage(), 120);
     }
@@ -7184,7 +13078,11 @@ private slots:
         QVERIFY(!itemNamed(card, u"reader-fit-height-swatch"_s)->isVisible());
 
         // Narrow: each name above its pills, both on the card's left edge. At 420 the three
-        // pills of a row still stand beside a name; at 360 they no longer do.
+        // pills of a row still stand beside a name; at 360 they no longer do. Neither is a
+        // window anyone can make since 23/10/2026, and the minimum is lifted on purpose: this
+        // is the card's own rule for a width it is not given, kept until the reader's cards
+        // are measured at 800.
+        window->setMinimumSize(QSize(0, 0));
         window->resize(420, 760);
         QTRY_COMPARE(view->width(), 420.0);
         QVERIFY(!card->property("stacked").toBool());
@@ -7466,13 +13364,14 @@ private slots:
         QVERIFY(view);
         auto *window = view->window();
         // Narrow enough for a page at 200 % to run off both sides, which is where the point
-        // aimed at can be held under the pointer across as well as down.
+        // aimed at can be held under the pointer across as well as down: the smallest window
+        // there is.
         const QSize sized = window->size();
         const auto putBack = qScopeGuard([&] { window->resize(sized); });
-        window->resize(600, 760);
+        window->resize(800, 760);
         QQuickItem *sheet = itemNamed(view, u"reader-sheet"_s);
         QVERIFY(sheet);
-        QTRY_VERIFY(sheet->width() < 600);
+        QTRY_VERIFY(sheet->width() < 800);
         QVERIFY(aFrameDrawn(window));
         const int before = reader->display();
 
@@ -7613,9 +13512,888 @@ private slots:
         QTRY_VERIFY2(pretend.heard.contains(whole), whole.constData());
     }
 
-    /// The zoom stays out of a strip: Ctrl and the wheel scroll a webtoon as the wheel alone
-    /// does, and nothing is enlarged.
-    void ctrl_and_the_wheel_still_scroll_a_webtoon()
+    /// A webtoon zooms by itself, apart from the books: Ctrl and the wheel, Ctrl + and −,
+    /// Ctrl 0 back, the column never wider than the window, and the page being read still the
+    /// one at the middle. It opens at its files' own width, not the window's (test of
+    /// 24/11/2026: a laptop's strip drew its panels twice the size they were drawn at).
+    void ctrl_and_the_wheel_zoom_a_webtoon_and_not_a_book()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *strip = nullptr;
+        QTRY_VERIFY((strip = itemNamed(view, u"reader-strip"_s)) && strip->isVisible());
+        QTRY_COMPARE(stripPageAt(strip, strip->property("contentY").toReal() + 1), 46);
+        const auto width46 = [&] {
+            QQuickItem *image = itemNamed(strip, u"strip-image-46"_s);
+            return image ? image->width() : -1.0;
+        };
+        // Its file's width, 1000, in a window wider than that.
+        QVERIFY(strip->width() > 1000);
+        QTRY_COMPARE(width46(), 1000.0);
+        const qreal middle = strip->property("contentY").toReal() + strip->height() / 2;
+        const int read = stripPageAt(strip, middle);
+
+        // A notch down with Ctrl is a tenth smaller, and the strip did not scroll away from
+        // the page at the middle.
+        wheel(window, across(view, 0.5), QPoint(0, -120), QPoint(0, 0), Qt::ControlModifier);
+        QTRY_COMPARE(width46(), double(qRound(1000 / 1.1)));
+        QVERIFY(qAbs(reader->stripWidth() - 1000 / 1.1) < 0.001);
+        QVERIFY(!reader->stripOwn());
+        QCOMPARE(stripPageAt(strip, strip->property("contentY").toReal() + strip->height() / 2),
+                 read);
+
+        // Ctrl 0 puts it back at its 100 %. Ctrl + past the files' own width is this
+        // chapter's alone, and twice is held to the window; Ctrl 0 forgets it.
+        QTest::keyClick(window, Qt::Key_0, Qt::ControlModifier);
+        QTRY_COMPARE(width46(), 1000.0);
+        QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
+        QTRY_COMPARE(width46(), strip->width());
+        QVERIFY(reader->stripOwn());
+        QCOMPARE(preferences->strip(reader->seriesId(), u"other"_s).width, 1000.0);
+        QTest::keyClick(window, Qt::Key_0, Qt::ControlModifier);
+        QTRY_COMPARE(width46(), 1000.0);
+        QVERIFY(!reader->stripOwn());
+        // The book's zoom was never touched.
+        QCOMPARE(zoomOf(view), 1.0);
+    }
+
+    /// A webtoon's card is its own row (maquette « Bande du bas »): the chapter among the
+    /// others and the steps to its neighbours, the zoom − % +, the A — and none of a book's
+    /// scrub nor its pages, which said nothing of where a strip is.
+    void a_webtoons_card_names_the_chapter_among_the_others_and_steps_to_them()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.preceded = true;
+        extras.followed = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s, nullptr, nullptr,
+                                &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QTRY_COMPARE(reader->entryCount(), 3);
+        QVERIFY(!itemNamed(view, u"reader-book-row"_s)->isVisible());
+        QQuickItem *back = barsCalled(window, view, u"reader-entry-backward"_s);
+        QVERIFY(back);
+        const auto text = [&](const QString &name) {
+            return itemNamed(view, name)->property("text").toString();
+        };
+        QCOMPARE(text(u"reader-entry-name"_s), reader->entryLabel());
+        QCOMPARE(text(u"reader-entry-among"_s), Words::readerAmong(3));
+        QTRY_COMPARE(text(u"reader-strip-level"_s), Words::readerZoom(1));
+
+        // − is a lasting zoom, said in the card.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(view, u"reader-zoom-out"_s)));
+        QTRY_VERIFY(qAbs(reader->stripWidth() - 1000 / 1.1) < 0.001);
+        QCOMPARE(text(u"reader-strip-level"_s), Words::readerZoom(1 / 1.1));
+
+        // « goes to the chapter before, and » back to this one.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(back));
+        QTRY_VERIFY(!reader->loading() && reader->entryId() == u"e11"_s);
+        QTRY_COMPARE(reader->entryPosition(), 1);
+        QVERIFY(!reader->hasPrevious());
+        QQuickItem *forward = barsCalled(window, view, u"reader-entry-forward"_s);
+        QVERIFY(forward);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(forward));
+        QTRY_VERIFY(!reader->loading() && reader->entryId() == u"e12"_s);
+    }
+
+    /// Going down a strip is reading it: the bars go at the first notch down, and stay going
+    /// up — a reader going back up a few panels has not asked for them (24/11/2026).
+    void a_webtoon_sends_its_bars_away_going_down_and_not_going_up()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QVERIFY(barsCalled(qobject_cast<QQuickWindow *>(window), view, u"reader-auto-read"_s));
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const qreal from = strip->property("contentY").toReal();
+
+        wheel(window, across(view, 0.5), QPoint(0, 120));
+        QTRY_VERIFY(strip->property("contentY").toReal() < from);
+        QVERIFY(view->property("barsShown").toBool());
+
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_VERIFY(!view->property("barsShown").toBool());
+    }
+
+    /// The A sends the strip down by itself, green while it does; the bars go a moment after
+    /// it is pressed, and a hand on the strip — a notch of the wheel — stops it.
+    void the_a_reads_a_webtoon_by_itself_until_a_hand_moves_it()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QQuickItem *a = barsCalled(window, view, u"reader-auto-read"_s);
+        QVERIFY(a);
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const qreal from = strip->property("contentY").toReal();
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(a));
+        QTRY_VERIFY(strip->property("autoRead").toBool());
+        auto *theme = engine.singletonInstance<Theme *>(qmlTypeId("Leaf", 1, 0, "Theme"));
+        QVERIFY(theme);
+        QTRY_COMPARE(a->property("color").value<QColor>(), theme->emerald());
+        QTRY_VERIFY(strip->property("contentY").toReal() > from + 20);
+        QTRY_VERIFY(!view->property("barsShown").toBool());
+
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_VERIFY(!strip->property("autoRead").toBool());
+        const qreal stopped = strip->property("contentY").toReal();
+        QTest::qWait(300);
+        QCOMPARE(strip->property("contentY").toReal(), stopped);
+    }
+
+    /// The mark on the right edge says how far down the chapter the strip is, and a click on
+    /// it goes there: three quarters down the mark is three quarters down the chapter.
+    void the_mark_on_the_right_of_a_strip_says_how_far_and_jumps()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QQuickItem *mark = barsCalled(window, view, u"reader-strip-mark"_s);
+        QVERIFY(mark);
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const auto fraction = [&] { return strip->property("fraction").toReal(); };
+        // Opened at page 46 of 190: about a quarter down.
+        QVERIFY(qAbs(fraction() - 46.0 / 189) < 0.05);
+        QVERIFY(qAbs(itemNamed(mark, u"reader-strip-mark-read"_s)->height()
+                     - mark->height() * fraction()) < 1);
+
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          mark->mapToScene(QPointF(mark->width() / 2, mark->height() * 0.75))
+                              .toPoint());
+        QTRY_VERIFY(qAbs(fraction() - 0.75) < 0.05);
+        QTRY_VERIFY(reader->firstPage() > 130);
+    }
+
+    /// A webtoon's desk, after the validated mockup: two sliders under « Défilement », when the
+    /// bars go under « Commandes » with the line saying what the pill chosen does, the box
+    /// « à l'arrêt » unless scrolling never sends them away, the paper, and its own note.
+    void a_webtoons_desk_offers_its_scrolling_its_controls_and_the_paper()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QQuickItem *card = openTheSettings(window, view);
+        QVERIFY(card);
+        const auto shown = [&](const QString &name) {
+            QQuickItem *one = itemNamed(card, name);
+            return one && one->isVisible();
+        };
+        for (const QString &name : {u"reader-sensitivity"_s, u"reader-auto-speed"_s,
+                                    u"reader-controls"_s, u"reader-at-rest"_s,
+                                    u"reader-backdrop"_s})
+            QVERIFY2(shown(name), qPrintable(name));
+        QVERIFY(!shown(u"reader-motion"_s));
+        QCOMPARE(itemNamed(card, u"reader-desk-note"_s)->property("text").toString(),
+                 Words::readerStripDeskNote());
+
+        // « Au clic »: the line says so, and the box has nothing left to add.
+        // The pointer arrives before it presses, as a hand's does: a press out of nowhere
+        // is the first thing a pill's hover has not yet seen.
+        QTest::mouseMove(window, centreOf(itemNamed(card, u"reader-controls-click"_s)));
+        QTest::qWait(100);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(card, u"reader-controls-click"_s)));
+        QTRY_COMPARE(preferences->stripControls(), Preferences::StripControls::OnClick);
+        QCOMPARE(itemNamed(card, u"reader-controls-hint"_s)->property("text").toString(),
+                 Words::readerStripControlsHint(Preferences::StripControls::OnClick));
+        QTRY_VERIFY(!shown(u"reader-at-rest"_s));
+
+        // The slider's far end is its last step, and the A goes five times as fast as at its
+        // third: a quarter faster each step.
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const qreal before = strip->property("autoSpeed").toReal();
+        QQuickItem *speed = itemNamed(card, u"reader-auto-speed"_s);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          speed->mapToScene(QPointF(speed->width() - 2, 4)).toPoint());
+        QTRY_COMPARE(preferences->stripAutoSpeed(), 10);
+        QVERIFY(qAbs(strip->property("autoSpeed").toReal() / before - std::pow(10, 0.7)) < 0.01);
+    }
+
+    /// The arrows ↓ and ↑ scroll a webtoon while they are held and stop at the release: the
+    /// reader opens with its bars up, and a click in the middle calling them again must not
+    /// take the keys away from the page.
+    void a_webtoons_arrows_scroll_while_held_with_the_bars_up_or_not()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const auto y = [&] { return strip->property("contentY").toReal(); };
+        const auto held = [&](Qt::Key key, int ms) {
+            const qreal from = y();
+            QTest::keyPress(window, key);
+            QTest::qWait(ms);
+            QTest::keyRelease(window, key);
+            return y() - from;
+        };
+
+        // Straight after opening, with the keys where the volume left them.
+        qreal moved = held(Qt::Key_Down, 500);
+        QVERIFY2(moved > 100, qPrintable(u"down on opening moved %1"_s.arg(moved)));
+        // Let the strip come to rest: the speed it had is not given up in the half second.
+        QTest::qWait(600);
+        moved = held(Qt::Key_Up, 500);
+        QVERIFY2(moved < -50, qPrintable(u"up moved %1"_s.arg(moved)));
+        QTest::qWait(600);
+
+        // And after the bars were called by a click in the middle.
+        QVERIFY(barsCalled(window, view, u"reader-auto-read"_s));
+        moved = held(Qt::Key_Down, 500);
+        QVERIFY2(moved > 100, qPrintable(u"down after a click moved %1"_s.arg(moved)));
+        // Let go, it stops.
+        QTest::qWait(400);
+        const qreal rest = y();
+        QTest::qWait(300);
+        QCOMPARE(y(), rest);
+    }
+
+    /// What a reader on the touchpad does: calls the bars with a click, presses one of their
+    /// buttons, sweeps two fingers down — the bars go — and then uses the arrows. Wherever the
+    /// focus was left by the click, the arrows still scroll; the pad's phases (begin, updates in
+    /// pixels, end) take the bars away and, under « En remontant », bring them back.
+    void a_webtoons_arrows_and_bars_follow_a_reader_on_the_touchpad()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->chooseStripControls(Preferences::StripControls::OnTheWayUp);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const auto y = [&] { return strip->property("contentY").toReal(); };
+        const auto bars = [&] { return view->property("barsShown").toBool(); };
+        const auto sweep = [&](int pixels, int updates) {
+            wheel(window, across(view, 0.5), {}, {}, Qt::NoModifier, Qt::ScrollBegin);
+            for (int i = 0; i < updates; ++i) {
+                wheel(window, across(view, 0.5), QPoint(0, pixels), QPoint(0, pixels),
+                      Qt::NoModifier, Qt::ScrollUpdate);
+                QTest::qWait(8);
+            }
+            wheel(window, across(view, 0.5), {}, {}, Qt::NoModifier, Qt::ScrollEnd);
+        };
+
+        // The bars called, a button of theirs pressed by the pointer: it keeps the focus.
+        QVERIFY(barsCalled(window, view, u"reader-auto-read"_s));
+        QQuickItem *button = itemNamed(view, u"reader-auto-read"_s);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(button));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(button));
+        QVERIFY(!strip->property("autoRead").toBool());
+
+        // Two fingers down: the bars go.
+        sweep(-40, 6);
+        QTRY_VERIFY(!bars());
+        QTest::qWait(900);
+
+        // The arrows, after all that.
+        const qreal from = y();
+        QTest::keyPress(window, Qt::Key_Down);
+        QTest::qWait(500);
+        QTest::keyRelease(window, Qt::Key_Down);
+        QVERIFY2(y() - from > 100,
+                 qPrintable(u"down moved %1, focus on %2"_s.arg(y() - from)
+                                .arg(window->activeFocusItem()
+                                         ? window->activeFocusItem()->objectName()
+                                         : u"nothing"_s)));
+        QTest::qWait(600);
+        const qreal low = y();
+        QTest::keyPress(window, Qt::Key_Up);
+        QTest::qWait(500);
+        QTest::keyRelease(window, Qt::Key_Up);
+        QVERIFY2(y() - low < -50, qPrintable(u"up moved %1"_s.arg(y() - low)));
+        QTest::qWait(600);
+        // Held up for half a second, the arrow climbed more than a quarter of the window: the
+        // bars are back, by the way chosen.
+        QTRY_VERIFY(bars());
+
+        // Gone again by two fingers down, and back by two fingers up.
+        sweep(-40, 6);
+        QTRY_VERIFY(!bars());
+        QTest::qWait(900);
+        sweep(40, 40);
+        QTRY_VERIFY(bars());
+    }
+
+    /// The settings used, then put away: the pill clicked in them held the keys, and with the
+    /// card gone the arrows must scroll the strip again, not go to a control nobody can see.
+    void a_webtoons_arrows_work_after_the_settings_were_used()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const auto y = [&] { return strip->property("contentY").toReal(); };
+        QQuickItem *card = openTheSettings(window, view);
+        QVERIFY(card);
+        QQuickItem *pill = itemNamed(card, u"reader-controls"_s);
+        QVERIFY(pill);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, centreOf(pill));
+        QTest::qWait(200);
+        // Put away by its own button, as a reader does.
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(card, u"reader-settings-close"_s)));
+        QTRY_VERIFY(!card->isVisible());
+        QTest::qWait(400);
+
+        const qreal from = y();
+        QTest::keyPress(window, Qt::Key_Down);
+        QTest::qWait(500);
+        QTest::keyRelease(window, Qt::Key_Down);
+        QVERIFY2(y() - from > 100,
+                 qPrintable(u"down moved %1, focus on %2"_s.arg(y() - from)
+                                .arg(window->activeFocusItem()
+                                         ? window->activeFocusItem()->objectName()
+                                         : u"nothing"_s)));
+        QTest::qWait(600);
+
+        // The S opens the settings, and closes them.
+        QTest::keyClick(window, Qt::Key_S);
+        QTRY_VERIFY(card->isVisible());
+        QTest::keyClick(window, Qt::Key_S);
+        QTRY_VERIFY(!card->isVisible());
+    }
+
+    /// The dock's A has a key: pressed, the strip reads itself down, and the same key stops it.
+    /// The card of keys, asked for a webtoon, says so — with the arrows that scroll, and none
+    /// of the book's « page précédente » over the left and right arrows.
+    void the_A_key_reads_a_webtoon_by_itself_and_the_card_of_keys_says_so()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        QVERIFY(!strip->property("autoRead").toBool());
+
+        QTest::keyClick(window, Qt::Key_A);
+        QTRY_VERIFY(strip->property("autoRead").toBool());
+        QTest::keyClick(window, Qt::Key_A);
+        QTRY_VERIFY(!strip->property("autoRead").toBool());
+
+        ReaderCaptions captions;
+        const auto doesOf = [&captions](bool webtoon) {
+            QStringList does;
+            for (const QVariant &group : captions.shortcutGroups(false, webtoon)) {
+                for (const QVariant &line : group.toMap().value(u"rows"_s).toList())
+                    does << line.toMap().value(u"does"_s).toString();
+            }
+            return does;
+        };
+        QVERIFY(doesOf(true).contains(Words::shortcutDoes(Words::ShortcutDoes::AutoRead)));
+        QVERIFY(doesOf(true).contains(Words::shortcutDoes(Words::ShortcutDoes::ScrollByArrow)));
+        QVERIFY(!doesOf(true).contains(Words::shortcutDoes(Words::ShortcutDoes::TurnByArrow)));
+        QVERIFY(!doesOf(false).contains(Words::shortcutDoes(Words::ShortcutDoes::AutoRead)));
+    }
+
+    /// The A stopped, « À l'arrêt » counts from there: the bars it sent away come back five
+    /// seconds after the pause, which nothing moving the strip would otherwise start.
+    void the_bars_come_back_at_rest_once_the_A_stops()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->chooseStripAtRest(true);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QVERIFY(barsCalled(qobject_cast<QQuickWindow *>(window), view, u"reader-auto-read"_s));
+        const auto bars = [&] { return view->property("barsShown").toBool(); };
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+
+        QTest::keyClick(window, Qt::Key_A);
+        QTRY_VERIFY(strip->property("autoRead").toBool());
+        QTRY_VERIFY_WITH_TIMEOUT(!bars(), 3000);
+        QTest::keyClick(window, Qt::Key_A);
+        QTRY_VERIFY(!strip->property("autoRead").toBool());
+        QVERIFY(!bars());
+        QTRY_VERIFY_WITH_TIMEOUT(bars(), 7000);
+    }
+
+    /// The bars and the strip's way down, by the mode chosen: « Au clic » leaves them up going
+    /// down; « En remontant » brings them back after a quarter of a screen up, and not a notch.
+    void a_webtoons_bars_come_back_by_the_way_chosen()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->chooseStripControls(Preferences::StripControls::OnClick);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QVERIFY(barsCalled(qobject_cast<QQuickWindow *>(window), view, u"reader-auto-read"_s));
+        const auto bars = [&] { return view->property("barsShown").toBool(); };
+
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTest::qWait(200);
+        QVERIFY(bars());
+
+        preferences->chooseStripControls(Preferences::StripControls::OnTheWayUp);
+        // The second step: a notch is 108 pixels, a quarter of the window's 760 being 190.
+        preferences->chooseStripSensitivity(1);
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_VERIFY(!bars());
+        // A notch up is 108, less than a quarter of the window.
+        wheel(window, across(view, 0.5), QPoint(0, 120));
+        QTest::qWait(200);
+        QVERIFY(!bars());
+        wheel(window, across(view, 0.5), QPoint(0, 120));
+        QTRY_VERIFY(bars());
+    }
+
+    /// « Reviennent aussi à l'arrêt »: five seconds with the strip still after it sent them
+    /// away going down, and they are back.
+    void a_webtoons_bars_come_back_at_rest_when_asked()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->chooseStripAtRest(true);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QVERIFY(barsCalled(qobject_cast<QQuickWindow *>(window), view, u"reader-auto-read"_s));
+        const auto bars = [&] { return view->property("barsShown").toBool(); };
+
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_VERIFY(!bars());
+        QTest::qWait(3000);
+        QVERIFY(!bars());
+        QTRY_VERIFY_WITH_TIMEOUT(bars(), 4000);
+    }
+
+    /// The sensitivity moves a notch six times as far at its last step, and two
+    /// fingers lifted from the pad leave the strip going on a little — unless the reader asked
+    /// for no motion.
+    void a_webtoon_scrolls_by_its_sensitivity_and_coasts_after_the_pad()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->chooseStripSensitivity(10);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const auto y = [&] { return strip->property("contentY").toReal(); };
+
+        qreal from = y();
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_COMPARE(y(), from + 720);
+
+        from = y();
+        wheel(window, across(view, 0.5), {}, {}, Qt::NoModifier, Qt::ScrollBegin);
+        for (int i = 0; i < 4; ++i) {
+            wheel(window, across(view, 0.5), QPoint(0, -30), QPoint(0, -30), Qt::NoModifier,
+                  Qt::ScrollUpdate);
+            QTest::qWait(10);
+        }
+        wheel(window, across(view, 0.5), {}, {}, Qt::NoModifier, Qt::ScrollEnd);
+        const qreal lifted = y();
+        QCOMPARE(lifted, from + 4 * 180);
+        QTRY_VERIFY(y() > lifted + 20);
+        QTRY_VERIFY(!strip->property("coasting").toReal());
+    }
+
+    /// The pad's two fingers, as a desktop really sends them, move the strip by the sensitivity:
+    /// the same swipe goes six times as far at the last step as at the first — the thing the settings promise, which the real pad never got.
+    void a_pad_swipe_goes_as_far_as_the_sensitivity_says()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const auto y = [&] { return strip->property("contentY").toReal(); };
+        const auto swiped = [&](int step) {
+            preferences->chooseStripSensitivity(step);
+            QTest::qWait(1000);
+            const qreal from = y();
+            swipe(window, across(view, 0.5), 20, -3);
+            // The strip goes on a little after the fingers lift: let it come to rest.
+            QTest::qWait(1500);
+            return y() - from;
+        };
+        const qreal slow = swiped(0);
+        const qreal fast = swiped(10);
+        QVERIFY2(slow > 100, qPrintable(u"slow moved %1"_s.arg(slow)));
+        QVERIFY2(fast > slow * 5 && fast < slow * 7,
+                 qPrintable(u"slow %1, fast %2"_s.arg(slow).arg(fast)));
+    }
+
+    /// A click held and dragged moves the strip by the sensitivity too: one for one at the
+    /// middle step, and by the sixth root and a half of the curve either side.
+    void a_dragged_strip_follows_the_sensitivity_too()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QQuickItem *strip = itemNamed(view, u"reader-strip"_s);
+        const auto y = [&] { return strip->property("contentY").toReal(); };
+        const auto dragged = [&](int step) {
+            preferences->chooseStripSensitivity(step);
+            QTest::qWait(1000);
+            const qreal from = y();
+            const QPoint start = across(view, 0.5) + QPoint(0, 250);
+            QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, start);
+            for (int i = 1; i <= 20; ++i) {
+                QTest::mouseMove(window, start - QPoint(0, 10 * i));
+                QTest::qWait(8);
+            }
+            // Held still before it lets go, so that nothing goes on after.
+            QTest::qWait(250);
+            QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, start - QPoint(0, 200));
+            QTest::qWait(600);
+            return y() - from;
+        };
+        const qreal middle = dragged(5);
+        QVERIFY2(middle > 150 && middle < 250, qPrintable(u"middle moved %1"_s.arg(middle)));
+        const qreal slow = dragged(0);
+        const qreal fast = dragged(10);
+        QVERIFY2(fast > slow * 2.3 && fast < slow * 3.6,
+                 qPrintable(u"slow %1, fast %2"_s.arg(slow).arg(fast)));
+    }
+
+    /// A webtoon turns nothing, so a click on its left or its right calls the bars like one in
+    /// the middle; and bars put away by a click stay away however the strip is scrolled.
+    void a_webtoons_bars_answer_a_click_anywhere_and_stay_away_once_clicked_away()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->chooseStripAtRest(true);
+        preferences->chooseStripControls(Preferences::StripControls::Discreet);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const auto bars = [&] { return view->property("barsShown").toBool(); };
+
+        // The welcome's three seconds, and the bars are gone by themselves.
+        QTRY_VERIFY_WITH_TIMEOUT(!bars(), 6000);
+        for (const qreal side : {0.1, 0.9}) {
+            QTest::mouseMove(window, across(view, side));
+            QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, side));
+            QTRY_VERIFY(bars());
+            QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, across(view, side));
+            QTRY_VERIFY(!bars());
+        }
+        // A click put them away for good: scrolling alone never calls them back.
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTest::qWait(6000);
+        QVERIFY(!bars());
+    }
+
+    /// The bars the welcome took away, after three seconds, come back at rest once the strip was
+    /// scrolled, as the ones scrolling sent away do: the reader never touched a bar, and
+    /// « À l'arrêt » did nothing for them.
+    void a_webtoons_bars_the_welcome_took_come_back_at_rest()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        preferences->chooseStripAtRest(true);
+        preferences->chooseStripControls(Preferences::StripControls::Discreet);
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        const auto bars = [&] { return view->property("barsShown").toBool(); };
+        QTRY_VERIFY_WITH_TIMEOUT(!bars(), 6000);
+        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTest::qWait(1000);
+        QVERIFY(!bars());
+        QTRY_VERIFY_WITH_TIMEOUT(bars(), 7000);
+    }
+
+    /// The foot of a webtoon's chapter offers the next one at the middle of the screen, its
+    /// first pages already asked for, and the offer goes by itself after six seconds; at the
+    /// foot, going on brings it back rather than the book's card, and its button opens it.
+    void the_foot_of_a_webtoon_chapter_offers_the_next_for_six_seconds()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        BookExtras extras;
+        extras.followed = true;
+        pretend.answerFor = [&extras](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s, nullptr, nullptr,
+                                &extras);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = qobject_cast<QQuickWindow *>(view->window());
+        QTRY_COMPARE(reader->entryCount(), 2);
+        QQuickItem *offer = itemNamed(view, u"reader-next-offer"_s);
+        QVERIFY(offer);
+        QVERIFY(!offer->isVisible());
+
+        QTest::keyClick(window, Qt::Key_End);
+        QTRY_VERIFY(offer->isVisible() && offer->opacity() == 1.0);
+        QCOMPARE(itemNamed(offer, u"reader-next-offer-title"_s)->property("text").toString(),
+                 reader->next().value(u"label"_s).toString());
+        QTRY_VERIFY(pretend.heard.contains("GET /entries/e13/pages/0 HTTP"));
+        QVERIFY(!reader->atTheEnd());
+        QTRY_VERIFY_WITH_TIMEOUT(!offer->isVisible(), 8000);
+
+        // Going on at the foot is the offer again, never the book's card.
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY(offer->isVisible());
+        QVERIFY(!reader->atTheEnd());
+        QTRY_VERIFY(offer->opacity() == 1.0);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(itemNamed(offer, u"reader-next-offer-go"_s)));
+        QTRY_COMPARE(reader->entryId(), u"e13"_s);
+        QTRY_VERIFY(!offer->isVisible());
+    }
+
+    /// A pinch over a strip is a glass and keeps nothing: what is under the fingers grows,
+    /// the bar at the foot says how to leave, and the width the series keeps is untouched.
+    /// Escape puts it away before it leaves anything else, and so does a double click.
+    void a_pinch_over_a_webtoon_is_a_glass_that_keeps_nothing()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"VERTICAL"_s, nullptr, u"webtoon"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *strip = nullptr;
+        QTRY_VERIFY((strip = itemNamed(view, u"reader-strip"_s)) && strip->isVisible());
+        QTRY_COMPARE(reader->stripWidth(), 1000.0);
+        // Said in the chapter's place in the card, which comes up for as long as it is there.
+        QQuickItem *dock = itemNamed(view, u"reader-dock"_s);
+        QQuickItem *said = itemNamed(view, u"reader-entry-name"_s);
+        QVERIFY(dock && said);
+        const auto glass = [&] { return strip->property("loupe").toReal(); };
+
+        pinch(window, QPointF(across(view, 0.5)), 0.5);
+        QTRY_VERIFY(glass() > 1.4);
+        QTRY_VERIFY(dock->isVisible() && dock->opacity() > 0);
+        QCOMPARE(said->property("text").toString(), Words::readerLoupe());
+        QCOMPARE(reader->stripWidth(), 1000.0);
+        QVERIFY(!reader->stripOwn());
+
+        // Escape takes the glass and leaves the reader where it is.
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_COMPARE(glass(), 1.0);
+        QVERIFY(view->isVisible());
+        QCOMPARE(said->property("text").toString(), reader->entryLabel());
+
+        pinch(window, QPointF(across(view, 0.5)), 0.5);
+        QTRY_VERIFY(glass() > 1.4);
+        QTest::mouseDClick(window, Qt::LeftButton, Qt::NoModifier, across(view, 0.5));
+        QTRY_COMPARE(glass(), 1.0);
+        QCOMPARE(reader->stripWidth(), 1000.0);
+    }
+
+    /// A held arrow drives a webtoon: it starts at once, moves a little every frame and never
+    /// by a jump, keeps on through the key's own repeat, and comes to rest soon after the key
+    /// is let go. A screen at a time, glided, read as jolts (test of 24/11/2026).
+    void a_held_arrow_scrolls_a_webtoon_without_a_jolt()
     {
         Pretend pretend;
         QVERIFY(pretend.listen(QHostAddress::LocalHost));
@@ -7633,15 +14411,48 @@ private slots:
         QQuickItem *strip = nullptr;
         QTRY_VERIFY((strip = itemNamed(view, u"reader-strip"_s)) && strip->isVisible());
         QTRY_COMPARE(stripPageAt(strip, strip->property("contentY").toReal() + 1), 46);
-        const qreal top = strip->property("contentY").toReal();
+        const auto y = [&] { return strip->property("contentY").toReal(); };
+        const qreal screen = strip->height();
+        const qreal top = y();
 
-        wheel(window, across(view, 0.5), QPoint(0, -120), QPoint(0, 0),
-                          Qt::ControlModifier);
-        QTRY_VERIFY(strip->property("contentY").toReal() > top);
-        QTest::keyClick(window, Qt::Key_Plus, Qt::ControlModifier);
-        QTest::keyClick(window, Qt::Key_I);
-        QTRY_VERIFY(view->property("volumeOpen").toBool());
-        QCOMPARE(zoomOf(view), 1.0);
+        // Held for most of a second, with the key's own repeat arriving as it does from a
+        // keyboard: presses marked as repeats, which must change nothing.
+        QTest::keyPress(window, Qt::Key_Down);
+        qreal last = y();
+        qreal largest = 0;
+        QElapsedTimer held;
+        held.start();
+        while (held.elapsed() < 700) {
+            QTest::qWait(16);
+            if (held.elapsed() > 400) {
+                QKeyEvent repeat(QEvent::KeyPress, Qt::Key_Down, Qt::NoModifier, QString(), true);
+                QCoreApplication::sendEvent(window, &repeat);
+            }
+            largest = qMax(largest, y() - last);
+            QVERIFY2(y() >= last, "a held ↓ moved the strip up");
+            last = y();
+        }
+        // It went somewhere, in steps a reader's eye follows: no frame moved a fifth of a
+        // screen, where a glided screen moved most of one in a handful of frames.
+        QVERIFY(y() - top > screen * 0.2);
+        QVERIFY2(largest < screen * 0.2, qPrintable(u"a step of %1 px"_s.arg(largest)));
+
+        // Let go, it comes to rest within a short way and stays there.
+        QTest::keyRelease(window, Qt::Key_Down);
+        const qreal released = y();
+        QTRY_VERIFY(qAbs(strip->property("speed").toReal()) < 0.001);
+        const qreal rested = y();
+        QVERIFY(rested - released < screen * 0.3);
+        QTest::qWait(100);
+        QCOMPARE(y(), rested);
+        QCOMPARE(reader->firstPage(), stripPageAt(strip, rested + screen / 2));
+
+        // A tap is a short way, not a screen: and ↑ brings it back the same way.
+        // Waited for moving first: the speed is still nought before the first frame of it.
+        QTest::keyClick(window, Qt::Key_Up);
+        QTRY_VERIFY(y() < rested);
+        QTRY_VERIFY(qAbs(strip->property("speed").toReal()) < 0.001);
+        QVERIFY(rested - y() < screen * 0.3);
     }
 
     /// A double click on a third of a whole page is two turns and no zoom, deliberately:
@@ -7738,6 +14549,35 @@ private slots:
         QTRY_COMPARE(zoomOf(view), 1.5);
         QTest::keyClick(window, Qt::Key_Agrave, Qt::ControlModifier);
         QTRY_COMPARE(zoomOf(view), 1.0);
+    }
+
+    /// A button of the reader's bar, pressed from the keys, acts once: Space and Enter were
+    /// answered by the button and by the stop round it, and the volume's panel opened and
+    /// shut again under the one press.
+    void a_button_of_the_reader_bar_pressed_from_the_keys_acts_once()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [](const QByteArray &request) {
+            return aBookAnswers(request, u"RIGHT_TO_LEFT"_s);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        Boot::run(engine, *qGuiApp, nowhere());
+        Reader *reader = nullptr;
+        QQuickItem *view = aReaderAtHand(engine, reader);
+        QVERIFY(view);
+        auto *window = view->window();
+        QQuickItem *volume = itemNamed(view, u"reader-volume-button"_s);
+        QVERIFY(volume);
+        view->setProperty("barsShown", true);
+        QTRY_VERIFY(volume->isVisible());
+        volume->forceActiveFocus(Qt::TabFocusReason);
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY(view->property("volumeOpen").toBool());
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(!view->property("volumeOpen").toBool());
     }
 
     /// F11 is the full screen every other application on the desk answers to, and the test
@@ -8144,7 +14984,7 @@ private slots:
                            Words::shortcutDoes(TurnByArrowRightToLeft),
                            Words::shortcutDoes(TurnBySpace),
                            Words::shortcutDoes(ToTheEndsRightToLeft), Words::shortcutDoes(BackAPage),
-                           Words::shortcutDoes(FullScreen), Words::shortcutDoes(VolumeInfo),
+                           Words::shortcutDoes(FullScreen), Words::shortcutDoes(VolumeInfo), Words::shortcutDoes(ReaderSettings),
                            Words::shortcutDoes(TheseShortcuts), Words::shortcutDoes(ZoomByKey),
                            Words::shortcutDoes(BackToWhole), Words::shortcutDoes(ZoomByWheel),
                            Words::shortcutDoes(ZoomWhereAimed), Words::shortcutDoes(Pinch),
@@ -8169,8 +15009,8 @@ private slots:
         QVERIFY(at(zoom).x() > at(navigate).x() + 200);
         QCOMPARE(at(zoom).y(), at(navigate).y());
 
-        window->resize(560, 760);
-        QTRY_COMPARE(view->width(), 560.0);
+        window->resize(800, 760);
+        QTRY_COMPARE(view->width(), 800.0);
         QTRY_COMPARE(at(zoom).x(), at(navigate).x());
         QVERIFY(at(zoom).y() > at(display).y());
     }
@@ -8215,8 +15055,8 @@ private slots:
         QTRY_COMPARE(grid->property("columns").toInt(), 2);
         window->resize(1099, 700);
         QTRY_COMPARE(grid->property("columns").toInt(), 1);
-        window->resize(560, 700);
-        QTRY_COMPARE(view->width(), 560.0);
+        window->resize(800, 560);
+        QTRY_COMPARE(view->width(), 800.0);
         QCOMPARE(grid->property("columns").toInt(), 1);
     }
 
@@ -8780,10 +15620,11 @@ private slots:
         QTRY_COMPARE(reader->entryId(), u"e13"_s);
     }
 
-    /// At the foot of a webtoon the wheel goes on as the space bar does: the card, then what
-    /// follows. Scrolling it did nothing, since there was no strip left to scroll, and the
-    /// card was out of reach of the wheel.
-    void at_the_foot_of_a_webtoon_the_wheel_raises_the_card_then_opens_what_follows()
+    /// At the foot of a webtoon chapter the wheel goes on as the space bar does: the next
+    /// chapter's offer — and never the next chapter itself, however many notches follow.
+    /// Scrolling it did nothing, since there was no strip left to scroll; and with the card a
+    /// notch too many opened what follows, which a strip read in one long scroll gives often.
+    void at_the_foot_of_a_webtoon_the_wheel_offers_what_follows_and_never_opens_it()
     {
         Pretend pretend;
         QVERIFY(pretend.listen(QHostAddress::LocalHost));
@@ -8805,23 +15646,25 @@ private slots:
         QTRY_VERIFY((strip = itemNamed(view, u"reader-strip"_s)) && strip->isVisible());
         QObject *rest = view->findChild<QObject *>(u"reader-wheel-rest"_s);
         QVERIFY(rest);
+        QQuickItem *offer = itemNamed(view, u"reader-next-offer"_s);
+        QVERIFY(offer);
 
         QTest::keyClick(window, Qt::Key_End);
         QTRY_VERIFY(strip->property("atYEnd").toBool());
         QTRY_COMPARE(reader->firstPage(), 189);
         QTRY_VERIFY(!reader->next().isEmpty());
         QTRY_VERIFY(!rest->property("running").toBool());
+        offer->setProperty("shown", false);
+        QTRY_VERIFY(!offer->isVisible());
 
         wheel(window, across(view, 0.5), QPoint(0, -120));
-        QVERIFY(reader->atTheEnd());
-        wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTRY_VERIFY(offer->isVisible());
+        QVERIFY(!reader->atTheEnd());
+        for (int notch = 0; notch < 4; ++notch)
+            wheel(window, across(view, 0.5), QPoint(0, -120));
+        QTest::qWait(300);
         QCOMPARE(reader->entryId(), u"e12"_s);
-        QTRY_VERIFY(!rest->property("running").toBool());
-        wheel(window, across(view, 0.5), QPoint(0, -120), QPoint(0, 0),
-                          Qt::NoModifier, Qt::ScrollMomentum);
-        QCOMPARE(reader->entryId(), u"e12"_s);
-        wheel(window, across(view, 0.5), QPoint(0, -120));
-        QTRY_COMPARE(reader->entryId(), u"e13"_s);
+        QVERIFY(!reader->atTheEnd());
     }
 
     /// The bars a click in the middle was about to call stay away when a page is turned
@@ -9102,7 +15945,7 @@ private slots:
         QTRY_VERIFY(whoReads->isVisible());
         QCOMPARE(textNamed(whoReads, u"who-reads-title"_s), Words::whoReads());
         QVERIFY(itemNamed(whoReads, u"who-reads-tile-p"_s));
-        QVERIFY(shownNamed(whoReads, u"who-reads-ring-p"_s));
+        QVERIFY(shownNamed(whoReads, u"who-reads-current-p"_s));
         QVERIFY(shownNamed(whoReads, u"who-reads-add"_s));
 
         QVERIFY(shownNamed(whoReads, u"who-reads-close"_s));
@@ -9417,6 +16260,51 @@ private slots:
         QVERIFY(hiddenNamed(square, u"profile-square-face-badge"_s));
         QVERIFY(sortButton->isVisible());
         QVERIFY(!importButton->isVisible());
+    }
+
+    /// A command a profile has no right to is not in its menu for the keys either: hidden,
+    /// « Réimporter » and « Supprimer » were still items the arrows reached.
+    void a_command_hidden_from_a_profile_is_out_of_the_reach_of_the_keys()
+    {
+        const QByteArray seating = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s)},
+            u"r"_s, true);
+        const auto elfes = anElfesPage(false);
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seating : elfes(request);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        QTRY_VERIFY(shownNamed(window->contentItem(), u"profile-square"_s));
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QTRY_VERIFY(shownNamed(page, u"volume-v2"_s));
+        QQuickItem *series = itemNamed(page, u"commands-albums"_s);
+        QVERIFY(series);
+        QVERIFY2(pressedUntil(window, u"commands-albums"_s), qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_Menu);
+        QTRY_VERIFY(series->property("opened").toBool());
+        QStringList walked;
+        for (int i = 0; i < 10; ++i) {
+            QTest::keyClick(window, Qt::Key_Down);
+            walked << focusedName(window);
+        }
+        for (const QString &one : walked)
+            QVERIFY2(!one.startsWith(u"command-erase"_s) && !one.startsWith(u"command-reimport"_s),
+                     qPrintable(walked.join(u" → "_s)));
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!series->property("opened").toBool());
+        QVERIFY(!pretend.heard.contains("DELETE "));
     }
 
     /// Eight rounds, always: how many are filled says how much was typed, never how long the
@@ -9928,14 +16816,14 @@ private slots:
 
         typeInto(window, u"Inès"_s);
         clickOn(window, itemNamed(dialog, u"profile-may-edit"_s));
-        QCOMPARE(textNamed(dialog, u"profile-confirm-text"_s), u"Ajouter Inès"_s);
+        QCOMPARE(textNamed(window->contentItem(), u"profile-confirm-text"_s), u"Ajouter Inès"_s);
         pretend.heard.clear();
-        clickOn(window, itemNamed(dialog, u"profile-confirm"_s));
+        clickOn(window, itemNamed(window->contentItem(), u"profile-confirm"_s));
         QTRY_VERIFY(shownNamed(dialog, u"profile-trouble"_s));
         QVERIFY(dialog->isVisible());
 
         pretend.heard.clear();
-        clickOn(window, itemNamed(dialog, u"profile-confirm"_s));
+        clickOn(window, itemNamed(window->contentItem(), u"profile-confirm"_s));
         QTRY_VERIFY(!dialog->isVisible());
         const QJsonObject sent = bodySent(pretend.heard, "POST /profiles ");
         QCOMPARE(sent.value(u"name"_s).toString(), u"Inès"_s);
@@ -9987,15 +16875,32 @@ private slots:
         QCOMPARE(textNamed(dialog, u"profile-age"_s), Words::yearsOld(10));
         clickOn(window, itemNamed(dialog, u"profile-age-more"_s));
         QCOMPARE(textNamed(dialog, u"profile-age"_s), Words::yearsOld(11));
+        // A year a press from the keys too: Space counted two, the button and the stop round
+        // it each answering it.
+        itemNamed(dialog, u"profile-age-more"_s)->forceActiveFocus(Qt::TabFocusReason);
+        QTest::keyClick(window, Qt::Key_Space);
+        QCOMPARE(textNamed(dialog, u"profile-age"_s), Words::yearsOld(12));
+        // A key held down is one press: its repeats are not more years.
+        QKeyEvent held(QEvent::KeyPress, Qt::Key_Space, Qt::NoModifier, u" "_s, true);
+        QCoreApplication::sendEvent(window, &held);
+        QCOMPARE(textNamed(dialog, u"profile-age"_s), Words::yearsOld(12));
+        // At seventeen « + » goes out, and the keys go to « − » rather than to nothing.
+        for (int age = 12; age < 17; ++age)
+            QTest::keyClick(window, Qt::Key_Space);
+        QCOMPARE(textNamed(dialog, u"profile-age"_s), Words::yearsOld(17));
+        QCOMPARE(focusedName(window), u"profile-age-less"_s);
+        for (int age = 17; age > 11; --age)
+            QTest::keyClick(window, Qt::Key_Return);
+        QCOMPARE(textNamed(dialog, u"profile-age"_s), Words::yearsOld(11));
         // Not ready until the code is typed twice.
-        QVERIFY(!itemNamed(dialog, u"profile-confirm"_s)->property("ready").toBool());
+        QVERIFY(!itemNamed(window->contentItem(), u"profile-confirm"_s)->property("ready").toBool());
 
         clickOn(window, itemNamed(dialog, u"profile-code"_s));
         typeInto(window, u"1234"_s);
         clickOn(window, itemNamed(dialog, u"profile-code-again"_s));
         typeInto(window, u"1235"_s);
         pretend.heard.clear();
-        clickOn(window, itemNamed(dialog, u"profile-confirm"_s));
+        clickOn(window, itemNamed(window->contentItem(), u"profile-confirm"_s));
         QTRY_VERIFY(!dialog->isVisible());
         const QJsonObject sent = bodySent(pretend.heard, "POST /profiles ");
         QCOMPARE(sent.value(u"kind"_s).toString(), u"restricted"_s);
@@ -10136,7 +17041,7 @@ private slots:
         QTest::qWait(100);
         QVERIFY(!pretend.heard.contains("DELETE "));
 
-        clickOn(window, itemNamed(dialog, u"profile-removal-confirm"_s));
+        clickOn(window, itemNamed(window->contentItem(), u"profile-removal-confirm"_s));
         QTRY_VERIFY(!dialog->isVisible());
         QVERIFY(pretend.heard.contains("DELETE /profiles/r "));
     }
@@ -10250,6 +17155,55 @@ private slots:
         QCOMPARE(rights.value(u"delete"_s).toBool(), false);
     }
 
+    /// Ticked from the keys, a right keeps the keys: the list of profiles is drawn again from
+    /// the server's answer, and the box ticked went with the row it stood in, the keys with it.
+    void a_right_ticked_from_the_keys_keeps_them()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
+             aProfile(u"r"_s, u"Lecteur"_s, u"corail"_s, u"reader"_s, false, 0, true)},
+            u"p"_s, true);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS",
+                u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *view = settingsOn(engine, window, u"profiles"_s);
+        QVERIFY(view);
+        QTRY_VERIFY(shownNamed(view, u"rights-r-import"_s));
+        QVariant took;
+        QVERIFY(QMetaObject::invokeMethod(view, "takeFocus", Q_RETURN_ARG(QVariant, took),
+                                          Q_ARG(QVariant, true)));
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"rights-r-import"_s));
+        QQuickItem *ticked = itemNamed(view, u"rights-r-import"_s);
+        QVERIFY(ticked);
+        pretend.heard.clear();
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY(pretend.heard.contains("PATCH /profiles/r "));
+        QTRY_VERIFY(pretend.heard.contains("GET /profiles "));
+        QTest::qWait(300);
+        QCOMPARE(focusedName(window), u"rights-r-import"_s);
+        // The same box, not one built again after the answer: the list said again is not a
+        // new list, and nothing under it was torn down.
+        QCOMPARE(itemNamed(view, u"rights-r-import"_s), ticked);
+        // A key held down is one press: its repeats do not ask the server again.
+        pretend.heard.clear();
+        QKeyEvent held(QEvent::KeyPress, Qt::Key_Space, Qt::NoModifier, u" "_s, true);
+        QCoreApplication::sendEvent(window, &held);
+        QTest::qWait(300);
+        QVERIFY(!pretend.heard.contains("PATCH /profiles/r "));
+        QTest::keyClick(window, Qt::Key_Tab);
+        QCOMPARE(focusedName(window), u"rights-r-edit"_s);
+    }
+
     /// Removing a device cuts its key with the answer, so it is asked first.
     void removing_a_device_asks_then_sends_delete()
     {
@@ -10267,6 +17221,7 @@ private slots:
                                                       {u"here"_s, true}},
                                           QJsonObject{{u"id"_s, u"d2"_s},
                                                       {u"name"_s, u"Tablette"_s},
+                                                      {u"seenAt"_s, 1792931520000.0},
                                                       {u"profile"_s, u"p"_s},
                                                       {u"kept"_s, true},
                                                       {u"here"_s, false}}}}})
@@ -10294,6 +17249,8 @@ private slots:
         QQuickItem *bin = nullptr;
         QTRY_VERIFY((bin = itemNamed(view, u"device-row-d2-remove"_s)) && bin->isVisible());
         QCOMPARE(textNamed(view, u"device-row-d2-opens"_s), Words::opensOn(u"Principal"_s));
+        QCOMPARE(textNamed(view, u"device-row-d2-seen"_s), Words::deviceSeen(1792931520000));
+        QVERIFY(!Words::deviceSeen(1792931520000).isEmpty());
         QVERIFY(!itemNamed(view, u"device-row-d1"_s));
         QVERIFY(laidOut(window));
         pretend.heard.clear();
@@ -10382,11 +17339,11 @@ private slots:
         const std::pair<QString, QString> sayings[] = {
             {u"code-dialog-body"_s, u"code-title"_s},
             {u"profile-removal-body"_s, u"profile-removal-title"_s},
-            {u"profile-removal-body"_s, u"profile-removal-confirm-text"_s},
+            {u"profile-removal-commands"_s, u"profile-removal-confirm-text"_s},
             {u"profile-dialog-body"_s, u"profile-title"_s},
             {u"profile-dialog-body"_s, u"profile-manages"_s},
             {u"profile-dialog-body"_s, u"profile-code-hint"_s},
-            {u"profile-dialog-body"_s, u"profile-confirm-text"_s},
+            {u"profile-dialog-commands"_s, u"profile-confirm-text"_s},
         };
         for (const auto &[body, name] : sayings) {
             auto *holder = window->findChild<QQuickItem *>(body);
@@ -10420,12 +17377,12 @@ private slots:
         QQuickItem *dialog = profileDialogFor(window, u"edit"_s, reader);
         QVERIFY(dialog);
         QCOMPARE(textNamed(dialog, u"profile-title"_s), Words::editProfile(u"Lecteur"_s));
-        QCOMPARE(textNamed(dialog, u"profile-confirm-text"_s), Words::saveProfile());
+        QCOMPARE(textNamed(window->contentItem(), u"profile-confirm-text"_s), Words::saveProfile());
         // Its own colour stays its own to keep.
         QVERIFY(itemNamed(dialog, u"profile-colour-corail"_s)->isEnabled());
         clickOn(window, itemNamed(dialog, u"profile-may-import"_s));
         pretend.heard.clear();
-        clickOn(window, itemNamed(dialog, u"profile-confirm"_s));
+        clickOn(window, itemNamed(window->contentItem(), u"profile-confirm"_s));
         QTRY_VERIFY(!dialog->isVisible());
         QJsonObject sent = bodySent(pretend.heard, "PATCH /profiles/r ");
         QCOMPARE(sent.value(u"kind"_s).toString(), u"reader"_s);
@@ -10442,7 +17399,7 @@ private slots:
         QVERIFY(hiddenNamed(dialog, u"profile-code"_s));
         clickOn(window, itemNamed(dialog, u"profile-age-less"_s));
         pretend.heard.clear();
-        clickOn(window, itemNamed(dialog, u"profile-confirm"_s));
+        clickOn(window, itemNamed(window->contentItem(), u"profile-confirm"_s));
         QTRY_VERIFY(!dialog->isVisible());
         sent = bodySent(pretend.heard, "PATCH /profiles/r ");
         QCOMPARE(sent.value(u"kind"_s).toString(), u"restricted"_s);
@@ -10486,7 +17443,7 @@ private slots:
         clickOn(window, itemNamed(dialog, u"profile-kind-lock"_s));
         QTRY_VERIFY(shownNamed(dialog, u"profile-code"_s));
         QVERIFY(laidOut(window));
-        QQuickItem *confirm = itemNamed(dialog, u"profile-confirm"_s);
+        QQuickItem *confirm = itemNamed(window->contentItem(), u"profile-confirm"_s);
         clickOn(window, itemNamed(dialog, u"profile-code"_s));
         typeInto(window, u"1234"_s);
         // Half a code is not a code.
@@ -10546,7 +17503,7 @@ private slots:
             aListedProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true));
         QVERIFY(dialog);
         typeInto(window, u"e"_s);
-        QQuickItem *confirm = itemNamed(dialog, u"profile-confirm"_s);
+        QQuickItem *confirm = itemNamed(window->contentItem(), u"profile-confirm"_s);
         QVERIFY(confirm->property("ready").toBool());
         // A code typed once, even where none is needed, is half a code.
         clickOn(window, itemNamed(dialog, u"profile-code"_s));
@@ -10614,7 +17571,7 @@ private slots:
         QTRY_VERIFY(!lever->property("on").toBool());
         QVERIFY(laidOut(window));
         // Removing a code asks for the code, as changing it does.
-        QQuickItem *confirm = itemNamed(dialog, u"profile-confirm"_s);
+        QQuickItem *confirm = itemNamed(window->contentItem(), u"profile-confirm"_s);
         QVERIFY(!confirm->property("ready").toBool());
         clickOn(window, itemNamed(dialog, u"profile-code-current"_s));
         typeInto(window, u"vieux"_s);
@@ -10659,7 +17616,7 @@ private slots:
         QTRY_VERIFY(dialog->isVisible());
         QVERIFY(laidOut(window));
         QVERIFY(hiddenNamed(dialog, u"profile-removal-trouble"_s));
-        clickOn(window, itemNamed(dialog, u"profile-removal-confirm"_s));
+        clickOn(window, itemNamed(window->contentItem(), u"profile-removal-confirm"_s));
         QTRY_VERIFY(shownNamed(dialog, u"profile-removal-trouble"_s));
         QVERIFY(!textNamed(dialog, u"profile-removal-trouble"_s).isEmpty());
         QVERIFY(dialog->isVisible());
@@ -10674,7 +17631,7 @@ private slots:
         const QByteArray seat = aSeating(
             {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true),
              aProfile(u"r"_s, u"Lecteur"_s, u"sauge"_s, u"reader"_s)},
-            u"p"_s, true);
+            u"p"_s, true, u"restricted"_s);
         const QByteArray empty =
             aReply(200, QByteArrayLiteral("application/json"), aPage({}));
         Pretend pretend;
@@ -10694,30 +17651,32 @@ private slots:
         QVariant took;
         QVERIFY(QMetaObject::invokeMethod(view, "takeFocus", Q_RETURN_ARG(QVariant, took),
                                           Q_ARG(QVariant, true)));
+        // The way back leads the page's strip, before the tabs.
         QCOMPARE(focusedName(window), u"back-button"_s);
 
         QStringList walked;
-        for (int i = 0; i < 40 && keysWithin(window, view); ++i) {
+        for (int i = 0; i < 60 && keysWithin(window, view); ++i) {
             walked << focusedName(window);
             QTest::keyClick(window, Qt::Key_Tab);
         }
         for (const QString &stop :
-             {u"settings-tab-general"_s, u"settings-tab-profiles"_s, u"settings-tab-devices"_s,
+             {u"back-button"_s, u"settings-tab-general"_s, u"settings-tab-profiles"_s, u"settings-tab-devices"_s,
               u"settings-tab-about"_s, u"profile-row-p-edit"_s, u"profile-row-r-edit"_s,
               u"profile-row-r-remove"_s, u"profiles-add"_s, u"rights-r-import"_s,
-              u"rights-r-edit"_s, u"rights-r-erase"_s})
+              u"rights-r-edit"_s, u"rights-r-erase"_s, u"recovery-current"_s})
             QVERIFY2(walked.contains(stop), qPrintable(walked.join(u" → "_s)));
         // Out of the screen and into the bar, which hands the keys back.
         QVERIFY2(!keysWithin(window, view), qPrintable(walked.join(u" → "_s)));
         QVERIFY(pressUntil(window, Qt::Key_Tab, u"back-button"_s, 10));
 
-        // The arrows walk the same chain, and Up before the first stop leaves for the bar.
+        // The arrows walk the same chain, and Up before the first stop leaves for the bar, by
+        // its last: the square.
         QTest::keyClick(window, Qt::Key_Down);
         QCOMPARE(focusedName(window), u"settings-tab-general"_s);
         QTest::keyClick(window, Qt::Key_Up);
         QCOMPARE(focusedName(window), u"back-button"_s);
         QTest::keyClick(window, Qt::Key_Up);
-        QVERIFY(!keysWithin(window, view));
+        QCOMPARE(focusedName(window), u"profile-square"_s);
 
         // Enter shows the tab it is on, and the list of keys there says where they stop.
         QVERIFY(pressUntil(window, Qt::Key_Tab, u"settings-tab-about"_s));
@@ -10765,25 +17724,35 @@ private slots:
         QTRY_VERIFY(dialog->isVisible());
         QTRY_COMPARE(focusedName(window), u"profile-name"_s);
 
+        // The window is its words and its commands, which stand beside each other.
+        QQuickItem *commands = window->findChild<QQuickItem *>(u"profile-dialog-commands"_s);
+        QVERIFY(commands);
+        QQuickItem *whole = commands->parentItem();
+
         QStringList walked;
         for (int i = 0; i < 14; ++i) {
             QTest::keyClick(window, Qt::Key_Tab);
-            QVERIFY2(keysWithin(window, dialog), qPrintable(walked.join(u" → "_s)));
+            QVERIFY2(keysWithin(window, whole), qPrintable(walked.join(u" → "_s)));
             walked << focusedName(window);
         }
         for (const QString &stop :
-             {u"profile-colour-sauge"_s, u"profile-kind-book"_s, u"profile-kind-lock"_s,
+             {u"profile-colour-sauge"_s, u"profile-kind-book"_s,
               u"profile-may-import"_s, u"profile-may-edit"_s, u"profile-may-erase"_s,
               u"profile-cancel"_s, u"profile-confirm"_s, u"profile-name"_s})
             QVERIFY2(walked.contains(stop), qPrintable(walked.join(u" → "_s)));
 
-        // Down goes on as Tab does, past the colours and out of them.
+        // Down goes on as Tab does, down the two rows of colours and out of them onto the kind
+        // chosen. The two kinds
+        // are one stop, as the colours are, and Right and Left walk them and choose: each was
+        // a stop of its own, and Tab went through both to reach the rights under them.
         QVERIFY(pressUntil(window, Qt::Key_Tab, u"profile-colour-sauge"_s));
         QTest::keyClick(window, Qt::Key_Down);
+        QCOMPARE(focusedName(window), u"profile-colour-violet"_s);
         QTest::keyClick(window, Qt::Key_Down);
-        QTest::keyClick(window, Qt::Key_Down);
+        QCOMPARE(focusedName(window), u"profile-kind-book"_s);
+        QTest::keyClick(window, Qt::Key_Right);
         QCOMPARE(focusedName(window), u"profile-kind-lock"_s);
-        QTest::keyClick(window, Qt::Key_Up);
+        QTest::keyClick(window, Qt::Key_Left);
         QCOMPARE(focusedName(window), u"profile-kind-book"_s);
 
         QVERIFY(pressUntil(window, Qt::Key_Tab, u"profile-cancel"_s));
@@ -10884,13 +17853,15 @@ private slots:
         QTest::keyClick(window, Qt::Key_Return);
         QTRY_COMPARE(focusedName(window), u"code-recovery-field"_s);
         QStringList walked;
-        for (int i = 0; i < 5; ++i) {
+        for (int i = 0; i < 6; ++i) {
             QTest::keyClick(window, Qt::Key_Tab);
             QVERIFY(keysWithin(window, dialog));
             walked << focusedName(window);
         }
+        // The command that makes a new recovery code is a stop, so that it can be copied
+        // without the mouse.
         QCOMPARE(walked, QStringList({u"code-new-field"_s, u"code-new-again-field"_s,
-                                      u"code-back"_s, u"code-replace"_s,
+                                      u"code-command"_s, u"code-back"_s, u"code-replace"_s,
                                       u"code-recovery-field"_s}));
 
         // Escape closes the window and leaves the profile where it was, its tile in hand.
@@ -10994,12 +17965,30 @@ private slots:
         QTRY_VERIFY(!removal->isVisible());
         QTRY_COMPARE(focusedName(window), u"profile-row-r-remove"_s);
         QVERIFY(!pretend.heard.contains("DELETE "));
+        // Opened again, it opens on the same way and not on the button it was left on: a
+        // window is a scope, which gives the keys back to what last held them.
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(removal->isVisible());
+        QTRY_COMPARE(focusedName(window), u"profile-removal-cancel"_s);
+        QTest::keyClick(window, Qt::Key_Tab);
+        QCOMPARE(focusedName(window), u"profile-removal-confirm"_s);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!removal->isVisible());
+        QTRY_COMPARE(focusedName(window), u"profile-row-r-remove"_s);
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(removal->isVisible());
+        QTRY_COMPARE(focusedName(window), u"profile-removal-cancel"_s);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!removal->isVisible());
+        QTRY_COMPARE(focusedName(window), u"profile-row-r-remove"_s);
+        QVERIFY(!pretend.heard.contains("DELETE "));
 
         // A device, by its bin, from the tab the keys reach.
         QVERIFY(pressUntil(window, Qt::Key_Tab, u"settings-tab-devices"_s));
         QTest::keyClick(window, Qt::Key_Return);
         QTRY_VERIFY(shownNamed(view, u"device-row-d2-remove"_s));
-        QVERIFY(pressUntil(window, Qt::Key_Tab, u"opening-refresh"_s));
+        // The choice of what opens here is one stop, on the answer it holds.
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"opening-bookmark"_s));
         QVERIFY(pressUntil(window, Qt::Key_Tab, u"device-row-d2-choose"_s));
         QVERIFY(pressUntil(window, Qt::Key_Tab, u"device-row-d2-remove"_s));
         QTest::keyClick(window, Qt::Key_Return);
@@ -11070,7 +18059,10 @@ private slots:
     }
 
     /// The corner the bubbles come out of, chosen with the keys: the picture was the one
-    /// setting of its tab that Tab went past.
+    /// setting of its tab that Tab went past. Then six stops, each ringed over its neighbours,
+    /// the ring on one zone while another was lit (owner, 25/10/2026): one stop now, the
+    /// picture, ringed round its edge, and the arrows move the bubbles inside it, as in any
+    /// group of radio buttons — and out of it past its edge.
     void the_corner_of_the_bubbles_is_chosen_from_the_keyboard()
     {
         Pretend pretend;
@@ -11089,17 +18081,32 @@ private slots:
         QVERIFY(preferences);
         QQuickItem *view = settingsOn(engine, window, u"notifications"_s);
         QVERIFY(view);
-        QTRY_VERIFY(shownNamed(view, u"bubble-corner-zone-0"_s));
+        QTRY_VERIFY(shownNamed(view, u"bubble-corner"_s));
+        preferences->putBubbles(static_cast<Preferences::Corner>(5));
+        QTRY_COMPARE(preferences->property("corner").toInt(), 5);
         QVariant took;
         QVERIFY(QMetaObject::invokeMethod(view, "takeFocus", Q_RETURN_ARG(QVariant, took),
                                           Q_ARG(QVariant, true)));
-        QVERIFY(pressUntil(window, Qt::Key_Tab, u"bubble-corner-zone-0"_s));
-        QTest::keyClick(window, Qt::Key_Return);
-        QTRY_COMPARE(preferences->property("corner").toInt(), 0);
-        QTest::keyClick(window, Qt::Key_Right);
-        QCOMPARE(focusedName(window), u"bubble-corner-zone-1"_s);
-        QTest::keyClick(window, Qt::Key_Space);
+        QVERIFY(pressUntil(window, Qt::Key_Tab, u"bubble-corner"_s));
+        // No zone is a stop of its own.
+        for (int zone = 0; zone < 6; ++zone) {
+            QQuickItem *one = itemNamed(view, u"bubble-corner-zone-%1"_s.arg(zone));
+            QVERIFY(one);
+            QVERIFY(!one->activeFocusOnTab());
+        }
+        QVERIFY(shownNamed(view, u"bubble-corner-focus"_s));
+
+        QTest::keyClick(window, Qt::Key_Left);
+        QTRY_COMPARE(preferences->property("corner").toInt(), 4);
+        QTest::keyClick(window, Qt::Key_Up);
         QTRY_COMPARE(preferences->property("corner").toInt(), 1);
+        QTest::keyClick(window, Qt::Key_Left);
+        QTRY_COMPARE(preferences->property("corner").toInt(), 0);
+        QCOMPARE(focusedName(window), u"bubble-corner"_s);
+        // Past the edge the keys leave the picture, and the corner stays.
+        QTest::keyClick(window, Qt::Key_Left);
+        QVERIFY(focusedName(window) != u"bubble-corner"_s);
+        QCOMPARE(preferences->property("corner").toInt(), 0);
     }
 
     /// « Qui lit ? » opens on the profile reading now, and the arrows go from tile to tile as
@@ -11224,6 +18231,7 @@ private slots:
         QTRY_VERIFY(popup->property("opened").toBool());
         QTRY_COMPARE(focusedName(window), u"erase-confirm"_s);
         pretend.heard.clear();
+        typeInto(window, u"Terres"_s);
         QTest::keyClick(window, Qt::Key_Return);
         QTest::qWait(100);
         QVERIFY(popup->property("visible").toBool());
@@ -11238,6 +18246,12 @@ private slots:
         QTest::keyClick(window, Qt::Key_Return);
         QTRY_VERIFY(!popup->property("visible").toBool());
         QVERIFY(!pretend.heard.contains("DELETE "));
+
+        // Asked again, it opens again on the name, and empty: the last answer is forgotten.
+        erasure->aboutSeries(u"albums"_s);
+        QTRY_VERIFY(popup->property("opened").toBool());
+        QTRY_COMPARE(focusedName(window), u"erase-confirm"_s);
+        QCOMPARE(textNamed(window->contentItem(), u"erase-confirm"_s), QString());
     }
 
     /// The swatches answer the keyboard: Tab reaches the chosen one, the arrows go from one
@@ -11300,6 +18314,242 @@ private slots:
         QVERIFY(dialog->isVisible());
     }
 
+    /// The three dots were the only way in with a mouse: a right click on the cover of a
+    /// series, where every desktop puts a context menu, did nothing at all.
+    void a_right_click_on_a_cover_opens_its_menu_and_not_its_series()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"s0"_s, u"Série 0"_s, 3, false)}));
+        pretend.answerFor = [pageReply](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /series?"))
+                return pageReply;
+            return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(navigation);
+        QVERIFY(grid);
+        QTRY_COMPARE(grid->property("count").toInt(), 1);
+
+        QQuickItem *tile = itemNamed(grid, u"tile-s0"_s);
+        QQuickItem *commands = itemNamed(grid, u"commands-s0"_s);
+        QVERIFY(tile);
+        QVERIFY(commands);
+        const QPointF middle = tile->mapToScene(QPointF(tile->width() / 2, tile->height() / 3));
+        QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, middle.toPoint());
+        QTRY_VERIFY(commands->property("opened").toBool());
+        QCOMPARE(navigation->destination(), Navigation::Destination::Shelf);
+    }
+
+    /// « Réimporter… » in the menu of a tile on the shelf did nothing: the tile said it, and
+    /// only a series page had anyone listening. The dialog belongs to the window, and now the
+    /// tile reaches it, aimed at that series and named as the shelf names it.
+    void the_reimport_of_a_shelf_tile_opens_the_import_on_that_series()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"s0"_s, u"Série 0"_s, 3, false)}));
+        // Seated as a profile that may import: the menu offers nothing the server refuses.
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true)}, u"p"_s,
+            false);
+        pretend.answerFor = [pageReply, seat](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            if (request.startsWith("GET /series?"))
+                return pageReply;
+            return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(grid);
+        QTRY_COMPARE(grid->property("count").toInt(), 1);
+        auto *seated = engine.singletonInstance<Profiles *>(qmlTypeId("Leaf", 1, 0, "Profiles"));
+        QVERIFY(seated);
+        QTRY_VERIFY(seated->canImport());
+
+        QQuickItem *commands = nullptr;
+        QTRY_VERIFY((commands = itemNamed(grid, u"commands-s0"_s)));
+        QVERIFY(QMetaObject::invokeMethod(commands, "show"));
+        QQuickItem *reimport = nullptr;
+        QTRY_VERIFY((reimport = itemNamed(window->contentItem(), u"command-reimport-s0"_s))
+                    && reimport->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(reimport, "triggered"));
+
+        auto *dialog = window->findChild<QObject *>(u"import-dialog"_s);
+        QVERIFY(dialog);
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        QQuickItem *title = nullptr;
+        QTRY_VERIFY((title = itemNamed(window->contentItem(), u"import-title"_s)));
+        QVERIFY2(title->property("text").toString().contains(u"Série 0"_s),
+                 qPrintable(title->property("text").toString()));
+        // And under it, what the library holds of that series: the name asked about, with its
+        // size, while the files are awaited.
+        QQuickItem *held = itemNamed(window->contentItem(), u"import-subtitle"_s);
+        QVERIFY(held);
+        QTRY_VERIFY(held->isVisible());
+        QCOMPARE(held->property("text").toString(), u"Série · 3 tomes dans la bibliothèque"_s);
+    }
+
+    /// The menu of a series offers « Ajouter des éditions… » to a profile that may import, and
+    /// the import it opens is titled by what it does.
+    void the_menu_of_a_series_offers_to_add_editions_to_who_may_import()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"s0"_s, u"Série 0"_s, 3, false)}));
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true)}, u"p"_s,
+            false);
+        pretend.answerFor = [pageReply, seat](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            if (request.startsWith("GET /series?"))
+                return pageReply;
+            return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(grid);
+        QTRY_COMPARE(grid->property("count").toInt(), 1);
+        auto *seated = engine.singletonInstance<Profiles *>(qmlTypeId("Leaf", 1, 0, "Profiles"));
+        QVERIFY(seated);
+        QTRY_VERIFY(seated->canImport());
+
+        QQuickItem *commands = nullptr;
+        QTRY_VERIFY((commands = itemNamed(grid, u"commands-s0"_s)));
+        QVERIFY(QMetaObject::invokeMethod(commands, "show"));
+        QQuickItem *add = nullptr;
+        QTRY_VERIFY((add = itemNamed(window->contentItem(), u"command-editions-s0"_s))
+                    && add->isVisible());
+        QCOMPARE(add->property("text").toString(), u"Ajouter des éditions…"_s);
+        QVERIFY(QMetaObject::invokeMethod(add, "triggered"));
+
+        auto *dialog = window->findChild<QObject *>(u"import-dialog"_s);
+        QVERIFY(dialog);
+        QTRY_VERIFY(dialog->property("opened").toBool());
+        QQuickItem *title = nullptr;
+        QTRY_VERIFY((title = itemNamed(window->contentItem(), u"import-title"_s)));
+        QCOMPARE(title->property("text").toString(), u"Ajouter des éditions à Série 0"_s);
+    }
+
+    /// A profile that may take a series out is offered « Exporter… » in its menu, and the entry
+    /// is the one word the export is reached by.
+    void the_menu_of_a_series_offers_the_export_to_a_profile_that_may()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"s0"_s, u"Série 0"_s, 3, false)}));
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true)}, u"p"_s,
+            false);
+        pretend.answerFor = [pageReply, seat](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            if (request.startsWith("GET /series?"))
+                return pageReply;
+            return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(grid);
+        QTRY_COMPARE(grid->property("count").toInt(), 1);
+        auto *seated = engine.singletonInstance<Profiles *>(qmlTypeId("Leaf", 1, 0, "Profiles"));
+        QVERIFY(seated);
+        QTRY_VERIFY(seated->canExport());
+
+        QQuickItem *commands = nullptr;
+        QTRY_VERIFY((commands = itemNamed(grid, u"commands-s0"_s)));
+        QVERIFY(QMetaObject::invokeMethod(commands, "show"));
+        QQuickItem *entry = nullptr;
+        QTRY_VERIFY((entry = itemNamed(window->contentItem(), u"command-export-s0"_s))
+                    && entry->isVisible());
+        QCOMPARE(entry->property("text").toString(), u"Exporter…"_s);
+    }
+
+    /// The right click's spot was kept after the menu closed, and the three dots, which open
+    /// it themselves, then opened it where the pointer had been rather than beside them.
+    void the_dots_open_the_menu_beside_themselves_after_a_right_click()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray pageReply = aReply(
+            200, QByteArrayLiteral("application/json"),
+            aPage({aSeries(u"s0"_s, u"Série 0"_s, 3, false)}));
+        pretend.answerFor = [pageReply](const QByteArray &request) -> QByteArray {
+            if (request.startsWith("GET /series?"))
+                return pageReply;
+            return "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(grid);
+        QTRY_COMPARE(grid->property("count").toInt(), 1);
+
+        QQuickItem *tile = itemNamed(grid, u"tile-s0"_s);
+        QQuickItem *commands = itemNamed(grid, u"commands-s0"_s);
+        QVERIFY(tile);
+        QVERIFY(commands);
+        const QPointF low = tile->mapToScene(QPointF(tile->width() / 2, tile->height() * 0.7));
+        // The menu is a child of the dots, and `y` is where it sits in them.
+        const auto menuY = [commands]() {
+            for (QObject *child : commands->children()) {
+                if (child->property("contentItem").isValid() && child->property("y").isValid())
+                    return child->property("y").toReal();
+            }
+            return qQNaN();
+        };
+        QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, low.toPoint());
+        QTRY_VERIFY(commands->property("opened").toBool());
+        const qreal underPointer = menuY();
+        QVERIFY(qAbs(underPointer) > commands->height() + 40);
+
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!commands->property("opened").toBool());
+
+        const QPointF dots =
+            commands->mapToScene(QPointF(commands->width() / 2, commands->height() / 2));
+        // The dots appear at the hover, faded in: pressed before that, the click misses them.
+        QTest::mouseMove(window, dots.toPoint());
+        QTRY_VERIFY(commands->isVisible());
+        QTRY_COMPARE(commands->opacity(), 1.0);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, dots.toPoint());
+        QTRY_VERIFY(commands->property("opened").toBool());
+        QVERIFY2(qAbs(menuY()) <= commands->height() + 40,
+                 qPrintable(QString::number(menuY())));
+    }
+
     /// The keys reached every cover of the shelf and opened none: Enter on a cover went
     /// past the tile, the grid and the page, and nothing heard it. The Menu key, beside it,
     /// always worked — which is how the tile came to hold the focus in the first place.
@@ -11346,7 +18596,7 @@ private slots:
         // And the keys go on from there, into the page that opened rather than through the
         // shelf hidden under it; Escape, and they find the shelf again.
         QTRY_VERIFY(itemNamed(window->contentItem(), u"series-view"_s));
-        QVERIFY2(pressedUntil(window, u"series-back"_s), qPrintable(holderName(window)));
+        QVERIFY2(pressedUntil(window, u"back-button"_s), qPrintable(holderName(window)));
         QTest::keyClick(window, Qt::Key_Escape);
         QTRY_COMPARE(navigation->destination(), Navigation::Destination::Shelf);
         QVERIFY2(pressedUntil(window, u"tile-s1"_s), qPrintable(holderName(window)));
@@ -11419,13 +18669,15 @@ private slots:
         QTRY_VERIFY(shownNamed(page, u"volume-v2"_s));
         QTRY_VERIFY(shownNamed(page, u"genre-Heroic Fantasy"_s));
 
-        QVERIFY2(pressedUntil(window, u"series-back"_s), qPrintable(holderName(window)));
-        const QStringList drawn{u"series-back"_s,  u"series-universe"_s,
-                                u"commands-albums"_s, u"genre-Fantasy"_s,
+        QVERIFY2(pressedUntil(window, u"back-button"_s), qPrintable(holderName(window)));
+        // The page as it is drawn, from its way back, then the bar, then the page again: the
+        // window's order, bar then screen then bar.
+        const QStringList drawn{u"back-button"_s,      u"series-universe"_s,
+                                u"commands-albums"_s,  u"genre-Fantasy"_s,
                                 u"genre-Heroic Fantasy"_s, u"series-tab-0"_s,
-                                u"series-tab-1"_s, u"volume-search"_s,
-                                u"volume-view"_s, u"volume-v1"_s,
-                                u"volume-v2"_s, u"settings-button"_s};
+                                u"series-tab-1"_s,     u"volume-search"_s,
+                                u"volume-view"_s,      u"volume-v1"_s,
+                                u"volume-v2"_s,        u"settings-button"_s};
         QStringList walked{holderName(window)};
         for (qsizetype i = 1; i < drawn.size(); ++i) {
             QTest::keyClick(window, Qt::Key_Tab);
@@ -11433,8 +18685,13 @@ private slots:
         }
         QCOMPARE(walked, drawn);
 
-        // And back the same way, Shift+Tab and Up alike, from the bar into the last volume.
-        // Backtab, which is what a keyboard sends for Shift+Tab.
+        // Past the bar the keys come round to the way back, and back the same way, Shift+Tab
+        // and Up alike, through the bar into the last volume. Backtab, which is what a
+        // keyboard sends for Shift+Tab.
+        QTest::keyClick(window, Qt::Key_Tab);
+        QCOMPARE(holderName(window), u"back-button"_s);
+        QTest::keyClick(window, Qt::Key_Backtab, Qt::ShiftModifier);
+        QCOMPARE(holderName(window), u"settings-button"_s);
         QTest::keyClick(window, Qt::Key_Backtab, Qt::ShiftModifier);
         QCOMPARE(holderName(window), u"volume-v2"_s);
         QTest::keyClick(window, Qt::Key_Up);
@@ -11442,6 +18699,1584 @@ private slots:
         QQuickItem *ring = itemNamed(page, u"volume-v1-focus"_s);
         QVERIFY(ring);
         QVERIFY(ring->isVisible());
+
+        // End and Home go to the last and the first volume, and not out of the list.
+        QTest::keyClick(window, Qt::Key_End);
+        QCOMPARE(holderName(window), u"volume-v2"_s);
+        QTest::keyClick(window, Qt::Key_Home);
+        QCOMPARE(holderName(window), u"volume-v1"_s);
+    }
+
+    /// A series page opened by the hand — a click on its cover, a click among the results of a
+    /// search — is walked by the keys like one opened from them. From the search, the focus
+    /// stayed in the field the page hides, and Tab went from it to the bar and stayed there.
+    void a_series_opened_by_the_hand_is_walked_by_the_keys()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = anElfesPage(true);
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        auto *shelf = engine.singletonInstance<Shelf *>(qmlTypeId("Leaf", 1, 0, "Shelf"));
+        QVERIFY(navigation);
+        QVERIFY(shelf);
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(grid);
+        QTRY_COMPARE(grid->property("count").toInt(), 2);
+        QQuickItem *cover = nullptr;
+        QTRY_VERIFY((cover = itemNamed(grid, u"cover-frame-albums"_s)) && cover->isVisible());
+        QVERIFY(aFrameDrawn(window));
+
+        clickOn(window, cover);
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QTRY_VERIFY(shownNamed(page, u"volume-v1"_s));
+        QVERIFY2(pressedUntil(window, u"volume-v1"_s), qPrintable(holderName(window)));
+        QTest::keyClick(window, Qt::Key_Down);
+        QCOMPARE(holderName(window), u"volume-v2"_s);
+
+        // From a search: typed in the field, the series clicked among the results.
+        navigation->back();
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Shelf);
+        auto *field = window->findChild<QQuickItem *>(u"search-field"_s);
+        QVERIFY(field);
+        clickOn(window, field);
+        QTRY_VERIFY(field->hasActiveFocus());
+        typeInto(window, u"elf"_s);
+        QTRY_COMPARE(shelf->query(), u"elf"_s);
+        auto *workspace = window->findChild<QQuickItem *>(u"search-workspace"_s);
+        QVERIFY(workspace);
+        QTRY_VERIFY(workspace->isVisible());
+        // The one cover of it shown: the overview and the series' scope draw one each.
+        const auto shownCover = [&]() -> QQuickItem * {
+            for (QQuickItem *one : itemsNamed(workspace, u"cover-frame-albums"_s)) {
+                if (one->isVisible())
+                    return one;
+            }
+            return nullptr;
+        };
+        QQuickItem *found = nullptr;
+        QTRY_VERIFY((found = shownCover()));
+        QVERIFY(aFrameDrawn(window));
+        clickOn(window, found);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Series);
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QTRY_VERIFY(shownNamed(page, u"volume-v1"_s));
+        QVERIFY(!field->hasActiveFocus());
+        QVERIFY2(pressedUntil(window, u"volume-v1"_s), qPrintable(holderName(window)));
+    }
+
+    /// A series left with the keys in it hands the focus to the Loader that drew it, which is
+    /// no stop: the next series opened found the focus « still on something shown » and
+    /// answered no key at all, the bar included — whichever series it was.
+    void a_series_opened_after_the_keys_left_another_answers_the_keys()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = anElfesPage(true);
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        QVERIFY(grid);
+        QTRY_COMPARE(grid->property("count").toInt(), 2);
+
+        for (int round = 0; round < 3; ++round) {
+            QQuickItem *cover = nullptr;
+            QTRY_VERIFY((cover = itemNamed(grid, u"cover-frame-albums"_s)) && cover->isVisible());
+            clickOn(window, cover);
+            QQuickItem *page = nullptr;
+            QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+            QTRY_VERIFY(shownNamed(page, u"volume-v1"_s));
+            // The keys go in, and are still in the page when it is left.
+            QVERIFY2(pressedUntil(window, u"volume-v1"_s), qPrintable(holderName(window)));
+            navigation->back();
+            QTRY_COMPARE(navigation->destination(), Navigation::Destination::Shelf);
+        }
+    }
+
+    /// Opening the settings from a series and coming back drew the page again from nothing:
+    /// the models were forgotten on the way out and asked for again on the way back, the page
+    /// came up at its first tab, and what it showed arrived in seven stages. The series is
+    /// still in the stack under the settings: nothing is asked for twice, nothing is lost.
+    void a_series_comes_back_from_the_settings_as_it_was_left_and_asks_nothing()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = anElfesPage(false);
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        auto *series = engine.singletonInstance<Series *>(qmlTypeId("Leaf", 1, 0, "Series"));
+        QVERIFY(navigation);
+        QVERIFY(series);
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QTRY_VERIFY(series->available());
+        QTRY_VERIFY(shownNamed(page, u"volume-v1"_s));
+
+        QQuickItem *tab = nullptr;
+        QTRY_VERIFY((tab = itemNamed(page, u"series-tab-1"_s)) && tab->width() > 0);
+        clickOn(window, tab);
+        QTRY_VERIFY(shownNamed(page, u"series-description"_s));
+
+        pretend.heard.clear();
+        QVERIFY(navigation->open(Navigation::Destination::Settings, {}));
+        QTRY_VERIFY(!page->isVisible());
+        QVERIFY(series->available());
+        navigation->back();
+        QTRY_VERIFY(page->isVisible());
+        // The same page, on the same tab, and not one drawn again.
+        QCOMPARE(itemNamed(window->contentItem(), u"series-view"_s), page);
+        QVERIFY(series->available());
+        QVERIFY(shownNamed(page, u"series-description"_s));
+        QTest::qWait(300);
+        QVERIFY2(!pretend.heard.contains("GET /series/albums"), pretend.heard.constData());
+
+        // The gear of the bar, clicked from the series page, opens the settings.
+        auto *gear = window->findChild<QQuickItem *>(u"settings-button"_s);
+        QVERIFY(gear);
+        clickOn(window, gear);
+        QTRY_COMPARE(navigation->destination(), Navigation::Destination::Settings);
+        navigation->back();
+        QTRY_VERIFY(page->isVisible());
+
+        // And the keys with it: the stop they held is held again, where the page stands, and not
+        // the first of the page — which scrolled it to the top to show it.
+        QVERIFY2(pressedUntil(window, u"series-tab-1"_s), qPrintable(holderName(window)));
+        QVERIFY(navigation->open(Navigation::Destination::Settings, {}));
+        QTRY_VERIFY(!page->isVisible());
+        navigation->back();
+        QTRY_VERIFY(page->isVisible());
+        QTRY_COMPARE(holderName(window), u"series-tab-1"_s);
+
+        // Another series on that same page: its first tab again, not the last one's.
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"integrale"_s}}));
+        QTRY_COMPARE(series->identifier(), u"integrale"_s);
+        QTRY_VERIFY(!shownNamed(page, u"series-description"_s));
+    }
+
+    /// The shelf, left scrolled for a series and come back to, drew itself where it had been
+    /// left, and then the 150 ms timer put it at the top: a frame or ten of the band under the
+    /// bar. A page is entered at its beginning, before it is seen, and no frame between shows
+    /// anything else.
+    void the_shelf_is_entered_at_its_beginning_and_never_seen_anywhere_else()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        QJsonArray many;
+        for (int i = 0; i < 40; ++i)
+            many.append(aSeries(u"s%1"_s.arg(i), u"Serie %1"_s.arg(i), 3, i == 0));
+        const QByteArray list = aReply(200, "application/json", aPage(many));
+        const QByteArray offer = aReply(200, "application/json", anOffer());
+        const auto elfes = anElfesPage(false);
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return offer;
+            if (request.startsWith("GET /series?"))
+                return list;
+            return elfes(request);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        window->resize(1100, 800);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        auto *band = window->findChild<QQuickItem *>(u"resume-band"_s);
+        auto *appBar = window->findChild<QQuickItem *>(u"app-bar"_s);
+        QVERIFY(grid && band && appBar);
+        QTRY_COMPARE(grid->property("count").toInt(), 40);
+        QTRY_VERIFY(band->height() > 0);
+        const auto atTheBeginning = [&] {
+            return qFuzzyCompare(grid->property("contentY").toReal() + 1,
+                                 grid->property("originY").toReal() + 1);
+        };
+        QTRY_VERIFY(atTheBeginning());
+
+        // Scrolled far down, as a reader does with the wheel.
+        QTest::mouseMove(window, QPoint(window->width() / 2, window->height() / 2));
+        for (int i = 0; i < 12; ++i)
+            wheel(window, QPoint(window->width() / 2, window->height() / 2),
+                              QPoint(0, -120));
+        QTRY_VERIFY(!atTheBeginning());
+        // The wheel is a hand on the shelf as much as a drag is: a refresh that changes the
+        // height afterwards must not take the reader back up.
+        QVERIFY(grid->property("followed").toBool());
+
+        // And a search closed shows its list from the beginning, not from where this one was.
+        auto *shelfModel = engine.singletonInstance<QObject *>(qmlTypeId("Leaf", 1, 0, "Shelf"));
+        QVERIFY(shelfModel);
+        QVERIFY(QMetaObject::invokeMethod(shelfModel, "searchFor", Q_ARG(QString, u"Serie"_s)));
+        QTest::qWait(300);
+        QVERIFY(QMetaObject::invokeMethod(shelfModel, "searchFor", Q_ARG(QString, QString())));
+        QTRY_VERIFY(atTheBeginning());
+
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QTRY_VERIFY(itemNamed(window->contentItem(), u"series-view"_s));
+
+        // Every frame drawn from the moment the shelf is back. Read while the scene is
+        // synchronised — the window thread stopped, what is read is what the frame is about to
+        // show — and not after rendering: there the render thread read the live position while
+        // the window thread was still moving it, and `frames.clear()` raced its `append`. A
+        // frame that showed 141 px was then a position the shelf held for a moment, not one
+        // that was drawn: one run in fifteen, alone, on a busy machine.
+        QList<qreal> frames;
+        const auto watch = QObject::connect(window, &QQuickWindow::beforeSynchronizing, window, [&] {
+            if (grid->isVisible() && grid->window())
+                frames.append(grid->property("contentY").toReal()
+                              - grid->property("originY").toReal());
+        }, Qt::DirectConnection);
+        navigation->back();
+        QTRY_VERIFY(grid->isVisible());
+        QTest::qWait(500);
+        QObject::disconnect(watch);
+        QVERIFY(!frames.isEmpty());
+        for (const qreal off : frames)
+            QVERIFY2(qFuzzyIsNull(off), qPrintable(u"a frame drew the shelf %1 px from its beginning"_s.arg(off)));
+        QVERIFY(atTheBeginning());
+        QCOMPARE(band->mapToItem(nullptr, QPointF(0, 0)).y(), qreal(appBar->height()));
+    }
+
+    /// The band arriving, or going, over a shelf that is at its beginning: the header grows
+    /// under a view that keeps its `contentY`, which is then no longer the beginning — the band
+    /// was drawn under the bar until the timer put it back. No frame shows it.
+    void a_band_that_arrives_or_leaves_never_moves_a_shelf_off_its_beginning()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        QJsonArray many;
+        for (int i = 0; i < 40; ++i)
+            many.append(aSeries(u"s%1"_s.arg(i), u"Serie %1"_s.arg(i), 3, i == 0));
+        const QByteArray list = aReply(200, "application/json", aPage(many));
+        const QByteArray offer = aReply(200, "application/json", anOffer());
+        const QByteArray none = "HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n";
+        auto offering = std::make_shared<bool>(false);
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return *offering ? offer : aReply(200, "application/json", "[]");
+            if (request.startsWith("GET /series?"))
+                return list;
+            return none;
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        window->resize(1100, 800);
+        auto *resume = engine.singletonInstance<QObject *>(qmlTypeId("Leaf", 1, 0, "Resume"));
+        QVERIFY(resume);
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        auto *band = window->findChild<QQuickItem *>(u"resume-band"_s);
+        QVERIFY(grid && band);
+        QTRY_COMPARE(grid->property("count").toInt(), 40);
+        QTest::qWait(400);
+
+        QList<qreal> frames;
+        const auto watch = QObject::connect(window, &QQuickWindow::beforeSynchronizing, window, [&] {
+            frames.append(grid->property("contentY").toReal()
+                          - grid->property("originY").toReal());
+        }, Qt::DirectConnection);
+        const auto allAtTheBeginning = [&](const char *when) {
+            for (const qreal off : frames)
+                QVERIFY2(qFuzzyIsNull(off),
+                         qPrintable(u"%1: a frame drew the shelf %2 px from its beginning"_s
+                                        .arg(QString::fromUtf8(when)).arg(off)));
+        };
+        *offering = true;
+        QVERIFY(QMetaObject::invokeMethod(resume, "reload"));
+        QTRY_VERIFY(band->height() > 0);
+        QTest::qWait(400);
+        allAtTheBeginning("arriving");
+        if (QTest::currentTestFailed())
+            return;
+        frames.clear();
+        *offering = false;
+        QVERIFY(QMetaObject::invokeMethod(resume, "reload"));
+        QTRY_VERIFY(![&] {
+            for (QQuickItem *one : itemsNamed(window->contentItem(), u"resume-card"_s)) {
+                if (one->isVisible() && one->width() > 0)
+                    return true;
+            }
+            return false;
+        }());
+        QTest::qWait(400);
+        allAtTheBeginning("leaving");
+        QObject::disconnect(watch);
+    }
+
+    /// A cover the keys reach is shown whole, and not behind what stays on screen: the pills
+    /// row is out of the scroll and stops at the top, so a cover scrolled up to the view's
+    /// edge sits under it. Going down and coming back up are both held to it.
+    void a_cover_the_keys_reach_is_never_left_under_the_pills_or_cut_by_the_edge()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        QJsonArray many;
+        for (int i = 0; i < 60; ++i)
+            many.append(aSeries(u"s%1"_s.arg(i), u"Serie %1"_s.arg(i), 3, i == 0));
+        const QByteArray list = aReply(200, "application/json", aPage(many));
+        const QByteArray offer = aReply(200, "application/json", anOffer());
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("GET /next"))
+                return offer;
+            if (request.startsWith("GET /series?"))
+                return list;
+            return QByteArray("HTTP/1.1 404 .\r\nContent-Length: 0\r\n\r\n");
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        window->resize(1100, 800);
+        auto *grid = window->findChild<QQuickItem *>(u"shelf-grid"_s);
+        auto *pills = window->findChild<QQuickItem *>(u"filter-pills"_s);
+        QVERIFY(grid);
+        QVERIFY(pills);
+        QTRY_COMPARE(grid->property("count").toInt(), 60);
+        QTest::qWait(400);
+        QObject *glide = shelfGlide(grid);
+        QVERIFY(glide);
+
+        for (int i = 0; i < 6 && grid->property("keyboardIndex").toInt() < 0; ++i)
+            QTest::keyClick(window, Qt::Key_Tab);
+        QVERIFY2(grid->property("keyboardIndex").toInt() >= 0, qPrintable(holderName(window)));
+
+        const auto whole = [&](const char *when) {
+            QTRY_VERIFY(!glide->property("running").toBool());
+            const int index = grid->property("keyboardIndex").toInt();
+            QQuickItem *tile = nullptr;
+            QTRY_VERIFY((QMetaObject::invokeMethod(grid, "itemAtIndex",
+                                                   Q_RETURN_ARG(QQuickItem *, tile),
+                                                   Q_ARG(int, index)),
+                         tile));
+            const qreal top = tile->mapToScene(QPointF(0, 0)).y();
+            const qreal bottom = top + tile->height();
+            const qreal floor = pills->mapToScene(QPointF(0, pills->height())).y();
+            const qreal edge = grid->mapToScene(QPointF(0, grid->height())).y();
+            QVERIFY2(top >= floor - 0.5, qPrintable(u"%1: cover %2 at %3, under the pills ending at %4"_s
+                                                       .arg(QString::fromUtf8(when)).arg(index)
+                                                       .arg(top).arg(floor)));
+            QVERIFY2(bottom <= edge + 0.5, qPrintable(u"%1: cover %2 ends at %3, past the edge %4"_s
+                                                         .arg(QString::fromUtf8(when)).arg(index)
+                                                         .arg(bottom).arg(edge)));
+        };
+        for (int i = 0; i < 7; ++i) {
+            QTest::keyClick(window, Qt::Key_Down);
+            whole("down");
+            if (QTest::currentTestFailed())
+                return;
+        }
+        for (int i = 0; i < 7; ++i) {
+            QTest::keyClick(window, Qt::Key_Up);
+            whole("up");
+            if (QTest::currentTestFailed())
+                return;
+        }
+    }
+
+    /// Tabbing through the settings brings each control into the scroll. A Flickable shows
+    /// nothing of the sort by itself: a window short enough to cut the page left the keys on
+    /// controls below its edge.
+    void the_settings_scroll_to_the_control_the_keys_reach()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true)}, u"p"_s,
+            false);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        window->resize(1100, 300);
+        for (const QString &section : QStringList{u"library"_s, u"profiles"_s}) {
+            QQuickItem *view = settingsOn(engine, window, section);
+            QVERIFY(view);
+            auto *sheet = view->findChild<QQuickItem *>(u"settings-sheet"_s);
+            QVERIFY(sheet);
+            QStringList cut;
+            int looked = 0;
+            for (int i = 0; i < 40; ++i) {
+                QTest::keyClick(window, Qt::Key_Tab);
+                QQuickItem *held = window->activeFocusItem();
+                if (!held || !sheet->isAncestorOf(held))
+                    continue;
+                ++looked;
+                const QRectF at(held->mapToScene(QPointF(0, 0)), held->size());
+                const QRectF room(sheet->mapToScene(QPointF(0, 0)), sheet->size());
+                if (at.top() < room.top() - 0.5 || at.bottom() > room.bottom() + 0.5)
+                    cut << u"%1 (%2..%3 in %4..%5)"_s.arg(held->objectName()).arg(at.top())
+                               .arg(at.bottom()).arg(room.top()).arg(room.bottom());
+            }
+            QVERIFY2(looked > 2, qPrintable(section + u": the keys never entered the sheet"_s));
+            QVERIFY2(cut.isEmpty(), qPrintable(section + u": "_s + cut.join(u", "_s)));
+
+            // A tab chosen is read from its top, whatever the last one was scrolled to.
+            sheet->setProperty("contentY", 60);
+            QVERIFY(sheet->property("contentY").toReal() > 0);
+            view->setProperty("section", section == u"library"_s ? u"profiles"_s : u"library"_s);
+            QTRY_COMPARE(sheet->property("contentY").toReal(), 0.0);
+        }
+    }
+
+    /// A menu is as wide as its words: « Marquer toute la série comme non lue » was cut to
+    /// « … comme n… » in a window with room for twice that, because every row claimed the
+    /// same constant. And it opens on the side that has room: from a line near the bottom of
+    /// the window it lay over the button that had opened it.
+    void a_menu_shows_its_words_whole_and_does_not_cover_its_own_button()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = anElfesPage(false);
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        window->resize(1100, 520);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QTRY_VERIFY(shownNamed(page, u"volume-v2"_s));
+
+        // The series' menu: its two longest words, whole.
+        QQuickItem *series = itemNamed(page, u"commands-albums"_s);
+        QVERIFY(series);
+        QVERIFY(QMetaObject::invokeMethod(series, "show"));
+        QQuickItem *unread = nullptr;
+        QTRY_VERIFY((unread = itemNamed(window->contentItem(), u"command-unread-albums"_s))
+                    && unread->isVisible());
+        const auto cut = [&](QQuickItem *row) {
+            for (QQuickItem *one : row->findChildren<QQuickItem *>()) {
+                if (one->inherits("QQuickText") && one->property("truncated").toBool())
+                    return true;
+            }
+            return false;
+        };
+        QVERIFY2(!cut(unread), "« Marquer toute la série comme non lue » is elided");
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!series->property("opened").toBool());
+
+        // The last line's menu, opened where the window ends: beside its button, not over it.
+        QQuickItem *dots = itemNamed(page, u"commands-v2"_s);
+        QVERIFY(dots);
+        QVERIFY(QMetaObject::invokeMethod(dots, "show"));
+        QQuickItem *read = nullptr;
+        QTRY_VERIFY((read = itemNamed(window->contentItem(), u"command-read-v2"_s))
+                    && read->isVisible());
+        QQuickItem *erase = itemNamed(window->contentItem(), u"command-erase-v2"_s);
+        const QRectF button(dots->mapToScene(QPointF(0, 0)), dots->size());
+        QRectF menu(read->mapToScene(QPointF(0, 0)), read->size());
+        if (erase && erase->isVisible())
+            menu = menu.united(QRectF(erase->mapToScene(QPointF(0, 0)), erase->size()));
+        QVERIFY2(!menu.intersects(button),
+                 qPrintable(u"the menu %1,%2 %3x%4 lies over its button %5,%6"_s
+                                .arg(menu.x()).arg(menu.y()).arg(menu.width()).arg(menu.height())
+                                .arg(button.x()).arg(button.y())));
+        // Near the bottom edge there is more room above the line than below it.
+        QVERIFY2(menu.bottom() <= button.top() + 1, "the menu opened below, over the window's edge");
+        QVERIFY(menu.bottom() <= window->height());
+        QVERIFY(menu.top() >= 0);
+    }
+
+    /// The reader's habits are in the general settings, and choosing there is choosing for
+    /// the reader: four choices had been reachable only from inside an open volume.
+    void the_general_settings_hold_the_readers_habits()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true)}, u"p"_s,
+            false);
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : empty;
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *preferences =
+            engine.singletonInstance<Preferences *>(qmlTypeId("Leaf", 1, 0, "Preferences"));
+        QVERIFY(preferences);
+        const auto motion = preferences->motion();
+        const auto restore = qScopeGuard([=] { preferences->chooseMotion(motion); });
+        QQuickItem *view = settingsOn(engine, window, u"general"_s);
+        QVERIFY(view);
+        for (const QString &name : {u"layout"_s, u"fit"_s, u"backdrop"_s, u"motion"_s})
+            QVERIFY2(shownNamed(view, u"general-reader-"_s + name), qPrintable(name));
+        QQuickItem *choice = itemNamed(view, u"general-reader-motion"_s);
+        const auto other = motion == Preferences::Motion::Instant ? Preferences::Motion::Fade
+                                                                  : Preferences::Motion::Instant;
+        QVERIFY(QMetaObject::invokeMethod(choice, "picked", Q_ARG(int, int(other))));
+        QCOMPARE(preferences->motion(), other);
+    }
+
+    /// « Informations » on a volume says what the file is — its name, what it weighs, how many
+    /// pages — and a series has no such entry, since a series is not a file.
+    void a_volume_tells_what_its_file_is_and_a_series_has_no_such_entry()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = anElfesPage(false);
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QTRY_VERIFY(shownNamed(page, u"volume-v2"_s));
+
+        QQuickItem *dots = itemNamed(page, u"commands-v2"_s);
+        QVERIFY(dots);
+        QVERIFY(QMetaObject::invokeMethod(dots, "show"));
+        QQuickItem *entry = nullptr;
+        QTRY_VERIFY((entry = itemNamed(window->contentItem(), u"command-info-v2"_s))
+                    && entry->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(entry, "triggered"));
+        QQuickItem *dialog = nullptr;
+        QTRY_VERIFY((dialog = itemNamed(window->contentItem(), u"file-info-value-0"_s))
+                    && dialog->isVisible());
+        // The file's own name is among the facts, beside the cover, as the reader's card has
+        // them; where it falls depends on what the volume has.
+        bool named = false;
+        for (int i = 0; i < 8 && !named; ++i)
+            named = textNamed(window->contentItem(), u"file-info-value-%1"_s.arg(i)) == u"T2.cbz"_s;
+        QVERIFY(named);
+        QVERIFY(itemNamed(window->contentItem(), u"file-info-cover"_s));
+        // The name a copy is offered under is the server's, not the file's.
+        auto *entries =
+            engine.singletonInstance<Entries *>(qmlTypeId("Leaf", 1, 0, "Entries"));
+        QVERIFY(entries);
+        QCOMPARE(entries->describe(u"v2"_s).value(u"copyName"_s).toString(),
+                 u"elfes_tome_002.cbz"_s);
+        QVERIFY(!textNamed(window->contentItem(), u"file-info-value-0-name"_s).isEmpty());
+        QTest::keyClick(window, Qt::Key_Escape);
+
+        QQuickItem *series = itemNamed(page, u"commands-albums"_s);
+        QVERIFY(series);
+        QVERIFY(QMetaObject::invokeMethod(series, "show"));
+        QTRY_VERIFY(itemNamed(window->contentItem(), u"command-read-albums"_s)
+                    && itemNamed(window->contentItem(), u"command-read-albums"_s)->isVisible());
+        QQuickItem *none = itemNamed(window->contentItem(), u"command-info-albums"_s);
+        QVERIFY(!none || !none->isVisible());
+
+        // The way a series is read is chosen from its own menu, and a volume has no such entry.
+        QQuickItem *way = itemNamed(window->contentItem(), u"command-direction-albums"_s);
+        QVERIFY(way && way->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(way, "triggered"));
+        QQuickItem *rtl = nullptr;
+        QTRY_VERIFY((rtl = itemNamed(window->contentItem(), u"direction-1-albums"_s))
+                    && rtl->isVisible());
+        QVERIFY(itemNamed(window->contentItem(), u"direction--1-albums"_s));
+        QQuickItem *volumeWay = itemNamed(window->contentItem(), u"command-direction-v2"_s);
+        QVERIFY(!volumeWay || !volumeWay->isVisible());
+    }
+
+    /// « Modifier » opens the window of what it commands: a series its fields, a volume its
+    /// own and the warning that the file is rewritten. A profile without the right is offered
+    /// neither.
+    void the_menus_offer_to_edit_a_series_and_a_volume_and_say_the_file_is_rewritten()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true, 0, true,
+                      true)},
+            u"p"_s, false);
+        const auto rest = anElfesPage(false);
+        pretend.answerFor = [seat, rest](const QByteArray &request) {
+            return request.startsWith("GET /profiles ") ? seat : rest(request);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QTRY_VERIFY(shownNamed(page, u"volume-v2"_s));
+
+        auto *seated = engine.singletonInstance<Profiles *>(qmlTypeId("Leaf", 1, 0, "Profiles"));
+        QVERIFY(seated);
+        QTRY_VERIFY(seated->canEdit());
+
+        QQuickItem *dots = itemNamed(page, u"commands-v2"_s);
+        QVERIFY(dots);
+        QVERIFY(QMetaObject::invokeMethod(dots, "show"));
+        QQuickItem *edit = nullptr;
+        QTRY_VERIFY((edit = itemNamed(window->contentItem(), u"command-edit-v2"_s))
+                    && edit->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(edit, "triggered"));
+        QQuickItem *warning = nullptr;
+        QTRY_VERIFY((warning = itemNamed(window->contentItem(), u"entry-edit-warning"_s))
+                    && warning->isVisible());
+        QVERIFY(warning->property("text").toString().contains(u"réécrit"_s));
+        // It starts from what the file says: its number is already there.
+        auto *number = itemNamed(window->contentItem(), u"entry-edit-number-field"_s);
+        QVERIFY(number);
+        QCOMPARE(number->property("text").toString(), u"2"_s);
+        QTest::keyClick(window, Qt::Key_Escape);
+
+        QQuickItem *series = itemNamed(page, u"commands-albums"_s);
+        QVERIFY(series);
+        QVERIFY(QMetaObject::invokeMethod(series, "show"));
+        QTRY_VERIFY((edit = itemNamed(window->contentItem(), u"command-edit-albums"_s))
+                    && edit->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(edit, "triggered"));
+        QTRY_VERIFY(itemNamed(window->contentItem(), u"series-edit-title-field"_s));
+        QVERIFY(itemNamed(window->contentItem(), u"series-edit-save"_s));
+    }
+
+    /// A volume whose credits nobody touched says nothing of them: what it draws on is the
+    /// series' word, shown greyed and with no × — written into the file as its own, it would
+    /// no longer follow the series when the series changes.
+    void a_volume_left_alone_sends_no_credits()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open(true));
+        QQuickItem *drawing = nullptr;
+        QTRY_VERIFY((drawing = edit.named(u"entry-edit-artists-chip-0"_s)));
+        QVERIFY(drawing->property("inherited").toBool());
+        QCOMPARE(drawing->property("word").toString(), u"Morris"_s);
+        QVERIFY(!edit.named(u"entry-edit-artists-chip-0-remove"_s)->isVisible());
+        QQuickItem *writing = edit.named(u"entry-edit-authors-chip-0"_s);
+        QVERIFY(writing && !writing->property("inherited").toBool());
+        QVERIFY(edit.named(u"entry-edit-authors-chip-0-remove"_s)->isVisible());
+        edit.type(u"entry-edit-title-field"_s, u"L'Honneur des elfes"_s);
+        QVERIFY(QMetaObject::invokeMethod(edit.named(u"entry-edit-save"_s), "triggered"));
+        QTRY_VERIFY(edit.pretend.heard.contains("PATCH /entries/v2 "));
+        const QJsonObject sent = bodySent(edit.pretend.heard, "PATCH /entries/v2 ");
+        QCOMPARE(sent.keys(), QStringList{u"title"_s});
+    }
+
+    /// The last name of a volume's own list taken away sends an empty list, which is how the
+    /// server hears « the series' word again », and the series' name comes back greyed.
+    void emptying_a_volume_credit_sends_an_empty_list()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open(true));
+        QQuickItem *remove = nullptr;
+        QTRY_VERIFY((remove = edit.named(u"entry-edit-authors-chip-0-remove"_s)));
+        QVERIFY(QMetaObject::invokeMethod(remove, "triggered"));
+        QQuickItem *writing = nullptr;
+        QTRY_VERIFY((writing = edit.named(u"entry-edit-authors-chip-0"_s))
+                    && writing->property("inherited").toBool());
+        QCOMPARE(writing->property("word").toString(), u"René Goscinny"_s);
+        QVERIFY(QMetaObject::invokeMethod(edit.named(u"entry-edit-save"_s), "triggered"));
+        QTRY_VERIFY(edit.pretend.heard.contains("PATCH /entries/v2 "));
+        const QJsonObject sent = bodySent(edit.pretend.heard, "PATCH /entries/v2 ");
+        QCOMPARE(sent.keys(), QStringList{u"authors"_s});
+        QVERIFY(sent.value(u"authors"_s).isArray());
+        QVERIFY(sent.value(u"authors"_s).toArray().isEmpty());
+    }
+
+    /// A date typed as one line, JJ/MM/AAAA, is sent as the one string the server keeps.
+    void a_date_typed_as_day_month_and_year_is_sent_as_one_date()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open());
+        edit.type(u"entry-edit-published-field"_s, u"04/03/2011"_s);
+        QCOMPARE(edit.chosen(), u"2011-03-04"_s);
+        QVERIFY(edit.said(u"entry-edit-published-problem"_s).isEmpty());
+        QVERIFY(QMetaObject::invokeMethod(edit.named(u"entry-edit-save"_s), "triggered"));
+        QTRY_VERIFY(edit.pretend.heard.contains("PATCH /entries/v2 "));
+        const QJsonObject sent = bodySent(edit.pretend.heard, "PATCH /entries/v2 ");
+        QCOMPARE(sent.value(u"publishedOn"_s).toString(), u"2011-03-04"_s);
+        // Nothing else changed, so nothing else is sent.
+        QCOMPARE(sent.size(), 1);
+    }
+
+    /// A year alone is a date, as the files write it, and so is a month and a year.
+    void a_date_may_stop_at_the_year_or_at_the_month()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open());
+        edit.type(u"entry-edit-published-field"_s, u"1998"_s);
+        QCOMPARE(edit.chosen(), u"1998"_s);
+        QVERIFY(edit.said(u"entry-edit-published-problem"_s).isEmpty());
+        edit.type(u"entry-edit-published-field"_s, u"10/1998"_s);
+        QCOMPARE(edit.chosen(), u"1998-10"_s);
+        QVERIFY(edit.said(u"entry-edit-published-problem"_s).isEmpty());
+        QVERIFY(edit.named(u"entry-edit-save"_s)->property("ready").toBool());
+    }
+
+    /// « 2011-02-30 » went to the file as it was typed and the reader showed it back untouched,
+    /// since a string that is no date is printed as it came: it is refused where it is typed.
+    void a_date_with_a_day_that_does_not_exist_is_refused_before_it_is_sent()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open());
+        QQuickItem *save = edit.named(u"entry-edit-save"_s);
+        edit.type(u"entry-edit-published-field"_s, u"30/02/2011"_s);
+        QVERIFY(edit.said(u"entry-edit-published-problem"_s).contains(u"n’existe pas"_s));
+        QVERIFY(!save->property("ready").toBool());
+        // The 29th of February exists in a leap year only.
+        edit.type(u"entry-edit-published-field"_s, u"29/02/2011"_s);
+        QVERIFY(!edit.said(u"entry-edit-published-problem"_s).isEmpty());
+        edit.type(u"entry-edit-published-field"_s, u"29/02/2012"_s);
+        QVERIFY(edit.said(u"entry-edit-published-problem"_s).isEmpty());
+        QVERIFY(save->property("ready").toBool());
+    }
+
+    /// A day with no year, a day with no month, a month that is not one and a year of two
+    /// digits are not dates, and the button stays grey on each.
+    void a_day_without_a_year_or_a_month_and_a_short_year_are_said_under_the_date()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open());
+        edit.type(u"entry-edit-published-field"_s, u"04/03/"_s);
+        QVERIFY(edit.said(u"entry-edit-published-problem"_s).contains(u"année"_s));
+        edit.type(u"entry-edit-published-field"_s, u"04/03/11"_s);
+        QVERIFY(edit.said(u"entry-edit-published-problem"_s).contains(u"quatre chiffres"_s));
+        edit.type(u"entry-edit-published-field"_s, u"04//2011"_s);
+        QVERIFY(edit.said(u"entry-edit-published-problem"_s).contains(u"mois"_s));
+        QVERIFY(!edit.named(u"entry-edit-save"_s)->property("ready").toBool());
+        edit.type(u"entry-edit-published-field"_s, u"04/13/2011"_s);
+        QVERIFY(edit.said(u"entry-edit-published-problem"_s).contains(u"n’existe pas"_s));
+        QVERIFY(!edit.named(u"entry-edit-save"_s)->property("ready").toBool());
+    }
+
+    /// A date emptied takes the field away, one the file spelled « 2011-3-4 » is not sent back
+    /// for the sake of its zero, and text that is no date is left alone unless typed over.
+    void a_date_emptied_is_taken_away_and_one_spelled_differently_is_not_rewritten()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open());
+        QQuickItem *date = edit.named(u"entry-edit-published"_s);
+        QVERIFY(QMetaObject::invokeMethod(date, "load", Q_ARG(QString, u"2011-3-4"_s)));
+        QCOMPARE(date->property("value").toString(), u"2011-03-04"_s);
+        QCOMPARE(edit.written(), u"04/03/2011"_s);
+        QCOMPARE(date->property("value").toString(), date->property("initial").toString());
+        QVERIFY(QMetaObject::invokeMethod(date, "load", Q_ARG(QString, u"printemps"_s)));
+        QCOMPARE(date->property("value").toString(), QString());
+        QCOMPARE(date->property("initial").toString(), QString());
+        QVERIFY(QMetaObject::invokeMethod(date, "load", Q_ARG(QString, u"2011-03-04"_s)));
+        edit.type(u"entry-edit-published-field"_s, QString());
+        QCOMPARE(date->property("value").toString(), QString());
+        QVERIFY(edit.said(u"entry-edit-published-problem"_s).isEmpty());
+        QVERIFY(QMetaObject::invokeMethod(edit.named(u"entry-edit-save"_s), "triggered"));
+        QTRY_VERIFY(edit.pretend.heard.contains("PATCH /entries/v2 "));
+        const QJsonObject sent = bodySent(edit.pretend.heard, "PATCH /entries/v2 ");
+        QVERIFY(sent.contains(u"publishedOn"_s) && sent.value(u"publishedOn"_s).isNull());
+    }
+
+    /// A date loaded in any of the three shapes the files use is written back in the line the
+    /// way it is typed, and sends nothing while it is left alone.
+    void a_date_loaded_at_the_year_or_the_month_is_written_the_way_it_is_typed()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open());
+        QQuickItem *date = edit.named(u"entry-edit-published"_s);
+        QVERIFY(QMetaObject::invokeMethod(date, "load", Q_ARG(QString, u"1998"_s)));
+        QCOMPARE(edit.written(), u"1998"_s);
+        QVERIFY(QMetaObject::invokeMethod(date, "load", Q_ARG(QString, u"1998-10"_s)));
+        QCOMPARE(edit.written(), u"10/1998"_s);
+        QCOMPARE(date->property("value").toString(), date->property("initial").toString());
+    }
+
+    /// The calendar opens on the month the line names and a click on a day writes the whole date.
+    void a_day_chosen_in_the_calendar_with_the_pointer_fills_the_line()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open());
+        edit.type(u"entry-edit-published-field"_s, u"10/1998"_s);
+        QTest::mouseClick(edit.window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(edit.named(u"entry-edit-published-calendar-button"_s)));
+        QTRY_VERIFY(edit.shows(u"1998-10-12"_s));
+        QVERIFY(!edit.shows(u"1998-12-12"_s));
+        QTest::mouseClick(edit.window, Qt::LeftButton, Qt::NoModifier,
+                          centreOf(edit.named(u"entry-edit-published-calendar-1998-10-12"_s)));
+        QTRY_VERIFY(!edit.shows(u"1998-10-12"_s));
+        QCOMPARE(edit.written(), u"12/10/1998"_s);
+        QCOMPARE(edit.chosen(), u"1998-10-12"_s);
+        QVERIFY(edit.dialog->isVisible());
+    }
+
+    /// The calendar is walked with the keys alone: the arrows a day or a week, Page Down a month,
+    /// Enter takes the day; Escape shuts it, keeps the line and leaves the window open.
+    void the_calendar_is_walked_with_the_keys_alone()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open());
+        edit.type(u"entry-edit-published-field"_s, u"12/10/1998"_s);
+        edit.openCalendar();
+        QTest::keyClick(edit.window, Qt::Key_Right);
+        QTest::keyClick(edit.window, Qt::Key_Down);
+        QTest::keyClick(edit.window, Qt::Key_PageDown);
+        QTest::keyClick(edit.window, Qt::Key_Return);
+        QTRY_VERIFY(!edit.shows(u"1998-11-20"_s));
+        QCOMPARE(edit.chosen(), u"1998-11-20"_s);
+        QCOMPARE(holderName(edit.window), u"entry-edit-published-field"_s);
+
+        edit.openCalendar();
+        QTest::keyClick(edit.window, Qt::Key_Left);
+        QTest::keyClick(edit.window, Qt::Key_Escape);
+        QTRY_VERIFY(!edit.shows(u"1998-11-20"_s));
+        QCOMPARE(edit.chosen(), u"1998-11-20"_s);
+        QVERIFY(edit.dialog->isVisible());
+        QCOMPARE(holderName(edit.window), u"entry-edit-published-field"_s);
+    }
+
+    /// A pointer left over a day of the calendar does not take the day the keys went to: the
+    /// list of the series window lost its row to one, and the calendar must not.
+    void a_still_pointer_does_not_take_the_day_the_keys_chose()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open());
+        edit.type(u"entry-edit-published-field"_s, u"12/10/1998"_s);
+        QTest::mouseMove(edit.window, centreOf(edit.named(u"entry-edit-published-calendar-button"_s)));
+        edit.openCalendar();
+        QTRY_VERIFY(edit.shows(u"1998-10-12"_s));
+        QTest::mouseMove(edit.window, centreOf(edit.named(u"entry-edit-published-calendar-1998-10-03"_s)));
+        QTest::keyClick(edit.window, Qt::Key_Right);
+        QTest::keyClick(edit.window, Qt::Key_Return);
+        QTRY_VERIFY(!edit.shows(u"1998-10-12"_s));
+        QCOMPARE(edit.chosen(), u"1998-10-13"_s);
+    }
+
+    /// Years of decades back are reached by typing the year in the header, and the day chosen
+    /// there is the day of that year.
+    void the_year_of_the_calendar_is_typed_over_to_reach_an_old_album()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open());
+        edit.openCalendar();
+        QQuickItem *year = edit.named(u"entry-edit-published-calendar-year"_s);
+        QVERIFY(year);
+        year->forceActiveFocus(Qt::TabFocusReason);
+        QVERIFY(QMetaObject::invokeMethod(year, "selectAll"));
+        typeInto(edit.window, u"1987"_s);
+        QTest::keyClick(edit.window, Qt::Key_Return);
+        QTRY_COMPARE(holderName(edit.window), u"entry-edit-published-calendar-grid"_s);
+        QTest::keyClick(edit.window, Qt::Key_Return);
+        QTRY_VERIFY(edit.chosen().startsWith(u"1987-"_s));
+    }
+
+    /// A calendar closed without a choice leaves a date as the file spelled it, and sends nothing.
+    void a_calendar_closed_without_a_choice_does_not_rewrite_the_date()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open());
+        QQuickItem *date = edit.named(u"entry-edit-published"_s);
+        QVERIFY(QMetaObject::invokeMethod(date, "load", Q_ARG(QString, u"2011-3-4"_s)));
+        edit.openCalendar();
+        QTest::keyClick(edit.window, Qt::Key_Escape);
+        QTRY_VERIFY(!edit.shows(u"2011-03-04"_s));
+        QCOMPARE(date->property("value").toString(), date->property("initial").toString());
+    }
+
+    /// The button was grey for an empty number and nothing said why; « 2abc » was read as 2 and
+    /// sent. The number is judged as it is typed, and its line says what is wrong with it.
+    void a_number_that_is_missing_or_not_a_number_is_said_under_its_field()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open());
+        QQuickItem *save = edit.named(u"entry-edit-save"_s);
+        QVERIFY(edit.said(u"entry-edit-number-problem"_s).isEmpty());
+        edit.type(u"entry-edit-number-field"_s, QString());
+        QVERIFY(edit.said(u"entry-edit-number-problem"_s).contains(u"obligatoire"_s));
+        QVERIFY(!save->property("ready").toBool());
+        edit.type(u"entry-edit-number-field"_s, u"2abc"_s);
+        QVERIFY(edit.said(u"entry-edit-number-problem"_s).contains(u"nombre"_s));
+        QVERIFY(!save->property("ready").toBool());
+        edit.type(u"entry-edit-number-field"_s, u"2,5"_s);
+        QVERIFY(edit.said(u"entry-edit-number-problem"_s).isEmpty());
+        QVERIFY(save->property("ready").toBool());
+        QVERIFY(QMetaObject::invokeMethod(save, "triggered"));
+        QTRY_VERIFY(edit.pretend.heard.contains("PATCH /entries/v2 "));
+        QCOMPARE(bodySent(edit.pretend.heard, "PATCH /entries/v2 ").value(u"number"_s).toDouble(),
+                 2.5);
+    }
+
+    /// A series offers an image from the disk and, once one is chosen, the way back to its first
+    /// volume; the image is sent after the fields, as bytes.
+    void a_series_cover_is_an_image_from_the_disk_and_can_go_back_to_the_first_volume()
+    {
+        QTemporaryDir folder;
+        QVERIFY(folder.isValid());
+        const QString file = folder.filePath(u"elfes.png"_s);
+        {
+            QFile out(file);
+            QVERIFY(out.open(QIODevice::WriteOnly));
+            out.write(aCover());
+        }
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true, 0, true, true)},
+            u"p"_s, false);
+        const auto rest = anElfesPage(false);
+        pretend.answerFor = [seat, rest](const QByteArray &request) {
+            if (request.startsWith("PUT /series/albums/cover ")
+                || request.startsWith("DELETE /series/albums/cover "))
+                return QByteArray("HTTP/1.1 204 .\r\nContent-Length: 0\r\n\r\n");
+            return request.startsWith("GET /profiles ") ? seat : rest(request);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        auto *seated = engine.singletonInstance<Profiles *>(qmlTypeId("Leaf", 1, 0, "Profiles"));
+        QVERIFY(seated);
+        QTRY_VERIFY(seated->canEdit());
+        QQuickItem *dots = nullptr;
+        QTRY_VERIFY((dots = itemNamed(page, u"commands-albums"_s)));
+        QVERIFY(QMetaObject::invokeMethod(dots, "show"));
+        QQuickItem *edit = nullptr;
+        QTRY_VERIFY((edit = itemNamed(window->contentItem(), u"command-edit-albums"_s))
+                    && edit->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(edit, "triggered"));
+
+        QQuickItem *chooser = nullptr;
+        QTRY_VERIFY((chooser = itemNamed(window->contentItem(), u"series-edit-cover"_s))
+                    && chooser->isVisible());
+        QVERIFY(!chooser->property("canRevert").toBool());
+        // One control for the cover, which opens the ways: a volume, an image — and no page,
+        // a series has none.
+        QQuickItem *change = itemNamed(window->contentItem(), u"series-edit-cover-change"_s);
+        QVERIFY(change);
+        QCOMPARE(change->property("label").toString(), u"Changer…"_s);
+        QVERIFY(change->property("activeFocusOnTab").toBool());
+        QTRY_COMPARE(chooser->property("volumes").toList().size(), 2);
+        QQuickItem *pick = coverWay(window, u"series-edit-cover"_s, u"pick-image"_s);
+        QVERIFY(pick);
+        QCOMPARE(pick->property("text").toString(), u"Choisir une image…"_s);
+        QQuickItem *pickVolume = itemNamed(window->contentItem(), u"series-edit-cover-pick-volume"_s);
+        QVERIFY(pickVolume && pickVolume->isVisible());
+        QCOMPARE(pickVolume->property("text").toString(), u"Choisir un tome…"_s);
+        QVERIFY(!itemNamed(window->contentItem(), u"series-edit-cover-pick-page"_s)->isVisible());
+        QVERIFY(!itemNamed(window->contentItem(), u"series-edit-cover-revert"_s)->isVisible());
+
+        QVERIFY(QMetaObject::invokeMethod(chooser, "chooseFile",
+                                          Q_ARG(QVariant, QUrl::fromLocalFile(file).toString())));
+        QTRY_VERIFY(chooser->property("canRevert").toBool());
+        QCOMPARE(chooser->property("revertLabel").toString(), u"Revenir au tome 1"_s);
+
+        QQuickItem *save = itemNamed(window->contentItem(), u"series-edit-save"_s);
+        QTRY_VERIFY(save->property("ready").toBool());
+        QVERIFY(QMetaObject::invokeMethod(save, "triggered"));
+        QTRY_VERIFY(pretend.heard.contains("PUT /series/albums/cover "));
+        QTRY_VERIFY(pretend.heard.contains(aCover()));
+        QVERIFY(!pretend.heard.contains("PATCH /series/albums "));
+    }
+
+    /// The cover of a series is picked among its volumes as thumbnails, not typed as a number, and
+    /// sent as the number the contract names: the second volume is the volume numbered 2.
+    void a_series_cover_is_picked_among_its_volumes_and_sent_as_a_number()
+    {
+        SeriesEdit edit;
+        QVERIFY(edit.open());
+        QCOMPARE(edit.said(u"series-edit-cover-status"_s), u"Couverture du tome 1"_s);
+        QVERIFY(!edit.named(u"series-edit-cover-field"_s));
+
+        QQuickItem *way = coverWay(edit.window, u"series-edit-cover"_s, u"pick-volume"_s);
+        QVERIFY(way);
+        QVERIFY(QMetaObject::invokeMethod(way, "triggered"));
+        QQuickItem *grid = nullptr;
+        QTRY_VERIFY((grid = edit.named(u"series-edit-cover-volumes-grid"_s)) && grid->isVisible());
+        QTRY_VERIFY(grid->hasActiveFocus());
+        QCOMPARE(grid->property("count").toInt(), 2);
+        QTest::keyClick(edit.window, Qt::Key_Right);
+        QTest::keyClick(edit.window, Qt::Key_Return);
+        QTRY_VERIFY(!grid->isVisible());
+
+        QCOMPARE(edit.said(u"series-edit-cover-status"_s), u"Tome 2"_s);
+        QVERIFY(edit.chooser->property("canRevert").toBool());
+        QVERIFY(QMetaObject::invokeMethod(edit.named(u"series-edit-save"_s), "triggered"));
+        QTRY_VERIFY(edit.pretend.heard.contains("PATCH /series/albums "));
+        const QJsonObject sent = bodySent(edit.pretend.heard, "PATCH /series/albums ");
+        QCOMPARE(sent.value(u"coverVolume"_s).toDouble(-1), 2.0);
+        QCOMPARE(sent.size(), 1);
+        QVERIFY(!edit.pretend.heard.contains("PUT /series/albums/cover"));
+        QVERIFY(!edit.pretend.heard.contains("DELETE /series/albums/cover"));
+    }
+
+    /// The picture is the series' own, on the line of its title and at its left as the volume's
+    /// window has it, so that the window does not end on a section nobody scrolls to.
+    void the_cover_of_a_series_stands_on_the_line_of_its_title()
+    {
+        SeriesEdit edit;
+        QVERIFY(edit.open());
+        QQuickItem *picture = edit.named(u"series-edit-cover-preview"_s);
+        QQuickItem *title = edit.named(u"series-edit-title"_s);
+        QVERIFY(picture && title);
+        const QPointF pictureAt = picture->mapToScene(QPointF(0, 0));
+        const QPointF titleAt = title->mapToScene(QPointF(0, 0));
+        QCOMPARE(pictureAt.y(), titleAt.y());
+        QVERIFY(pictureAt.x() < titleAt.x());
+        // And above everything else the window asks.
+        QVERIFY(pictureAt.y() < edit.named(u"series-edit-summary"_s)->mapToScene(QPointF(0, 0)).y());
+    }
+
+    /// « Revenir au tome 1 » takes a chosen volume back by a DELETE, which is the server's one way
+    /// of forgetting the volume and the image together; nothing else is sent.
+    void going_back_to_the_first_volume_sends_a_delete_and_is_offered_for_a_volume_already_kept()
+    {
+        SeriesEdit edit;
+        QVERIFY(edit.open(2.0));
+        QCOMPARE(edit.said(u"series-edit-cover-status"_s), u"Tome 2"_s);
+        QVERIFY(edit.chooser->property("canRevert").toBool());
+
+        QQuickItem *revert = coverWay(edit.window, u"series-edit-cover"_s, u"revert"_s);
+        QVERIFY(revert);
+        QCOMPARE(revert->property("text").toString(), u"Revenir au tome 1"_s);
+        QVERIFY(QMetaObject::invokeMethod(revert, "triggered"));
+        QCOMPARE(edit.said(u"series-edit-cover-status"_s), u"Couverture du tome 1"_s);
+        QVERIFY(QMetaObject::invokeMethod(edit.named(u"series-edit-save"_s), "triggered"));
+        QTRY_VERIFY(edit.pretend.heard.contains("DELETE /series/albums/cover "));
+        QVERIFY(!edit.pretend.heard.contains("PATCH /series/albums "));
+    }
+
+    /// Choosing the volume the series already names is not a change: nothing is sent, and the
+    /// window does not pretend otherwise.
+    void choosing_the_volume_already_kept_changes_nothing()
+    {
+        SeriesEdit edit;
+        QVERIFY(edit.open(2.0));
+        QVERIFY(QMetaObject::invokeMethod(edit.chooser, "chooseVolume", Q_ARG(QVariant, 1)));
+        QVERIFY(!edit.chooser->property("changed").toBool());
+        QVERIFY(edit.chooser->property("pickedVolume").isNull());
+    }
+
+    /// Every picture of a cover asks again once a volume is chosen and once it is taken back, so
+    /// that the new one is drawn without a scan and without a restart (the stamp is what makes the
+    /// address new; `a_cover_changed_from_the_window_is_drawn_again_without_a_restart` holds the
+    /// drawing itself).
+    void choosing_a_volume_and_going_back_each_renew_the_pictures_of_covers()
+    {
+        {
+            SeriesEdit edit;
+            QVERIFY(edit.open());
+            auto *server = edit.engine.singletonInstance<Server *>(qmlTypeId("Leaf", 1, 0, "Server"));
+            QVERIFY(server);
+            const int before = server->coverStamp();
+            QVERIFY(QMetaObject::invokeMethod(edit.chooser, "chooseVolume", Q_ARG(QVariant, 1)));
+            QVERIFY(QMetaObject::invokeMethod(edit.named(u"series-edit-save"_s), "triggered"));
+            QTRY_VERIFY(server->coverStamp() > before);
+        }
+        {
+            SeriesEdit edit;
+            QVERIFY(edit.open(2.0));
+            auto *server = edit.engine.singletonInstance<Server *>(qmlTypeId("Leaf", 1, 0, "Server"));
+            QVERIFY(server);
+            const int before = server->coverStamp();
+            QQuickItem *revert = coverWay(edit.window, u"series-edit-cover"_s, u"revert"_s);
+            QVERIFY(revert);
+            QVERIFY(QMetaObject::invokeMethod(revert, "triggered"));
+            QVERIFY(QMetaObject::invokeMethod(edit.named(u"series-edit-save"_s), "triggered"));
+            QTRY_VERIFY(server->coverStamp() > before);
+        }
+    }
+
+    /// **Measured before it was corrected:** the cover of a series is asked for under the same
+    /// address after it changed, and the `Image` answered it from the pixmap it already held, so
+    /// the old picture stayed until the restart. Changed, it is asked for again and the new
+    /// picture is the one drawn.
+    void a_cover_changed_from_the_window_is_drawn_again_without_a_restart()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const auto rest = anElfesPage(false);
+        const auto plain = [](const QColor &colour) {
+            QImage image(2, 3, QImage::Format_RGB32);
+            image.fill(colour);
+            QByteArray bytes;
+            QBuffer buffer(&bytes);
+            buffer.open(QIODevice::WriteOnly);
+            image.save(&buffer, "PNG");
+            return aReply(200, "image/png", bytes);
+        };
+        const QByteArray before = plain(QColor(u"#2B3550"_s));
+        const QByteArray after = plain(QColor(u"#B03030"_s));
+        auto *now = new QByteArray(before);
+        const auto release = qScopeGuard([now] { delete now; });
+        pretend.answerFor = [rest, now](const QByteArray &request) {
+            return request.startsWith("GET /series/albums/cover") ? *now : rest(request);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QQuickItem *picture = nullptr;
+        QTRY_VERIFY((picture = itemNamed(window->contentItem(), u"series-header-picture"_s)));
+        QTRY_COMPARE(picture->property("status").toInt(), 1);
+        const auto seen = [&] {
+            const QImage rendered = window->grabWindow();
+            const QPointF at = picture->mapToScene(QPointF(picture->width() / 2, picture->height() / 2));
+            const qreal scale = rendered.width() / qreal(window->width());
+            return rendered.pixelColor(qRound(at.x() * scale), qRound(at.y() * scale));
+        };
+        QTRY_COMPARE(seen(), QColor(u"#2B3550"_s));
+
+        *now = after;
+        auto *server = engine.singletonInstance<Server *>(qmlTypeId("Leaf", 1, 0, "Server"));
+        QVERIFY(server);
+        server->coverChanged();
+        QTRY_VERIFY2(picture->property("source").toString().contains(u"?v=1"_s),
+                     qPrintable(picture->property("source").toString()));
+        QTRY_COMPARE(picture->property("status").toInt(), 1);
+        QTRY_COMPARE(seen(), QColor(u"#B03030"_s));
+    }
+
+    /// The cover is a page of the volume, picked among all of them as thumbnails and sent as the
+    /// contract counts: the fifth page is the page numbered 4. Reached with the keys alone.
+    void a_cover_page_is_picked_in_a_grid_and_sent_from_zero()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open());
+        QQuickItem *save = edit.named(u"entry-edit-save"_s);
+        QVERIFY(edit.named(u"entry-edit-cover-preview"_s));
+        QVERIFY(!edit.named(u"entry-edit-cover"_s)->property("canRevert").toBool());
+        QVERIFY(!edit.named(u"entry-edit-cover-field"_s));
+
+        QQuickItem *page = coverWay(edit.window, u"entry-edit-cover"_s, u"pick-page"_s);
+        QVERIFY(page);
+        QVERIFY(!edit.named(u"entry-edit-cover-pick-volume"_s)->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(page, "triggered"));
+        QQuickItem *grid = nullptr;
+        QTRY_VERIFY((grid = edit.named(u"entry-edit-cover-pages-grid"_s)) && grid->isVisible());
+        QTRY_VERIFY(grid->hasActiveFocus());
+        for (int i = 0; i < 4; ++i)
+            QTest::keyClick(edit.window, Qt::Key_Right);
+        QTest::keyClick(edit.window, Qt::Key_Return);
+        QTRY_VERIFY(!grid->isVisible());
+
+        QVERIFY(edit.named(u"entry-edit-cover"_s)->property("canRevert").toBool());
+        QCOMPARE(edit.said(u"entry-edit-cover-status"_s), u"Page 5 du tome"_s);
+        QVERIFY(QMetaObject::invokeMethod(save, "triggered"));
+        QTRY_VERIFY(edit.pretend.heard.contains("PATCH /entries/v2 "));
+        const QJsonObject sent = bodySent(edit.pretend.heard, "PATCH /entries/v2 ");
+        QCOMPARE(sent.value(u"coverPage"_s).toInt(-1), 4);
+        QCOMPARE(sent.size(), 1);
+        QVERIFY(!edit.pretend.heard.contains("PUT /entries/v2/cover"));
+        QVERIFY(!edit.pretend.heard.contains("DELETE /entries/v2/cover"));
+    }
+
+    /// An image chosen on the reader's disk is read here and sent as bytes, never as a path; it
+    /// replaces a page chosen before it, and « Revenir par défaut » appears only once something is
+    /// chosen and sends a DELETE.
+    void an_image_chosen_on_the_disk_is_sent_as_bytes_and_can_be_taken_back()
+    {
+        QTemporaryDir folder;
+        QVERIFY(folder.isValid());
+        const QString file = folder.filePath(u"ma couverture.png"_s);
+        {
+            QFile out(file);
+            QVERIFY(out.open(QIODevice::WriteOnly));
+            out.write(aCover());
+        }
+
+        EntryEdit edit;
+        QVERIFY(edit.open());
+        QQuickItem *chooser = edit.named(u"entry-edit-cover"_s);
+        QVERIFY(chooser);
+        QVERIFY(!chooser->property("canRevert").toBool());
+
+        QVERIFY(QMetaObject::invokeMethod(chooser, "choosePage", Q_ARG(QVariant, 2)));
+        QVERIFY(QMetaObject::invokeMethod(chooser, "chooseFile",
+                                          Q_ARG(QVariant, QUrl::fromLocalFile(file).toString())));
+        QCOMPARE(chooser->property("pickedPage").toInt(), -1);
+        QTRY_VERIFY(chooser->property("canRevert").toBool());
+        QCOMPARE(edit.said(u"entry-edit-cover-status"_s), u"ma couverture.png"_s);
+        QCOMPARE(chooser->property("revertLabel").toString(), u"Revenir par défaut"_s);
+
+        QVERIFY(QMetaObject::invokeMethod(edit.named(u"entry-edit-save"_s), "triggered"));
+        QTRY_VERIFY(edit.pretend.heard.contains("PUT /entries/v2/cover "));
+        QTRY_VERIFY(edit.pretend.heard.contains(aCover()));
+        QVERIFY(!edit.pretend.heard.contains(folder.path().toUtf8()));
+        QVERIFY(!edit.pretend.heard.contains("PATCH /entries/v2 "));
+    }
+
+    void going_back_to_the_default_sends_a_delete()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open());
+        QQuickItem *chooser = edit.named(u"entry-edit-cover"_s);
+        QVERIFY(QMetaObject::invokeMethod(chooser, "choosePage", Q_ARG(QVariant, 2)));
+        QTRY_VERIFY(chooser->property("canRevert").toBool());
+        QQuickItem *revert = coverWay(edit.window, u"entry-edit-cover"_s, u"revert"_s);
+        QVERIFY(revert);
+        QVERIFY(QMetaObject::invokeMethod(revert, "triggered"));
+        QTRY_VERIFY(!chooser->property("canRevert").toBool());
+        QCOMPARE(edit.said(u"entry-edit-cover-status"_s), u"Couverture par défaut"_s);
+        QVERIFY(QMetaObject::invokeMethod(edit.named(u"entry-edit-save"_s), "triggered"));
+        QTRY_VERIFY(edit.pretend.heard.contains("DELETE /entries/v2/cover "));
+        QVERIFY(!edit.pretend.heard.contains("PATCH /entries/v2 "));
+    }
+
+    /// The cover stands at the left on the line of the title, and the number, the date and the ISBN
+    /// share the line under them on three equal columns, as the series window lays out its own.
+    void the_cover_and_the_title_share_a_line_and_so_do_the_number_the_date_and_the_isbn()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open());
+        const auto top = [&](const QString &name) {
+            QQuickItem *item = edit.named(name);
+            return item ? item->mapToScene(QPointF(0, 0)) : QPointF(-1, -1);
+        };
+        const QPointF picture = top(u"entry-edit-cover-preview"_s);
+        const QPointF title = top(u"entry-edit-title"_s);
+        const QPointF number = top(u"entry-edit-number"_s);
+        const QPointF published = top(u"entry-edit-published"_s);
+        const QPointF isbn = top(u"entry-edit-isbn"_s);
+        QVERIFY(picture.x() >= 0 && title.x() > picture.x());
+        QCOMPARE(title.y(), picture.y());
+        QVERIFY(number.y() > title.y());
+        QCOMPARE(isbn.y(), number.y());
+        QVERIFY(isbn.x() > number.x());
+        QCOMPARE(published.y(), number.y());
+        QVERIFY(published.x() > number.x() && isbn.x() > published.x());
+        QCOMPARE(number.x(), picture.x());
+    }
+
+    /// Tab walks the date line, then the button that opens its calendar, then on.
+    void tab_walks_the_date_line_then_the_calendar_button()
+    {
+        EntryEdit edit;
+        QVERIFY(edit.open());
+        edit.named(u"entry-edit-number-field"_s)->forceActiveFocus(Qt::TabFocusReason);
+        QVERIFY(pressedUntil(edit.window, u"entry-edit-published-field"_s, Qt::Key_Tab,
+                             Qt::NoModifier, 3));
+        QTest::keyClick(edit.window, Qt::Key_Tab);
+        QCOMPARE(holderName(edit.window), u"entry-edit-published-calendar-button"_s);
+        QTest::keyClick(edit.window, Qt::Key_Backtab);
+        QCOMPARE(holderName(edit.window), u"entry-edit-published-field"_s);
+    }
+
+    /// A word typed with one letter wrong is offered as the word the library already has, ahead
+    /// of its creation, and ↓ then Enter takes it: « Horeur » next to « Horreur » was two
+    /// genres until a filter listed both.
+    void a_tag_one_letter_off_is_offered_as_the_word_that_exists_before_being_created()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true, 0, true,
+                      true)},
+            u"p"_s, false);
+        const auto rest = anElfesPage(false);
+        const QByteArray vocabulary = aReply(
+            200, QByteArrayLiteral("application/json"),
+            QByteArrayLiteral(R"({"tags":[{"value":"Horreur","count":3},{"value":"Magie","count":1}]})"));
+        pretend.answerFor = [seat, rest, vocabulary](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            if (request.startsWith("GET /filters"))
+                return vocabulary;
+            return rest(request);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        auto *seated = engine.singletonInstance<Profiles *>(qmlTypeId("Leaf", 1, 0, "Profiles"));
+        QVERIFY(seated);
+        QTRY_VERIFY(seated->canEdit());
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QTRY_VERIFY(shownNamed(page, u"volume-v2"_s));
+
+        QQuickItem *series = itemNamed(page, u"commands-albums"_s);
+        QVERIFY(series);
+        QVERIFY(QMetaObject::invokeMethod(series, "show"));
+        QQuickItem *edit = nullptr;
+        QTRY_VERIFY((edit = itemNamed(window->contentItem(), u"command-edit-albums"_s))
+                    && edit->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(edit, "triggered"));
+        QQuickItem *field = nullptr;
+        QTRY_VERIFY((field = itemNamed(window->contentItem(), u"series-edit-tags-field"_s))
+                    && field->isVisible());
+        // The vocabulary has arrived once the field suggests from it.
+        field->forceActiveFocus();
+        QTest::qWait(300);
+        field->setProperty("text", u"horeur"_s);
+        QQuickItem *first = nullptr;
+        QTRY_VERIFY((first = itemNamed(window->contentItem(), u"series-edit-tags-suggestion-0"_s))
+                    && first->isVisible());
+        QCOMPARE(textIn(first), u"Horreur"_s);
+        // And the creation of what was typed comes after, never before.
+        QQuickItem *creation = itemNamed(window->contentItem(), u"series-edit-tags-suggestion-1"_s);
+        QVERIFY(creation);
+        QVERIFY(textIn(creation).contains(u"horeur"_s));
+
+        field->forceActiveFocus();
+        QVERIFY2(window->activeFocusItem() == field,
+                 qPrintable(window->activeFocusItem()
+                                ? window->activeFocusItem()->objectName() : u"nothing"_s));
+        QTest::keyClick(window, Qt::Key_Down);
+        QTest::keyClick(window, Qt::Key_Return);
+        QQuickItem *chip = nullptr;
+        QTRY_VERIFY((chip = itemNamed(window->contentItem(), u"series-edit-tags-chip-0"_s)));
+        QCOMPARE(textIn(chip), u"Horreur"_s);
+    }
+
+    /// The type of a series is chosen from a list opened and walked with the keys alone, and
+    /// Escape shuts that list and not the window it stands in: nine pills wrapped onto two
+    /// lines and made the series window taller than the screens it opens on.
+    void the_dropdown_of_the_series_window_is_walked_with_the_keys_alone()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true, 0, true,
+                      true)},
+            u"p"_s, false);
+        const auto rest = anElfesPage(false);
+        pretend.answerFor = [seat, rest](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            return rest(request);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        auto *seated = engine.singletonInstance<Profiles *>(qmlTypeId("Leaf", 1, 0, "Profiles"));
+        QVERIFY(seated);
+        QTRY_VERIFY(seated->canEdit());
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QTRY_VERIFY(shownNamed(page, u"volume-v2"_s));
+        QQuickItem *series = itemNamed(page, u"commands-albums"_s);
+        QVERIFY(series);
+        QVERIFY(QMetaObject::invokeMethod(series, "show"));
+        QQuickItem *edit = nullptr;
+        QTRY_VERIFY((edit = itemNamed(window->contentItem(), u"command-edit-albums"_s))
+                    && edit->isVisible());
+        QVERIFY(QMetaObject::invokeMethod(edit, "triggered"));
+        QQuickItem *medium = nullptr;
+        QTRY_VERIFY((medium = itemNamed(window->contentItem(), u"series-edit-medium"_s))
+                    && medium->isVisible());
+        // The language is held as its tag and read as its name.
+        QQuickItem *tag = itemNamed(window->contentItem(), u"series-edit-language"_s);
+        QVERIFY(tag);
+        tag->setProperty("words", QStringList{u"fr"_s});
+        QQuickItem *language = nullptr;
+        QTRY_VERIFY((language = itemNamed(window->contentItem(), u"series-edit-language-held"_s))
+                    && language->isVisible());
+        QCOMPARE(textIn(language), u"Français"_s);
+        window->resize(900, 520);
+        QQuickItem *field = nullptr;
+        QVERIFY((field = itemNamed(medium, u"series-edit-medium-text"_s)));
+        QQuickItem *button = field->parentItem();
+        QVERIFY(button);
+        QCOMPARE(button->property("activeFocusOnTab").toBool(), true);
+
+        // The window gives its title the focus a turn after it shows; a key sent before that
+        // turn has the focus taken back from the row it went to.
+        QTRY_VERIFY(window->activeFocusItem()
+                    && window->activeFocusItem()->objectName() == u"series-edit-title-field"_s);
+        button->forceActiveFocus(Qt::TabFocusReason);
+        QCOMPARE(medium->property("opened").toBool(), false);
+        QTest::keyClick(window, Qt::Key_Down);
+        QTRY_COMPARE(medium->property("opened").toBool(), true);
+        // The list never covers the field it belongs to, whichever side it opened on.
+        QQuickItem *surface = itemNamed(window->contentItem(), u"series-edit-medium--1"_s);
+        QVERIFY(surface);
+        const QRectF held = button->mapRectToScene(QRectF(0, 0, button->width(), button->height()));
+        const QRectF drawn = surface->mapRectToScene(QRectF(0, 0, surface->width(), surface->height()));
+        QVERIFY2(!drawn.intersects(held), qPrintable(u"%1 over %2"_s.arg(drawn.y()).arg(held.y())));
+        // The row under the keys has the real focus, which is what a screen reader follows.
+        QTRY_VERIFY(window->activeFocusItem()
+                    && window->activeFocusItem()->objectName().startsWith(u"series-edit-medium-"_s));
+
+        // « B » goes to the first word that begins with it, then Enter takes it.
+        QTest::keyClick(window, Qt::Key_B);
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(medium->property("opened").toBool(), false);
+        QCOMPARE(textIn(field), u"BD"_s);
+        QVERIFY2(window->activeFocusItem() == button,
+                 qPrintable(window->activeFocusItem()
+                                ? window->activeFocusItem()->objectName() : u"nothing"_s));
+
+        // Escape shuts the list, keeps the value and leaves the window open.
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_COMPARE(medium->property("opened").toBool(), true);
+        // The arrows, and the ends, move the row the keys are on.
+        QCOMPARE(medium->property("pointed").toInt(), 2);
+        QTest::keyClick(window, Qt::Key_Down);
+        QTRY_COMPARE(medium->property("pointed").toInt(), 3);
+        QTest::keyClick(window, Qt::Key_Up);
+        QTRY_COMPARE(medium->property("pointed").toInt(), 2);
+        QTest::keyClick(window, Qt::Key_End);
+        QTRY_COMPARE(medium->property("pointed").toInt(), 8);
+        QTest::keyClick(window, Qt::Key_Home);
+        QTRY_COMPARE(medium->property("pointed").toInt(), 0);
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_COMPARE(medium->property("opened").toBool(), false);
+        QCOMPARE(textIn(field), u"BD"_s);
+        window->resize(1100, 760);
+        QVERIFY(itemNamed(window->contentItem(), u"series-edit-save"_s));
+        QVERIFY(itemNamed(window->contentItem(), u"series-edit-save"_s)->isVisible());
+    }
+
+    /// A series is read again from its files by asking for that one series: the menu of a
+    /// profile that may edit offers it, and what it sends is aimed at the series, not at the
+    /// library — a full scan is minutes on a remote disk.
+    void a_series_is_rescanned_by_itself_from_its_menu()
+    {
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true, 0, true,
+                      true)},
+            u"p"_s, false);
+        const auto rest = anElfesPage(false);
+        pretend.answerFor = [seat, rest](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            return rest(request);
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        auto *navigation =
+            engine.singletonInstance<Navigation *>(qmlTypeId("Leaf", 1, 0, "Navigation"));
+        QVERIFY(navigation);
+        auto *seated = engine.singletonInstance<Profiles *>(qmlTypeId("Leaf", 1, 0, "Profiles"));
+        QVERIFY(seated);
+        QTRY_VERIFY(seated->canEdit());
+        QVERIFY(navigation->open(Navigation::Destination::Series, {{u"series"_s, u"albums"_s}}));
+        QQuickItem *page = nullptr;
+        QTRY_VERIFY((page = itemNamed(window->contentItem(), u"series-view"_s)));
+        QTRY_VERIFY(shownNamed(page, u"volume-v2"_s));
+
+        QQuickItem *series = itemNamed(page, u"commands-albums"_s);
+        QVERIFY(series);
+        QVERIFY(QMetaObject::invokeMethod(series, "show"));
+        QQuickItem *rescan = nullptr;
+        QTRY_VERIFY((rescan = itemNamed(window->contentItem(), u"command-rescan-albums"_s))
+                    && rescan->isVisible());
+        pretend.heard.clear();
+        QVERIFY(QMetaObject::invokeMethod(rescan, "triggered"));
+        QTRY_VERIFY(pretend.heard.contains("POST /series/albums/rescan"));
+        QVERIFY(!pretend.heard.contains("POST /scan"));
+
+        // And a volume of it, by its own route.
+        QQuickItem *volume = itemNamed(page, u"commands-v2"_s);
+        QVERIFY(volume);
+        QVERIFY(QMetaObject::invokeMethod(volume, "show"));
+        QTRY_VERIFY((rescan = itemNamed(window->contentItem(), u"command-rescan-v2"_s))
+                    && rescan->isVisible());
+        pretend.heard.clear();
+        QVERIFY(QMetaObject::invokeMethod(rescan, "triggered"));
+        QTRY_VERIFY(pretend.heard.contains("POST /entries/v2/rescan"));
+    }
+
+    /// A finding of the scan is three lines until asked for the rest: nine kinds of them, each
+    /// up to sixteen lines, were a wall in the library tab.
+    void a_scan_finding_shows_three_lines_and_unfolds_on_request()
+    {
+        const QByteArray seat = aSeating(
+            {aProfile(u"p"_s, u"Principal"_s, u"emeraude"_s, u"principal"_s, true)}, u"p"_s,
+            false);
+        QJsonArray items;
+        for (int i = 1; i <= 7; ++i)
+            items << u"Dossier %1 — rien"_s.arg(i);
+        const QByteArray scan = aReply(
+            200, QByteArrayLiteral("application/json"),
+            QJsonDocument(QJsonObject{
+                {u"state"_s, u"IDLE"_s},
+                {u"startedAt"_s, 1792931520000.0},
+                {u"finishedAt"_s, 1792931580000.0},
+                {u"report"_s,
+                 QJsonObject{{u"counts"_s, QJsonObject{{u"universes"_s, 0}, {u"works"_s, 1}, {u"editions"_s, 1},
+                                                       {u"entries"_s, 7}, {u"chapters"_s, 0},
+                                                       {u"pages"_s, 0}, {u"reanalysed"_s, 0}}},
+                             {u"findings"_s, QJsonArray{QJsonObject{{u"kind"_s, u"DISREGARDED"_s},
+                                                                    {u"total"_s, 7},
+                                                                    {u"items"_s, items}}}}}}})
+                .toJson(QJsonDocument::Compact));
+        const QByteArray empty =
+            aReply(200, QByteArrayLiteral("application/json"), aPage({}));
+        Pretend pretend;
+        QVERIFY(pretend.listen(QHostAddress::LocalHost));
+        pretend.answerFor = [=](const QByteArray &request) {
+            if (request.startsWith("GET /profiles "))
+                return seat;
+            return request.startsWith("GET /scan") ? scan : empty;
+        };
+        qputenv("LEAF_ADDRESS", u"http://127.0.0.1:%1"_s.arg(pretend.serverPort()).toUtf8());
+        QQmlApplicationEngine engine;
+        QQuickWindow *window = shown(engine);
+        QVERIFY(window);
+        QQuickItem *view = settingsOn(engine, window, u"library"_s);
+        QVERIFY(view);
+        QQuickItem *fold = nullptr;
+        QTRY_VERIFY((fold = itemNamed(view, u"scan-finding-fold"_s)) && fold->isVisible());
+        const auto shownLines = [&] {
+            int count = 0;
+            std::function<void(QQuickItem *)> walk = [&](QQuickItem *item) {
+                if (item->isVisible() && item->property("text").toString().contains(u"Dossier "_s))
+                    ++count;
+                for (QQuickItem *child : item->childItems())
+                    walk(child);
+            };
+            walk(view);
+            return count;
+        };
+        QTRY_COMPARE(shownLines(), 3);
+        clickOn(window, fold);
+        QTRY_COMPARE(shownLines(), 7);
+        clickOn(window, fold);
+        QTRY_COMPARE(shownLines(), 3);
     }
 
     /// What the keys reach on a series page, they act on: a tab, a genre, a volume, and the
@@ -11588,6 +20423,18 @@ private slots:
         QTest::keyClick(window, Qt::Key_Escape);
         QTRY_VERIFY(!menu->property("opened").toBool());
         QCOMPARE(navigation->destination(), Navigation::Destination::Series);
+        QTRY_COMPARE(holderName(window), u"edition-switch"_s);
+
+        // Opened with a click and walked with the arrows, the ring follows the keys: the
+        // arrows moved the edition pointed at, and no ring showed which.
+        clickOn(window, switcher);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QTest::keyClick(window, Qt::Key_Down);
+        QQuickItem *other = itemNamed(window->contentItem(), u"edition-integrale-focus"_s);
+        QVERIFY(other);
+        QTRY_VERIFY(other->isVisible());
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_VERIFY(!menu->property("opened").toBool());
         QTRY_COMPARE(holderName(window), u"edition-switch"_s);
 
         QTest::keyClick(window, Qt::Key_Return);
@@ -11888,7 +20735,9 @@ private slots:
         QVERIFY(preferences);
         QTRY_COMPARE(grid->property("count").toInt(), 1);
         preferences->showBubble(Preferences::Warns::Downloads, true);
-        bubbles->copySaved(u"/tmp/T1.cbz"_s);
+        auto *warnings = engine.singletonInstance<Warnings *>(qmlTypeId("Leaf", 1, 0, "Warnings"));
+        QVERIFY(warnings);
+        warnings->copySaved(u"/tmp/T1.cbz"_s);
         QTRY_VERIFY(shownNamed(window->contentItem(), u"toast-0-action"_s));
 
         QVERIFY2(pressedUntil(window, u"tile-s0"_s), qPrintable(holderName(window)));
@@ -11896,8 +20745,14 @@ private slots:
         QCOMPARE(holderName(window), u"toast-0-action"_s);
         QTest::keyClick(window, Qt::Key_Tab);
         QCOMPARE(holderName(window), u"toast-0-close"_s);
+        // Held while the keys are on its cross, and let go once they leave: it went on
+        // counting, and went with the focus.
+        QQuickItem *bubble = itemNamed(window->contentItem(), u"toast-0"_s);
+        QVERIFY(bubble);
+        QVERIFY(bubble->property("holding").toBool());
         QTest::keyClick(window, Qt::Key_Tab);
         QCOMPARE(holderName(window), u"search-field"_s);
+        QVERIFY(!bubble->property("holding").toBool());
         QTest::keyClick(window, Qt::Key_Backtab, Qt::ShiftModifier);
         QCOMPARE(holderName(window), u"toast-0-close"_s);
 
@@ -12021,10 +20876,90 @@ int reexecuteOnItsOwnDisplay(int argc, char *argv[])
     fprintf(stderr, "crosses-the-seam could not start xvfb-run: %s\n", strerror(errno));
     return 1;
 }
+
+/// Every case of the class, in the order QTest runs them: its private slots without an
+/// argument, less the four QTest calls around them and the `_data` functions that feed one.
+QStringList everyCase()
+{
+    static const QSet<QString> aroundThem{u"initTestCase"_s, u"cleanupTestCase"_s, u"init"_s,
+                                          u"cleanup"_s};
+    const QMetaObject &meta = CrossesTheSeam::staticMetaObject;
+    QStringList cases;
+    for (int i = meta.methodOffset(); i < meta.methodCount(); ++i) {
+        const QMetaMethod method = meta.method(i);
+        const QString name = QString::fromUtf8(method.name());
+        if (method.methodType() == QMetaMethod::Slot && method.access() == QMetaMethod::Private
+            && method.parameterCount() == 0 && !name.endsWith(u"_data"_s)
+            && !aroundThem.contains(name))
+            cases << name;
+    }
+    return cases;
+}
+
+/// The cases of share `index` out of `shares`, dealt out one at a time like cards. Dealt, not
+/// cut in blocks: the slow ones come in runs — sixteen webtoon cases wait on the bars, one
+/// after another — and a block of them would be one share's whole afternoon.
+QStringList shareOf(const QStringList &cases, int index, int shares)
+{
+    QStringList share;
+    for (qsizetype i = index; i < cases.size(); i += shares)
+        share << cases.at(i);
+    return share;
+}
+
+/// `1/3` is the second of three shares. Nothing else is a share: a typo in the variable must
+/// stop the run, not run everything or nothing.
+bool parseShare(const QByteArray &text, int *index, int *shares)
+{
+    const QList<QByteArray> parts = text.split('/');
+    bool one = false;
+    bool two = false;
+    if (parts.size() != 2)
+        return false;
+    *index = parts.at(0).toInt(&one);
+    *shares = parts.at(1).toInt(&two);
+    return one && two && *shares >= 1 && *index >= 0 && *index < *shares;
+}
+
+/// `crosses-the-seam --shard-plan 3`: needs no display, and says whether three shares hold
+/// every case once and none of them is empty. A share that silently held nothing would pass,
+/// and the suite it was cut from would be smaller by that much with nothing to say so.
+int checkTheShares(const QByteArray &count)
+{
+    bool counted = false;
+    const int shares = count.toInt(&counted);
+    const QStringList cases = everyCase();
+    if (!counted || shares < 1 || cases.isEmpty()) {
+        fprintf(stderr, "crosses-the-seam --shard-plan needs a number of shares, and cases\n");
+        return 1;
+    }
+    QStringList dealt;
+    for (int i = 0; i < shares; ++i) {
+        const QStringList share = shareOf(cases, i, shares);
+        if (share.isEmpty()) {
+            fprintf(stderr, "share %d of %d holds no case\n", i, shares);
+            return 1;
+        }
+        dealt << share;
+    }
+    dealt.sort();
+    QStringList sorted = cases;
+    sorted.sort();
+    if (dealt != sorted) {
+        fprintf(stderr, "the %d shares do not hold the %lld cases, each once\n", shares,
+                static_cast<long long>(cases.size()));
+        return 1;
+    }
+    printf("%d shares hold the %lld cases, each once\n", shares,
+           static_cast<long long>(cases.size()));
+    return 0;
+}
 } // namespace
 
 int main(int argc, char *argv[])
 {
+    if (argc == 3 && qstrcmp(argv[1], "--shard-plan") == 0)
+        return checkTheShares(argv[2]);
     if (!qEnvironmentVariableIsSet(ownDisplay))
         return reexecuteOnItsOwnDisplay(argc, argv);
     // Defensive: whoever sets the marker by hand still never reaches the real display.
@@ -12036,6 +20971,26 @@ int main(int argc, char *argv[])
     app.setAttribute(Qt::AA_Use96Dpi, true);
     CrossesTheSeam tc;
     QTest::setMainSourcePath(__FILE__);
-    return QTest::qExec(&tc, argc, argv);
+
+    // One share of the cases, when asked for one (`LEAF_SHARD=1/3`): QTest runs the functions
+    // named after its options, and `initTestCase` and `cleanupTestCase` around them.
+    QStringList arguments;
+    for (int i = 0; i < argc; ++i)
+        arguments << QString::fromLocal8Bit(argv[i]);
+    if (qEnvironmentVariableIsSet("LEAF_SHARD")) {
+        int index = 0;
+        int shares = 1;
+        if (!parseShare(qgetenv("LEAF_SHARD"), &index, &shares)) {
+            fprintf(stderr, "LEAF_SHARD is « index/shares », such as 0/3\n");
+            return 1;
+        }
+        const QStringList share = shareOf(everyCase(), index, shares);
+        if (share.isEmpty()) {
+            fprintf(stderr, "LEAF_SHARD=%d/%d holds no case\n", index, shares);
+            return 1;
+        }
+        arguments << share;
+    }
+    return QTest::qExec(&tc, arguments);
 }
 #include "crosses_the_seam.moc"

@@ -42,6 +42,10 @@ pub struct HealthDto {
     /// is told nothing about where the server is reached.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relay: Option<bool>,
+    /// Only to a recognised key, like `relay`: which release answers. A build number is a
+    /// fact about the deployment that tells a stranger which known flaws to try.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<&'static str>,
 }
 
 // ------------------------------------------------------------------ linking
@@ -275,6 +279,12 @@ pub struct SeriesDto {
     /// The illustrators — penciller, inker and cover artist in one.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub artists: Vec<String>,
+    /// What `work.json` declares, and only that: what a volume that says nothing is
+    /// credited with. `authors` and `artists` are everybody the volumes are credited with,
+    /// so a series whose writer changed hands lists both and declares one. Always present,
+    /// empty when nothing is declared — even when a ComicInfo credits every volume.
+    pub declared_authors: Vec<String>,
+    pub declared_artists: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub medium: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -284,6 +294,10 @@ pub struct SeriesDto {
     /// default": the series is read the way it says.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reading_direction_chosen: Option<String>,
+    /// An image was chosen for this series through `PUT /series/{id}/cover`, as opposed to a
+    /// `cover.jpg` placed in its folder by hand.
+    #[serde(skip_serializing_if = "is_false")]
+    pub cover_image: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     /// The prose somebody wrote about the work, shown as it stands.
@@ -292,6 +306,11 @@ pub struct SeriesDto {
     /// no way to show the one thing a reader opens that tab for.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// What the edition says of itself, when it does: the part of `summary` that is not the
+    /// work's. A client editing the description needs to know which of the two it is
+    /// editing, and copying the work's sentence into the edition is what it must not do.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub own_summary: Option<String>,
     /// Computed, never declared. Absent means UNREAD.
     #[serde(skip_serializing_if = "is_unread")]
     pub read_status: String,
@@ -350,6 +369,9 @@ pub struct SeriesDto {
     /// Positive form, never `blackAndWhite`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub colour: Option<bool>,
+    /// The number of the volume the series shows as its cover; absent when none was chosen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover_volume: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -398,6 +420,58 @@ pub struct FacetsDto {
     pub languages: Vec<FacetDto>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub publishers: Vec<FacetDto>,
+    /// The vocabulary an editing window suggests from, so that « Horreur » is picked and not
+    /// retyped as « Horeur ». Not a filter, so only `/series/facets` over series fills them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<FacetDto>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub artists: Vec<FacetDto>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub collections: Vec<FacetDto>,
+}
+
+/// What a profile has read, in a file it can keep: the series it may see, their volumes, and
+/// where it stands in each. Nothing about where the library lives on a disk and nothing
+/// about who may open it — no path, no key, no code, no device, no other profile.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingExportDto {
+    /// Milliseconds since the epoch, when the file was drawn.
+    pub exported_at: i64,
+    pub series: Vec<ExportedSeriesDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportedSeriesDto {
+    pub id: String,
+    pub work: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edition: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub universe: Option<String>,
+    pub entries: Vec<ExportedEntryDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportedEntryDto {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub number: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub page_count: i64,
+    /// UNREAD, IN_PROGRESS or READ, as the shelf would say it for this volume.
+    pub read_status: &'static str,
+    /// The page the profile stands on; 0 when nothing was opened.
+    pub page: i64,
+    pub times_finished: i64,
+    /// When the place was last written, absent for a volume never opened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
 }
 
 /// A file — a volume, or a chapter that arrived on its own.
@@ -419,6 +493,10 @@ pub struct EntryDto {
     pub chapter_count: i64,
     /// The file name alone, never a path.
     pub file: String,
+    /// The name a copy of it is offered under, worked out from where it sits in the library
+    /// and never stored (see `store::naming`).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub download_name: String,
     pub size: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub isbn: Option<String>,
@@ -431,6 +509,25 @@ pub struct EntryDto {
     pub added_at: Option<i64>,
     #[serde(skip_serializing_if = "is_false")]
     pub own_cover: bool,
+    /// An image was chosen for this volume through `PUT /entries/{id}/cover`, as opposed to
+    /// one placed beside the archive by hand: what a client needs to offer taking it back.
+    #[serde(skip_serializing_if = "is_false")]
+    pub cover_image: bool,
+    /// The page chosen as the cover, counted from 0; absent when none was chosen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cover_page: Option<i64>,
+    /// No cover of its own — nothing chosen, and a first page numbered `001` — so its tile
+    /// shows the series' cover, which the client marks with the volume's number: without it,
+    /// 120 chapters were 120 copies of one picture.
+    #[serde(skip_serializing_if = "is_false")]
+    pub borrowed_cover: bool,
+    /// Who wrote and who drew this volume: its own word, else its series' default.
+    pub authors: Vec<String>,
+    pub artists: Vec<String>,
+    /// Field by field, whether that came from the series: what the client shows in grey,
+    /// and what emptying a volume's own list returns it to.
+    pub authors_inherited: bool,
+    pub artists_inherited: bool,
 }
 
 /// A marker. It may live inside a volume or be an entry of its own — the numbering is the
@@ -580,6 +677,8 @@ pub struct SeriesFilter {
     pub works: Vec<String>,
     pub universes: Vec<String>,
     pub authors: Vec<String>,
+    /// Who drew it, on the same terms as `authors`.
+    pub artists: Vec<String>,
     pub genres: Vec<String>,
     pub media: Vec<String>,
     pub statuses: Vec<String>,
@@ -595,6 +694,7 @@ impl SeriesFilter {
             && self.works.is_empty()
             && self.universes.is_empty()
             && self.authors.is_empty()
+            && self.artists.is_empty()
             && self.genres.is_empty()
             && self.media.is_empty()
             && self.statuses.is_empty()

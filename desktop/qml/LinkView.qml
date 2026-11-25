@@ -47,32 +47,15 @@ FocusScope {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        height: 58
+        height: Widths.scale.size(58)
         color: Theme.surface
 
-        Image {
-            id: mark
-
+        // The application bar's name, and not a copy of it: this one had kept its 36, its 10
+        // and its 25 by hand (spacing audit, 23/10/2026).
+        BarBrand {
             anchors.left: parent.left
-            anchors.leftMargin: Widths.shelfMargin
+            anchors.leftMargin: Widths.space.gutter
             anchors.verticalCenter: parent.verticalCenter
-            width: 36
-            height: 36
-            source: Theme.dark
-                    ? "assets/logos/leaf-mark-dark.svg"
-                    : "assets/logos/leaf-mark-light.svg"
-            sourceSize: Qt.size(36, 36)
-        }
-
-        Text {
-            anchors.left: mark.right
-            anchors.leftMargin: 10
-            anchors.verticalCenter: parent.verticalCenter
-            text: "Leaf"
-            color: Theme.ink
-            font.family: Theme.displayFamily
-            font.pixelSize: 25
-            font.weight: Font.Bold
         }
 
         Rectangle {
@@ -91,8 +74,11 @@ FocusScope {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.verticalCenter: parent.verticalCenter
         anchors.verticalCenterOffset: bar.height / 2
-        width: Math.min(420, view.width - 2 * Widths.shelfMargin)
-        spacing: 14
+        width: Math.min(420, view.width - 2 * Widths.space.gutter)
+        // Glyph, headline, sentence and form are blocks of one column, the series page's
+        // gap between its blocks. It was a literal 14, which is that gap at 1280 and at no
+        // other window (spacing audit, 23/10/2026).
+        spacing: Widths.space.block
 
         Glyph {
             visible: !view.found
@@ -104,10 +90,14 @@ FocusScope {
         Text {
             objectName: "link-title"
             width: parent.width
+            textFormat: Text.PlainText
             text: Linking.title
             color: Theme.ink
             font.family: Theme.displayFamily
-            font.pixelSize: 30
+            // The one thing on the screen, and one of the three words allowed to grow with
+            // the window (audit, 23/10/2026): 30 pixels in the middle of 1920 read as a
+            // caption. It shrinks with every other word below 1280.
+            font.pixelSize: Widths.scale.display(30)
             font.weight: Font.Bold
             wrapMode: Text.Wrap
         }
@@ -115,6 +105,7 @@ FocusScope {
         Text {
             width: parent.width
             visible: !view.found
+            textFormat: Text.PlainText
             text: Linking.intro
             color: Theme.inkSoft
             font.family: Theme.textFamily
@@ -123,185 +114,177 @@ FocusScope {
             wrapMode: Text.Wrap
         }
 
-        Rectangle {
+        // The settings' card and not a surface of its own: the two were one card drawn twice,
+        // this copy 12 between its lines where the settings left 10 (spacing audit,
+        // 23/10/2026).
+        Card {
             id: form
 
-            readonly property int padding: 16
-
             width: parent.width
-            height: fields.height + 2 * padding
-            radius: Theme.cardRadius
-            color: Theme.surface
-            antialiasing: true
-
-            CardLift { level: CardLift.Card }
 
             Column {
-                id: fields
+                width: parent.width
+                spacing: 6
 
-                x: form.padding
-                y: form.padding
-                width: form.width - 2 * form.padding
-                spacing: 12
+                Text {
+                    textFormat: Text.PlainText
+                    text: Linking.linkField
+                    color: Theme.ink
+                    font.family: Theme.textFamily
+                    font.pixelSize: 13
+                    font.weight: Font.Medium
+                }
+
+                LeafField {
+                    id: linkField
+
+                    objectName: "link-field"
+                    width: parent.width
+                    activeFocusOnTab: true
+                    // A code on its way may not be swapped for another link: its answer is
+                    // a key, and the key belongs to this link.
+                    enabled: Linking.stage !== Linking.Sending
+                    text: Linking.typed
+                    placeholderText: Linking.linkPlaceholder
+                    onTextEdited: Linking.offer(text)
+                    // Enter links, as it does from the name below: a link pasted and
+                    // checked is a link ready to use, and Enter here did nothing.
+                    onAccepted: Linking.canLook ? Linking.look() : Linking.link()
+                }
+            }
+
+            // What the check found: the address, the certificate the link named, and how
+            // much is there. Kept while a taken name is being changed, since the library
+            // has not gone anywhere.
+            Rectangle {
+                objectName: "link-found"
+                width: parent.width
+                visible: view.found
+                height: foundWords.height + 18
+                radius: 9
+                color: Theme.emeraldWash
+
+                Glyph {
+                    id: foundGlyph
+
+                    x: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    source: "assets/icons/check_circle.svg"
+                    side: 20
+                    tint: Theme.emerald
+                }
 
                 Column {
-                    width: parent.width
-                    spacing: 6
+                    id: foundWords
+
+                    anchors.left: foundGlyph.right
+                    anchors.leftMargin: 10
+                    anchors.right: parent.right
+                    anchors.rightMargin: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 2
 
                     Text {
-                        text: Linking.linkField
-                        color: Theme.ink
-                        font.family: Theme.textFamily
-                        font.pixelSize: 13
-                        font.weight: Font.Medium
-                    }
-
-                    LeafField {
-                        id: linkField
-
-                        objectName: "link-field"
                         width: parent.width
-                        activeFocusOnTab: true
-                        // A code on its way may not be swapped for another link: its answer is
-                        // a key, and the key belongs to this link.
-                        enabled: Linking.stage !== Linking.Sending
-                        text: Linking.typed
-                        placeholderText: Linking.linkPlaceholder
-                        onTextEdited: Linking.offer(text)
-                        // Enter links, as it does from the name below: a link pasted and
-                        // checked is a link ready to use, and Enter here did nothing.
-                        onAccepted: Linking.link()
-                    }
-                }
-
-                // What the check found: the address, the certificate the link named, and how
-                // much is there. Kept while a taken name is being changed, since the library
-                // has not gone anywhere.
-                Rectangle {
-                    objectName: "link-found"
-                    width: parent.width
-                    visible: view.found
-                    height: foundWords.height + 18
-                    radius: 9
-                    color: Theme.emeraldWash
-
-                    Glyph {
-                        id: foundGlyph
-
-                        x: 12
-                        anchors.verticalCenter: parent.verticalCenter
-                        source: "assets/icons/check_circle.svg"
-                        side: 20
-                        tint: Theme.emerald
-                    }
-
-                    Column {
-                        id: foundWords
-
-                        anchors.left: foundGlyph.right
-                        anchors.leftMargin: 10
-                        anchors.right: parent.right
-                        anchors.rightMargin: 12
-                        anchors.verticalCenter: parent.verticalCenter
-                        spacing: 2
-
-                        Text {
-                            width: parent.width
-                            text: Linking.found
-                            color: Theme.ink
-                            font.family: Theme.textFamily
-                            font.pixelSize: 14
-                            font.weight: Font.Medium
-                            wrapMode: Text.Wrap
-                        }
-
-                        Text {
-                            width: parent.width
-                            text: Linking.detail
-                            color: Theme.inkSoft
-                            font.family: Theme.textFamily
-                            font.pixelSize: 12
-                            wrapMode: Text.Wrap
-                        }
-                    }
-                }
-
-                Rectangle {
-                    objectName: "link-sentence"
-                    width: parent.width
-                    visible: Linking.sentence.length > 0
-                    height: sentence.height + 18
-                    radius: 9
-                    color: view.alarming ? Theme.alertWash : Theme.onBar
-
-                    Glyph {
-                        id: sentenceGlyph
-
-                        x: 12
-                        y: 10
-                        visible: view.alarming
-                        source: "assets/icons/error.svg"
-                        side: 18
-                        tint: Theme.alert
-                    }
-
-                    Text {
-                        id: sentence
-
-                        anchors.left: view.alarming ? sentenceGlyph.right : parent.left
-                        anchors.leftMargin: view.alarming ? 10 : 12
-                        anchors.right: parent.right
-                        anchors.rightMargin: 12
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: Linking.sentence
+                        textFormat: Text.PlainText
+                        text: Linking.found
                         color: Theme.ink
                         font.family: Theme.textFamily
-                        font.pixelSize: 13
-                        lineHeight: 1.25
+                        font.pixelSize: 14
+                        font.weight: Font.Medium
                         wrapMode: Text.Wrap
                     }
-                }
-
-                Column {
-                    width: parent.width
-                    visible: view.found
-                    spacing: 6
-
-                    Text {
-                        text: Linking.nameField
-                        color: Theme.ink
-                        font.family: Theme.textFamily
-                        font.pixelSize: 13
-                        font.weight: Font.Medium
-                    }
-
-                    LeafField {
-                        objectName: "device-name-field"
-                        width: parent.width
-                        activeFocusOnTab: true
-                        enabled: Linking.stage !== Linking.Sending
-                        text: Linking.name
-                        onTextEdited: Linking.name = text
-                        onAccepted: Linking.link()
-                    }
 
                     Text {
                         width: parent.width
-                        text: Linking.nameHelp
+                        textFormat: Text.PlainText
+                        text: Linking.detail
                         color: Theme.inkSoft
                         font.family: Theme.textFamily
                         font.pixelSize: 12
                         wrapMode: Text.Wrap
                     }
                 }
+            }
 
-                ActionButton {
-                    objectName: "link-action"
-                    anchors.right: parent.right
-                    label: Linking.action
-                    ready: Linking.canLink
-                    onTriggered: Linking.link()
+            Rectangle {
+                objectName: "link-sentence"
+                width: parent.width
+                visible: Linking.sentence.length > 0
+                height: sentence.height + 18
+                radius: 9
+                color: view.alarming ? Theme.alertWash : Theme.onBar
+
+                Glyph {
+                    id: sentenceGlyph
+
+                    x: 12
+                    y: 10
+                    visible: view.alarming
+                    source: "assets/icons/error.svg"
+                    side: 18
+                    tint: Theme.alert
                 }
+
+                Text {
+                    id: sentence
+
+                    anchors.left: view.alarming ? sentenceGlyph.right : parent.left
+                    anchors.leftMargin: view.alarming ? 10 : 12
+                    anchors.right: parent.right
+                    anchors.rightMargin: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    textFormat: Text.PlainText
+                    text: Linking.sentence
+                    color: Theme.ink
+                    font.family: Theme.textFamily
+                    font.pixelSize: 13
+                    lineHeight: 1.25
+                    wrapMode: Text.Wrap
+                }
+            }
+
+            Column {
+                width: parent.width
+                visible: view.found
+                spacing: 6
+
+                Text {
+                    textFormat: Text.PlainText
+                    text: Linking.nameField
+                    color: Theme.ink
+                    font.family: Theme.textFamily
+                    font.pixelSize: 13
+                    font.weight: Font.Medium
+                }
+
+                LeafField {
+                    objectName: "device-name-field"
+                    width: parent.width
+                    activeFocusOnTab: true
+                    enabled: Linking.stage !== Linking.Sending
+                    text: Linking.name
+                    onTextEdited: Linking.name = text
+                    onAccepted: Linking.link()
+                }
+
+                Text {
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    text: Linking.nameHelp
+                    color: Theme.inkSoft
+                    font.family: Theme.textFamily
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                }
+            }
+
+            ActionButton {
+                objectName: "link-action"
+                anchors.right: parent.right
+                label: Linking.action
+                ready: Linking.canLink || Linking.canLook
+                onTriggered: Linking.canLook ? Linking.look() : Linking.link()
             }
         }
     }

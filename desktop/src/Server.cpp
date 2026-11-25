@@ -13,6 +13,7 @@
 #include <QTimer>
 #include <QUrl>
 
+#include <memory>
 #include <utility>
 
 namespace {
@@ -53,6 +54,28 @@ Server::Server(Settings *settings, QObject *parent) : QObject(parent), m_setting
     });
 }
 
+void Server::whenLoaded(const QObject *caller, std::function<void()> then) const
+{
+    if (m_settings->loaded()) {
+        then();
+        return;
+    }
+    auto done = std::make_shared<QMetaObject::Connection>();
+    *done = connect(m_settings, &Settings::changed, caller,
+                    [this, done, then = std::move(then)] {
+                        if (!m_settings->loaded())
+                            return;
+                        disconnect(*done);
+                        then();
+                    });
+}
+
+void Server::coverChanged()
+{
+    ++m_coverStamp;
+    emit coverStampChanged();
+}
+
 Server *Server::create(QQmlEngine *engine, QJSEngine *)
 {
     // Resolved here rather than handed in: a QML singleton is built by the engine with nothing
@@ -76,6 +99,17 @@ Server *Server::create(QQmlEngine *engine, QJSEngine *)
 QString Server::address() const
 {
     return tidy(m_settings->address());
+}
+
+QString Server::segment(const QString &id)
+{
+    return QString::fromUtf8(QUrl::toPercentEncoding(id));
+}
+
+bool Server::loopback(const QString &host)
+{
+    return host == QStringLiteral("127.0.0.1") || host == QStringLiteral("::1")
+           || host.compare(QStringLiteral("localhost"), Qt::CaseInsensitive) == 0;
 }
 
 QString Server::tidy(const QString &address)
@@ -137,6 +171,14 @@ void Server::getFile(const QString &path, const QObject *caller,
     send({"GET", path, QUrlQuery(), {}, {}}, caller, std::move(then), Reading::Bytes);
 }
 
+void Server::download(const QString &path, const QObject *caller,
+                      std::function<bool(const QByteArray &)> chunk,
+                      std::function<void(const Answer &)> then)
+{
+    send({"GET", path, QUrlQuery(), {}, {}, false, std::move(chunk)}, caller, std::move(then),
+         Reading::Stream);
+}
+
 void Server::put(const QString &path, const QByteArray &body, qint64 from, qint64 whole,
                  const QObject *caller, std::function<void(const Answer &)> then)
 {
@@ -193,6 +235,12 @@ void Server::send(const Sending &what, const QObject *caller,
     // Nothing is decided while the keyring is still answering — see `Waiting`. Past this
     // line `missing()` speaks for certain, because it is silent only before `loaded`.
     if (!m_settings->loaded()) {
+        // A download is not held back: its pieces are owed to someone who is watching them
+        // arrive, and a queue of closures cannot hold that.
+        if (what.chunks) {
+            then({0, {}, Words::noLibrary()});
+            return;
+        }
         if (m_waiting.size() >= MostWaiting) {
             // Said, and not held. A queue that quietly stops taking requests is a screen
             // waiting on an answer that was never going to come.
@@ -222,14 +270,28 @@ void Server::send(const Sending &what, const QObject *caller,
         return;
     }
 
+    // The key is on every request, and in clear on a network it is anyone's who listens. The
+    // refusal that `Link` and `Bond` make for an address typed in the application, made here
+    // for one written by hand in the file or the environment (`LEAF_ADDRESS`), which neither
+    // of them sees.
+    if (const QUrl typed(address); typed.scheme() == QStringLiteral("http") && !loopback(typed.host())) {
+        then({0, {}, Words::httpsElsewhere()});
+        return;
+    }
+
     QUrl url(address + what.path);
     if (!what.query.isEmpty()) {
         url.setQuery(what.query);
     }
     QNetworkRequest request = Pinning::request(url);
     request.setRawHeader(KeyHeader, m_settings->key().toUtf8());
+    // Never followed: the key is on this request, and a redirect names an address the
+    // library's owner did not write. Qt carries custom headers across one, to another host
+    // as to the same, so a server that answered with a 302 was handed the key by the client.
+    // A Leaf server never redirects; the answer is the redirect itself, and says so.
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
-                         QNetworkRequest::NoLessSafeRedirectPolicy);
+                         QNetworkRequest::ManualRedirectPolicy);
+    request.setTransferTimeout(m_patience);
 
     // A body means something to send, and a server that reads a length. Set even when the
     // body is empty: `POST /scan` carries nothing, and a POST with no length at all is one
@@ -247,6 +309,21 @@ void Server::send(const Sending &what, const QObject *caller,
     QNetworkReply *reply =
         what.verb == "GET" ? m_network.get(request)
                            : m_network.sendCustomRequest(request, what.verb, what.body);
+    if (what.chunks) {
+        // Taken as it comes, and only when it is the file: a refusal keeps its body for
+        // `read`, which has the sentence the server gave. A reader that lags behind lets Qt
+        // stop reading the socket past a megabyte, so a slow disk slows the transfer and
+        // does not fill the memory.
+        reply->setReadBufferSize(1 << 20);
+        connect(reply, &QIODevice::readyRead, this, [reply, chunk = what.chunks] {
+            if (const int status =
+                    reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+                status < 200 || status >= 300)
+                return;
+            if (!chunk(reply->readAll()))
+                reply->abort();
+        });
+    }
     connect(reply, &QNetworkReply::finished, this,
             [this, reply, what, alive, reading, key = m_settings->key(), sentTo = address,
              then = std::move(then)] {
@@ -260,7 +337,7 @@ void Server::send(const Sending &what, const QObject *caller,
                 //
                 // Only a question. A command may already have reached the server before the
                 // cancel, and sending it twice is not this file's call to make.
-                if (Pinning::renewed(reply) && what.verb == "GET") {
+                if (Pinning::renewed(reply) && what.verb == "GET" && !what.chunks) {
                     QTimer::singleShot(0, this, [this, what, alive, reading, then] {
                         if (alive) {
                             send(what, alive.data(), then, reading);
@@ -336,7 +413,17 @@ Server::Answer Server::read(QNetworkReply *reply, Reading reading) const
         return {0, {}, Words::unreachable(reply->errorString())};
     }
 
+    // Cut short on the way: the status was already 200 when the connection went, and the
+    // pieces handed over would pass for a whole file.
+    if (reading == Reading::Stream && reply->error() != QNetworkReply::NoError
+        && status >= 200 && status < 300) {
+        return {0, {}, Words::unreachable(reply->errorString())};
+    }
+
     const QByteArray bytes = reply->readAll();
+    if (reading == Reading::Stream && status >= 200 && status < 300) {
+        return {status, {}, {}, {}};
+    }
     // An archive is not a document, and reading it as one would turn the one answer that
     // arrived whole into « the server said something this client cannot read ». A refusal
     // still carries its sentence in JSON, so only the successful answer is left alone.

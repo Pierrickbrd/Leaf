@@ -31,6 +31,7 @@ Item {
     Text {
         x: 34
         anchors.verticalCenter: parent.verticalCenter
+        textFormat: Text.PlainText
         text: stretch.range
         color: Theme.inkFaint
         font.family: Theme.textFamily

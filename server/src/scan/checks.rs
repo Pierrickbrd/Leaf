@@ -10,7 +10,16 @@
 
 use crate::metadata::sidecars::{ChapterJson, EditionJson, EntryJson, WorkJson, FORMAT_VERSION};
 
-pub fn work(folder: &str, meta: Option<&WorkJson>) -> Vec<String> {
+/// `every_volume_has_authors` and `every_volume_has_artists` say whether each volume is
+/// credited, by itself or by this file's default: a series whose credits are written volume
+/// by volume is not missing them from its `work.json`, and one volume credited by nobody is.
+/// Asking whether *anyone* was credited let one credited volume hide forty that were not.
+pub fn work(
+    folder: &str,
+    meta: Option<&WorkJson>,
+    every_volume_has_authors: bool,
+    every_volume_has_artists: bool,
+) -> Vec<String> {
     let Some(meta) = meta else {
         return vec![format!(
             "{folder}/work.json missing — title, status and reading direction unknown"
@@ -23,10 +32,10 @@ pub fn work(folder: &str, meta: Option<&WorkJson>) -> Vec<String> {
     if blank(&meta.medium) {
         missing.push("medium");
     }
-    if meta.authors().is_empty() {
+    if meta.authors().is_empty() && !every_volume_has_authors {
         missing.push("authors");
     }
-    if meta.artists.is_empty() {
+    if meta.artists.is_empty() && !every_volume_has_artists {
         missing.push("artists");
     }
     if blank(&meta.status) {
@@ -209,6 +218,11 @@ pub fn coherence(
         return Vec::new();
     };
     let mut out = about_the_entry(file, declared, kind, from_name);
+    if let Some(page) = declared.cover_page.filter(|p| !(0..page_count).contains(p)) {
+        out.push(format!(
+            "{file}: coverPage is {page} and the archive holds {page_count} pages — ignored"
+        ));
+    }
     let mut starts: Vec<i32> = Vec::new();
     for chapter in &declared.chapters {
         out.extend(about_a_chapter(file, chapter, page_count, &mut starts));

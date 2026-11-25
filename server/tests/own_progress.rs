@@ -210,6 +210,21 @@ async fn what_next_offers_each_profile_its_own_volume_once() {
 }
 
 #[tokio::test]
+async fn a_limit_that_means_everything_to_the_database_does_not_to_the_route() {
+    // SQLite reads `LIMIT -1` as no limit at all, and the limit comes off the query string.
+    let home = a_household();
+    let place = format!("/entries/{}/progress", home.first);
+    home.patch(&place, &home.parent, serde_json::json!({"page": 3}))
+        .await;
+
+    let (status, next) = home.get("/next?limit=-1", &home.parent).await;
+    assert_eq!(StatusCode::OK, status);
+    assert!(next.as_array().unwrap().is_empty(), "{next}");
+    let (_, next) = home.get("/next?limit=1000000", &home.parent).await;
+    assert_eq!(1, next.as_array().unwrap().len(), "{next}");
+}
+
+#[tokio::test]
 async fn a_profile_recording_its_place_is_answered_with_its_own_position() {
     let home = a_household();
     let place = format!("/entries/{}/progress", home.first);

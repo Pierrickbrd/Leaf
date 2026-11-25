@@ -56,6 +56,7 @@ class Linking : public QObject
     Q_PROPERTY(QString name READ name WRITE setName NOTIFY changed)
     /// Whether « Relier » would do anything.
     Q_PROPERTY(bool canLink READ canLink NOTIFY changed)
+    Q_PROPERTY(bool canLook READ canLook NOTIFY changed)
 
     // The screen's own words, held by the object the screen is named after.
     Q_PROPERTY(QString title READ title CONSTANT)
@@ -70,6 +71,8 @@ public:
     enum class Stage {
         Empty,
         NotALink,
+        /// A link read and not yet looked for: nothing was sent to the host it names.
+        Unchecked,
         Checking,
         Unreachable,
         Mismatch,
@@ -96,6 +99,8 @@ public:
     Q_INVOKABLE void clearNotice();
     void setName(const QString &name);
     bool canLink() const;
+    /// A link is in the field and its host was not contacted: « Chercher la bibliothèque ».
+    bool canLook() const { return m_stage == Stage::Unchecked; }
 
     QString title() const;
     QString intro() const;
@@ -109,6 +114,11 @@ public:
     /// check the server it names. Ignored while a code is on its way — the answer to it is a
     /// key, and nothing may stand between that key and `Settings`.
     Q_INVOKABLE void offer(const QString &typed);
+    /// « Chercher la bibliothèque »: contact the host of a link that was only read. A link
+    /// found on the clipboard is read and shown, never answered: the clipboard is read
+    /// without anybody asking, and contacting what it names would give this machine's address
+    /// to whoever wrote there.
+    Q_INVOKABLE void look();
     /// « Relier »: the code and the name, once. Does nothing unless `canLink`.
     Q_INVOKABLE void link();
     /// Read once, when the screen opens: a link already on the clipboard fills the field.

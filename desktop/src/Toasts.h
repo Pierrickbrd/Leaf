@@ -37,13 +37,22 @@ class Toasts : public QAbstractListModel
     QML_ELEMENT
     QML_SINGLETON
 
-    /// How many are drawn — three at most, whatever is waiting behind them.
+    /// How many are drawn — `atOnce` at most, whatever is waiting behind them.
     Q_PROPERTY(int count READ count NOTIFY changed)
-    /// How many more there are than the three drawn. Nought when everything fits.
+    /// The window is short (`Widths.short`, which `ToastStack` hands it): two are drawn and
+    /// not three.
+    Q_PROPERTY(bool cramped READ cramped WRITE setCramped NOTIFY changed)
+    /// How many more there are than the ones drawn. Nought when everything fits.
     Q_PROPERTY(int more READ more NOTIFY changed)
     Q_PROPERTY(QString moreLabel READ moreLabel NOTIFY changed)
     /// Which of the six zones they are laid in, as the reader asked.
     Q_PROPERTY(int corner READ corner NOTIFY changed)
+    /// What was said lately, newest first: `[{ failed, headline, detail, when }]`. A bubble
+    /// is gone in ten seconds and the import it announced may not be: this is where a reader
+    /// who was elsewhere finds out what happened.
+    Q_PROPERTY(QVariantList history READ history NOTIFY historyChanged)
+    Q_PROPERTY(QString historyTitle READ historyTitle CONSTANT)
+    Q_PROPERTY(QString historyEmpty READ historyEmpty CONSTANT)
 
 public:
     /// What the icon says, and nothing else does: the card keeps a card's background. A
@@ -62,6 +71,10 @@ public:
 
     /// At most three at a time, the newest at the bottom.
     static constexpr int AtOnce = 3;
+    /// At most two on a short window. On 23/10/2026, at 800 × 560, three bubbles and the
+    /// line counting the rest stood from the foot of the window to the bar, over the whole
+    /// right half of the shelf; two leave the page readable above them.
+    static constexpr int AtOnceWhenShort = 2;
 
     /// How long a bubble is left up, in milliseconds, success and failure alike.
     static constexpr int Lifetime = 10000;
@@ -80,34 +93,35 @@ public:
     QHash<int, QByteArray> roleNames() const override;
 
     int count() const { return rowCount(); }
+    bool cramped() const { return m_atOnce == AtOnceWhenShort; }
+    /// Draws `AtOnceWhenShort` when cramped, `AtOnce` otherwise: the rest wait behind, as a
+    /// count. The rows drawn change all at once, so the view is told the model was reset.
+    void setCramped(bool cramped);
     int more() const;
     QString moreLabel() const;
     int corner() const;
+    QVariantList history() const;
+    QString historyTitle() const;
+    QString historyEmpty() const;
+    /// How many are kept: enough to cover an evening of imports, few enough to be read.
+    static constexpr int Remembered = 20;
 
     /// Says something. `family` is what the settings screen answers for: silent there is
-    /// silent here, and the bubble is not raised at all rather than raised and hidden.
+    /// silent here, and the bubble is not raised at all rather than raised and hidden. What
+    /// each event says, and under which family, is `Warnings`'s business.
     void say(Preferences::Warns family, Tone tone, const QString &headline,
              const QString &detail, Offer offer = Offer::Nothing,
              const QString &subject = {});
 
-    /// The six things that warn, each worded where the words live. A `.qml` connecting a
-    /// signal to one of these is a `.qml` that carries no French, which is the whole
-    /// arrangement of this client.
-    Q_INVOKABLE void importSettled(bool went, const QString &subject, const QString &said);
-    Q_INVOKABLE void scanFinished(const QString &counts);
-    Q_INVOKABLE void scanFailed(const QString &why);
-    Q_INVOKABLE void copySaved(const QString &path);
-    Q_INVOKABLE void commandRefused(const QString &why);
-    /// « ISBN copié », the number under it. Outside every family the settings screen answers
-    /// for, and never sent to the desktop: it answers a click made in this window a moment
-    /// ago, and a reader who silenced the reports of imports and scans still wants to know
-    /// that their click did something — a copy shows nothing on the screen.
-    Q_INVOKABLE void isbnCopied(const QString &isbn);
-    /// Says, once, that Qt cannot read WebP — the format of every cover and every resized
-    /// page — and which package fixes it. `readable` is what `QImageReader` lists, given
-    /// rather than read so that a test can take the plugin away. Outside every family: it is
-    /// not news about the library but the reason none of it can be seen.
-    void readsImages(const QList<QByteArray> &readable);
+    /// Lays the bubble, whatever the families say: `say` decides whether to call it, and
+    /// `Warnings` calls it directly for the two events that answer to no family — the ISBN
+    /// copied and the WebP plugin missing.
+    void raise(Tone tone, const QString &headline, const QString &detail, Offer offer,
+               const QString &subject);
+
+    /// Forgets what was said: the history belongs to the profile that heard it, and the next
+    /// one to sit at this window must not read a series title it has no right to see.
+    void forget();
 
     /// Takes one away — the cross, which is the way out and not an action of its own.
     Q_INVOKABLE void dismiss(int row);
@@ -121,6 +135,7 @@ public:
 
 signals:
     void changed();
+    void historyChanged();
     /// The reader pressed the one thing a bubble offered. Whoever knows what to do with it
     /// is listening — this object knows what was said, not what to do about it.
     void acted(Offer what, const QString &subject);
@@ -144,14 +159,19 @@ private:
     };
 
     void take(qsizetype row);
-    /// Lays the bubble, whatever the families say: `say` decides whether to call it.
-    void raise(Tone tone, const QString &headline, const QString &detail, Offer offer,
-               const QString &subject);
+
+    struct Memory {
+        Tone tone = Tone::Done;
+        QString headline;
+        QString detail;
+        QDateTime at;
+    };
 
     Preferences *m_preferences;
+    QList<Memory> m_history;
     std::function<bool()> m_awake;
     int m_lifetime;
+    int m_atOnce = AtOnce;
     QList<Bubble> m_shown;
     QTimer m_clock;
-    bool m_toldWebp = false;
 };

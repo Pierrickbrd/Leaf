@@ -34,6 +34,14 @@ Rectangle {
     radius: width / 2
     color: held ? Theme.onPaper : (hovered ? Theme.onPaper : "transparent")
 
+    // The fill comes and goes with the pointer; switched, it blinked on every button the
+    // pointer crossed.
+    Behavior on color {
+        ColorAnimation {
+            duration: Preferences.motion === Preferences.Instant ? 0 : 110
+        }
+    }
+
     Accessible.role: Accessible.Button
     Accessible.name: label
     Accessible.onPressAction: button.press()
@@ -45,7 +53,9 @@ Rectangle {
     Keys.onPressed: event => {
         if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
                 || event.key === Qt.Key_Enter) {
-            button.press()
+            // Once for a key held down, as `ActionButton`.
+            if (!event.isAutoRepeat)
+                button.press()
             event.accepted = true
         }
     }

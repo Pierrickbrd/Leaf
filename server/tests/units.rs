@@ -813,6 +813,166 @@ fn a_scan_asked_for_twice_only_starts_once() {
     let _ = gate.send(());
 }
 
+#[test]
+fn a_scan_asked_while_one_runs_runs_once_more_after_it() {
+    // An import committed while a scan was reading the library was installed on disk and
+    // never indexed: the commit's own request was told a scan was running, and the running
+    // one had already passed that folder. Three asks while it runs are one more pass.
+    use leaf_server::scan::runner::ScanRunner;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let runner = Arc::new(ScanRunner::default());
+    let passes = Arc::new(AtomicUsize::new(0));
+    let (gate, wait) = std::sync::mpsc::channel::<()>();
+    let first = Arc::clone(&passes);
+    assert!(runner.start("Long", move || {
+        let _ = wait.recv();
+        first.fetch_add(1, Ordering::SeqCst);
+        Ok(Default::default())
+    }));
+    for _ in 0..3 {
+        let again = Arc::clone(&passes);
+        runner.start_or_again("Encore", move || {
+            again.fetch_add(1, Ordering::SeqCst);
+            Ok(Default::default())
+        });
+    }
+    assert_eq!(0, passes.load(Ordering::SeqCst));
+    let _ = gate.send(());
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while runner.status().state != "DONE" {
+        assert!(Instant::now() < deadline, "the scans never finished");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(2, passes.load(Ordering::SeqCst));
+}
+
+#[test]
+fn asking_for_a_scan_while_none_runs_runs_it_once() {
+    use leaf_server::scan::runner::ScanRunner;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let runner = Arc::new(ScanRunner::default());
+    let passes = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&passes);
+    runner.start_or_again("Seul", move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+        Ok(Default::default())
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while runner.status().state != "DONE" {
+        assert!(Instant::now() < deadline, "the scan never finished");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(1, passes.load(Ordering::SeqCst));
+}
+
+#[test]
+fn scans_asked_as_one_ends_never_run_side_by_side_nor_go_unanswered() {
+    // The flag was cleared twice on the way out; a scan started between the two had it
+    // cleared under it, and a third could run beside it. Asked from several threads at the
+    // instant scans end, two must never overlap, and a pass must begin after the last ask.
+    use leaf_server::scan::runner::ScanRunner;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    for _ in 0..200 {
+        let runner = Arc::new(ScanRunner::default());
+        let inside = Arc::new(AtomicUsize::new(0));
+        let overlapped = Arc::new(AtomicUsize::new(0));
+        // Asks made so far, counted before each call; a pass notes how many it began after.
+        let asked = Arc::new(AtomicUsize::new(0));
+        let began_after = Arc::new(AtomicUsize::new(0));
+        let askers: Vec<_> = (0..4usize)
+            .map(|_| {
+                let (runner, inside, overlapped, asked, began_after) = (
+                    Arc::clone(&runner),
+                    Arc::clone(&inside),
+                    Arc::clone(&overlapped),
+                    Arc::clone(&asked),
+                    Arc::clone(&began_after),
+                );
+                std::thread::spawn(move || {
+                    for _ in 0..5 {
+                        let (inside, overlapped, asked, began_after) = (
+                            Arc::clone(&inside),
+                            Arc::clone(&overlapped),
+                            Arc::clone(&asked),
+                            Arc::clone(&began_after),
+                        );
+                        asked.fetch_add(1, Ordering::SeqCst);
+                        runner.start_or_again("Course", move || {
+                            if inside.fetch_add(1, Ordering::SeqCst) > 0 {
+                                overlapped.fetch_add(1, Ordering::SeqCst);
+                            }
+                            began_after.store(asked.load(Ordering::SeqCst), Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_micros(300));
+                            inside.fetch_sub(1, Ordering::SeqCst);
+                            Ok(Default::default())
+                        });
+                    }
+                })
+            })
+            .collect();
+        for a in askers {
+            a.join().unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while runner.status().state != "DONE" {
+            assert!(Instant::now() < deadline, "the scans never finished");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            0,
+            overlapped.load(Ordering::SeqCst),
+            "two scans ran at once"
+        );
+        // The last pass to run began once every ask had been made: no ask went unanswered.
+        assert_eq!(
+            20,
+            began_after.load(Ordering::SeqCst),
+            "the last request ran before the last ask"
+        );
+    }
+}
+
+#[test]
+fn a_scan_asked_for_while_one_dies_still_runs_after_it() {
+    // A pass that panicked freed the flag and left the scan asked for meanwhile in the
+    // runner, unrun: an import committed during it stayed out of the index.
+    use leaf_server::scan::runner::ScanRunner;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let runner = Arc::new(ScanRunner::default());
+    let (gate, wait) = std::sync::mpsc::channel::<()>();
+    assert!(runner.start("Mourant", move || {
+        let _ = wait.recv();
+        panic!("the scanner fell over");
+    }));
+    let passes = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&passes);
+    runner.start_or_again("Suivant", move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+        Ok(Default::default())
+    });
+    let _ = gate.send(());
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while passes.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "the scan asked for never ran");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 // -------------------------------------------------------- is it the same volume
 
 #[test]
@@ -1065,4 +1225,164 @@ fn a_guess_that_judged_nothing_gives_its_slot_back_uncounted() {
     }
     assert!(brake.blocked_for("d").is_none());
     assert!(brake.attempt("d").is_ok());
+}
+
+// ----------------------------------------------------------- the name of a copy
+
+mod copy_names {
+    use leaf_server::store::naming::{file_name, Parts};
+
+    fn parts<'a>(universe: Option<&'a str>, work: &'a str) -> Parts<'a> {
+        Parts {
+            universe,
+            work,
+            edition: None,
+            editions: 1,
+            chapter: false,
+            number: Some(1.0),
+            title: None,
+            file: "Tome 3.CBZ",
+        }
+    }
+
+    #[test]
+    fn a_volume_says_its_series_and_its_number_in_three_digits() {
+        let mut p = parts(None, "Les Chevaliers du Zodiaque");
+        p.number = Some(12.0);
+        assert_eq!(file_name(&p), "chevaliers-du-zodiaque_tome_012.cbz");
+    }
+
+    #[test]
+    fn a_series_named_like_its_universe_is_said_once() {
+        let mut p = parts(Some("Dragon Ball"), "Dragon Ball");
+        p.edition = Some("Perfect Edition");
+        p.editions = 2;
+        p.number = Some(3.0);
+        assert_eq!(file_name(&p), "dragon-ball_perfect-edition_tome_003.cbz");
+    }
+
+    #[test]
+    fn a_series_that_contains_its_universe_keeps_its_own_name_so_two_series_never_meet() {
+        let sub = parts(Some("Naruto"), "Naruto Shippuden");
+        let main = parts(Some("Naruto"), "Naruto");
+        assert_eq!(file_name(&sub), "naruto-shippuden_tome_001.cbz");
+        assert_eq!(file_name(&main), "naruto_tome_001.cbz");
+    }
+
+    #[test]
+    fn a_universe_is_not_found_inside_a_longer_word() {
+        let p = parts(Some("Ham"), "Hamlet");
+        assert_eq!(file_name(&p), "ham_hamlet_tome_001.cbz");
+    }
+
+    #[test]
+    fn elisions_and_apostrophes_are_words_apart() {
+        let mut p = parts(None, "L'Attaque des Titans");
+        p.chapter = true;
+        p.number = Some(139.5);
+        assert_eq!(file_name(&p), "attaque-des-titans_chapitre_0139.5.cbz");
+        let q = parts(Some("Les Terres d'Arran"), "Elfes");
+        assert_eq!(file_name(&q), "terres-d-arran_elfes_tome_001.cbz");
+    }
+
+    #[test]
+    fn a_name_that_is_only_an_article_or_starts_with_i_keeps_it() {
+        assert_eq!(file_name(&parts(None, "Le")), "le_tome_001.cbz");
+        assert_eq!(
+            file_name(&parts(None, "I Am a Hero")),
+            "i-am-a-hero_tome_001.cbz"
+        );
+    }
+
+    #[test]
+    fn the_edition_is_said_only_beside_another() {
+        let mut p = parts(None, "Death Note");
+        p.edition = Some("Black Edition");
+        assert_eq!(file_name(&p), "death-note_tome_001.cbz");
+        p.editions = 2;
+        assert_eq!(file_name(&p), "death-note_black-edition_tome_001.cbz");
+    }
+
+    #[test]
+    fn a_side_story_is_marked_negative_and_zero_is_a_number() {
+        let mut p = parts(None, "Death Note");
+        p.number = Some(-1.0);
+        assert_eq!(file_name(&p), "death-note_tome_m001.cbz");
+        p.number = Some(0.0);
+        assert_eq!(file_name(&p), "death-note_tome_000.cbz");
+    }
+
+    #[test]
+    fn a_book_with_no_number_goes_by_its_title_then_by_its_old_name() {
+        let mut p = parts(None, "Akira Artbook");
+        p.number = None;
+        p.title = Some("Le Grand Livre");
+        assert_eq!(file_name(&p), "akira-artbook_grand-livre.cbz");
+        p.title = None;
+        p.file = "Hors Série Spécial.cbz";
+        assert_eq!(file_name(&p), "akira-artbook_hors-serie-special.cbz");
+    }
+
+    #[test]
+    fn a_script_without_latin_letters_is_kept_and_stays_inside_a_file_name() {
+        let p = parts(None, "進撃の巨人");
+        assert_eq!(file_name(&p), "進撃の巨人_tome_001.cbz");
+        let long = "あ".repeat(100);
+        assert!(file_name(&parts(Some(&long), &long)).len() < 255);
+    }
+}
+
+// ------------------------------------------------------- the name of a folder
+
+mod folder_names {
+    use leaf_server::store::naming::folder_name;
+
+    #[test]
+    fn a_folder_keeps_the_accents_of_its_name() {
+        assert_eq!(
+            folder_name("Les Chroniques d'Arran Ⅱ"),
+            "Les Chroniques d'Arran Ⅱ"
+        );
+        assert_eq!(folder_name("Élève modèle"), "Élève modèle");
+    }
+
+    #[test]
+    fn a_slash_in_a_title_does_not_make_a_subfolder() {
+        assert_eq!(folder_name("Fate/Zero"), "Fate-Zero");
+        assert_eq!(folder_name("Re:Zero ? *"), "Re-Zero");
+    }
+
+    #[test]
+    fn a_name_made_of_dots_is_not_a_traversal() {
+        assert_eq!(folder_name(".."), "Sans nom");
+        assert_eq!(folder_name("."), "Sans nom");
+        assert_eq!(folder_name("Bleach..."), "Bleach");
+    }
+
+    #[test]
+    fn a_long_name_is_cut_on_a_character() {
+        let long = "é".repeat(200);
+        let cut = folder_name(&long);
+        assert!(cut.len() <= 120);
+        assert!(cut.chars().all(|c| c == 'é') && !cut.is_empty());
+    }
+
+    #[test]
+    fn a_reserved_name_is_not_left_alone() {
+        assert_eq!(folder_name("CON"), "CON_");
+        assert_eq!(folder_name("lpt1"), "lpt1_");
+        assert_eq!(folder_name("Console"), "Console");
+    }
+
+    #[test]
+    fn an_empty_name_has_a_fallback() {
+        assert_eq!(folder_name(""), "Sans nom");
+        assert_eq!(folder_name("   "), "Sans nom");
+        assert_eq!(folder_name("???"), "Sans nom");
+    }
+
+    #[test]
+    fn spaces_are_folded_and_the_ends_trimmed() {
+        assert_eq!(folder_name("  Dragon   Ball \t Z "), "Dragon Ball Z");
+    }
 }

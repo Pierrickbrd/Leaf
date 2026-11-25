@@ -27,9 +27,15 @@ Item {
     /// where the colour is the answer and a word alone makes the reader picture it. Empty for
     /// every other choice.
     property var swatches: ({})
-    /// Whether each pill is a stop for Tab and the arrows. The settings and their windows walk
-    /// every control with the keys; the reader's card does not, its keys turning pages.
+    /// Whether the pills are reached by Tab. The settings and their windows walk every control
+    /// with the keys; the reader's card asks for it too, so that its pills are not the hand's
+    /// alone.
     property bool tabStops: false
+    /// Left and Right go from pill to pill and pick as they go, as in any group of radio
+    /// buttons, and Tab stops once, on the pill lit: three pills of appearance were three
+    /// stops between the tabs and the next card. Off in the reader, where the arrows turn
+    /// pages: every pill is a stop of its own there, and Space or Enter picks it.
+    property bool arrows: true
     /// How wide its pills are on one line, wrapping aside: what a row beside a name needs to
     /// stand without wrapping, so that the card can decide when to put the name above instead.
     readonly property real lineWidth: {
@@ -48,10 +54,24 @@ Item {
     }
 
     function sized(drawn: real): int {
-        return choice.scaled ? Widths.scale.size(drawn) : drawn
+        return choice.scaled ? Widths.scale.fit(drawn) : drawn
     }
 
     signal picked(int value)
+
+    readonly property bool anyLit: choice.options.some(one => one.value === choice.chosen)
+
+    /// From the pill at `from` to its neighbour, which takes the keys and is picked. False at
+    /// either end.
+    function step(from: int, by: int): bool {
+        const to = from + by
+        const next = pills.itemAt(to)
+        if (!next)
+            return false
+        next.forceActiveFocus(by > 0 ? Qt.TabFocusReason : Qt.BacktabFocusReason)
+        choice.picked(choice.options[to].value)
+        return true
+    }
 
     // No heading of its own: the card above already names the setting, and saying it twice
     // is the kind of thing a screen does when nobody reads it back.
@@ -67,12 +87,15 @@ Item {
         spacing: choice.sized(8)
 
         Repeater {
+            id: pills
+
             model: choice.options
 
             delegate: Rectangle {
                 id: pill
 
                 required property var modelData
+                required property int index
 
                 readonly property bool isPill: true
                 readonly property bool lit: choice.chosen === modelData.value
@@ -99,7 +122,10 @@ Item {
                 border.color: lit ? Theme.emerald : Theme.rule
                 border.width: 1
                 antialiasing: true
+                // One stop for the group when the arrows walk it: the pill lit, or the first
+                // while none is.
                 activeFocusOnTab: choice.tabStops
+                                  && (!choice.arrows || lit || (pill.index === 0 && !choice.anyLit))
 
                 Accessible.role: Accessible.RadioButton
                 Accessible.name: modelData.label
@@ -110,8 +136,14 @@ Item {
                 Keys.onPressed: event => {
                     if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
                             || event.key === Qt.Key_Enter) {
-                        choice.picked(pill.modelData.value)
+                        if (!event.isAutoRepeat)
+                            choice.picked(pill.modelData.value)
                         event.accepted = true
+                    } else if (choice.arrows && choice.tabStops
+                               && (event.key === Qt.Key_Left || event.key === Qt.Key_Right)) {
+                        // Past either end the key goes on, and the page walks out of the group.
+                        event.accepted = choice.step(pill.index,
+                                                     event.key === Qt.Key_Right ? 1 : -1)
                     }
                 }
 

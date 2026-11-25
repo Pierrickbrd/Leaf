@@ -3,7 +3,6 @@
 #include "Words.h"
 
 #include <QDebug>
-#include <QFileInfo>
 #include <QGuiApplication>
 
 #include <algorithm>
@@ -40,7 +39,18 @@ Toasts::Toasts(Preferences *preferences, std::function<bool()> awake, int lifeti
 
 int Toasts::rowCount(const QModelIndex &parent) const
 {
-    return parent.isValid() ? 0 : int(std::min<qsizetype>(m_shown.size(), AtOnce));
+    return parent.isValid() ? 0 : int(std::min<qsizetype>(m_shown.size(), m_atOnce));
+}
+
+void Toasts::setCramped(bool cramped)
+{
+    const int drawn = cramped ? AtOnceWhenShort : AtOnce;
+    if (drawn == m_atOnce)
+        return;
+    beginResetModel();
+    m_atOnce = drawn;
+    endResetModel();
+    emit changed();
 }
 
 QVariant Toasts::data(const QModelIndex &index, int role) const
@@ -78,7 +88,29 @@ QHash<int, QByteArray> Toasts::roleNames() const
 
 int Toasts::more() const
 {
-    return int(std::max<qsizetype>(0, m_shown.size() - AtOnce));
+    return int(std::max<qsizetype>(0, m_shown.size() - m_atOnce));
+}
+
+QVariantList Toasts::history() const
+{
+    QVariantList all;
+    for (const Memory &one : m_history) {
+        all << QVariantMap{{u"failed"_s, one.tone == Tone::Failed},
+                           {u"headline"_s, one.headline},
+                           {u"detail"_s, one.detail},
+                           {u"when"_s, Words::moment(one.at.toMSecsSinceEpoch())}};
+    }
+    return all;
+}
+
+QString Toasts::historyTitle() const
+{
+    return Words::notificationHistory();
+}
+
+QString Toasts::historyEmpty() const
+{
+    return Words::nothingToldYet();
 }
 
 QString Toasts::moreLabel() const
@@ -98,6 +130,13 @@ void Toasts::say(Preferences::Warns family, Tone tone, const QString &headline,
     if (headline.isEmpty())
         return;
 
+    // Remembered whether or not it is drawn: a family a reader silenced is still something
+    // that happened, and the list is where to look for it.
+    m_history.prepend({tone, headline, detail, QDateTime::currentDateTime()});
+    while (m_history.size() > Remembered)
+        m_history.removeLast();
+    emit historyChanged();
+
     // The desktop first, because it does not depend on there being room for a bubble: a
     // reader who keeps Leaf on another virtual desktop wants the system's notification and
     // nothing else, and that is a sensible thing to want.
@@ -116,7 +155,7 @@ void Toasts::raise(Tone tone, const QString &headline, const QString &detail, Of
 {
     // One lifetime for every tone (the header says why).
     const QDateTime until = QDateTime::currentDateTime().addMSecs(m_lifetime);
-    const bool drawn = m_shown.size() < AtOnce;
+    const bool drawn = m_shown.size() < m_atOnce;
     if (drawn)
         beginInsertRows(QModelIndex(), int(m_shown.size()), int(m_shown.size()));
     m_shown.append({tone, headline, detail, offer, subject, until, false, 0});
@@ -128,53 +167,19 @@ void Toasts::raise(Tone tone, const QString &headline, const QString &detail, Of
     emit changed();
 }
 
-void Toasts::importSettled(bool went, const QString &subject, const QString &said)
+void Toasts::forget()
 {
-    using enum Preferences::Warns;
-    if (went) {
-        // The subject on the first line and the work's own words on the second: « 29 tomes
-        // envoyés · 1 encore à venir » is `whatLanded` word for word, and it counts in
-        // « tomes » whatever the medium — an import may cross several series and does not
-        // know theirs yet.
-        say(Imports, Tone::Done, subject, said, Offer::See, subject);
-        return;
+    if (!m_shown.isEmpty()) {
+        beginResetModel();
+        m_shown.clear();
+        endResetModel();
+        m_clock.stop();
+        emit changed();
     }
-    say(Failures, Tone::Failed, Words::couldNotSend(subject), said, Offer::Retry, subject);
-}
-
-void Toasts::scanFinished(const QString &counts)
-{
-    say(Preferences::Warns::Scans, Tone::Done, Words::scanEnded(), counts);
-}
-
-void Toasts::scanFailed(const QString &why)
-{
-    say(Preferences::Warns::Failures, Tone::Failed, Words::scanStopped(), why);
-}
-
-void Toasts::copySaved(const QString &path)
-{
-    say(Preferences::Warns::Downloads, Tone::Done, Words::copyKept(),
-        QFileInfo(path).fileName(), Offer::OpenFolder, path);
-}
-
-void Toasts::commandRefused(const QString &why)
-{
-    say(Preferences::Warns::Failures, Tone::Failed, Words::commandRefused(), why);
-}
-
-void Toasts::isbnCopied(const QString &isbn)
-{
-    raise(Tone::Done, Words::isbnCopied(), isbn, Offer::Nothing, {});
-}
-
-void Toasts::readsImages(const QList<QByteArray> &readable)
-{
-    // Once: one missing package is one sentence, not one per cover that fails to draw.
-    if (m_toldWebp || readable.contains("webp"))
+    if (m_history.isEmpty())
         return;
-    m_toldWebp = true;
-    raise(Tone::Failed, Words::webpMissing(), Words::webpMissingRemedy(), Offer::Nothing, {});
+    m_history.clear();
+    emit historyChanged();
 }
 
 void Toasts::dismiss(int row)
@@ -200,7 +205,7 @@ void Toasts::take(qsizetype row)
 
     // Drawn or not decides whether a view is told: the ones past the third are a count, and
     // a count changing is not a row being removed.
-    const bool drawn = row < AtOnce;
+    const bool drawn = row < m_atOnce;
     if (drawn)
         beginRemoveRows(QModelIndex(), int(row), int(row));
     m_shown.removeAt(row);
@@ -209,8 +214,8 @@ void Toasts::take(qsizetype row)
 
     // One that was waiting behind takes the place, which is a row appearing and not a row
     // changing: the view is told so rather than left to notice.
-    if (drawn && m_shown.size() >= AtOnce) {
-        beginInsertRows(QModelIndex(), AtOnce - 1, AtOnce - 1);
+    if (drawn && m_shown.size() >= m_atOnce) {
+        beginInsertRows(QModelIndex(), m_atOnce - 1, m_atOnce - 1);
         endInsertRows();
     }
     if (m_shown.isEmpty())

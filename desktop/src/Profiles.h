@@ -115,6 +115,7 @@ public:
     Q_INVOKABLE QString sayPrincipalManages(const QString &principal) const;
     Q_INVOKABLE QString sayColourName(const QString &id, const QString &owner) const;
     Q_INVOKABLE QString sayOpensOn(const QString &name) const;
+    Q_INVOKABLE QString sayDeviceSeen(const QVariant &milliseconds) const;
     Q_INVOKABLE QString saySeriesForYou(int count) const;
     Q_INVOKABLE QString sayManagedByPrincipal(const QString &principal) const;
     Q_INVOKABLE QString sayOnlyReads(const QString &name) const;
@@ -161,6 +162,10 @@ public:
 
 signals:
     void changed();
+    /// `GET /profile/reading` was answered for the profile still reading. Apart from `changed`,
+    /// which says a hundred other things: a client that applied the preferences at every
+    /// `changed` would overwrite a choice made a moment ago, before its own write landed.
+    void readingHeard();
     /// The recovery code, once. A window shows it and nothing keeps it: not this object, not
     /// the log, not the clipboard.
     void recoveryDrawn(const QString &code);

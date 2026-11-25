@@ -42,6 +42,36 @@ Item {
     implicitHeight: frame.height + 8 + word.implicitHeight
     height: implicitHeight
 
+    // **One stop, the picture, and the arrows move the bubbles in it**, as in any group of
+    // radio buttons: the ring goes round the screen and the place chosen is lit inside it.
+    // Each zone was a stop of its own, ringed outside its edges: the ring of one zone stood
+    // over its neighbours, in the green of the zone chosen elsewhere, and read as a second
+    // place picked (owner, 25/10/2026). Past an edge the key goes on, and the page walks out.
+    activeFocusOnTab: true
+
+    Accessible.role: Accessible.RadioButton
+    Accessible.name: screen.label
+    Accessible.focusable: true
+    Accessible.focused: screen.activeFocus
+
+    Keys.onPressed: event => {
+        const column = screen.chosen % 3
+        const row = screen.chosen < 3 ? 0 : 1
+        let to = -1
+        if (event.key === Qt.Key_Left && column > 0)
+            to = screen.chosen - 1
+        else if (event.key === Qt.Key_Right && column < 2)
+            to = screen.chosen + 1
+        else if (event.key === Qt.Key_Up && row > 0)
+            to = screen.chosen - 3
+        else if (event.key === Qt.Key_Down && row < 1)
+            to = screen.chosen + 3
+        if (to < 0)
+            return
+        screen.picked(to)
+        event.accepted = true
+    }
+
     /// A rectangle's outline drawn inside its bounds, one hair wide: straight sides that are
     /// not smoothed, and an arc at each corner that is rounded. A corner left square has its
     /// two sides run on into it.
@@ -125,6 +155,12 @@ Item {
         width: 222
         height: 138
 
+        FocusRing {
+            objectName: "bubble-corner-focus"
+            cornerRadius: screen.rounding
+            focused: screen.activeFocus
+        }
+
         Rectangle {
             id: glass
 
@@ -162,21 +198,6 @@ Item {
                     objectName: "bubble-corner-zone-" + zone.index
                     width: frame.width / 3
                     height: frame.height / 2
-                    // A stop each, chosen with Enter or Space: the picture was the one
-                    // setting of the tab the keyboard could not change.
-                    activeFocusOnTab: true
-
-                    Keys.onPressed: event => {
-                        if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
-                                || event.key === Qt.Key_Enter) {
-                            screen.picked(zone.index)
-                            event.accepted = true
-                        }
-                    }
-
-                    FocusRing {
-                        cornerRadius: 4
-                    }
 
                     TapHandler {
                         gesturePolicy: TapHandler.ReleaseWithinBounds
@@ -288,6 +309,7 @@ Item {
         anchors.left: frame.left
         anchors.top: frame.bottom
         anchors.topMargin: 8
+        textFormat: Text.PlainText
         text: screen.label
         color: Theme.inkSoft
         font.family: Theme.textFamily

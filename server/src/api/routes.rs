@@ -38,6 +38,7 @@ use super::dto::{
     FORMAT_VERSION,
 };
 use super::erase::Erase;
+use super::folders::Folders;
 use super::intake::{Collision, FileRequest, Intake, Proposal};
 use super::keys::{Key, Keys, Permission, HEADER};
 use super::linking;
@@ -48,6 +49,7 @@ use super::progress::{Progress, ProgressDto, ProgressPatch, SeriesProgressPatch,
 use super::records::{EntryPatch, Records, SeriesPatch};
 use super::relocate::{MoveRequest, Relocate};
 use super::throttle::Throttle;
+use crate::api::cover_choice::CoverChoice;
 use crate::metadata::sidecars::ArcJson;
 use crate::net::link::Relay;
 use crate::scan::layout;
@@ -260,10 +262,28 @@ pub fn router(state: AppState) -> Router {
         .route("/entries/{id}/chapters", get(list_entry_chapters))
         .route("/entries/{id}/pages", get(list_entry_pages))
         .route("/entries/{id}/pages/{number}", get(get_page))
-        .route("/entries/{id}/cover", get(entry_cover))
-        .route("/series/{id}/cover", get(series_cover))
+        .route(
+            "/entries/{id}/cover",
+            get(entry_cover)
+                .put(put_entry_cover)
+                .delete(delete_entry_cover)
+                .layer(cover_body_limit()),
+        )
+        .route(
+            "/series/{id}/cover",
+            get(series_cover)
+                .put(put_series_cover)
+                .delete(delete_series_cover)
+                .layer(cover_body_limit()),
+        )
         .route("/entries/{id}/file", get(download_entry_file))
+        .route("/series/{id}/folders", get(list_series_folders))
+        .route("/series/{id}/files/{index}", get(download_series_file))
         .route("/scan", get(scan_status).post(start_scan))
+        .route("/cache", delete(purge_cache))
+        .route("/profile/export", get(export_reading))
+        .route("/series/{id}/rescan", post(rescan_series))
+        .route("/entries/{id}/rescan", post(rescan_entry))
         .route(
             "/series/{id}",
             get(get_series).patch(patch_series).delete(erase_series),
@@ -286,7 +306,12 @@ pub fn router(state: AppState) -> Router {
             post(file_entry).put(receive_staged_file),
         )
         .route("/preflight", post(preflight))
-        .route("/import", get(list_imports).post(open_import))
+        .route(
+            "/import",
+            get(list_imports)
+                .post(open_import)
+                .layer(announcement_body_limit()),
+        )
         .route("/intake", get(list_intake))
         .route("/import/{id}", get(import_state).delete(abandon_import))
         .route("/import/{id}/file", axum::routing::put(receive_import_file))
@@ -312,6 +337,18 @@ pub fn router(state: AppState) -> Router {
                 .delete(forget_progress),
         )
         .with_state(state)
+        .layer(axum::middleware::map_response(never_sniffed))
+}
+
+/// On every answer, the refusals included: the type of a page or a cover is read from its
+/// first bytes, and a program that opens one of these addresses should take that type and
+/// not guess another from the content.
+async fn never_sniffed(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    response
 }
 
 // -------------------------------------------------------------------- guards
@@ -544,6 +581,26 @@ fn lacking(right: &str) -> String {
     format!("this profile does not carry the \"{right}\" right")
 }
 
+/// Whether the request was addressed to a name of this machine. An open library trusts the
+/// loopback, but a web page in a browser here can make a name of its own resolve to
+/// 127.0.0.1 and then call it with the browser's own rights (DNS rebinding); the name it
+/// has to use is the one in `Host`. A request that names none (HTTP/1.0) is let through:
+/// no browser sends one.
+fn addressed_to_this_machine(parts: &Parts) -> bool {
+    let Some(host) = parts.headers.get(axum::http::header::HOST) else {
+        return true;
+    };
+    let Ok(host) = host.to_str() else {
+        return false;
+    };
+    // The port is not the name: `[::1]:8081`, `localhost:8081`, `127.0.0.1`.
+    let name = match host.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or_default(),
+        None => host.rsplit_once(':').map_or(host, |(name, _)| name),
+    };
+    crate::boot::is_loopback(name)
+}
+
 /// Who is at the door, without asking what they want: a key the server knows, a device, or
 /// nobody while the library is open.
 async fn door(parts: &Parts, state: &AppState) -> Result<Who, Refused> {
@@ -563,7 +620,7 @@ async fn door(parts: &Parts, state: &AppState) -> Result<Who, Refused> {
     // refused, so a revoked key never reads through an open door. The keys are asked first
     // because they cost nothing; the marker is a query.
     let keyless = offered.as_deref().is_none_or(|k| k.trim().is_empty());
-    if keyless && state.loopback && state.keys.open() {
+    if keyless && state.loopback && state.keys.open() && addressed_to_this_machine(parts) {
         let devices = Arc::clone(&state.devices);
         if !blocking(move || devices.closed()).await? {
             return Ok(Who::Open);
@@ -705,6 +762,8 @@ async fn health(
     Recognised(recognised): Recognised,
 ) -> Result<Json<HealthDto>, Failure> {
     let relay = recognised.is_some().then(|| state.relay.possible());
+    // Read from `VERSION` by the build script, which refuses a Cargo.toml that disagrees.
+    let version = recognised.is_some().then_some(env!("LEAF_VERSION"));
     let local_drop = state.drop.enabled();
     let could_be_open = state.loopback && state.keys.open();
     let (library, closed) = blocking(move || {
@@ -742,6 +801,7 @@ async fn health(
         local_drop,
         linked: !could_be_open || closed,
         relay,
+        version,
     }))
 }
 
@@ -1061,6 +1121,12 @@ async fn start_scan(_: Principal, State(state): State<AppState>) -> Response {
         Ok(report)
     });
 
+    scan_answer(&state, started)
+}
+
+/// What a scan that was asked for answers: where it is, and whether it was the one that
+/// started — 202 for it, 409 for one that met another already running.
+fn scan_answer(state: &AppState, started: bool) -> Response {
     let status = state.runner.status();
     let code = if started {
         StatusCode::ACCEPTED
@@ -1068,6 +1134,52 @@ async fn start_scan(_: Principal, State(state): State<AppState>) -> Response {
         StatusCode::CONFLICT
     };
     (code, Json(status)).into_response()
+}
+
+/// Reads one series' work again from its files, and nothing else.
+///
+/// What `PATCH` already does after an edit, asked for by itself: files changed under the
+/// server — renamed, replaced, a sidecar edited by hand — are read back without sweeping a
+/// library whose cost grows with it. It goes through the scan runner, so `GET /scan` says
+/// it is running and a second request, of either kind, is told so with a 409.
+async fn rescan_series(
+    _: Editor,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, Failure> {
+    let lookup = state.clone();
+    let folder = blocking(move || Repository::new(&lookup.db).work_folder_of_series(&id)).await?;
+    aimed_scan(&state, folder, "unknown series")
+}
+
+/// The same from a volume: the work it belongs to is read again, which is the smallest
+/// thing the scanner can be aimed at — an archive is never read apart from its folder.
+async fn rescan_entry(
+    _: Editor,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, Failure> {
+    let lookup = state.clone();
+    let folder = blocking(move || Repository::new(&lookup.db).work_folder_of_entry(&id)).await?;
+    aimed_scan(&state, folder, "unknown entry")
+}
+
+fn aimed_scan(
+    state: &AppState,
+    folder: Option<String>,
+    what: &'static str,
+) -> Result<Response, Failure> {
+    let Some(folder) = folder else {
+        return Err(Failure::Missing(what));
+    };
+    let scanner = Arc::clone(&state.scanner);
+    let pages = Arc::clone(&state.pages);
+    let started = state.runner.start("Rescan", move || {
+        let report = scanner.rescan_work(std::path::Path::new(&folder))?;
+        pages.warm_covers();
+        Ok(report)
+    });
+    Ok(scan_answer(state, started))
 }
 
 // -------------------------------------------------------------------- pages
@@ -1154,40 +1266,96 @@ async fn series_cover(
 }
 
 /// The original file: this is how a volume comes back down to be retouched.
+/// The folders a series sits in, each with its sidecar: what an export needs besides the
+/// volumes. Behind the same guard as the volumes' own download, since it is the other half
+/// of the same copy.
+async fn list_series_folders(
+    Exporter(who): Exporter,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, Failure> {
+    or_missing(
+        blocking(move || {
+            let ceiling = who.ceiling();
+            Folders::new(&state.db).of(&id, &ceiling)
+        })
+        .await?,
+        "unknown series",
+    )
+}
+
+/// One file of the listing above, by its place in it. A volume goes through exactly the
+/// route of `GET /entries/{id}/file` — stamp included — because an export that copied
+/// volumes unstamped would hand back files that cannot find their way home.
+async fn download_series_file(
+    Exporter(who): Exporter,
+    State(state): State<AppState>,
+    Path((id, index)): Path<(String, usize)>,
+) -> Result<Response, Failure> {
+    let ceiling = who.ceiling();
+    let located = {
+        let state = state.clone();
+        blocking(move || Folders::new(&state.db).nth(&id, index, &ceiling))
+            .await?
+            .ok_or(Failure::Missing("unknown file"))?
+    };
+    match located.file.entry_id {
+        Some(entry) if located.file.kind == "VOLUME" => {
+            download_entry_file(Exporter(who), State(state), Path(entry)).await
+        }
+        _ => {
+            let name = located
+                .disk
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            stream_file(&located.disk.to_string_lossy(), &name).await
+        }
+    }
+}
+
 async fn download_entry_file(
     Exporter(who): Exporter,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, Failure> {
-    let path = blocking(move || {
+    let (path, offered) = blocking(move || {
         let ceiling = who.ceiling();
         // Asked before the stamp, not after: the stamp writes into the file, and a request
         // for a volume the caller may not see must not touch it.
         let Some(path) = Repository::new(&state.db).entry_path(&id, &ceiling)? else {
             return Ok(None);
         };
+        let offered = Repository::new(&state.db).download_name(&id, &ceiling)?;
         // It leaves stamped — work, edition, number — so it can find its own way home when
         // it comes back. A GET that writes: deliberate,
         // because the stamp has to be in the copy that leaves rather than the one that
         // stays.
-        Records::new(&state.db).stamp_entry(&id)?;
-        Ok(Some(path))
+        Records::new(&state.db)
+            .in_library(state.bulk.library())
+            .stamp_entry(&id)?;
+        Ok(Some((path, offered)))
     })
-    .await?;
-    let Some(path) = path else {
-        return Err(Failure::Missing("unknown entry"));
-    };
+    .await?
+    .ok_or(Failure::Missing("unknown entry"))?;
 
-    let name = std::path::Path::new(&path)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "volume.cbz".to_string());
+    // The library's name for it, and the file's own only when it has none to give.
+    let name = offered.filter(|n| !n.is_empty()).unwrap_or_else(|| {
+        std::path::Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "volume.cbz".to_string())
+    });
 
-    // Opened and handed to the wire frame by frame. Read whole first, one download of a
-    // 130 MB volume held 130 MB before a byte left, three at once held four hundred, and a
-    // volume larger than what is free took the server down. `receive_import_file` streams
-    // the other way for exactly this reason.
-    let file = match tokio::fs::File::open(&path).await {
+    stream_file(&path, &name).await
+}
+
+/// Opened and handed to the wire frame by frame. Read whole first, one download of a
+/// 130 MB volume held 130 MB before a byte left, three at once held four hundred, and a
+/// volume larger than what is free took the server down. `receive_import_file` streams
+/// the other way for exactly this reason.
+async fn stream_file(path: &str, name: &str) -> Result<Response, Failure> {
+    let file = match tokio::fs::File::open(path).await {
         Ok(it) => it,
         // A volume taken off the disk between two scans is a thing that is not there, which
         // is exactly what the line above answers for an entry the index has never heard of.
@@ -1214,7 +1382,7 @@ async fn download_entry_file(
 
     let answer = Response::builder()
         .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
-        .header(axum::http::header::CONTENT_DISPOSITION, attachment(&name))
+        .header(axum::http::header::CONTENT_DISPOSITION, attachment(name))
         // Streamed, so nothing counts the bytes on the way out: without this the answer is
         // chunked and no client can say how far along it is.
         .header(axum::http::header::CONTENT_LENGTH, facts.len());
@@ -1608,7 +1776,9 @@ async fn up_next(
     State(state): State<AppState>,
     query: ListQuery,
 ) -> Result<Json<Vec<UpNextDto>>, Failure> {
-    let limit = query.limit.unwrap_or(20);
+    // Bounded like every other list: SQLite reads `LIMIT -1` as no limit, and this comes off
+    // the query string.
+    let limit = query.limit.unwrap_or(20).clamp(0, MAX_PAGE);
     Ok(Json(
         blocking(move || {
             let ceiling = who.ceiling();
@@ -1631,8 +1801,16 @@ async fn patch_series(
     Json(patch): Json<SeriesPatch>,
 ) -> Result<Response, Failure> {
     let series = blocking(move || {
+        // Planned before the sidecar is written: a refusal — a name taken, a disk that will
+        // not take a rename — leaves the title where it was, and the sidecar with it.
+        let renames = super::renames::for_series(&state.db, &id, &patch)?;
         if !Records::new(&state.db).patch_series(&id, &patch)? {
             return Ok(None);
+        }
+        super::renames::apply(&state.scanner, &state.db, renames)?;
+        // After the sidecar is written, so a refused patch leaves the image where it was.
+        if matches!(patch.cover_volume, Some(Some(_))) {
+            CoverChoice::new(&state.db).yield_to_volume(&id)?;
         }
         rescan_around(
             &state,
@@ -1676,9 +1854,14 @@ async fn patch_entry(
     Json(patch): Json<EntryPatch>,
 ) -> Result<Response, Failure> {
     let entry = blocking(move || {
-        if !Records::new(&state.db).patch_entry(&id, &patch)? {
+        let renames = super::renames::for_entry(&state.db, &id, &patch)?;
+        if !Records::new(&state.db)
+            .in_library(state.bulk.library())
+            .patch_entry(&id, &patch)?
+        {
             return Ok(None);
         }
+        super::renames::apply(&state.scanner, &state.db, renames)?;
         rescan_around(
             &state,
             Repository::new(&state.db).work_folder_of_entry(&id)?,
@@ -1687,6 +1870,115 @@ async fn patch_entry(
     })
     .await?;
     or_missing(entry, "unknown entry")
+}
+
+/// The ceiling on an announcement. axum's own is 2 MB, and a whole library announced at once
+/// — thousands of paths, every declaration's text — refused with a 413 before anything read
+/// it. [`MAX_ANNOUNCEMENT_BYTES`](super::bulk_import::MAX_ANNOUNCEMENT_BYTES) says the real one.
+fn announcement_body_limit() -> axum::extract::DefaultBodyLimit {
+    axum::extract::DefaultBodyLimit::max(super::bulk_import::MAX_ANNOUNCEMENT_BYTES)
+}
+
+/// The ceiling on an image sent as a cover. axum's own is 2 MB, which refuses a photograph
+/// of a cover before anything looks at it; [`cover_choice`](super::cover_choice) says the
+/// real one, and the check there is the one that decides.
+fn cover_body_limit() -> axum::extract::DefaultBodyLimit {
+    axum::extract::DefaultBodyLimit::max(super::cover_choice::MAX_BYTES)
+}
+
+/// Gives a series the cover of an image sent by the client, which the server decodes and
+/// writes into the series' folder. See [`super::cover_choice`].
+async fn put_series_cover(
+    _: Editor,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, Failure> {
+    let done = blocking(move || {
+        if !CoverChoice::new(&state.db).set_series(&id, &body)? {
+            return Ok(false);
+        }
+        rescan_around(
+            &state,
+            Repository::new(&state.db).work_folder_of_series(&id)?,
+        );
+        Ok(true)
+    })
+    .await?;
+    cover_answer(done, "unknown series")
+}
+
+/// Takes back the image the server wrote for a series; a cover somebody put there stays.
+async fn delete_series_cover(
+    _: Editor,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, Failure> {
+    let done = blocking(move || {
+        if !CoverChoice::new(&state.db).clear_series(&id)? {
+            return Ok(false);
+        }
+        rescan_around(
+            &state,
+            Repository::new(&state.db).work_folder_of_series(&id)?,
+        );
+        Ok(true)
+    })
+    .await?;
+    cover_answer(done, "unknown series")
+}
+
+async fn put_entry_cover(
+    _: Editor,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, Failure> {
+    let done = blocking(move || {
+        if !CoverChoice::new(&state.db)
+            .in_library(state.bulk.library())
+            .set_entry(&id, &body)?
+        {
+            return Ok(false);
+        }
+        rescan_around(
+            &state,
+            Repository::new(&state.db).work_folder_of_entry(&id)?,
+        );
+        Ok(true)
+    })
+    .await?;
+    cover_answer(done, "unknown entry")
+}
+
+async fn delete_entry_cover(
+    _: Editor,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, Failure> {
+    let done = blocking(move || {
+        if !CoverChoice::new(&state.db)
+            .in_library(state.bulk.library())
+            .clear_entry(&id)?
+        {
+            return Ok(false);
+        }
+        rescan_around(
+            &state,
+            Repository::new(&state.db).work_folder_of_entry(&id)?,
+        );
+        Ok(true)
+    })
+    .await?;
+    cover_answer(done, "unknown entry")
+}
+
+fn cover_answer(done: bool, missing: &'static str) -> Result<Response, Failure> {
+    if done {
+        Ok(StatusCode::NO_CONTENT.into_response())
+    } else {
+        or_missing(None::<()>, missing)
+    }
 }
 
 /// Moves a work's folder into a universe, or out to the library root it lives under.
@@ -1701,21 +1993,69 @@ async fn move_work(
     Json(request): Json<MoveRequest>,
 ) -> Result<Response, Failure> {
     let moved = blocking(move || {
-        let relocate = Relocate::new(&state.db, &state.roots);
-        let Some(to) = relocate.into_universe(&id, request.universe_id.as_deref())? else {
-            return Ok(None);
-        };
-        let Some(moved) = relocate.work(&id, &to)? else {
-            return Ok(None);
-        };
-        // Only what moved is read again. A work asked to go where it already is has changed
-        // nothing on the disk, and rescanning it would be a second answer to a first one.
-        if moved.moved {
-            state
-                .scanner
-                .rescan_work(std::path::Path::new(&moved.path))?;
-        }
-        Ok(Some(moved))
+        // The whole of it under the scanners' lock: the names, the folder, and the index
+        // told where it went. A scan between the folder moving and the index following saw
+        // a work that had vanished and another that had appeared.
+        state.scanner.exclusive(|held| {
+            let relocate = Relocate::new(&state.db, &state.roots);
+            let Some(to) = relocate.into_universe(&id, request.universe_id.as_deref())? else {
+                return Ok(None);
+            };
+            // Before anything moves: a folder in the way, or a name in the way, refuses the
+            // move with nothing changed, which is what the answer says.
+            relocate.check(&id, &to)?;
+            let was_in: Option<String> = state
+                .db
+                .read(|cx| {
+                    cx.query_one(
+                        "SELECT universe_id FROM work WHERE id = ?1",
+                        [id.as_str()],
+                        |r| r.get::<_, Option<String>>(0),
+                    )
+                })?
+                .flatten();
+            let plan = super::renames::before_move(&state.db, &id, request.universe_id.as_deref())?;
+            super::renames::apply_held(&state.scanner, held, &state.db, plan.as_ref())?;
+            let moved = match relocate.work(&id, &to) {
+                Ok(Some(moved)) => moved,
+                other => {
+                    // The names took the universe and the folder did not follow: they are
+                    // given back what they had, so that nothing says a universe the series
+                    // is not in.
+                    if plan.is_some() {
+                        let back = super::renames::before_move(&state.db, &id, was_in.as_deref())
+                            .and_then(|undo| {
+                                super::renames::apply_held(
+                                    &state.scanner,
+                                    held,
+                                    &state.db,
+                                    undo.as_ref(),
+                                )
+                            });
+                        if let Err(why) = back {
+                            tracing::warn!(?why, work = %id, "names could not be given back");
+                        }
+                    }
+                    return other;
+                }
+            };
+            // Only what moved is read again. A work asked to go where it already is has
+            // changed nothing on the disk, and rescanning it would be a second answer to a
+            // first one.
+            if moved.moved {
+                // The index is told where the folder went before anything reads it: the
+                // volumes are found by their files.
+                crate::store::renaming::follow_moved_folder(
+                    &state.db,
+                    &moved.from,
+                    std::path::Path::new(&moved.path),
+                )?;
+                state
+                    .scanner
+                    .rescan_work_held(held, std::path::Path::new(&moved.path))?;
+            }
+            Ok(Some(moved))
+        })
     })
     .await?;
     or_missing(moved, "unknown work")
@@ -1891,12 +2231,23 @@ async fn file_entry(
     Json(request): Json<FileRequest>,
 ) -> Result<Response, Failure> {
     let filed = blocking(move || {
-        let filed = state.intake.file(&id, &request)?;
+        let mut filed = state.intake.file(&id, &request)?;
         // Only the series that received it can have changed.
         rescan_around(
             &state,
             Repository::new(&state.db).work_folder_of_series(&request.series_id)?,
         );
+        // A new volume is given its identity by the scan, once, and the answer names that
+        // one: the id the file would have had before the scan drew it is held by nothing.
+        if let Some(held) = state.db.read(|cx| {
+            cx.query_one(
+                "SELECT id FROM entry WHERE file = ?1",
+                [filed.path.as_str()],
+                |r| r.get::<_, String>(0),
+            )
+        })? {
+            filed.entry_id = held;
+        }
         Ok(filed)
     })
     .await?;
@@ -1915,11 +2266,14 @@ async fn abandon_entry(
 // --------------------------------------------------------------- bulk import
 
 async fn open_import(
-    _: Importer,
+    Importer(who): Importer,
     State(state): State<AppState>,
     Json(request): Json<ImportRequest>,
 ) -> Result<Response, Failure> {
-    let opened = blocking(move || state.bulk.open(&request)).await?;
+    // A target is read as this caller sees the library: one it may not see is unknown.
+    let profile = who.profile().to_string();
+    let ceiling = who.ceiling();
+    let opened = blocking(move || state.bulk.open(&request, &profile, &ceiling)).await?;
     Ok(Json(opened).into_response())
 }
 
@@ -2019,7 +2373,7 @@ async fn receive_import_file(
 /// Nothing is deleted: orphans are handed back to the client, which shows them to you
 /// before you decide.
 async fn commit_import(
-    _: Importer,
+    Importer(who): Importer,
     State(state): State<AppState>,
     Path(id): Path<String>,
     request: Option<Json<CommitRequest>>,
@@ -2028,6 +2382,8 @@ async fn commit_import(
     let wanted = asked.move_these;
     let replacing = asked.replace_these;
     let declaring = asked.declare_these;
+    let resetting = asked.reset_these;
+    let profile = who.profile().to_string();
     let result = blocking(move || {
         // **Before the install, not after.** The commit writes the folder's declarations
         // into the library, so the place a work is being filed under exists by the time it
@@ -2050,22 +2406,31 @@ async fn commit_import(
             }
         }
 
-        let mut result = state.bulk.commit(&id, &replacing, &declaring)?;
+        let mut result =
+            super::renames::commit_import(&state.scanner, &state.db, &state.bulk, &id, |first| {
+                state
+                    .bulk
+                    .commit_with(&id, &replacing, &declaring, &resetting, &profile, first)
+            })?;
         result.moved = filed;
 
         // Aimed at what has just arrived rather than at the whole library. A full scan here
         // costs as much as the library is big — fifteen seconds at two hundred series — and
         // the request held the connection open for all of it, to index one folder.
-        //
-        // Never aimed once something moved: a work filed under the folder that just arrived
-        // is a second place that changed, and one aimed rescan cannot read both.
         let target = state.bulk.target_of(&result.root);
-        if result.moved.is_empty() && can_be_aimed_at(&target) {
-            state.scanner.rescan_work(&target)?;
+        if let Some(aimed) = aimed_after_import(&target, &result) {
+            state.scanner.rescan_work(&aimed)?;
             state.pages.warm_covers();
         } else {
             // A whole shelf at once is too broad to aim: it goes behind, like any scan.
             background_scan(&state, "Scan after import");
+        }
+        // The volumes are installed whatever this says: naming them afterwards is a courtesy,
+        // and an error of it must not turn a commit that happened into one that failed.
+        if let Err(why) =
+            super::renames::after_replacement(&state.scanner, &state.db, &result.replaced)
+        {
+            tracing::warn!(?why, "replaced volumes keep the names they had");
         }
         Ok(result)
     })
@@ -2093,6 +2458,10 @@ pub struct CommitRequest {
     /// counterpart is installed whatever this says: `creates` announced it.
     #[serde(rename = "declare")]
     pub declare_these: Vec<String>,
+    /// The paths, among those replaced, whose volume this profile starts again from the
+    /// first page. Only this profile's: another reader's place is not theirs to move.
+    #[serde(rename = "reset")]
+    pub reset_these: Vec<String>,
 }
 
 async fn abandon_import(
@@ -2102,6 +2471,33 @@ async fn abandon_import(
 ) -> Result<StatusCode, Failure> {
     blocking(move || state.bulk.abandon(&id)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The calling profile's shelf and places as one JSON file to keep.
+///
+/// Any seated profile, for itself only, and under its own ceiling: a child's export holds
+/// what the child sees. A GET that answers as an attachment, so a browser saves it.
+async fn export_reading(
+    Caller(who): Caller,
+    State(state): State<AppState>,
+) -> Result<Response, Failure> {
+    let export = blocking(move || {
+        Repository::new(&state.db).reading_export(who.profile(), &who.ceiling(), now_in_millis())
+    })
+    .await?;
+    let mut response = Json(export).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        axum::http::HeaderValue::from_static("attachment; filename=\"leaf-lecture.json\""),
+    );
+    Ok(response)
+}
+
+/// Empties the disk cache of resized pages and covers. Reserved like the scan: it costs
+/// every reader the resizes again, and touches no file of the library nor the index.
+async fn purge_cache(_: Principal, State(state): State<AppState>) -> Result<Response, Failure> {
+    let done = blocking(move || Ok(state.pages.purge_cache())).await?;
+    Ok(Json(serde_json::json!({ "files": done.files, "bytes": done.bytes })).into_response())
 }
 
 /// Deletion on an explicit, by-name order, never inferred from a manifest.
@@ -2147,14 +2543,33 @@ fn background_scan(state: &AppState, label: &'static str) {
     let scanner = Arc::clone(&state.scanner);
     let roots = Arc::clone(&state.roots);
     let pages = Arc::clone(&state.pages);
-    if !state.runner.start(label, move || {
+    // Asked again rather than dropped: a scan that has already read the library folder does
+    // not see what arrives after, and a universe committed during one stayed unindexed
+    // until the next scan happened to run.
+    state.runner.start_or_again(label, move || {
         let report = scanner.scan(&roots)?;
         pages.warm_covers();
         Ok(report)
-    }) {
-        // Not an error: the scan that is already running will see the same disk.
-        tracing::info!(label, "a scan is already running");
+    });
+}
+
+/// The folder a commit's rescan reads, or `None` when it has to sweep behind.
+///
+/// Never aimed once something moved: a work filed under the folder that just arrived is a
+/// second place that changed, and one aimed rescan cannot read both.
+pub fn aimed_after_import(
+    target: &std::path::Path,
+    result: &super::bulk_import::ImportResult,
+) -> Option<std::path::PathBuf> {
+    if !result.moved.is_empty() {
+        return None;
     }
+    // A series of a universe lands under the universe's folder, which cannot be aimed at;
+    // its work can, and is all that changed.
+    if let Some(work) = result.work_folder.as_deref().filter(|w| can_be_aimed_at(w)) {
+        return Some(work.to_path_buf());
+    }
+    can_be_aimed_at(target).then(|| target.to_path_buf())
 }
 
 /// Whether a rescan can be aimed at this folder rather than at the library.
@@ -2277,6 +2692,7 @@ impl ListQuery {
                 "work" => out.filter.works.push(value),
                 "universe" => out.filter.universes.push(value),
                 "author" => out.filter.authors.push(value),
+                "artist" => out.filter.artists.push(value),
                 "genre" => out.filter.genres.push(value),
                 "medium" => out.filter.media.push(value),
                 "status" => out.filter.statuses.push(value),
@@ -2356,6 +2772,13 @@ impl IntoResponse for Failure {
                 // in the request: it is a thing that is not there.
                 if let Some(gone) = e.downcast_ref::<crate::api::Absent>() {
                     return (StatusCode::NOT_FOUND, Json(ErrorDto::new(gone.to_string())))
+                        .into_response();
+                }
+                if let Some(blocked) = e.downcast_ref::<crate::api::Conflict>() {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(ErrorDto::new(blocked.to_string())),
+                    )
                         .into_response();
                 }
                 // A name already taken in the series. Not a fault and not a thing missing:

@@ -12,6 +12,12 @@ use leaf_server::boot::{
 };
 use leaf_server::config::Config;
 
+mod common;
+
+fn common_archive() -> Vec<u8> {
+    common::archive_bytes(None)
+}
+
 /// Parses a line that is expected to run rather than to print usage or be refused.
 fn asked(args: &[&str]) -> Invocation {
     match Invocation::of(args.iter().copied().map(String::from)).unwrap() {
@@ -326,5 +332,68 @@ fn profile_reset_code_is_read_and_anything_else_under_profile_is_refused() {
             Invocation::of(args.iter().copied().map(String::from)).is_err(),
             "{args:?}"
         );
+    }
+}
+
+mod renames_left_by_a_cut {
+    use std::sync::Arc;
+
+    use leaf_server::boot::finish_interrupted_renames;
+    use leaf_server::scan::scanner::Scanner;
+    use leaf_server::store::renaming::{execute_until, plan_work, Overrides};
+    use leaf_server::store::Db;
+
+    /// A rename that the process died in the middle of is finished before the server listens,
+    /// and before the first scan: that scan would meet the series half moved and prune the
+    /// volumes that are between their old name and their new one.
+    #[test]
+    fn boot_finishes_the_rename_a_cut_interrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("library/Bleach");
+        std::fs::create_dir_all(&library).unwrap();
+        std::fs::write(library.join("work.json"), r#"{"leaf":1,"title":"Bleach"}"#).unwrap();
+        for n in 1..=3 {
+            std::fs::write(
+                library.join(format!("Tome {n}.cbz")),
+                super::common_archive(),
+            )
+            .unwrap();
+        }
+        let db = Arc::new(Db::open(&dir.path().join("index.sqlite")).unwrap());
+        let scanner = Scanner::new(Arc::clone(&db), true);
+        scanner.scan(&[dir.path().join("library")]).unwrap();
+        let work: String = db
+            .read(|cx| cx.query_one("SELECT id FROM work", [], |r| r.get(0)))
+            .unwrap()
+            .unwrap();
+        let plan = db
+            .read(|cx| {
+                plan_work(
+                    cx,
+                    &work,
+                    &Overrides {
+                        work_name: Some("Bleach Deluxe".into()),
+                        ..Overrides::default()
+                    },
+                )
+            })
+            .unwrap()
+            .expect("a plan");
+        execute_until(&scanner, &db, &plan, 2).unwrap();
+        assert!(dir.path().join("library/Bleach Deluxe/Tome 3.cbz").exists());
+
+        let finished = finish_interrupted_renames(&scanner, &db).unwrap();
+
+        assert_eq!(1, finished);
+        for n in 1..=3 {
+            assert!(dir
+                .path()
+                .join(format!(
+                    "library/Bleach Deluxe/bleach-deluxe_tome_00{n}.cbz"
+                ))
+                .is_file());
+        }
+        // And a start with nothing left over does nothing.
+        assert_eq!(0, finish_interrupted_renames(&scanner, &db).unwrap());
     }
 }

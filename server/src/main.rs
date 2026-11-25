@@ -99,6 +99,9 @@ async fn serve(asked: Invocation) -> Result<()> {
     if asked.is_scan() {
         let started = std::time::Instant::now();
         let scanner = Scanner::new(Arc::clone(&db), asked.all_dimensions);
+        // The journal first, as `serve` does: a scan that comes before the end of a cut
+        // rename sees a library half moved and indexes it as it is.
+        leaf_server::boot::finish_interrupted_renames(&scanner, &db)?;
         let report = scanner.scan(&roots)?;
         tracing::info!(seconds = started.elapsed().as_secs(), "Scan finished");
         println!();
@@ -187,6 +190,12 @@ async fn serve(asked: Invocation) -> Result<()> {
             config.max_upload_bytes,
         );
 
+    // Before the first scan, which would meet a series half renamed and prune the volumes
+    // that are between their old name and their new one. A few directory entries to move,
+    // not a scan: it does not wait for the server to answer.
+    leaf_server::boot::finish_interrupted_renames(&state.scanner, &state.db)
+        .context("finishing the renames a cut had interrupted")?;
+
     // Behind, so the server answers from its first second. A scan that dies with the
     // process costs nothing: the index is rebuildable, you simply run it again.
     if std::env::var("LEAF_NO_SCAN").is_err() {
@@ -197,7 +206,7 @@ async fn serve(asked: Invocation) -> Result<()> {
             .start("Startup scan", move || scanner.scan(&roots));
     }
 
-    let app = router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let app = router(state);
 
     // https whenever the server is reachable from anywhere but this machine, with no setting
     // to turn it off: a key sent in clear on a home network is anyone's who listens. Plain
@@ -206,35 +215,17 @@ async fn serve(asked: Invocation) -> Result<()> {
     let address: std::net::SocketAddr = address
         .parse()
         .with_context(|| format!("{address} is not an address to bind"))?;
-    match tls {
-        Some(tls) => {
-            tracing::info!("Listening on https://{address}");
-            // The same graceful stop the plain path has. Without it, stopping the unit cut
-            // the process off mid-write while HTTP shut down politely — one behaviour for
-            // one server, decided by which port it happened to be listening on.
-            let handle = axum_server::Handle::new();
-            let asked_to_stop = handle.clone();
-            tokio::spawn(async move {
-                stopping.wait().await;
-                asked_to_stop.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
-            });
-            axum_server::bind_rustls(address, tls.config)
-                .handle(handle)
-                .serve(app)
-                .await
-                .context("serving")
-        }
-        None => {
-            let listener = tokio::net::TcpListener::bind(address)
-                .await
-                .with_context(|| format!("binding {address}"))?;
-            tracing::info!("Listening on http://{address}");
-            axum::serve(listener, app)
-                .with_graceful_shutdown(stopping.wait())
-                .await
-                .context("serving")
-        }
-    }
+    // The same graceful stop on both paths, and the same bounds on how long a connection may
+    // say nothing (`serving`). Stopping the unit used to cut the process off mid-write on
+    // one port while HTTP shut down politely on the other.
+    leaf_server::serving::serve(
+        address,
+        tls.map(|tls| tls.config),
+        app,
+        leaf_server::serving::Limits::default(),
+        stopping.wait(),
+    )
+    .await
 }
 
 /// Answers the two signals that ask a server to stop, so the writer finishes what it holds.

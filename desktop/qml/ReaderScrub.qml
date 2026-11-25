@@ -100,13 +100,17 @@ Item {
             color: Theme.emerald
         }
 
+        // A count, as `ReaderVolumePanel` reads the same list: `Reader.changed` is emitted at
+        // every page and each emission gave a new list, so the marks were built again at
+        // every page turned.
         Repeater {
-            model: Reader.chapters
+            model: Reader.chapters.length
 
             Rectangle {
                 id: mark
 
-                required property var modelData
+                required property int index
+                readonly property var modelData: Reader.chapters[index] ?? ({ "startPage": -1 })
 
                 readonly property bool past: mark.modelData.startPage <= scrub.reached
 

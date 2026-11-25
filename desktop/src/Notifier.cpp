@@ -27,8 +27,12 @@ QDBusMessage Notifier::announcement(const QString &headline, const QString &deta
     // one would lose what the last one said), the icon, the two lines, the actions, the
     // hints, and how long. Minus one is the daemon's own default: it knows what its reader
     // has asked for, and this does not.
-    call.setArguments({u"Leaf"_s, uint(0), u"leaf"_s, headline, detail, QStringList(),
-                       QVariantMap(), -1});
+    //
+    // The detail is the body, and a daemon may read a body as markup (`<b>`, `<a href>`,
+    // `<img>`): what it holds can be the name of a series, which anybody who named a folder
+    // chose. Escaped, it is shown as written. The headline is plain by the specification.
+    call.setArguments({u"Leaf"_s, uint(0), u"leaf"_s, headline, detail.toHtmlEscaped(),
+                       QStringList(), QVariantMap(), -1});
     return call;
 }
 

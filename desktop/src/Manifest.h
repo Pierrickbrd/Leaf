@@ -14,11 +14,14 @@
 // Symlinks are leaves, never descended into. A link back to a parent is then a file this
 // does not follow rather than a walk that never ends.
 
+#include "Cbz.h"
+
 #include <QByteArray>
 #include <QList>
 #include <QString>
 
 #include <functional>
+#include <optional>
 
 namespace Manifest {
 
@@ -49,11 +52,21 @@ struct Entry {
     /// — and what arrives verified before it is installed. A volume that travelled wrong is
     /// worse than one that did not travel, because nothing afterwards would say so.
     QString checksum;
-    /// What the archive declares itself to be, read out of its own `entry.json`.
+    /// What the archive says in its two description members, and what went wrong reading
+    /// each one.
     ///
-    /// Empty when nothing opened it — the instant tree opens no archive, and a drop without
-    /// checksums opens none either. A title is worth a second open only where the whole file
-    /// is being read anyway, which is the verification pass.
+    /// With checksums, `members.digests` also holds every page hashed on its content, which
+    /// is what `checksum` cannot say of the file the server writes.
+    ///
+    /// Filled by `of`, with checksums or without: the walk opens every archive anyway, and
+    /// a walk without checksums used to leave the import's first screen knowing a volume's
+    /// file name and nothing of what it declared. `found` opens nothing and leaves it empty
+    /// — an unopened archive and an archive holding no sidecar look the same here, and the
+    /// instant tree is the one caller for whom that is the point.
+    Cbz::Members members;
+    /// What the archive declares itself to be, taken from `members.entry`.
+    ///
+    /// Empty when nothing opened it, or when it declares no title.
     QString title;
 };
 
@@ -73,7 +86,10 @@ struct Sidecar {
 ///
 /// `Chapter` sits between `Edition` and `Volume` because a chapter is not under a volume,
 /// it stands beside it: `entry.type` is VOLUME or CHAPTER, never one nested in the other.
-enum class Level { Universe, Work, Edition, Chapter, Volume };
+///
+/// `Book` is last, so that every value already handed to QML as an integer keeps its
+/// number: an archive that declares itself whole, filed beside works rather than inside one.
+enum class Level { Universe, Work, Edition, Chapter, Volume, Book };
 
 /// A declared thing, and what it holds.
 ///
@@ -95,6 +111,11 @@ struct Node {
     /// The sidecar's bytes, as they are. Empty for an implicit edition and for a volume —
     /// neither one declares anything.
     QByteArray declaration;
+    /// Whether a sidecar of the folder declares it — even an empty or unreadable one.
+    ///
+    /// `level` cannot say: `Work` is what a node falls back to, so a folder that wrote
+    /// `work.json` and one that merely holds archives came out the same.
+    bool declared = false;
     qint64 size = 0;
     QList<Node> children;
     /// The archives sitting directly in this node, never its children's.
@@ -111,10 +132,18 @@ struct Folder {
     QList<Sidecar> sidecars;
     /// Empty when the folder was read.
     QString trouble;
+    /// The images kept as a series' cover beside its declaration: sent with the volumes,
+    /// never counted among them.
+    QList<Entry> covers;
 
     bool read() const { return trouble.isEmpty(); }
     qint64 bytes() const;
 };
+
+/// The tree of a folder that holds only the archive at `file`: `root` is its name without
+/// the extension and `files` is it alone. What a file aimed at a volume travels as — the
+/// server has one road for what is dropped on a target, and it is a folder's.
+Folder single(const QString &file, bool withChecksums = true);
 
 /// Called once per file the walk has read, with the running total — never a fraction,
 /// because the caller already knows the folder's own volume count from `found()` and can
@@ -135,6 +164,23 @@ Folder of(const QString &path, bool withChecksums = true, const Progress &onward
 /// deliberate: dropping a whole library hashed everything before showing anything, and
 /// the window looked stuck long enough for the desktop to offer to kill it.
 QList<Node> found(const QString &path);
+
+/// Everything under a dropped folder, shelves kept as undeclared nodes.
+///
+/// `found` walks a shelf through, which is right for choosing cards and wrong for showing
+/// what was dropped: `BD/Terres d’Arran/{Elfes, Mages}` came back as two cards and the folder
+/// holding them vanished. **No archive is opened**, for the reason `found` opens none.
+Node whole(const QString &path);
+
+/// The number a file's name gives it, or nothing.
+///
+/// Read from the **label** of the name without its extension and never from the title behind
+/// it: « Tome 12 - 1984 » is volume 12, not 1984. A leading minus belongs to the number, and
+/// so does one decimal separator — a point or a comma — with a digit behind it. It is
+/// `metadata::label::last_number` on the server, and the two must stay in step: a client
+/// numbering a file differently from the server that will scan it shows a position the
+/// library then contradicts.
+std::optional<double> numberOf(const QString &fileName);
 
 /// The SHA-256 of one file, lowercase hex, or empty when it could not be read.
 QString checksumOf(const QString &path);

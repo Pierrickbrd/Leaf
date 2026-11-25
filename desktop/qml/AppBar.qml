@@ -29,8 +29,7 @@ Item {
                                             && searchField.activeFocus
     /// Everything in this row exists to browse a shelf: a field that searches it, a filter
     /// that narrows it, an order that sorts it. On any other page they act on something
-    /// nobody is looking at, so the bar keeps the brand and drops the rest — and the page
-    /// carries its own way back, because a control that leaves a page belongs to it.
+    /// nobody is looking at, so the bar keeps the brand and drops the rest.
     readonly property bool browsing: Navigation.destination === Navigation.Shelf
 
     // A popup outlives the button that opened it: hiding the button hides nothing that is
@@ -43,15 +42,14 @@ Item {
     }
 
     objectName: "app-bar"
-    height: 58
+    height: Widths.scale.size(58)
     z: 20
 
     /// The stops, left to right as they are drawn. A button that is not there is not a stop —
     /// the bar drops its commands when a narrow window gives the search the whole width.
     function stops() {
         const all = []
-        for (const one of [searchField, importButton, sortButton, settingsButton,
-                            profileButton]) {
+        for (const one of [searchField, importButton, sortButton, settingsButton, profileButton]) {
             if (one && one.visible)
                 all.push(one)
         }
@@ -127,49 +125,21 @@ Item {
         anchors.fill: parent
         anchors.leftMargin: Widths.shelfMargin
         anchors.rightMargin: Widths.shelfMargin
-        spacing: 9
+        spacing: Widths.space.label
 
-        Item {
+        BarBrand {
             id: brand
 
             objectName: "leaf-brand"
             visible: !bar.searchTakesBar
-            Layout.preferredWidth: mark.width
-                                   + (brandWord.visible ? 10 + brandWord.implicitWidth : 0)
-            Layout.preferredHeight: 36
-            // Thirty-two pixels in all, with the row's own nine: the field is a pill with a
-            // focus ring outside its edge, and at the row's spacing alone that ring came to
-            // rest against the "f" of Leaf — the name and the field read as one object.
-            Layout.rightMargin: 23
-
-            Image {
-                id: mark
-
-                objectName: "leaf-mark"
-                anchors.left: parent.left
-                anchors.verticalCenter: parent.verticalCenter
-                width: 36
-                height: 36
-                source: Theme.dark
-                        ? "assets/logos/leaf-mark-dark.svg"
-                        : "assets/logos/leaf-mark-light.svg"
-                sourceSize: Qt.size(36, 36)
-            }
-
-            Text {
-                id: brandWord
-
-                objectName: "brand-word"
-                anchors.left: mark.right
-                anchors.leftMargin: 10
-                anchors.verticalCenter: parent.verticalCenter
-                visible: Widths.band === Widths.Wide
-                text: "Leaf"
-                color: Theme.ink
-                font.family: Theme.displayFamily
-                font.pixelSize: 25
-                font.weight: Font.Bold
-            }
+            worded: Widths.band === Widths.Wide
+            Layout.preferredWidth: implicitWidth
+            Layout.preferredHeight: implicitHeight
+            // A `section` from the name to whatever follows it — the field on the shelf —
+            // the row's own `label` included. At the row's spacing alone the field's focus
+            // ring, drawn outside its edge, came to rest against the "f" of Leaf, and the
+            // name and the field read as one object.
+            Layout.rightMargin: Widths.space.section - Widths.space.label
         }
 
         TextField {
@@ -178,25 +148,29 @@ Item {
             objectName: "search-field"
             visible: bar.browsing
             Layout.fillWidth: true
-            Layout.minimumWidth: bar.searchTakesBar ? 120 : 150
-            Layout.preferredWidth: 520
-            Layout.maximumWidth: bar.searchTakesBar ? 16777215 : 720
-            Layout.preferredHeight: 36
+            Layout.minimumWidth: Widths.scale.size(bar.searchTakesBar ? 120 : 150)
+            Layout.preferredWidth: Widths.scale.column(520)
+            // A field of words, so it grows as a column: grown as a length it would reach 900
+            // pixels at 1920, with the query at one end of it.
+            Layout.maximumWidth: bar.searchTakesBar ? 16777215 : Widths.scale.column(720)
+            Layout.preferredHeight: Widths.scale.size(36)
 
             // Out of Qt's traversal, like every other stop of this bar: the order is the
             // page's, and Qt's would consume the key here before the page could say so.
             activeFocusOnTab: false
             text: Shelf.query
             placeholderText: Widths.band === Widths.Wide
-                             ? Captions.placeholder : Captions.shortPlaceholder
+                             ? BarCaptions.placeholder : BarCaptions.shortPlaceholder
             color: Theme.ink
             placeholderTextColor: Theme.inkFaint
             selectionColor: Theme.emerald
             selectedTextColor: Theme.onEmerald
             font.family: Theme.textFamily
-            font.pixelSize: 15
-            leftPadding: 40
-            rightPadding: clearSearch.visible ? 42 : 14
+            font.pixelSize: Widths.scale.body(15)
+            // The glyph a `card` in from the pill's end, its words a `label` after it; the
+            // cross mirrors the glyph at the other end, and the words stop as far from it.
+            leftPadding: Widths.space.card + searchGlyph.width + Widths.space.label
+            rightPadding: clearSearch.visible ? leftPadding : Widths.space.card
             verticalAlignment: TextInput.AlignVCenter
 
             onTextEdited: Shelf.searchFor(text)
@@ -216,9 +190,9 @@ Item {
             Glyph {
                 id: searchGlyph
 
-                x: 12
+                x: Widths.space.card
                 anchors.verticalCenter: parent.verticalCenter
-                side: 20
+                side: Widths.scale.icon(20)
                 source: "assets/icons/search.svg"
                 tint: Theme.inkFaint
             }
@@ -228,15 +202,15 @@ Item {
 
                 objectName: "clear-search"
                 anchors.right: parent.right
-                anchors.rightMargin: 5
+                anchors.rightMargin: Widths.space.card - (width - searchGlyph.width) / 2
                 anchors.verticalCenter: parent.verticalCenter
-                width: 28
-                height: 28
+                width: Widths.scale.size(28)
+                height: width
                 visible: searchField.text.length > 0
                 activeFocusOnTab: visible
 
                 Accessible.role: Accessible.Button
-                Accessible.name: Captions.clearLabel
+                Accessible.name: BarCaptions.clearLabel
                 Accessible.focusable: true
                 Accessible.focused: activeFocus
                 Accessible.onPressAction: clearSearch.clear()
@@ -271,7 +245,7 @@ Item {
 
                 Rectangle {
                     anchors.centerIn: parent
-                    width: 14
+                    width: Widths.scale.icon(14)
                     height: 1.5
                     radius: 1
                     rotation: 45
@@ -280,7 +254,7 @@ Item {
 
                 Rectangle {
                     anchors.centerIn: parent
-                    width: 14
+                    width: Widths.scale.icon(14)
                     height: 1.5
                     radius: 1
                     rotation: -45
@@ -295,7 +269,7 @@ Item {
                 LeafToolTip {
                     objectName: "clear-search-tooltip"
                     visible: clearPointer.hovered
-                    text: Captions.clearLabel
+                    text: BarCaptions.clearLabel
                 }
             }
         }
@@ -312,11 +286,12 @@ Item {
             source: "assets/icons/upload.svg"
             label: ImportCaptions.title
             // What it says with the dialog shut: a transfer that finished and a question
-            // nobody saw look the same from here, so it can say either.
-            value: Imports.deciding > 0 ? ImportCaptions.waitingLabel
-                                        : (Imports.inFlight > 0 && Widths.band === Widths.Wide
-                                           ? String(Imports.inFlight) : "")
-            held: Imports.inFlight > 0
+            // nobody saw look the same from here, so it can say either. A card stopped to be
+            // checked is such a question too.
+            value: Imports.deciding + Imports.reviewing > 0 ? ImportCaptions.waitingLabel
+                                        : (ImportTally.inFlight > 0 && Widths.band === Widths.Wide
+                                           ? String(ImportTally.inFlight) : "")
+            held: ImportTally.inFlight > 0
             onTriggered: bar.importRequested()
             onPointerEntered: bar.pointerLeftTheShelf()
         }
@@ -332,11 +307,11 @@ Item {
             objectName: "sort-button"
             visible: bar.browsing && !bar.searchTakesBar
             source: "assets/icons/sort.svg"
-            label: Captions.sortLabel
+            label: BarCaptions.sortLabel
             // The order in force, spelled out, until the window is too narrow to spell it.
             // Only the narrow band drops it: a half-screen window has room for all three
             // commands and their words, and it used to lose two of the commands instead.
-            value: Widths.band === Widths.Narrow ? "" : Captions.sortValue
+            value: Widths.band === Widths.Narrow ? "" : BarCaptions.sortValue
             toolTipSuppressed: sortMenu.opened
             popup: sortMenu
             onPointerEntered: bar.pointerLeftTheShelf()
@@ -345,10 +320,10 @@ Item {
                 id: sortMenu
 
                 objectName: "sort-menu"
-                y: sortButton.height + 7
+                y: sortButton.height + Widths.space.compact
 
                 Instantiator {
-                    model: Captions.sortOptions
+                    model: BarCaptions.sortOptions
 
                     delegate: LeafMenuItem {
                         required property var modelData
@@ -359,7 +334,7 @@ Item {
                         // The chosen criterion carries its direction, the others only their
                         // name: without the arrow here nothing says which way the shelf runs,
                         // and the second click that reverses it would have no visible target.
-                        text: inForce ? Captions.sortValue : modelData.label
+                        text: inForce ? BarCaptions.sortValue : modelData.label
                         checkable: true
                         checked: inForce
                         ButtonGroup.group: sortCriteria
@@ -378,7 +353,7 @@ Item {
         Item {
             visible: !bar.searchTakesBar
             Layout.fillWidth: true
-            Layout.minimumWidth: 8
+            Layout.minimumWidth: Widths.space.label
         }
 
         BarButton {
@@ -391,7 +366,7 @@ Item {
             // a button that takes you where you already are.
             visible: Navigation.destination !== Navigation.Settings && !bar.searchTakesBar
             source: "assets/icons/settings.svg"
-            label: Captions.settingsLabel
+            label: BarCaptions.settingsLabel
             onTriggered: bar.settingsRequested()
             onPointerEntered: bar.pointerLeftTheShelf()
         }
@@ -405,9 +380,11 @@ Item {
 
             objectName: "profile-square"
             visible: !bar.searchTakesBar && Profiles.active.id !== undefined
-            Layout.preferredWidth: 34
-            Layout.preferredHeight: 34
-            Layout.leftMargin: 4
+            // As tall as the bar's buttons beside it: it was a literal 34 while they grew with
+            // the window, and at 1920 stood 8 pixels shorter than the gear.
+            Layout.preferredWidth: Widths.scale.size(34)
+            Layout.preferredHeight: Widths.scale.size(34)
+            Layout.leftMargin: Widths.scale.size(4)
             activeFocusOnTab: false
 
             Accessible.role: Accessible.Button
@@ -424,13 +401,31 @@ Item {
                 }
             }
 
-            ProfileSquare {
-                objectName: "profile-square-face"
-                profile: Profiles.active
+            // The ring « Qui lit ? » draws round the profile reading now: the profile's colour,
+            // close round the square, and behind it, so the crown or the lock stands over it
+            // and hides the stretch it would cross. Lit by the keys alone, as every ring.
+            Rectangle {
+                objectName: "profile-square-focus"
+                readonly property var cursor: Window.window ? Window.window.navigationCursor
+                                                           : null
+
+                visible: profileButton.activeFocus && !(cursor && cursor.pointerTookOver)
+                anchors.centerIn: face
+                width: face.side + 2 * Theme.focusGap
+                height: width
+                radius: face.radius + Theme.focusGap
+                color: "transparent"
+                border.color: face.color
+                border.width: 2
+                antialiasing: true
             }
 
-            FocusRing {
-                cornerRadius: 10
+            ProfileSquare {
+                id: face
+
+                objectName: "profile-square-face"
+                side: profileButton.width
+                profile: Profiles.active
             }
 
             HoverHandler {

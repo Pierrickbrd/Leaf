@@ -23,25 +23,38 @@ Column {
 
     signal opened(string seriesId)
 
-    spacing: 10
     visible: tiles.length > 0
 
-    BlockHeading {
-        width: block.width
-        title: block.title
+    // The heading counts its own gap to what it heads, the settings' and the search's gap.
+    // Its count ends over the last tile drawn and not at the block's far edge: held to the
+    // block's width, it stood a thousand pixels from its heading over three tiles at 1100
+    // (audit, 23/10/2026). Wider than the tiles, the heading keeps its own words whole.
+    SectionHeading {
+        objectName: block.objectName + "-heading"
+        width: Math.min(block.width, Math.max(shelf.used, implicitWidth))
+        text: block.title
         line: block.line
     }
 
+    // A chooser between the heading and the tiles is one more line of the block: `row`
+    // under it, as between the lines of a card.
     Column {
-        id: between
-
         width: block.width
-        spacing: 6
-    }
+        spacing: Widths.space.row
 
-    TileShelf {
-        width: block.width
-        tiles: block.tiles
-        onOpened: seriesId => block.opened(seriesId)
+        Column {
+            id: between
+
+            width: block.width
+            spacing: Widths.scale.room(6)
+        }
+
+        TileShelf {
+            id: shelf
+
+            width: block.width
+            tiles: block.tiles
+            onOpened: seriesId => block.opened(seriesId)
+        }
     }
 }

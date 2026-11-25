@@ -13,10 +13,13 @@
 // bubble. A pill lit on the click and put back on the answer would flicker a lie for as long
 // as the server took.
 //
-// **A webtoon keeps the fit and the backdrop, and nothing else.** It has no sense of reading,
-// no pair of pages to lay out and no page to turn, and « Hauteur » means nothing for a column
-// with no end. A fit chosen for books as « Hauteur » is shown as « Largeur », which is what a
-// strip does with it. The paper behind a strip is still the reader's paper.
+// **A webtoon has its own desk.** It has no sense of reading, no pair of pages to lay out, no
+// page to turn and no fit to choose: a strip is drawn at its files' own width, and zoomed in
+// its band (`ReaderStrip`) — « Largeur » drew a laptop's strip at twice the size its panels
+// were drawn at (test of 24/11/2026). What it has instead, after the validated mockup: how
+// far the wheel moves it and how fast its A goes, two sliders of eleven steps under
+// « Défilement »; when its bars go and come back, under « Commandes »; and the paper. All of
+// it for every webtoon, on this desk only.
 //
 // **The backdrop and the motion are the choice of 22/10/2026**: a black paper in a lit
 // room tires some eyes, and a slide at every page is too much for some readers. Both are kept
@@ -45,7 +48,9 @@ import Leaf
 Rectangle {
     id: card
 
-    readonly property int padding: Widths.scale.size(18)
+    /// The padding of every card, which was 18 here and 16 on every other card of the
+    /// application: two pixels, and one role (spacing audit, 23/10/2026).
+    readonly property int padding: Widths.space.card
     /// The most height the window leaves it. Taller than that, the card stops at it and its
     /// groups scroll inside: on a short window it ran off the foot of the screen.
     property real room: Number.POSITIVE_INFINITY
@@ -55,12 +60,14 @@ Rectangle {
     /// A name above its pills rather than beside them: when the widest row of pills would not
     /// fit beside the column of names. Measured from the pills on one line, which do not
     /// depend on the card's width, so the choice never feeds back into what it is made from.
+    /// Only the rows shown count: a book's card stacked for the pills of a webtoon's.
     readonly property bool stacked: body.width < card.labelColumn + card.labelGap
-                                    + Math.max(layoutChoice.lineWidth, fitChoice.lineWidth,
-                                               backdropChoice.lineWidth, motionChoice.lineWidth)
-    /// The fit a strip actually draws with, so that the pill lit is the one that is true.
-    readonly property int stripFit: Preferences.fit === Preferences.Original
-                                    ? Preferences.Original : Preferences.Width
+                                    + (Reader.webtoon
+                                       ? Math.max(controlsChoice.lineWidth,
+                                                  backdropChoice.lineWidth)
+                                       : Math.max(layoutChoice.lineWidth, fitChoice.lineWidth,
+                                                  backdropChoice.lineWidth,
+                                                  motionChoice.lineWidth))
 
     /// The cross was pressed: the card asks to be closed, as Escape does.
     signal closeRequested()
@@ -99,6 +106,7 @@ Rectangle {
             id: word
 
             objectName: group.objectName + "-heading"
+            textFormat: Text.PlainText
             anchors.bottom: parent.bottom
             color: Theme.inkFaint
             font.family: Theme.textFamily
@@ -138,6 +146,7 @@ Rectangle {
             id: label
 
             objectName: line.key + "-name"
+            textFormat: Text.PlainText
             width: line.stacked ? line.width : line.labelColumn
             y: line.stacked ? 0 : (line.height - height) / 2
             color: Theme.inkSoft
@@ -177,15 +186,19 @@ Rectangle {
         x: card.padding
         y: card.padding
         width: card.width - 2 * card.padding
-        height: Widths.scale.size(26)
+        // The cross's height, or the title's when the desktop's text makes it taller.
+        height: Math.max(Widths.scale.size(26), title.implicitHeight)
 
         Text {
+            id: title
+
             objectName: "reader-settings-title"
             anchors.left: parent.left
             anchors.right: cross.left
             anchors.rightMargin: Widths.scale.size(8)
             anchors.verticalCenter: parent.verticalCenter
             elide: Text.ElideRight
+            textFormat: Text.PlainText
             text: ReaderCaptions.cardTitle
             color: Theme.ink
             font.family: Theme.displayFamily
@@ -197,6 +210,9 @@ Rectangle {
             id: cross
 
             objectName: "reader-settings-close"
+            // A stop, as the bar's buttons are: Escape was the only way out by the keys.
+            activeFocusOnTab: true
+            Accessible.focusable: true
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             width: Widths.scale.size(26)
@@ -221,6 +237,8 @@ Rectangle {
         interactive: body.height > sheet.height
         boundsBehavior: Flickable.StopAtBounds
 
+        FollowsFocus { flick: sheet }
+
         Column {
             id: body
 
@@ -236,6 +254,8 @@ Rectangle {
 
             SettingsChoice {
                 objectName: "reader-direction"
+                tabStops: true
+                arrows: false
                 visible: !Reader.webtoon
                 width: parent.width
                 scaled: true
@@ -276,6 +296,8 @@ Rectangle {
 
             SubHeading {
                 objectName: "reader-pages"
+                // Nothing left under it in a strip: no layout, no fit.
+                visible: !Reader.webtoon
                 text: ReaderCaptions.pagesGroup
             }
 
@@ -291,6 +313,8 @@ Rectangle {
                     id: layoutChoice
 
                     objectName: "reader-layout"
+                    tabStops: true
+                    arrows: false
                     width: parent.width
                     scaled: true
                     options: ReaderCaptions.layouts
@@ -302,6 +326,7 @@ Rectangle {
             DeskRow {
                 key: "reader-fit"
                 name: ReaderCaptions.fitName
+                visible: !Reader.webtoon
                 stacked: card.stacked
                 labelColumn: card.labelColumn
                 labelGap: card.labelGap
@@ -310,11 +335,107 @@ Rectangle {
                     id: fitChoice
 
                     objectName: "reader-fit"
+                    tabStops: true
+                    arrows: false
                     width: parent.width
                     scaled: true
-                    options: Reader.webtoon ? ReaderCaptions.stripFits : ReaderCaptions.fits
-                    chosen: Reader.webtoon ? card.stripFit : Preferences.fit
+                    options: ReaderCaptions.fits
+                    chosen: Preferences.fit
                     onPicked: value => Preferences.chooseFit(value)
+                }
+            }
+
+            SubHeading {
+                objectName: "reader-scrolling"
+                visible: Reader.webtoon
+                text: ReaderCaptions.scrollingGroup
+            }
+
+            DeskRow {
+                key: "reader-sensitivity"
+                name: ReaderCaptions.sensitivityName
+                visible: Reader.webtoon
+                stacked: card.stacked
+                labelColumn: card.labelColumn
+                labelGap: card.labelGap
+
+                StepSlider {
+                    objectName: "reader-sensitivity"
+                    width: parent.width
+                    label: ReaderCaptions.sensitivityName
+                    ends: ReaderCaptions.sensitivityEnds
+                    value: Preferences.stripSensitivity
+                    onMoved: step => Preferences.chooseStripSensitivity(step)
+                }
+            }
+
+            DeskRow {
+                key: "reader-auto-speed"
+                name: ReaderCaptions.autoSpeedName
+                visible: Reader.webtoon
+                stacked: card.stacked
+                labelColumn: card.labelColumn
+                labelGap: card.labelGap
+
+                StepSlider {
+                    objectName: "reader-auto-speed"
+                    width: parent.width
+                    label: ReaderCaptions.autoSpeedName
+                    ends: ReaderCaptions.autoSpeedEnds
+                    value: Preferences.stripAutoSpeed
+                    onMoved: step => Preferences.chooseStripAutoSpeed(step)
+                }
+            }
+
+            SubHeading {
+                objectName: "reader-controls-group"
+                visible: Reader.webtoon
+                text: ReaderCaptions.controlsGroup
+            }
+
+            DeskRow {
+                key: "reader-controls"
+                name: ReaderCaptions.controlsName
+                visible: Reader.webtoon
+                stacked: card.stacked
+                labelColumn: card.labelColumn
+                labelGap: card.labelGap
+
+                SettingsChoice {
+                    id: controlsChoice
+
+                    objectName: "reader-controls"
+                    tabStops: true
+                    arrows: false
+                    width: parent.width
+                    scaled: true
+                    options: ReaderCaptions.stripControls
+                    chosen: Preferences.stripControls
+                    onPicked: value => Preferences.chooseStripControls(value)
+                }
+            }
+
+            // Under the pills and not beside the name: what the pill chosen does, and the box
+            // that adds a way back — which means nothing when scrolling never sends them away.
+            Column {
+                objectName: "reader-controls-more"
+                visible: Reader.webtoon
+                x: card.stacked ? 0 : card.labelColumn + card.labelGap
+                width: parent.width - x
+                spacing: Widths.scale.size(8)
+
+                Note {
+                    objectName: "reader-controls-hint"
+                    text: ReaderCaptions.controlsHint(Preferences.stripControls)
+                }
+
+                LeafCheck {
+                    objectName: "reader-at-rest"
+                    visible: Preferences.stripControls !== Preferences.OnClick
+                    width: parent.width
+                    label: ReaderCaptions.atRest
+                    checked: Preferences.stripAtRest
+                    onToggled: wanted => Preferences.chooseStripAtRest(wanted)
                 }
             }
 
@@ -334,6 +455,8 @@ Rectangle {
                     id: backdropChoice
 
                     objectName: "reader-backdrop"
+                    tabStops: true
+                    arrows: false
                     width: parent.width
                     scaled: true
                     options: ReaderCaptions.backdrops
@@ -360,6 +483,8 @@ Rectangle {
                     id: motionChoice
 
                     objectName: "reader-motion"
+                    tabStops: true
+                    arrows: false
                     width: parent.width
                     scaled: true
                     options: ReaderCaptions.motions
@@ -370,7 +495,7 @@ Rectangle {
 
             Note {
                 objectName: "reader-desk-note"
-                text: ReaderCaptions.deskNote
+                text: Reader.webtoon ? ReaderCaptions.stripDeskNote : ReaderCaptions.deskNote
             }
         }
     }

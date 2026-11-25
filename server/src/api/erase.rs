@@ -118,7 +118,30 @@ impl<'a> Erase<'a> {
                     )?
                     .unwrap_or(0);
                 if editions == 0 {
+                    let universe: Option<String> = cx
+                        .query_one(
+                            "SELECT universe_id FROM work WHERE id = ?1",
+                            [work.as_str()],
+                            |r| r.get(0),
+                        )?
+                        .flatten();
                     cx.execute("DELETE FROM work WHERE id = ?1", [work.as_str()])?;
+                    // The same reasoning one level up: a universe with no work is a name
+                    // that opens onto nothing, and the list drew it all the same. Its folder
+                    // and `universe.json` stay on the disk, so a rescan that still finds
+                    // them is what brings it back.
+                    if let Some(universe) = universe {
+                        let works: i64 = cx
+                            .query_one(
+                                "SELECT COUNT(*) FROM work WHERE universe_id = ?1",
+                                [universe.as_str()],
+                                |r| r.get(0),
+                            )?
+                            .unwrap_or(0);
+                        if works == 0 {
+                            cx.execute("DELETE FROM universe WHERE id = ?1", [universe.as_str()])?;
+                        }
+                    }
                 }
             }
             Ok(())

@@ -40,7 +40,7 @@ Item {
     readonly property int ringClearance: Theme.focusGap + 2
     // The shadow reaches 16 px left and right. Giving the viewport that full clearance keeps
     // the first and last elevations intact while the covers themselves stay on the 16 px edge.
-    readonly property int viewportClearance: Widths.shelfMargin
+    readonly property int viewportClearance: Widths.space.gutter
 
     function isArrowKey(key) {
         return key === Qt.Key_Left || key === Qt.Key_Right
@@ -252,7 +252,51 @@ Item {
         grid.currentIndex = -1
     }
 
+    /// The cover the keys stood on when the shelf was left for a page it opened: the focus
+    /// leaves the shelf for that page, and clears the position with it.
+    property int keptIndex: -1
+    onVisibleChanged: {
+        keptIndex = visible ? keptIndex : grid.keyboardIndex
+        // A page is entered at its beginning, whatever it was left at, and before it is seen:
+        // the scroll the reader had given it was drawn again for the 150 ms the timer below
+        // took to put it back — the band under the bar, then up.
+        if (visible)
+            grid.startAtTheBeginning()
+    }
+
+    /// That cover, taken again on the way back by the keys. False when there is none, and
+    /// the screen is then entered from its start.
+    function comeBack() {
+        const position = root.keptIndex
+        root.keptIndex = -1
+        if (Search.active || position < 0 || position >= grid.count)
+            return false
+        // The shelf is back at its beginning and stays there: a cover below the fold is not
+        // scrolled to, so the keys begin again at the start rather than carry the page off it.
+        const header = grid.headerItem ? grid.headerItem.height : 0
+        if (header + (Math.floor(position / grid.columns) + 1) * grid.cellHeight > grid.height)
+            return false
+        grid.keyboardIndex = position
+        grid.currentIndex = position
+        navigationCursor.useKeyboard(grid, position)
+        grid.forceActiveFocus(Qt.OtherFocusReason)
+        grid.bringIntoSight(position)
+        return true
+    }
+
     Component.onCompleted: sourceModel.reload()
+
+    // The grid is hidden, not left, while a search is up, and what it holds is replaced under
+    // it. Closing the search shows a new list, and a new list is read from its beginning — not
+    // from the clamped offset the old one was scrolled to.
+    Connections {
+        target: Search
+
+        function onActiveChanged() {
+            if (!Search.active)
+                grid.startAtTheBeginning()
+        }
+    }
 
     Connections {
         target: root.navigationCursor
@@ -338,6 +382,10 @@ Item {
         }
     }
 
+    TileLines {
+        id: tileLines
+    }
+
     GridView {
         id: grid
 
@@ -356,9 +404,11 @@ Item {
         // That keeps the first and last covers on the same 16 px edges in both palettes.
         cellWidth: (width - 2 * root.viewportClearance + Widths.shelfGap)
                    / Math.max(1, columns)
-        // 40 px is the title's two 20 px lines; one-line names leave breathing room before
-        // the next row rather than moving that row upward.
-        cellHeight: Math.ceil(root.ringClearance + coverHeight + 6 + 40 + 2 + 18
+        // Room for a two-line name whatever the name is, so that one-line names leave
+        // breathing room before the next row rather than moving that row upward. Measured
+        // from the words the tile draws (`TileLines`), not added up from the sizes they had
+        // at 1100: that sum cut the count off a two-line name at 800 (audit, 23/10/2026).
+        cellHeight: Math.ceil(root.ringClearance + coverHeight + tileLines.under
                               + Widths.shelfGap)
 
         cacheBuffer: cellHeight
@@ -374,8 +424,25 @@ Item {
         // header, is exactly what those 64 pixels cut off. Two things move that room at
         // startup and nothing after: the first page arriving, and the band arriving.
         function stayAtTheBeginning() {
-            if (!followed)
-                positionViewAtBeginning()
+            if (followed)
+                return
+            placing = true
+            positionViewAtBeginning()
+            placing = false
+        }
+
+        /// A new visit: nothing the reader moved before is kept, and nothing is animated.
+        function startAtTheBeginning() {
+            glide.stop()
+            followed = false
+            placing = true
+            // A view still rearranging answers `positionViewAtBeginning` with nothing: on a
+            // busy machine the shelf was entered while it was, and 141 px of where the reader
+            // had left it were drawn until the timer above came — one run in fifteen of
+            // the shelf test, alone, with sixteen busy loops beside it. Laid out now, it obeys.
+            forceLayout()
+            positionViewAtBeginning()
+            placing = false
         }
 
         onDragStarted: {
@@ -383,6 +450,20 @@ Item {
             glide.stop()
         }
         onFlickStarted: followed = true
+
+        // The wheel and the touchpad move a Flickable without a drag or a flick, so neither
+        // signal above comes: a shelf scrolled by them was still "not followed", and the next
+        // change of height — a refresh, a cover — took it back up to the beginning. What
+        // answers is a position that is no longer the beginning when nothing here moved it.
+        property bool placing: false
+        onContentYChanged: {
+            if (!followed && !placing && Math.abs(contentY - originY) > 1)
+                followed = true
+        }
+
+        // The wheel and the touchpad move a Flickable without a drag or a flick, so neither
+        // signal above comes: a shelf scrolled by them was still "not followed", and the next
+        // change of height — a refresh, a cover — took it back up to the beginning.
 
         // Where a key lands, glided to rather than jumped to. `positionViewAtIndex` alone
         // teleports the shelf a row at a time, and a reader holding Down lost track of which
@@ -407,7 +488,7 @@ Item {
 
             target: grid
             property: "contentY"
-            duration: 180
+            duration: Preferences.motion === Preferences.Instant ? 0 : 180
             easing.type: Easing.OutCubic
         }
         onCountChanged: {
@@ -427,6 +508,23 @@ Item {
         onContentHeightChanged: {
             if (!followed)
                 showTheBeginning.restart()
+        }
+
+        // The header growing moves the origin up by its height and leaves `contentY` where it
+        // was, which is then that height *past* the beginning: the band drawn under the bar.
+        // Put back here, at the very place the origin moves, and not at the next turn of the
+        // event loop: the layout is done during the polish and the scene graph is synchronised
+        // in the same turn, so a `Qt.callLater` came after the frame — 141 px of offset drawn
+        // in one run in four of the band test, alone, with sixteen busy loops beside it. Only
+        // `contentY` is written, never `positionViewAtBeginning`, which does nothing while the
+        // view is still rearranging; the call below answers that case once it has settled.
+        onOriginYChanged: {
+            if (followed)
+                return
+            placing = true
+            contentY = originY
+            placing = false
+            Qt.callLater(stayAtTheBeginning)
         }
 
         Timer {
@@ -462,6 +560,78 @@ Item {
             }
         }
 
+        /// True from the moment a series is taken off the disk until its tile has finished
+        /// leaving: the neighbours close the gap only then, and otherwise not at all.
+        property bool erasing: false
+
+        // 160 + 170 + 240: the three beats a tile leaves in, during which its row stays.
+        Binding {
+            target: Shelf
+            property: "erasureLead"
+            value: Preferences.motion === Preferences.Instant ? 0 : 570
+        }
+
+        Connections {
+            target: Shelf
+
+            function onForgetting() {
+                if (Preferences.motion !== Preferences.Instant) {
+                    grid.erasing = true
+                    erasingOver.restart()
+                }
+            }
+        }
+
+        /// True while the shelf asked again for what an import brought: the tiles its answer adds
+        /// come in, the first four that are on screen with the choreography of an arrival and
+        /// the rest as they are. Forty series at once are not forty tiles to watch.
+        property bool arriving: false
+        property int arrivals: 0
+        readonly property int arrivalsShown: 4
+
+        function claimArrival(tile) {
+            if (grid.arrivals >= grid.arrivalsShown)
+                return false
+            // On screen: a series that lands out of sight has nothing to show.
+            if (tile.y + tile.height <= grid.contentY || tile.y >= grid.contentY + grid.height)
+                return false
+            grid.arrivals += 1
+            return true
+        }
+
+        Connections {
+            target: Shelf
+
+            function onArriving() {
+                grid.arrivals = 0
+                grid.arriving = true
+                arrivingOver.restart()
+            }
+        }
+
+        // Long enough for the answer to come back and the row to be added; past it a row
+        // added for any other reason — a page, a filter — is not an arrival.
+        Timer {
+            id: arrivingOver
+
+            interval: 4000
+            onTriggered: grid.arriving = false
+        }
+
+        Timer {
+            id: erasingOver
+
+            interval: 1500
+            onTriggered: grid.erasing = false
+        }
+
+        // The row goes once the tile has tilted and fallen, so the neighbours close the gap at
+        // that moment and not before. Along the line they slide and settle; only the vertical
+        // move overshoots. A cover that goes back to the end of the line above does not cross
+        // the grid — it crossed the whole of it over the others, and with an overshoot ended
+        // off the screen — it fades in where it is going.
+        displaced: ClosesTheGap { enabled: grid.erasing || grid.arriving }
+
         delegate: SeriesTile {
             cellWidth: grid.cellWidth
             cellHeight: grid.cellHeight
@@ -488,6 +658,11 @@ Item {
         z: 2
         width: grid.width
         visible: !Search.active && showing
+        // The first thing under the bar when nothing is started, so at the page's top; under
+        // the band, one block further than the band's own: the 28 between the card and the
+        // button was measured as the pair it is on 23/10/2026, and kept.
+        topPadding: grid.headerItem && grid.headerItem.bandHeight > 0 ? Widths.space.block
+                                                                        : Widths.space.top
         // Following the bottom edge of the band, and stopping at the top. That clamp is the
         // whole difference between the two: the band keeps going and leaves, this stays and
         // goes on saying what you are looking at.
@@ -527,8 +702,15 @@ Item {
         shown: !Search.active && !grid.atYEnd
     }
 
+    // Under the band and the filters, and not over them: filling the whole screen, it drew its
+    // first row of placeholders across the band and behind the pills, which then stood on
+    // covers that were not there (spacing audit, 23/10/2026). Where the grid's first row
+    // will land, which is under its header.
     ShelfSkeleton {
-        anchors.fill: parent
+        x: 0
+        y: root.noticeTop
+        width: root.width
+        height: Math.max(0, root.height - y)
         // Only when there is nothing to keep. Changing a filter or an order leaves the shelf
         // that is already drawn in place until its replacement lands, so this is the first
         // load and nothing else.
@@ -537,49 +719,75 @@ Item {
         cellHeight: grid.cellHeight
         coverWidth: grid.coverWidth
         coverHeight: grid.coverHeight
-        leftInset: root.viewportClearance
+        clearance: root.viewportClearance
     }
 
     BusyIndicator {
         objectName: "shelf-next-page"
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
-        anchors.bottomMargin: Widths.shelfMargin
+        anchors.bottomMargin: Widths.space.top
         running: !Search.active && root.sourceModel.loading && grid.count > 0
         visible: running
         palette.highlight: Theme.emerald
     }
 
-    Rectangle {
-        id: trouble
+    // The paper under the band and the pills, in the page's column: the notices stand in it
+    // as every page's content does, a gutter from either side, rather than each computing
+    // its own margins against the window.
+    PageColumn {
+        id: bare
 
-        objectName: "shelf-trouble"
+        objectName: "shelf-bare"
         z: 2
-        width: Math.max(0, Math.min(560, root.width - 2 * Widths.shelfMargin))
-        height: troubleText.implicitHeight + 32
-        x: Math.round((root.width - width) / 2)
-        y: grid.count === 0 ? Math.round((root.height - height) / 2) : root.height - height - Widths.shelfMargin
-        radius: Theme.cardRadius
-        color: Theme.surface
-        visible: !Search.active && troubleText.text.length > 0
+        y: root.noticeTop
+        width: root.width
+        height: Math.max(0, root.height - y)
+        // Under the strip, whose `block` already parts them; under the bar, the page's top.
+        topPadding: root.noticeTop > 0 ? 0 : Widths.space.top
 
-        Text {
-            id: troubleText
+        // A library with nothing in it, or filters that left nothing: said, in the middle of
+        // the paper, rather than four hundred and fifty pixels of nothing under the pills
+        // (audit, 23/10/2026). Never while the shelf is asking — that is the skeleton's — and
+        // never over a trouble, which says why the shelf is bare better than this would.
+        ShelfNotice {
+            id: empty
 
-            objectName: "shelf-trouble-text"
-            anchors.fill: parent
-            anchors.margins: 16
-            text: root.sourceModel.trouble
-            color: Theme.inkSoft
-            font.family: Theme.textFamily
-            font.pixelSize: 15
-            lineHeightMode: Text.FixedHeight
-            lineHeight: 22
-            wrapMode: Text.Wrap
-            horizontalAlignment: Text.AlignHCenter
-            verticalAlignment: Text.AlignVCenter
+            objectName: "shelf-empty"
+            width: Math.max(0, Math.min(implicitWidth, bare.measure))
+            height: implicitHeight
+            x: Math.round((bare.measure - width) / 2)
+            y: Math.round((bare.frame.height - height) / 2)
+            visible: !Search.active && !root.sourceModel.loading && grid.count === 0
+                     && root.sourceModel.trouble.length === 0
+            glyph: "collections_bookmark"
+            headline: Captions.emptyHeadline
+            said: Captions.emptySaid
+        }
+
+        // The same words for a shelf that could not fill: a headline over the trouble while
+        // there is nothing else on the screen, and the trouble alone in a card over the covers
+        // once there are covers to keep — at the foot of the column, then.
+        ShelfNotice {
+            id: trouble
+
+            objectName: "shelf-trouble"
+            framed: grid.count > 0
+            width: Math.max(0, Math.min(framed ? Widths.scale.column(560) : implicitWidth,
+                                        bare.measure))
+            height: implicitHeight
+            x: Math.round((bare.measure - width) / 2)
+            y: framed ? bare.frame.height - height
+                      : Math.round((bare.frame.height - height) / 2)
+            visible: !Search.active && said.length > 0
+            glyph: "cloud_off"
+            headline: Captions.troubleHeadline
+            said: root.sourceModel.trouble
         }
     }
+
+    /// Where the paper under the band and the pills begins, for the notices centred on it.
+    readonly property real noticeTop: grid.headerItem ? grid.headerItem.height : 0
 
     /// Whether what is on screen is a list of files, which decides what the bar's filter
     /// panel counts. Read by the shell, which owns the bar.

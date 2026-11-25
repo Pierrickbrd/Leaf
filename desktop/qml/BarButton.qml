@@ -29,9 +29,15 @@ Rectangle {
 
     readonly property bool hovered: pointer.hovered
 
-    implicitWidth: 12 + 24 + (value.length > 0 ? 7 + word.implicitWidth : 0) + 12
+    // A `compact` padding either side, as every small surface that opens or acts has; the
+    // glyph a `label` from its word, as in every control. The 7 here was the only 7 in the
+    // application (spacing audit, 23/10/2026). The box, not the glyph, stands at the gutter:
+    // the hover surface is what lines up with the page, as the mark does.
+    implicitWidth: Widths.space.compact + glyph.width
+                   + (value.length > 0 ? Widths.space.label + word.implicitWidth : 0)
+                   + Widths.space.compact
     width: implicitWidth
-    height: 34
+    height: Widths.scale.size(34)
     radius: Theme.buttonRadius
     color: held ? Theme.emeraldWash : (hovered ? Theme.onPaper : "transparent")
     /// Out of Qt's own traversal: the bar walks its stops itself, and the page walks from the
@@ -96,9 +102,9 @@ Rectangle {
     Glyph {
         id: glyph
 
-        x: 12
+        x: Widths.space.compact
         anchors.verticalCenter: parent.verticalCenter
-        side: 24
+        side: Widths.scale.icon(24)
         source: button.source
         tint: button.held ? Theme.emerald : Theme.inkSoft
     }
@@ -107,8 +113,9 @@ Rectangle {
         id: word
 
         anchors.left: glyph.right
-        anchors.leftMargin: 7
+        anchors.leftMargin: Widths.space.label
         anchors.verticalCenter: parent.verticalCenter
+        textFormat: Text.PlainText
         text: button.value
         visible: text.length > 0
         color: button.held ? Theme.emerald : Theme.inkSoft

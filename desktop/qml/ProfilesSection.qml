@@ -22,6 +22,7 @@ Item {
 
     readonly property var shown: Profiles.isPrincipal ? Profiles.list
                                                       : Profiles.list.filter(one => one.current)
+    readonly property var others: Profiles.list.filter(one => one.kind !== "principal")
     readonly property var principal: Profiles.list.find(one => one.kind === "principal") ?? null
     /// The rights are the principal's to give, so only the principal sees them; and only once
     /// there is someone else to give them to.
@@ -65,13 +66,17 @@ Item {
                 width: parent.width
                 spacing: 4
 
+                // A count, and each row reads its own profile: `Profiles.changed` is emitted at
+                // every request — the ask, the answer, the profile read again — and each gave a
+                // new list, which rebuilt every row and dropped the focus of the case just ticked.
                 Repeater {
-                    model: section.shown
+                    model: section.shown.length
 
                     delegate: Item {
                         id: row
 
-                        required property var modelData
+                        required property int index
+                        readonly property var modelData: section.shown[index] ?? ({})
 
                         objectName: "profile-row-" + modelData.id
                         width: parent.width
@@ -124,7 +129,9 @@ Item {
 
                             anchors.right: parent.right
                             anchors.verticalCenter: parent.verticalCenter
-                            spacing: 2
+                            // `label` apart, as the bar's commands: at 2 the ring of one ran
+                            // over the circle of the next.
+                            spacing: Widths.space.label
 
                             // One's own row is « Votre profil », the principal's included: the
                             // name, the colour and, for the principal, the code.
@@ -205,6 +212,9 @@ Item {
 
                     objectName: "recovery-current"
                     width: parent.width
+                    // A stop, as every field of the settings is: the keys could not reach it,
+                    // and the action under it waits for what is typed here.
+                    activeFocusOnTab: true
                     echoMode: TextInput.Password
                     maximumLength: 8
                     placeholderText: Profiles.words.currentCode
@@ -235,6 +245,7 @@ Item {
                     id: redrawTrouble
 
                     objectName: "recovery-trouble"
+                    textFormat: Text.PlainText
                     width: parent.width
                     visible: text.length > 0
                     color: Theme.alert
@@ -278,12 +289,13 @@ Item {
                 spacing: 14
 
                 Repeater {
-                    model: Profiles.list.filter(one => one.kind !== "principal")
+                    model: section.others.length
 
                     delegate: Column {
                         id: entry
 
-                        required property var modelData
+                        required property int index
+                        readonly property var modelData: section.others[index] ?? ({})
                         readonly property var rights: modelData.rights
 
                         width: parent.width

@@ -36,6 +36,13 @@ const HEAD: usize = 4096;
 /// sidecar.
 const MAX_SIDECAR: u64 = 4 * 1024 * 1024;
 
+/// What all the sidecars of one archive may put in memory together. Each is bounded by
+/// [`MAX_SIDECAR`], but a deflated member costs a thousandth of what it fills: a hundred of
+/// them of a few hundred kilobytes were a file of twenty-five megabytes and twenty-five
+/// gigabytes of memory during a scan, which the system ended — and the next scan began again
+/// with the same file. Real sidecars (ComicInfo, entry.json) are a few kilobytes.
+const MAX_SIDECARS: u64 = 16 * 1024 * 1024;
+
 /// A ceiling on what one entry may put in memory.
 ///
 /// A zip says how big each entry is *before* it is read, and that figure is written by
@@ -102,6 +109,8 @@ pub fn read(path: &Path, measure_dimensions: bool) -> Result<Content> {
     let mut pages: Vec<ArchivePage> = Vec::new();
     let mut sidecars: Vec<(String, Vec<u8>)> = Vec::new();
     let mut reread: Vec<(usize, String)> = Vec::new();
+    // Bytes of sidecars kept so far, against [`MAX_SIDECARS`].
+    let mut kept: u64 = 0;
 
     for i in 0..archive.len() {
         let Some((name, size, head)) = head_of(&mut archive, i)? else {
@@ -110,7 +119,12 @@ pub fn read(path: &Path, measure_dimensions: bool) -> Result<Content> {
         match classify(&name, size, &head, measure_dimensions) {
             Member::Ignored => {}
             Member::Later => reread.push((i, name)),
-            Member::Sidecar(bytes) => sidecars.push((name, bytes)),
+            Member::Sidecar(bytes) => {
+                if kept + bytes.len() as u64 <= MAX_SIDECARS {
+                    kept += bytes.len() as u64;
+                    sidecars.push((name, bytes));
+                }
+            }
             Member::Page { page, again } => {
                 if again {
                     reread.push((i, name));
@@ -122,10 +136,22 @@ pub fn read(path: &Path, measure_dimensions: bool) -> Result<Content> {
 
     // The few that the head did not settle, read in full — up to the ceiling.
     for (index, name) in reread {
-        let bytes = whole(&mut archive, index)?;
         match pages.iter_mut().find(|p| p.name == name) {
-            Some(page) => page.dimension = crate::archive::images::dimension(&bytes),
-            None => sidecars.push((name, bytes)),
+            Some(page) => {
+                let bytes = whole(&mut archive, index, MAX_PAGE)?;
+                page.dimension = crate::archive::images::dimension(&bytes);
+            }
+            None => {
+                // The size a member declares is written by whoever made the file: what is
+                // read is bounded, not what was announced, and a member that turns out
+                // bigger than a sidecar is not one.
+                let room = MAX_SIDECAR.min(MAX_SIDECARS - kept);
+                let bytes = whole(&mut archive, index, room + 1)?;
+                if bytes.len() as u64 <= room {
+                    kept += bytes.len() as u64;
+                    sidecars.push((name, bytes));
+                }
+            }
         }
     }
 
@@ -185,12 +211,12 @@ fn page_order(a: &ArchivePage, b: &ArchivePage) -> std::cmp::Ordering {
         .then_with(|| crate::archive::natural_order::compare(&a.name, &b.name))
 }
 
-/// One member read whole, up to the ceiling.
-fn whole(archive: &mut zip::ZipArchive<File>, index: usize) -> Result<Vec<u8>> {
+/// One member read whole, up to `ceiling` bytes.
+fn whole(archive: &mut zip::ZipArchive<File>, index: usize, ceiling: u64) -> Result<Vec<u8>> {
     let entry = archive.by_index(index)?;
     OPENED.fetch_add(1, Ordering::Relaxed);
     let mut bytes = Vec::new();
-    entry.take(MAX_PAGE).read_to_end(&mut bytes)?;
+    entry.take(ceiling).read_to_end(&mut bytes)?;
     Ok(bytes)
 }
 
@@ -233,6 +259,90 @@ fn duplicated(pages: &[ArchivePage]) -> Vec<String> {
     names
 }
 
+/// A page of an archive and the SHA-256 of its decompressed bytes, lowercase hex.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageDigest {
+    /// Full path inside the archive, folders included.
+    pub name: String,
+    pub checksum: String,
+}
+
+/// The digest of every page of the archive, in the order the archive lists them.
+///
+/// Of the **content**, never of the stored bytes and never keyed by the name: an import that
+/// rewrites an archive copies its entries raw and may rename them (`splice_into` numbers every
+/// page afresh), so the one thing that tells a page from another afterwards is what it
+/// decompresses to. A page is what [`read`] calls one — recognised by its leading bytes —
+/// so the two can never disagree about how many there are. Streamed in blocks: a page is
+/// never held whole.
+pub fn page_digests(path: &Path) -> Result<Vec<PageDigest>> {
+    digests_within(path, MAX_PAGE)
+}
+
+/// [`page_digests`] with the most one member may decompress to. A zip declares its sizes
+/// itself and a stream that expands a few kilobytes into gigabytes would otherwise be hashed
+/// to the end: every other read of a member here stops at [`MAX_PAGE`], and the one that
+/// hashes it all must not be the way round that ceiling. Past it the archive is refused,
+/// like one that cannot be read.
+fn digests_within(path: &Path, ceiling: u64) -> Result<Vec<PageDigest>> {
+    use sha2::{Digest, Sha256};
+
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut archive =
+        zip::ZipArchive::new(file).with_context(|| format!("reading {}", path.display()))?;
+    let mut digests = Vec::new();
+    let mut block = vec![0u8; 1 << 16];
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        if entry.is_dir() {
+            continue;
+        }
+        OPENED.fetch_add(1, Ordering::Relaxed);
+        let name = entry.name().to_string();
+        let mut hasher = Sha256::new();
+        // Filled, not read once: a stream may give fewer bytes than asked, and the
+        // signature of a format is up to twelve.
+        let mut filled = 0;
+        while filled < HEAD {
+            match entry
+                .read(&mut block[filled..HEAD])
+                .with_context(|| format!("reading {name} in {}", path.display()))?
+            {
+                0 => break,
+                n => filled += n,
+            }
+        }
+        let recognised = crate::archive::images::media_type(&block[..filled]).is_some();
+        hasher.update(&block[..filled]);
+        let mut total = filled as u64;
+        loop {
+            let read = entry
+                .read(&mut block)
+                .with_context(|| format!("reading {name} in {}", path.display()))?;
+            if read == 0 {
+                break;
+            }
+            total += read as u64;
+            if total > ceiling {
+                anyhow::bail!(
+                    "{name} in {} decompresses past the {ceiling} bytes allowed for one page",
+                    path.display()
+                );
+            }
+            hasher.update(&block[..read]);
+        }
+        if recognised {
+            let checksum = hasher
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            digests.push(PageDigest { name, checksum });
+        }
+    }
+    Ok(digests)
+}
+
 /// One entry, by its full name inside the archive. `None` when it is not there.
 pub fn extract(path: &Path, entry_name: &str) -> Result<Option<Vec<u8>>> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
@@ -261,4 +371,36 @@ pub fn extract(path: &Path, entry_name: &str) -> Result<Option<Vec<u8>>> {
         );
     }
     Ok(Some(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    /// The ceiling is cut down here and not the 256 MiB of the real one: a member of zeros
+    /// weighs a few kilobytes deflated and three mebibytes once read, which is all a
+    /// decompression bomb is.
+    #[test]
+    fn a_member_that_decompresses_past_the_ceiling_is_refused_not_read_to_its_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bomb.cbz");
+        let mut zip = zip::ZipWriter::new(File::create(&path).unwrap());
+        zip.start_file::<_, ()>(
+            "001.jpg",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated),
+        )
+        .unwrap();
+        zip.write_all(&vec![0u8; 3 << 20]).unwrap();
+        zip.finish().unwrap();
+
+        let refused = digests_within(&path, 1 << 20).unwrap_err();
+        assert!(
+            refused.to_string().contains("allowed for one page"),
+            "{refused:#}"
+        );
+        assert!(digests_within(&path, 4 << 20).is_ok());
+    }
 }

@@ -47,6 +47,7 @@ Item {
 
         Text {
             width: parent.width
+            textFormat: Text.PlainText
             text: family.label
             color: Theme.ink
             font.family: Theme.textFamily
@@ -56,6 +57,7 @@ Item {
 
         Text {
             width: parent.width
+            textFormat: Text.PlainText
             text: family.detail
             color: Theme.inkFaint
             font.family: Theme.textFamily

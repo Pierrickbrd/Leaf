@@ -22,7 +22,7 @@ Item {
     property bool scaled: false
 
     function sized(drawn: real): int {
-        return action.scaled ? Widths.scale.size(drawn) : drawn
+        return action.scaled ? Widths.scale.fit(drawn) : drawn
     }
 
     signal triggered()
@@ -43,7 +43,9 @@ Item {
     Keys.onPressed: event => {
         if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
                 || event.key === Qt.Key_Enter) {
-            action.triggered()
+            // Once for a key held down, as `ActionButton`.
+            if (!event.isAutoRepeat)
+                action.triggered()
             event.accepted = true
         }
     }
@@ -70,6 +72,7 @@ Item {
 
         objectName: "leaf-text-action-word"
         anchors.centerIn: parent
+        textFormat: Text.PlainText
         text: action.label
         color: action.alarming ? Theme.alert : (action.quiet ? Theme.inkSoft : Theme.emerald)
         font.family: Theme.textFamily

@@ -367,6 +367,17 @@ private slots:
         QGuiApplication::clipboard()->setText(linkTo());
         m_linking->lookAtTheClipboard();
         QCOMPARE(m_linking->typed(), linkTo());
+        // Read and shown, not answered: nobody asked for the clipboard to be read, so the host
+        // it names is not contacted until « Chercher la bibliothèque » is pressed.
+        QCOMPARE(m_linking->stage(), Linking::Stage::Unchecked);
+        QVERIFY(m_linking->canLook());
+        QVERIFY(!m_linking->canLink());
+        QCOMPARE(m_linking->action(), Words::lookForTheLibrary());
+        QTest::qWait(200);
+        QCOMPARE(m_linking->stage(), Linking::Stage::Unchecked);
+        QVERIFY(m_server->heard.isEmpty());
+
+        m_linking->look();
         QTRY_COMPARE_WITH_TIMEOUT(m_linking->stage(), Linking::Stage::Found, 5000);
     }
 

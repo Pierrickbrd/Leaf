@@ -6,8 +6,12 @@
 //
 // **A bar and not a ring.** A cover has a bottom edge to lay a bar along; a line of a list has
 // none, and that is the whole of the difference between this and `VolumeRow`. Finished, the
-// bar is full *and* a check sits in the far corner: the bar alone said two opposite things,
+// bar is full *and* a check sits beside the words: the bar alone said two opposite things,
 // never opened and done, by being absent in one case and complete in the other.
+//
+// **A borrowed cover carries its number.** A volume with no cover of its own shows its
+// series' (`borrowed`), and on that picture, shared by every such volume, the number is what
+// tells one from the next: see `CoverNumber`.
 //
 // Never opened carries neither, and no word either: an empty track drawn on every cover would
 // be fifty grey lines on a wall of illustrations.
@@ -21,11 +25,25 @@ Item {
     required property string entryId
     required property string number
     required property string title
+    /// « 12 · Le Titre », « Tome 12 », « Chapitre 12 »: see `Words::tileCaption`.
+    required property string caption
     required property string pages
     required property string cover
     required property string fileName
     required property int state
     required property real howFarRead
+    /// No cover of its own: `cover` serves the series', and the number is written over it.
+    required property bool borrowed
+    /// Its number as written on that cover: a chapter's too, which has no `number`.
+    required property string coverNumber
+    /// « TOME » or « CHAPITRE » over that number, empty in an edition of one kind.
+    required property string kindWord
+    /// « 42 % », what a webtoon says in place of its pages.
+    required property string readPercent
+    /// A webtoon's chapter is one strip, and its page count says nothing a reader goes by.
+    property bool webtoon: false
+    /// The series' picture is pale at its foot even veiled: the number is written dark.
+    property bool numberLight: false
     /// The edition this belongs to, which its menu commands it through.
     required property string seriesId
     required property real coverWidth
@@ -38,19 +56,33 @@ Item {
 
     signal opened()
     signal reimportAsked()
+    signal chapterAsked()
+    property int chapters: 0
 
     // Opening a file is reading it: the line and the cover both lead to the reader, at the
     // page where reading stopped. Here rather than where the tile is placed, so the list and
     // the grid cannot open one book two ways.
     onOpened: Navigation.open(Navigation.Reader, { "series": tile.seriesId, "entry": tile.entryId })
 
+    /// Picked with others, to be commanded together: see `Selection`.
+    readonly property bool picked: Selection.ids.includes(tile.entryId)
+
+    /// Opens, unless something is already picked: then it picks one more. See `SeriesTile`.
+    function activate() {
+        if (Selection.active)
+            Selection.toggle(tile.entryId, tile.seriesId)
+        else
+            tile.opened()
+    }
+
     objectName: "tile-volume-" + (entryId.length > 0 ? entryId : "missing-" + number)
     width: coverWidth
     height: coverHeight + 6 + 34 + 2 + 16
 
     Accessible.role: Accessible.ListItem
-    Accessible.name: tile.number + " " + tile.title
+    Accessible.name: tile.caption
     Accessible.description: tile.missing ? tile.title : tile.pages
+    Accessible.selected: tile.picked
 
     /// A stop of the page's walk — see `KeyWalk` — unless it is a hole, which opens nothing.
     readonly property bool keyStop: !tile.missing
@@ -58,7 +90,10 @@ Item {
     Keys.onPressed: event => {
         if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
                 || event.key === Qt.Key_Enter) {
-            tile.opened()
+            if (event.modifiers & (Qt.ControlModifier | Qt.ShiftModifier))
+                Selection.toggle(tile.entryId, tile.seriesId)
+            else
+                tile.activate()
             event.accepted = true
         } else if (event.key === Qt.Key_Menu
                    || (event.key === Qt.Key_F10 && (event.modifiers & Qt.ShiftModifier))) {
@@ -87,8 +122,22 @@ Item {
 
     TapHandler {
         gesturePolicy: TapHandler.ReleaseWithinBounds
+        acceptedModifiers: Qt.NoModifier
         enabled: !tile.missing
-        onTapped: tile.opened()
+        onTapped: tile.activate()
+    }
+
+    PickHandler {
+        enabled: !tile.missing
+        onToggled: Selection.toggle(tile.entryId, tile.seriesId)
+    }
+
+    // The secondary button opens the same menu as the three dots, under the pointer.
+    TapHandler {
+        acceptedButtons: Qt.RightButton
+        gesturePolicy: TapHandler.ReleaseWithinBounds
+        enabled: !tile.missing
+        onTapped: point => commands.showAt(tile, point.position)
     }
 
     Item {
@@ -108,6 +157,18 @@ Item {
             anchors.fill: parent
             source: tile.cover
             visible: !tile.missing
+
+            CoverVeil {
+                full: tile.borrowed
+            }
+
+            CoverNumber {
+                visible: tile.borrowed && tile.coverNumber.length > 0
+                number: tile.coverNumber
+                word: tile.kindWord
+                light: tile.numberLight
+                coverWidth: tile.coverWidth
+            }
 
             ReadBar {
                 key: tile.entryId
@@ -136,6 +197,7 @@ Item {
             Text {
                 anchors.centerIn: parent
                 width: parent.width - 16
+                textFormat: Text.PlainText
                 text: tile.title
                 color: Theme.alert
                 font.family: Theme.textFamily
@@ -153,9 +215,9 @@ Item {
             focused: tile.activeFocus
         }
 
-        ReadCheck {
-            key: tile.entryId
-            finished: tile.finished
+        PickMark {
+            objectName: "picked-" + tile.entryId
+            picked: tile.picked
             coverWidth: tile.coverWidth
         }
 
@@ -177,7 +239,9 @@ Item {
             entryId: tile.entryId
             fileName: tile.fileName
             label: tile.title
+            chapters: tile.chapters
             onReimportAsked: tile.reimportAsked()
+            onChapterAsked: tile.chapterAsked()
         }
     }
 
@@ -185,11 +249,13 @@ Item {
         id: name
 
         anchors.left: frame.left
-        anchors.right: frame.right
+        anchors.right: tile.finished ? check.left : frame.right
+        anchors.rightMargin: tile.finished ? 6 : 0
         anchors.top: frame.bottom
         anchors.topMargin: 6
         height: Math.min(implicitHeight, 34)
-        text: tile.number + " · " + tile.title
+        textFormat: Text.PlainText
+        text: tile.caption
         color: tile.missing ? Theme.inkFaint : Theme.ink
         font.family: Theme.displayFamily
         font.pixelSize: 13
@@ -202,15 +268,29 @@ Item {
     }
 
     Text {
+        id: count
+
+        objectName: "count-" + tile.entryId
         anchors.left: frame.left
-        anchors.right: frame.right
+        anchors.right: name.right
         anchors.top: name.bottom
         anchors.topMargin: 2
         height: 16
-        text: tile.pages
+        textFormat: Text.PlainText
+        text: tile.webtoon ? tile.readPercent : tile.pages
         color: Theme.inkFaint
         font.family: Theme.textFamily
         font.pixelSize: 11
         elide: Text.ElideRight
+    }
+
+    // At the right of the words, centred on the two lines they make.
+    ReadCheck {
+        id: check
+
+        key: tile.entryId
+        finished: tile.finished
+        anchors.right: frame.right
+        y: name.y + (count.y + count.height - name.y - height) / 2
     }
 }

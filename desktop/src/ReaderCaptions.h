@@ -15,6 +15,7 @@
 #include <QObject>
 #include <QQmlEngine>
 #include <QString>
+#include <QStringList>
 #include <QVariantList>
 
 class ReaderCaptions final : public QObject
@@ -62,9 +63,26 @@ class ReaderCaptions final : public QObject
     /// words alone, as the directions above them are. `name` is what the pill is called among
     /// the items, in English, so that a test finds it without the picto that used to name it.
     Q_PROPERTY(QVariantList layouts READ layouts CONSTANT)
-    /// All three fits, for a book. A strip has no height to fit, and takes `stripFits`.
+    /// All three fits, for a book. A strip has none to choose: it is drawn at its files' width.
     Q_PROPERTY(QVariantList fits READ fits CONSTANT)
-    Q_PROPERTY(QVariantList stripFits READ stripFits CONSTANT)
+    /// « Zoom temporaire · Échap », while a pinch magnifies a strip.
+    Q_PROPERTY(QString loupe READ loupe CONSTANT)
+    /// A webtoon's half of « Sur cet appareil »: its groups, its rows, the ends of its two
+    /// sliders, its pills, the box under them, and its note.
+    Q_PROPERTY(QString scrollingGroup READ scrollingGroup CONSTANT)
+    Q_PROPERTY(QString controlsGroup READ controlsGroup CONSTANT)
+    Q_PROPERTY(QString sensitivityName READ sensitivityName CONSTANT)
+    Q_PROPERTY(QString autoSpeedName READ autoSpeedName CONSTANT)
+    Q_PROPERTY(QString controlsName READ controlsName CONSTANT)
+    Q_PROPERTY(QStringList sensitivityEnds READ sensitivityEnds CONSTANT)
+    Q_PROPERTY(QStringList autoSpeedEnds READ autoSpeedEnds CONSTANT)
+    /// `[{ value, label, name }]`, `Preferences.Discreet` and its two siblings.
+    Q_PROPERTY(QVariantList stripControls READ stripControls CONSTANT)
+    Q_PROPERTY(QString atRest READ atRest CONSTANT)
+    Q_PROPERTY(QString stripDeskNote READ stripDeskNote CONSTANT)
+    /// A webtoon's band: its zoom steps and its A, said and not drawn.
+    Q_PROPERTY(QString zoomIn READ zoomIn CONSTANT)
+    Q_PROPERTY(QString zoomOut READ zoomOut CONSTANT)
     /// `[{ value, label, name }]`, `Preferences.Black` and its two siblings, then
     /// `Preferences.Slide` and its two.
     Q_PROPERTY(QVariantList backdrops READ backdrops CONSTANT)
@@ -106,7 +124,21 @@ public:
     QVariantList directions() const;
     QVariantList layouts() const;
     QVariantList fits() const;
-    QVariantList stripFits() const;
+    QString loupe() const;
+    QString scrollingGroup() const;
+    QString controlsGroup() const;
+    QString sensitivityName() const;
+    QString autoSpeedName() const;
+    QString controlsName() const;
+    QStringList sensitivityEnds() const;
+    QStringList autoSpeedEnds() const;
+    QVariantList stripControls() const;
+    QString atRest() const;
+    QString stripDeskNote() const;
+    /// The line under the pills for the one chosen.
+    Q_INVOKABLE QString controlsHint(int which) const;
+    QString zoomIn() const;
+    QString zoomOut() const;
     QVariantList backdrops() const;
     QVariantList motions() const;
     QString shortcuts() const;
@@ -118,7 +150,7 @@ public:
     ///
     /// For the book open, and not once for every book: in a book read right to left ← and
     /// Ctrl ← go on, and the lines for the arrows say so.
-    Q_INVOKABLE QVariantList shortcutGroups(bool rightToLeft) const;
+    Q_INVOKABLE QVariantList shortcutGroups(bool rightToLeft, bool webtoon = false) const;
 
     /// The line under the directions, for what `Reader.declaredDirection` holds (−1 for
     /// nothing). Styled text: the declared way is in `<b>`.
@@ -147,4 +179,8 @@ public:
     Q_INVOKABLE QString outOf(int count) const;
     /// « 200 % » for 2.
     Q_INVOKABLE QString zoom(qreal level) const;
+    /// « sur 120 ».
+    Q_INVOKABLE QString among(int count) const;
+    /// What the A does, by whether it runs.
+    Q_INVOKABLE QString autoRead(bool running) const;
 };

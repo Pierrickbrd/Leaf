@@ -31,8 +31,9 @@ use crate::scan::checks;
 use crate::scan::covers;
 use crate::scan::identity;
 use crate::scan::layout::{self, Kind};
+use crate::scan::orders;
 use crate::scan::report::ScanReport;
-use crate::store::text::search_key;
+use crate::store::text::{search_key, tag_case};
 use crate::store::{Cx, Db};
 
 pub const ENTRY_JSON: &str = "entry.json";
@@ -45,7 +46,15 @@ pub const ONESHOT_JSON: &str = "oneshot.json";
 pub struct Scanner {
     db: std::sync::Arc<Db>,
     all_dimensions: bool,
+    /// Held for the whole of a scan and for the whole of a rename: the two read and move the
+    /// same files, and a scan that sees a rename half done prunes the volume that is between
+    /// its old name and its new one, reading position and all. See [`Scanner::exclusive`].
+    exclusive: std::sync::Mutex<()>,
 }
+
+/// Proof that the scanners' lock is held, handed to the closure of [`Scanner::exclusive`].
+/// What needs the lock already taken asks for it, so that it cannot be called without.
+pub struct Held(());
 
 /// What the scan met, so that what it did not meet can be removed.
 #[derive(Default)]
@@ -81,8 +90,13 @@ struct WorkDefaults {
     medium: Option<String>,
     reading_direction: Option<String>,
     colour: Option<bool>,
+    cover_volume: Option<f64>,
     chapter_label: Option<String>,
     arcs: Vec<ArcJson>,
+    /// Who wrote and who drew, as `work.json` declares it: what a volume that says nothing
+    /// is credited with.
+    authors: Vec<String>,
+    artists: Vec<String>,
     work: Option<WorkJson>,
     work_name: String,
     universe_name: Option<String>,
@@ -91,9 +105,77 @@ struct WorkDefaults {
 /// What the files turned out to know that `work.json` did not say.
 #[derive(Default, Clone)]
 struct Inherited {
-    authors: Vec<String>,
     reading_direction: Option<String>,
     genres: Vec<String>,
+}
+
+/// What reading one edition leaves for the work above it to settle.
+struct Visited {
+    inherited: Inherited,
+    lifted: Vec<ReadEntry>,
+    credited: Credited,
+}
+
+/// The credits an edition's volumes carried, with the search entry that is still to be
+/// written with them.
+struct Credited {
+    authors: Vec<String>,
+    artists: Vec<String>,
+    /// Whether every volume of the edition has a writer, and a drawer, once it has taken
+    /// its series' default: one volume credited by nobody is what the work is reported for.
+    every_authored: bool,
+    every_drawn: bool,
+    search: EditionSearch,
+}
+
+/// Who a volume is credited with once its series has had its say, and, field by field,
+/// whether that came from the series rather than from the volume.
+#[derive(Default, Clone)]
+struct Credits {
+    authors: Vec<String>,
+    authors_inherited: bool,
+    artists: Vec<String>,
+    artists_inherited: bool,
+}
+
+impl Credits {
+    /// What the volume says, else what its series declares — never the two together: a
+    /// volume that names its writer replaces the series' writer, it does not join him.
+    fn of(own: &(Vec<String>, Vec<String>), defaults: &WorkDefaults) -> Self {
+        let (authors, authors_inherited) = inherit(&own.0, &defaults.authors);
+        let (artists, artists_inherited) = inherit(&own.1, &defaults.artists);
+        Credits {
+            authors,
+            authors_inherited,
+            artists,
+            artists_inherited,
+        }
+    }
+
+    /// What the volume says and nothing else: a book standing alone has no series above it.
+    fn own(own: &(Vec<String>, Vec<String>)) -> Self {
+        Credits {
+            authors: own.0.clone(),
+            artists: own.1.clone(),
+            ..Credits::default()
+        }
+    }
+}
+
+fn inherit(own: &[String], default: &[String]) -> (Vec<String>, bool) {
+    if own.is_empty() && !default.is_empty() {
+        (default.to_vec(), true)
+    } else {
+        (own.to_vec(), false)
+    }
+}
+
+/// What the search index holds about an edition apart from its credits.
+struct EditionSearch {
+    id: String,
+    names: Vec<String>,
+    genres: Vec<String>,
+    rest: Vec<String>,
 }
 
 /// One chapter, as it stands before its position on the edition's scale is known.
@@ -136,8 +218,18 @@ struct ReadEntry {
     stale: Option<String>,
     file_order: usize,
     cover_file: Option<String>,
+    /// A page of the archive that `entry.json` names as its cover, kept only when the archive
+    /// holds it: a number past the end serves nothing, and the cover would be a 404.
+    cover_page: Option<i32>,
     legacy_arc: Option<String>,
     inherited: Option<Inherited>,
+    /// Who wrote and who drew **this** volume: its `entry.json` first, its ComicInfo's
+    /// `Writer` and `Penciller` otherwise, field by field. The series is credited with the
+    /// union of these over its volumes, see [`union`].
+    credits: (Vec<String>, Vec<String>),
+    /// [`ReadEntry::credits`] once the series has filled what the volume left empty — what
+    /// the volume is recorded, shown and found under.
+    effective: Credits,
     /// What the file says about itself, kept so the checks can compare it with where it
     /// actually sits. Nothing downstream reads the index from it.
     declared: Option<EntryJson>,
@@ -174,7 +266,26 @@ impl ReadEntry {
 
 impl Scanner {
     pub fn new(db: std::sync::Arc<Db>, all_dimensions: bool) -> Self {
-        Scanner { db, all_dimensions }
+        Scanner {
+            db,
+            all_dimensions,
+            exclusive: std::sync::Mutex::new(()),
+        }
+    }
+
+    /// Runs `f` while no scan and no other `exclusive` runs, and keeps them out until it ends.
+    ///
+    /// Not re-entrant: `f` must not call [`Scanner::scan`] or [`Scanner::rescan_work`], which
+    /// take the lock themselves and would wait for `f` forever. It receives a [`Held`] for
+    /// [`Scanner::rescan_work_held`], which is the same rescan without taking the lock.
+    pub fn exclusive<T>(&self, f: impl FnOnce(&Held) -> T) -> T {
+        // A panic in a previous holder poisons the mutex but leaves nothing inconsistent in
+        // it — it guards no data, only the right to go.
+        let _lock = self
+            .exclusive
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        f(&Held(()))
     }
 
     /// The whole library, one transaction per shelf folder.
@@ -193,6 +304,10 @@ impl Scanner {
     ///
     /// The prune is its own transaction at the end, because it needs the whole of `seen`.
     pub fn scan(&self, roots: &[PathBuf]) -> Result<ScanReport> {
+        self.exclusive(|_| self.scan_held(roots))
+    }
+
+    fn scan_held(&self, roots: &[PathBuf]) -> Result<ScanReport> {
         let mut report = ScanReport::default();
         // Built fresh every run. Kept between runs, a deletion became undetectable: the ids
         // met on the first scan stayed in the set, so pruning never removed anything the
@@ -242,6 +357,11 @@ impl Scanner {
     /// Reading the whole library after one edited field is five seconds on six series and a
     /// minute on sixty.
     pub fn rescan_work(&self, work_folder: &Path) -> Result<ScanReport> {
+        self.exclusive(|held| self.rescan_work_held(held, work_folder))
+    }
+
+    /// [`Scanner::rescan_work`] for a caller already inside [`Scanner::exclusive`].
+    pub fn rescan_work_held(&self, _held: &Held, work_folder: &Path) -> Result<ScanReport> {
         let mut report = ScanReport::default();
         let mut seen = Seen::default();
         let path = absolute(work_folder);
@@ -425,12 +545,65 @@ impl Scanner {
             }
             self.visit_work(cx, &work, Some(&id), name.as_deref(), seen, report)?;
         }
+        self.visit_books_of(cx, folder, &id, seen, report)?;
         // Last, and in the same transaction as the works it points at: an order names works
         // by folder, and a step cannot be resolved against a work nobody has recorded yet.
-        self.record_orders(cx, folder, &id, meta.as_ref(), report)?;
+        self.record_orders(cx, folder, &id, meta.as_ref(), &seen.editions, report)?;
         // Only now: every work of this universe has had its chance to carry off whatever it
         // collided with — see `make_way`.
         self.let_go(cx, "universe", stale_universe.as_deref())?;
+        Ok(())
+    }
+
+    /// The archives sitting directly in a universe folder.
+    ///
+    /// Walking only its sub-folders, the scan skipped them in silence: a universe's book that
+    /// is no series of it had to be given a folder made for nothing but holding it, and one
+    /// dropped beside the works was on the disk and nowhere in the library. A book declaring
+    /// itself whole is filed exactly as one lifted out of a work folder — `read_entry`, then
+    /// `write_one_shot` — under a provisional edition that only lasts until it gets its own.
+    /// Anything else belongs to no work, and guessing one would be inventing a series, so it
+    /// is reported rather than read.
+    fn visit_books_of(
+        &self,
+        cx: &Cx<'_>,
+        folder: &Path,
+        universe_id: &str,
+        seen: &mut Seen,
+        report: &mut ScanReport,
+    ) -> Result<()> {
+        let provisional = identity::under(universe_id, "edition");
+        let within = Within {
+            edition_id: &provisional,
+            chapter_pattern: None,
+        };
+        for (order, file) in layout::archives(folder).iter().enumerate() {
+            // What reading the file said of it as a volume — no metadata, a contradiction — is
+            // only true of a book. An archive that is not one is reported once, as that.
+            let before = report.clone();
+            match self.read_entry(cx, file, order, &within, seen, report) {
+                Ok(Some(album)) => {
+                    seen.entries.remove(&album.id);
+                    if album.one_shot.is_some() {
+                        self.write_one_shot(cx, album, Some(universe_id), seen, report)?;
+                    } else {
+                        *report = before;
+                        report.disregarded.push(format!(
+                            "{}/{}: an archive sitting in a universe belongs to no work — only \
+                             a book declaring itself whole with oneshot.json can sit there, so \
+                             it is not read",
+                            name_of(folder),
+                            name_of(file)
+                        ));
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    report.errors.push(format!("{}: {e}", name_of(file)));
+                    tracing::warn!(file = %file.display(), error = %e, "unreadable entry");
+                }
+            }
+        }
         Ok(())
     }
 
@@ -445,6 +618,7 @@ impl Scanner {
         folder: &Path,
         universe_id: &str,
         meta: Option<&UniverseJson>,
+        editions: &HashSet<String>,
         report: &mut ScanReport,
     ) -> Result<()> {
         cx.execute(
@@ -459,27 +633,20 @@ impl Scanner {
         }
 
         let here = name_of(folder);
-        let mut declared_ids: Vec<String> = Vec::new();
+        let mut declared_ids: HashSet<String> = HashSet::new();
+        let mut said_order_ceiling = false;
+        let plan = orders::Plan::new(&meta.orders);
+        let mut budget = orders::Budget::new();
+        let mut said_universe_ceiling = false;
         for (at, order) in meta.orders.iter().enumerate() {
-            let declared = order
-                .id
-                .clone()
-                .filter(|one| !one.trim().is_empty())
-                .or_else(|| {
-                    order
-                        .name
-                        .as_deref()
-                        .map(search_key)
-                        .filter(|one| !one.is_empty())
-                })
-                .unwrap_or_else(|| (at + 1).to_string());
-            if declared_ids.contains(&declared) {
+            let declared = orders::declared_id(order, at);
+            if !declared_ids.insert(declared.clone()) {
                 report.contradictions.push(format!(
-                    "{here}/universe.json — two orders are both called \"{declared}\"; the                      second is disregarded"
+                    "{here}/universe.json — two orders are both called \"{declared}\"; the \
+                     second is disregarded"
                 ));
                 continue;
             }
-            declared_ids.push(declared.clone());
 
             // Under its universe, never under the folder's path: on the scan that moves a
             // library off path identities the universe gets a new one, so the `DELETE … WHERE
@@ -506,23 +673,73 @@ impl Scanner {
                 ],
             )?;
 
+            if at >= orders::MOST_ORDERS {
+                if !said_order_ceiling {
+                    said_order_ceiling = true;
+                    report.contradictions.push(format!(
+                        "{here}/universe.json — it holds more than {} orders; from order \
+                         \"{declared}\" on they are kept without steps",
+                        orders::MOST_ORDERS
+                    ));
+                }
+                continue;
+            }
+            // Said once, by the order that writes the inclusion; the steps it would have
+            // brought are not read again for every order that reaches this one.
+            for ((_, step_at), why) in plan.refused.range((at, 0)..=(at, usize::MAX)) {
+                report.disregarded.push(format!(
+                    "{here}/universe.json — order \"{declared}\", step {}: {why}",
+                    step_at + 1
+                ));
+            }
+            let flat = match plan.flatten(at, &mut budget) {
+                Ok(flat) => flat,
+                Err(over) => {
+                    // Said once for the universe: past its ceiling every later order is
+                    // cut the same way, and a line each would be the file's size again.
+                    if over == orders::Over::Order {
+                        report.contradictions.push(format!(
+                            "{here}/universe.json — order \"{declared}\" is too large once \
+                             its inclusions are read in place (more than {} steps written, or \
+                             {} looked at); it is kept without steps",
+                            orders::MOST_FLAT_STEPS,
+                            orders::MOST_STEPS_LOOKED_AT
+                        ));
+                    } else if !said_universe_ceiling {
+                        said_universe_ceiling = true;
+                        report.contradictions.push(format!(
+                            "{here}/universe.json — its orders together are too large once \
+                             their inclusions are read in place (more than {} steps written, \
+                             or {} looked at); order \"{declared}\" and each later one that \
+                             no longer fits are kept without steps",
+                            orders::MOST_UNIVERSE_STEPS,
+                            orders::MOST_UNIVERSE_LOOKS
+                        ));
+                    }
+                    continue;
+                }
+            };
             let mut position = 0i64;
-            for (step_at, step) in order.steps.iter().enumerate() {
-                let complaint = self.record_step(cx, folder, &order_id, position, step)?;
-                match complaint {
-                    Some(why) => report.disregarded.push(format!(
+            for flat_step in flat {
+                let complaint =
+                    self.record_step(cx, folder, &order_id, position, flat_step.step, editions)?;
+                match (complaint, flat_step.own) {
+                    (Some(why), Some(own)) => report.disregarded.push(format!(
                         "{here}/universe.json — order \"{declared}\", step {}: {why}",
-                        step_at + 1
+                        own + 1
                     )),
-                    None => position += 1,
+                    // The order that wrote the step has already said what is wrong with it.
+                    (Some(_), None) => {}
+                    (None, _) => position += 1,
                 }
             }
         }
 
         if let Some(wanted) = meta.default_order.as_deref() {
-            if !declared_ids.iter().any(|one| one == wanted) {
+            if !declared_ids.contains(wanted) {
                 report.contradictions.push(format!(
-                    "{here}/universe.json — defaultOrder is \"{wanted}\" and no order is                      called that; the first one is offered instead"
+                    "{here}/universe.json — defaultOrder is \"{wanted}\" and no order is \
+                     called that; the first one is offered instead"
                 ));
             }
         }
@@ -538,6 +755,7 @@ impl Scanner {
         order_id: &str,
         position: i64,
         step: &StepJson,
+        editions: &HashSet<String>,
     ) -> Result<Option<String>> {
         let Some(work) = step
             .work
@@ -583,39 +801,60 @@ impl Scanner {
             .as_deref()
             .map(str::trim)
             .filter(|e| !e.is_empty());
-        let edition_id = match (unit.as_deref(), named_edition) {
-            // A range of volumes describes different content in a 42-volume edition and a
-            // 34-volume one, so it has to say which.
-            (Some("VOLUME"), None) => {
-                return Ok(Some(
-                    "a VOLUME range must name its edition, because volume numbers differ                      between editions of the same work"
-                        .to_string(),
-                ))
-            }
-            (Some("CHAPTER"), Some(_)) => {
-                return Ok(Some(
-                    "a CHAPTER range must not name an edition: a chapter number identifies                      the same story in every edition"
-                        .to_string(),
-                ))
-            }
-            (_, None) => None,
-            (_, Some(edition)) => {
-                let path = absolute(&folder.join(work).join(edition));
-                let found = cx.query_one(
-                    "SELECT id FROM edition WHERE path = ?1 AND work_id = ?2",
-                    rusqlite::params![path.as_str(), work_id.as_str()],
-                    |r| r.get::<_, String>(0),
-                )?;
-                match found {
-                    Some(id) => Some(id),
-                    None => {
-                        return Ok(Some(format!(
-                            "\"{edition}\" is not an edition of \"{work}\""
-                        )))
+        let edition_id =
+            match (unit.as_deref(), named_edition) {
+                // A range of volumes describes different content in a 42-volume edition and a
+                // 34-volume one, so with several editions it has to say which. With one there is
+                // nothing to choose between, and the edition beside the archives has no name to
+                // write: refusing there turned « Lanfeust de Troy, tomes 1 à 4 » down for a
+                // work that has exactly one way to count its volumes.
+                (Some("VOLUME"), None) => {
+                    // Only the editions this scan met: the row of one whose archives moved
+                    // into a folder is pruned after the orders are written, and counted here it
+                    // made a work with one edition look like a work with two.
+                    let mut held: Vec<String> = cx
+                        .query(
+                            "SELECT id FROM edition WHERE work_id = ?1 AND one_shot = 0",
+                            [work_id.as_str()],
+                            |r| r.get::<_, String>(0),
+                        )?
+                        .into_iter()
+                        .filter(|id| editions.contains(id))
+                        .collect();
+                    match (held.pop(), held.pop()) {
+                        (Some(only), None) => Some(only),
+                        _ => return Ok(Some(
+                            "a VOLUME range must name its edition, because volume numbers differ \
+                             between editions of the same work"
+                                .to_string(),
+                        )),
                     }
                 }
-            }
-        };
+                (Some("CHAPTER"), Some(_)) => {
+                    return Ok(Some(
+                        "a CHAPTER range must not name an edition: a chapter number identifies \
+                         the same story in every edition"
+                            .to_string(),
+                    ))
+                }
+                (_, None) => None,
+                (_, Some(edition)) => {
+                    let path = absolute(&folder.join(work).join(edition));
+                    let found = cx.query_one(
+                        "SELECT id FROM edition WHERE path = ?1 AND work_id = ?2",
+                        rusqlite::params![path.as_str(), work_id.as_str()],
+                        |r| r.get::<_, String>(0),
+                    )?;
+                    match found {
+                        Some(id) => Some(id),
+                        None => {
+                            return Ok(Some(format!(
+                                "\"{edition}\" is not an edition of \"{work}\""
+                            )))
+                        }
+                    }
+                }
+            };
 
         if let (Some(from), Some(to)) = (step.from, step.to) {
             if from > to {
@@ -669,8 +908,9 @@ impl Scanner {
 
         cx.execute(
             "INSERT INTO work (id, universe_id, name, path, title, medium, status,
-                               reading_direction, summary, age_rating, age)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+                               reading_direction, summary, age_rating, age,
+                               declared_authors, declared_artists)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
              ON CONFLICT(id) DO UPDATE SET
                -- The place follows the identity. It did not have to before: a folder
                -- that moved got a new identity, so it got a new row, and this one was
@@ -681,7 +921,9 @@ impl Scanner {
                universe_id=excluded.universe_id, name=excluded.name, title=excluded.title,
                medium=excluded.medium, status=excluded.status,
                reading_direction=excluded.reading_direction, summary=excluded.summary,
-               age_rating=excluded.age_rating, age=excluded.age",
+               age_rating=excluded.age_rating, age=excluded.age,
+               declared_authors=excluded.declared_authors,
+               declared_artists=excluded.declared_artists",
             rusqlite::params![
                 id,
                 universe_id,
@@ -698,26 +940,18 @@ impl Scanner {
                 meta.as_ref()
                     .and_then(|m| m.age_rating.as_deref())
                     .and_then(age_of),
+                declared(&meta.as_ref().map(WorkJson::authors).unwrap_or_default()),
+                declared(&meta.as_ref().map(|m| m.artists.clone()).unwrap_or_default()),
             ],
         )?;
         report.works += 1;
-        report
-            .missing_required
-            .extend(checks::work(&name_of(folder), meta.as_ref()));
+        // Said at this place in the report, but only once the volumes have been read: a series
+        // whose credits are written volume by volume is not missing them.
+        let work_report_at = report.missing_required.len();
         self.record_genres(
             cx,
             &id,
             &meta.as_ref().map(|m| m.genres.clone()).unwrap_or_default(),
-        )?;
-        self.record_authors(
-            cx,
-            &id,
-            &meta.as_ref().map(WorkJson::authors).unwrap_or_default(),
-        )?;
-        self.record_artists(
-            cx,
-            &id,
-            &meta.as_ref().map(|m| m.artists.clone()).unwrap_or_default(),
         )?;
         self.record_tags(
             cx,
@@ -737,8 +971,11 @@ impl Scanner {
             medium: meta.as_ref().and_then(|m| m.medium.clone()),
             reading_direction: meta.as_ref().and_then(|m| m.reading_direction.clone()),
             colour: meta.as_ref().and_then(|m| m.colour),
+            cover_volume: meta.as_ref().and_then(|m| m.cover_volume),
             chapter_label: meta.as_ref().and_then(|m| m.chapter_label.clone()),
             arcs: meta.as_ref().map(|m| m.arcs.clone()).unwrap_or_default(),
+            authors: meta.as_ref().map(WorkJson::authors).unwrap_or_default(),
+            artists: meta.as_ref().map(|m| m.artists.clone()).unwrap_or_default(),
             work: meta.clone(),
             work_name: name_of(folder),
             universe_name: universe_name.map(str::to_string),
@@ -764,8 +1001,10 @@ impl Scanner {
         let several =
             edition_folders.len() > 1 || (!direct.is_empty() && !edition_folders.is_empty());
 
+        let said_before = report.missing_required.len();
         let mut inherited: Vec<Inherited> = Vec::new();
         let mut albums: Vec<ReadEntry> = Vec::new();
+        let mut credited: Vec<Credited> = Vec::new();
         if !direct.is_empty() {
             // An edition.json here describes an edition that has no folder of its own, so it
             // has no name either — nothing would ever show it. The rest of the file is used;
@@ -780,23 +1019,26 @@ impl Scanner {
                     name_of(folder)
                 ));
             }
-            let (found, lifted) = self.visit_edition(
+            let visited = self.visit_edition(
                 cx, folder, &id, true, &direct, &defaults, false, seen, report,
             )?;
-            inherited.push(found);
-            albums.extend(lifted);
+            inherited.push(visited.inherited);
+            albums.extend(visited.lifted);
+            credited.push(visited.credited);
         }
         for edition in &edition_folders {
             let files = layout::archives(edition);
-            let (found, lifted) = self.visit_edition(
+            let visited = self.visit_edition(
                 cx, edition, &id, false, &files, &defaults, several, seen, report,
             )?;
-            inherited.push(found);
-            albums.extend(lifted);
+            inherited.push(visited.inherited);
+            albums.extend(visited.lifted);
+            credited.push(visited.credited);
         }
 
         // Filed after the work they came out of, because their rows are made from what that
         // pass read.
+        let said_by_visits = report.missing_required.len();
         let lifted_any = !albums.is_empty();
         for album in albums {
             self.write_one_shot(cx, album, universe_id, seen, report)?;
@@ -831,25 +1073,70 @@ impl Scanner {
                 cx.execute("DELETE FROM work WHERE id = ?1", [id.as_str()])?;
                 seen.works.remove(&id);
                 report.works = report.works.saturating_sub(1);
+                // What the visits said about its editions was said about a work that is not one.
+                report.missing_required.drain(said_before..said_by_visits);
                 self.let_go(cx, "work", stale_work.as_deref())?;
                 return Ok(());
             }
         }
 
+        // Who wrote and who drew: everybody its volumes are credited with, once they have
+        // taken the series' default. `work.json` naming someone used to replace this union
+        // outright, and Lucky Luke credited to its first team hid every writer after them.
+        // The default alone only for a series with no volume to credit. Recorded once, here,
+        // because the editions' search entries below are made from the same lists and a
+        // search must find what is recorded.
+        let or_declared = |found: Vec<String>, declared: &[String]| {
+            if found.is_empty() {
+                declared.to_vec()
+            } else {
+                found
+            }
+        };
+        let authors = or_declared(
+            union(credited.iter().map(|c| c.authors.clone())),
+            &defaults.authors,
+        );
+        let artists = or_declared(
+            union(credited.iter().map(|c| c.artists.clone())),
+            &defaults.artists,
+        );
+        self.record_authors(cx, &id, &authors)?;
+        self.record_artists(cx, &id, &artists)?;
+        let work_report = checks::work(
+            &name_of(folder),
+            meta.as_ref(),
+            credited.iter().all(|c| c.every_authored),
+            credited.iter().all(|c| c.every_drawn),
+        );
+        report
+            .missing_required
+            .splice(work_report_at..work_report_at, work_report);
+        for found in credited {
+            let mut extra = found.search.genres;
+            extra.extend(authors.iter().cloned());
+            extra.extend(artists.iter().cloned());
+            extra.extend(found.search.rest);
+            self.index(
+                cx,
+                "EDITION",
+                &found.search.id,
+                Some(&found.search.id),
+                None,
+                &found.search.names,
+                &extra,
+            )?;
+        }
+
         // Whatever work.json does not say yet, we take from what is still in the files.
-        if let Some(found) = inherited.into_iter().find(|i| {
-            !i.authors.is_empty() || i.reading_direction.is_some() || !i.genres.is_empty()
-        }) {
+        if let Some(found) = inherited
+            .into_iter()
+            .find(|i| i.reading_direction.is_some() || !i.genres.is_empty())
+        {
             cx.execute(
                 "UPDATE work SET reading_direction = COALESCE(reading_direction, ?1) WHERE id = ?2",
                 rusqlite::params![found.reading_direction, id],
             )?;
-            // The writer goes the same way as genres below — the files first, the legacy
-            // metadata only when work.json is silent about every one of them.
-            let declared_authors = meta.as_ref().map(WorkJson::authors).unwrap_or_default();
-            if declared_authors.is_empty() && !found.authors.is_empty() {
-                self.record_authors(cx, &id, &found.authors)?;
-            }
             // Genres go the same way as the rest — the files first, the legacy metadata
             // only when work.json is silent. They used to take a second route, into a
             // column of their own, and so were shown without ever being filterable.
@@ -876,7 +1163,7 @@ impl Scanner {
         has_several_editions: bool,
         seen: &mut Seen,
         report: &mut ScanReport,
-    ) -> Result<(Inherited, Vec<ReadEntry>)> {
+    ) -> Result<Visited> {
         // An implicit edition has no folder of its own, so it has nowhere to keep an
         // identifier: it takes its work's, which a rename of the folder no longer changes.
         let id = if implicit {
@@ -909,8 +1196,8 @@ impl Scanner {
         cx.execute(
             "INSERT INTO edition (id, work_id, name, path, implicit, publisher, status, medium,
                                   cover_file, reading_direction, volume_count, format, language,
-                                  collection, colour, summary)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+                                  collection, colour, summary, cover_volume)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
              ON CONFLICT(id) DO UPDATE SET
                path=excluded.path,
                work_id=excluded.work_id, name=excluded.name, implicit=excluded.implicit,
@@ -918,7 +1205,7 @@ impl Scanner {
                cover_file=excluded.cover_file, reading_direction=excluded.reading_direction,
                volume_count=excluded.volume_count, format=excluded.format, language=excluded.language,
                collection=excluded.collection, colour=excluded.colour,
-               summary=excluded.summary",
+               summary=excluded.summary, cover_volume=excluded.cover_volume",
             rusqlite::params![
                 id,
                 work_id,
@@ -946,6 +1233,7 @@ impl Scanner {
                 // work's copied into its row. Copied, the day somebody edits the work the
                 // editions would go on saying what it used to say.
                 meta.as_ref().and_then(|m| m.summary.clone()),
+                meta.as_ref().and_then(|m| m.cover_volume).or(defaults.cover_volume),
             ],
         )?;
         report.editions += 1;
@@ -977,11 +1265,9 @@ impl Scanner {
         .into_iter()
         .flatten()
         .collect();
-        let mut extra: Vec<String> = work.map(|w| w.genres.clone()).unwrap_or_default();
-        extra.extend(work.map(WorkJson::authors).unwrap_or_default());
-        extra.extend(work.map(|w| w.artists.clone()).unwrap_or_default());
-        extra.extend(work.map(|w| w.tags.clone()).unwrap_or_default());
-        extra.extend(
+        let genres: Vec<String> = work.map(|w| w.genres.clone()).unwrap_or_default();
+        let mut rest: Vec<String> = work.map(|w| w.tags.clone()).unwrap_or_default();
+        rest.extend(
             [
                 work.and_then(|w| w.summary.clone()),
                 or_default(
@@ -992,7 +1278,14 @@ impl Scanner {
             .into_iter()
             .flatten(),
         );
-        self.index(cx, "EDITION", &id, Some(&id), None, &names, &extra)?;
+        // Not written yet: the people it names are the series' credits, which are known
+        // only once every edition has been read. One write per edition, as before.
+        let search = EditionSearch {
+            id: id.clone(),
+            names,
+            genres,
+            rest,
+        };
 
         let pattern = meta
             .as_ref()
@@ -1020,8 +1313,13 @@ impl Scanner {
         // taken out before anything is written or checked against a work it does not belong
         // to — its own title would be reported as naming the wrong series, and its page
         // count would be counted into a series it is not part of.
-        let (lifted, entries): (Vec<ReadEntry>, Vec<ReadEntry>) =
+        let (lifted, mut entries): (Vec<ReadEntry>, Vec<ReadEntry>) =
             entries.into_iter().partition(|e| e.one_shot.is_some());
+        // After the partition and not in `read_entry`: a book standing alone in the folder
+        // never was one of the series' volumes, and the series' writer is not its writer.
+        for e in &mut entries {
+            e.effective = Credits::of(&e.credits, defaults);
+        }
         for album in &lifted {
             // The identity `read_entry` gave it belongs to this edition, and it is about to
             // get one of its own. Left in, the prune would spare a row nobody wrote.
@@ -1054,6 +1352,9 @@ impl Scanner {
         }
 
         self.write_entries(cx, &id, &entries, report)?;
+        // Outside the shortcut below, always: an edition whose files are all as they were
+        // still changes credits when only `work.json` did.
+        self.credit_entries(cx, &id, &entries)?;
 
         // Chapters are rewritten for a whole edition at once, because a chapter's position
         // depends on the entries around it. When not one entry has moved, and none has been
@@ -1120,13 +1421,20 @@ impl Scanner {
         // with this row, the same loss a complete sweep's prune would otherwise report.
         self.let_go(cx, "edition", stale_edition.as_deref())?;
 
-        Ok((
-            entries
+        Ok(Visited {
+            inherited: entries
                 .iter()
                 .find_map(|e| e.inherited.clone())
                 .unwrap_or_default(),
             lifted,
-        ))
+            credited: Credited {
+                authors: union(entries.iter().map(|e| e.effective.authors.clone())),
+                artists: union(entries.iter().map(|e| e.effective.artists.clone())),
+                every_authored: entries.iter().all(|e| !e.effective.authors.is_empty()),
+                every_drawn: entries.iter().all(|e| !e.effective.artists.is_empty()),
+                search,
+            },
+        })
     }
 
     /// Files an archive that declares itself a whole book: its own work, its own implicit
@@ -1178,13 +1486,16 @@ impl Scanner {
         let stale_work = self.make_way(cx, "work", &work_id, &absolute(&file))?;
         cx.execute(
             "INSERT INTO work (id, universe_id, name, path, title, medium, status,
-                               reading_direction, summary, age_rating, age)
-             VALUES (?1,?2,?3,?4,?5,?6,'completed',?7,?8,?9,?10)
+                               reading_direction, summary, age_rating, age,
+                               declared_authors, declared_artists)
+             VALUES (?1,?2,?3,?4,?5,?6,'completed',?7,?8,?9,?10,?11,?12)
              ON CONFLICT(id) DO UPDATE SET
                path=excluded.path, universe_id=excluded.universe_id, name=excluded.name,
                title=excluded.title, medium=excluded.medium, status=excluded.status,
                reading_direction=excluded.reading_direction, summary=excluded.summary,
-               age_rating=excluded.age_rating, age=excluded.age",
+               age_rating=excluded.age_rating, age=excluded.age,
+               declared_authors=excluded.declared_authors,
+               declared_artists=excluded.declared_artists",
             rusqlite::params![
                 work_id,
                 universe_id,
@@ -1196,6 +1507,9 @@ impl Scanner {
                 meta.summary.clone(),
                 meta.age_rating.clone(),
                 meta.age_rating.as_deref().and_then(age_of),
+                // A book declares its own credits in `oneshot.json`, which is its `work.json`.
+                declared(&meta.authors()),
+                declared(&meta.artists),
             ],
         )?;
         report.works += 1;
@@ -1254,8 +1568,11 @@ impl Scanner {
         )?;
 
         seen.entries.insert(album.id.clone());
+        // The book's own file credits it, and nothing above it does.
+        album.effective = Credits::own(&(meta.authors(), meta.artists.clone()));
         let one = [album];
         self.write_entries(cx, &edition_id, &one, report)?;
+        self.credit_entries(cx, &edition_id, &one)?;
         self.write_chapters(cx, &edition_id, &one, report)?;
 
         self.let_go(cx, "edition", stale_edition.as_deref())?;
@@ -1278,11 +1595,6 @@ impl Scanner {
             edition_id,
             chapter_pattern,
         } = *within;
-        // « This file, in this edition », and nothing about where either of them sits.
-        // Nothing is written into an archive to hold an identifier — see [`identity::under`].
-        let id = identity::under(edition_id, &name_of(file));
-        seen.entries.insert(id.clone());
-
         let meta = std::fs::metadata(file)?;
         let size = meta.len() as i64;
         let modified_at = meta
@@ -1296,17 +1608,36 @@ impl Scanner {
         // holding it is filed under another identity — which identity that is. `file` is
         // UNIQUE, so there is at most one such row, and it is where this file's reading
         // position is.
-        let held = cx.query_one(
-            "SELECT id, size, modified_at FROM entry WHERE file = ?1",
+        let row = cx.query_one(
+            "SELECT id, size, modified_at, edition_id FROM entry WHERE file = ?1",
             [absolute(file).as_str()],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, i64>(1)?,
                     r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             },
         )?;
+        let held = row.clone().map(|(id, size, at, _)| (id, size, at));
+
+        // The row that holds this file **is** this volume, whatever `under(edition, name)`
+        // would say of it now: the server renames a file and moves `entry.file` in the same
+        // step, and a row found by its file keeps the identity it has. A file with no row is a
+        // new volume and gets one drawn once (see [`identity::minted`]) — nothing is written
+        // into an archive to hold it, and the name stops being what the volume is.
+        //
+        // **In the same edition only.** A row found in another edition is the case the
+        // identity change of a folder produces — the first scan after the identifiers stopped
+        // being paths re-keys every edition at once — and its reading position hangs off the
+        // edition it was filed under: it is carried by `stale`, as it always was.
+        let id = match &row {
+            Some((id, _, _, held_edition)) if held_edition == edition_id => id.clone(),
+            Some(_) => identity::under(edition_id, &name_of(file)),
+            None => identity::minted(),
+        };
+        seen.entries.insert(id.clone());
         let unchanged = held
             .as_ref()
             .is_some_and(|(held, s, m)| *held == id && *s == size && *m == modified_at);
@@ -1385,6 +1716,28 @@ impl Scanner {
             );
         }
 
+        let cover_page = own
+            .as_ref()
+            .and_then(|o| o.cover_page)
+            .filter(|p| (0..content.pages.len() as i32).contains(p));
+
+        let credits = (
+            credit(
+                own.as_ref().map(|o| o.authors.as_slice()),
+                legacy
+                    .as_ref()
+                    .map(|l| l.author.as_slice())
+                    .unwrap_or_default(),
+            ),
+            credit(
+                own.as_ref().map(|o| o.artists.as_slice()),
+                legacy
+                    .as_ref()
+                    .map(|l| l.artist.as_slice())
+                    .unwrap_or_default(),
+            ),
+        );
+
         Ok(Some(ReadEntry {
             id,
             path: file.to_path_buf(),
@@ -1405,12 +1758,14 @@ impl Scanner {
             stale,
             file_order: order,
             cover_file: covers::beside_archive(file).map(|p| p.to_string_lossy().to_string()),
+            cover_page,
             declared: own.or_else(|| legacy.as_ref().map(|l| l.entry.clone())),
             one_shot,
             held,
             legacy_arc: legacy.as_ref().and_then(|l| l.arc.clone()),
+            effective: Credits::own(&credits),
+            credits,
             inherited: legacy.as_ref().map(|l| Inherited {
-                authors: l.author.iter().cloned().collect(),
                 reading_direction: l.reading_direction.clone(),
                 genres: l.genres.clone(),
             }),
@@ -1636,6 +1991,95 @@ impl Scanner {
         Ok(())
     }
 
+    /// Which new entry is an old one under another file name, as `new id → old id`.
+    ///
+    /// An entry is « this file, in this edition » (see [`identity::under`]), so a CBZ renamed
+    /// is a new entry and the prune would delete the old one with its reading position.
+    /// Renaming 190 volumes to fix their titles would have taken 190 positions with it.
+    ///
+    /// Matched by the one thing a rename does not change, the size in bytes, and only when
+    /// it is unambiguous on both sides: one row of this edition whose file is no longer
+    /// listed, one new file of that size. Two volumes of the same size, renamed together, are
+    /// left alone — a position carried onto the wrong volume is worse than one reported lost.
+    fn renamed(
+        &self,
+        cx: &Cx<'_>,
+        edition_id: &str,
+        entries: &[ReadEntry],
+    ) -> Result<HashMap<String, String>> {
+        let listed: HashSet<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        let held = cx.query(
+            "SELECT id, size, file FROM entry WHERE edition_id = ?1",
+            [edition_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        let known: HashSet<&str> = held.iter().map(|(id, _, _)| id.as_str()).collect();
+
+        let base = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
+        let mut gone: Vec<(&str, i64, String)> = Vec::new();
+        for (id, size, file) in &held {
+            if !listed.contains(id.as_str()) {
+                gone.push((id, *size, base(file)));
+            }
+        }
+        let arrived: Vec<&ReadEntry> = entries
+            .iter()
+            .filter(|e| e.stale.is_none() && !known.contains(e.id.as_str()))
+            .collect();
+
+        // **By name first.** A folder renamed by hand moves every `file` at once and leaves
+        // each volume's own name alone, so a row whose name is the name of exactly one new
+        // file is that file — which no size can say of two volumes that weigh the same.
+        let mut by_name: HashMap<String, (Vec<&str>, Vec<&str>)> = HashMap::new();
+        for (id, _, name) in &gone {
+            by_name.entry(name.clone()).or_default().0.push(id);
+        }
+        for e in &arrived {
+            by_name
+                .entry(base(&e.path.to_string_lossy()))
+                .or_default()
+                .1
+                .push(&e.id);
+        }
+        let mut matched: HashMap<String, String> = HashMap::new();
+        for (old, new) in by_name.values() {
+            if let ([old], [new]) = (old.as_slice(), new.as_slice()) {
+                matched.insert(new.to_string(), old.to_string());
+            }
+        }
+
+        // **Then by size**, for a file renamed itself: only when it is unambiguous on both
+        // sides, one row of this edition whose file is no longer listed, one new file of
+        // that size.
+        let taken: HashSet<&str> = matched.values().map(String::as_str).collect();
+        let mut gone_by_size: HashMap<i64, Vec<&str>> = HashMap::new();
+        for (id, size, _) in &gone {
+            if !taken.contains(id) {
+                gone_by_size.entry(*size).or_default().push(id);
+            }
+        }
+        let mut arrived_by_size: HashMap<i64, Vec<&str>> = HashMap::new();
+        for e in &arrived {
+            if !matched.contains_key(e.id.as_str()) {
+                arrived_by_size.entry(e.size).or_default().push(&e.id);
+            }
+        }
+        for (size, new) in arrived_by_size {
+            if let (&[new], Some(&[old])) =
+                (new.as_slice(), gone_by_size.get(&size).map(Vec::as_slice))
+            {
+                matched.insert(new.to_string(), old.to_string());
+            }
+        }
+        Ok(matched)
+    }
+
     fn write_entries(
         &self,
         cx: &Cx<'_>,
@@ -1647,6 +2091,8 @@ impl Scanner {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
+
+        let renamed = self.renamed(cx, edition_id, entries)?;
 
         for e in entries {
             let page_count = match &e.pages {
@@ -1673,9 +2119,10 @@ impl Scanner {
 
             cx.execute(
                 "INSERT INTO entry (id, edition_id, type, file, size, modified_at, added_at,
-                                    cover_file, volume_number, title, sort_key, page_count,
-                                    isbn, published_on, summary)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                                    cover_file, cover_page, volume_number, title, sort_key,
+                                    page_count, isbn, published_on, summary,
+                                    authors_inherited, artists_inherited)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
                  ON CONFLICT(id) DO UPDATE SET
                    -- The file follows the identity, for the reason `work` gives above: a
                    -- folder renamed keeps its entries, and they are still in it.
@@ -1685,10 +2132,13 @@ impl Scanner {
                    -- Set once, on arrival, and never touched again: it is the one fact a
                    -- rescan could not reconstruct.
                    added_at=COALESCE(entry.added_at, excluded.added_at),
-                   cover_file=excluded.cover_file, volume_number=excluded.volume_number,
+                   cover_file=excluded.cover_file, cover_page=excluded.cover_page,
+                   volume_number=excluded.volume_number,
                    title=excluded.title, sort_key=excluded.sort_key,
                    page_count=excluded.page_count, isbn=excluded.isbn,
-                   published_on=excluded.published_on, summary=excluded.summary",
+                   published_on=excluded.published_on, summary=excluded.summary,
+                   authors_inherited=excluded.authors_inherited,
+                   artists_inherited=excluded.artists_inherited",
                 rusqlite::params![
                     e.id,
                     edition_id,
@@ -1698,6 +2148,7 @@ impl Scanner {
                     e.modified_at,
                     arrived_at,
                     e.cover_file,
+                    e.cover_page,
                     e.volume_number,
                     e.title,
                     e.sort_key(),
@@ -1705,6 +2156,8 @@ impl Scanner {
                     e.isbn,
                     e.published_on,
                     e.summary,
+                    e.effective.authors_inherited,
+                    e.effective.artists_inherited,
                 ],
             )?;
             report.entries += 1;
@@ -1715,10 +2168,30 @@ impl Scanner {
             if let Some(stale) = &e.stale {
                 self.reattach(cx, stale, &e.id, edition_id, report)?;
             }
+            if let Some(was) = renamed.get(&e.id) {
+                self.reattach(cx, was, &e.id, edition_id, report)?;
+                // The date it arrived is as much the old file's as its position is: a
+                // renamed volume is not a new one, and `added_at` is the one fact a rescan
+                // could not reconstruct.
+                cx.execute(
+                    "UPDATE entry SET added_at = COALESCE( \
+                       (SELECT added_at FROM entry WHERE id = ?2), added_at) WHERE id = ?1",
+                    rusqlite::params![e.id, was],
+                )?;
+            }
 
             let names: Vec<String> = [e.title.clone(), Some(stem_of(&e.path))]
                 .into_iter()
                 .flatten()
+                .collect();
+            // The people who made it, inherited ones included: a volume was found by its
+            // title and nothing else, so « Oda » found One Piece and none of its volumes.
+            let people: Vec<String> = e
+                .effective
+                .authors
+                .iter()
+                .chain(&e.effective.artists)
+                .cloned()
                 .collect();
             self.index(
                 cx,
@@ -1727,7 +2200,7 @@ impl Scanner {
                 Some(edition_id),
                 Some(&e.id),
                 &names,
-                &[],
+                &people,
             )?;
 
             let Some(pages) = &e.pages else { continue };
@@ -2087,13 +2560,69 @@ impl Scanner {
         Ok(())
     }
 
+    /// Who each volume of an edition is credited with, written only where it changed.
+    ///
+    /// Not the rewrite-whole rule of the series' tables: that costs a statement per name per
+    /// volume on every scan, and a series of a hundred volumes with two names each would
+    /// rewrite four hundred rows to arrive where it started. So the edition's stored credits
+    /// are read in one question, and a volume is rewritten only when its list differs.
+    fn credit_entries(&self, cx: &Cx<'_>, edition_id: &str, entries: &[ReadEntry]) -> Result<()> {
+        let rows = cx.query(
+            "SELECT c.entry_id, 0, c.name, c.rowid FROM entry_author c
+               JOIN entry x ON x.id = c.entry_id WHERE x.edition_id = ?1
+             UNION ALL
+             SELECT c.entry_id, 1, c.name, c.rowid FROM entry_artist c
+               JOIN entry x ON x.id = c.entry_id WHERE x.edition_id = ?1",
+            [edition_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            },
+        )?;
+        let mut stored: HashMap<(String, i64), Vec<(i64, String)>> = HashMap::new();
+        for (entry, role, name, at) in rows {
+            stored.entry((entry, role)).or_default().push((at, name));
+        }
+        for (role, table) in [(0, "entry_author"), (1, "entry_artist")] {
+            for e in entries {
+                let wanted = union([if role == 0 {
+                    e.effective.authors.clone()
+                } else {
+                    e.effective.artists.clone()
+                }]);
+                let mut held = stored.remove(&(e.id.clone(), role)).unwrap_or_default();
+                held.sort_by_key(|(at, _)| *at);
+                if held.into_iter().map(|(_, n)| n).eq(wanted.iter().cloned()) {
+                    continue;
+                }
+                cx.execute(
+                    &format!("DELETE FROM {table} WHERE entry_id = ?1"),
+                    [e.id.as_str()],
+                )?;
+                for name in &wanted {
+                    cx.execute(
+                        &format!(
+                            "INSERT OR IGNORE INTO {table} (entry_id, name, key) VALUES (?1,?2,?3)"
+                        ),
+                        rusqlite::params![e.id, name, search_key(name)],
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// And again for the tags — beside genres, never merged into them.
     fn record_tags(&self, cx: &Cx<'_>, work_id: &str, tags: &[String]) -> Result<()> {
         cx.execute("DELETE FROM work_tag WHERE work_id = ?1", [work_id])?;
-        for name in tags.iter().map(|t| t.trim()).filter(|t| !t.is_empty()) {
+        for name in tags.iter().map(|t| tag_case(t)).filter(|t| !t.is_empty()) {
             cx.execute(
                 "INSERT OR IGNORE INTO work_tag (work_id, name, key) VALUES (?1,?2,?3)",
-                rusqlite::params![work_id, name, search_key(name)],
+                rusqlite::params![work_id, name, search_key(&name)],
             )?;
         }
         Ok(())
@@ -2372,6 +2901,39 @@ impl Scanner {
         )?;
         Ok(())
     }
+}
+
+/// One credit of a volume: what its `entry.json` lists, else the names its ComicInfo gives. Field by field, so a volume whose `entry.json` credits only the drawing still has
+/// its writer read from ComicInfo.
+fn credit(own: Option<&[String]>, legacy: &[String]) -> Vec<String> {
+    match own {
+        Some(listed) if !listed.is_empty() => listed.to_vec(),
+        _ => legacy.to_vec(),
+    }
+}
+
+/// A default as the `work` row keeps it: a JSON list, or nothing when nobody is declared.
+fn declared(names: &[String]) -> Option<String> {
+    (!names.is_empty()).then(|| serde_json::to_string(names).unwrap_or_default())
+}
+
+/// The people of several lists, once each: by `search_key`, under the spelling met first,
+/// in the order they are met, which is file order (`Tome 10` before `Tome 2`).
+///
+/// What a series is credited with when its volumes are credited one by one. The rule it
+/// replaces took the `Writer` of the first volume that had one for the whole series, so a
+/// script that changed hands at volume 2 was credited to its first writer only, and an
+/// illustrator was never credited at all — which is also what a search for him found.
+fn union(lists: impl IntoIterator<Item = Vec<String>>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for name in lists.into_iter().flatten() {
+        let name = name.trim();
+        if !name.is_empty() && seen.insert(search_key(name)) {
+            out.push(name.to_string());
+        }
+    }
+    out
 }
 
 /// Short and content-addressed: two rows written from the same text share it.

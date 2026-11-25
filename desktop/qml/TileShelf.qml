@@ -23,14 +23,25 @@ Flow {
 
     // The design's own gap between these, which is tighter than the wall's: they are read
     // one after another rather than swept across.
-    spacing: 12
+    spacing: Widths.scale.room(12)
 
-    /// As many as fit, at the size the width gives them — the rule the volumes grid and the
-    /// shelf both follow. Held at three quarters of a shelf column, because these are read
-    /// one after another and a wall of them would be a second shelf.
-    readonly property real coverSide: {
-        const columns = Math.max(1, Math.round(Widths.shelfColumns * 1.35))
-        return Math.max(64, (width + spacing) / columns - spacing)
+    /// The cover a tile is drawn at for a window of 1280: a length, so it grows with the
+    /// window, and never narrower than its words — a card of words, so at a larger desktop
+    /// text size the name under it keeps the width to wrap in.
+    readonly property real drawnSide: Math.max(Widths.scale.size(108), Widths.scale.column(108))
+
+    /// As many as fit at about that size, widened to share the row between them. It was a
+    /// count read off the shelf's columns, whatever the width it was handed: a block bounded
+    /// to a reading column would have shrunk its tiles rather than held fewer of them.
+    readonly property int columns: Math.max(1, Math.floor((width + spacing)
+                                                          / (drawnSide + spacing)))
+    readonly property real coverSide: (width + spacing) / columns - spacing
+
+    /// How much of the width the tiles actually take: one row of three tiles takes three,
+    /// not the block's width. The heading above them is held to it.
+    readonly property real used: {
+        const across = Math.min(columns, tiles.length)
+        return across > 0 ? across * (coverSide + spacing) - spacing : 0
     }
 
     // A count, and each tile reads its own entry: handed the list, every tile was rebuilt —

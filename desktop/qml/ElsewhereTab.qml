@@ -24,12 +24,22 @@ Column {
     /// rather than going anywhere.
     signal editionChosen(string seriesId)
 
+    /// The width the blocks are laid in: the page's reading column, on the left with the
+    /// tabs above. The page hands this tab the window's width, and at 1920 its tiles ran 1888
+    /// pixels as a second shelf, which is what these are drawn not to be (audit, 23/10/2026).
+    /// `Widths.space.column`, and not a width of its own: the files found and the settings
+    /// stop at the same edge.
+    readonly property int span: Math.min(width, Widths.space.column)
+
     objectName: "elsewhere-tab"
-    spacing: 16
+    // Titled sections, so a section apart, as the settings' cards are: room(16) here,
+    // room(16) on the description, 28 on the settings and 8 on the search — four gaps for
+    // one role (spacing audit, 23/10/2026).
+    spacing: Widths.space.section
 
     ElsewhereBlock {
         objectName: "editions-block"
-        width: parent.width
+        width: tab.span
         title: SeriesCaptions.sameWorkHeading
         line: tab.page.editionsLabel
         tiles: tab.page.editions
@@ -38,7 +48,7 @@ Column {
 
     ElsewhereBlock {
         objectName: "universe-block"
-        width: parent.width
+        width: tab.span
         title: SeriesCaptions.universeHeading
         line: SeriesCaptions.universeLine
         tiles: tab.block.tiles
@@ -53,7 +63,7 @@ Column {
             property bool unfolded: false
 
             width: parent.width
-            spacing: 6
+            spacing: Widths.scale.room(6)
             visible: tab.block.orders.length > 0
 
             Text {
@@ -76,10 +86,11 @@ Column {
                     cornerRadius: 4
                 }
 
+                textFormat: Text.PlainText
                 text: tab.block.chosenName
                 color: Theme.ink
                 font.family: Theme.textFamily
-                font.pixelSize: 13
+                font.pixelSize: Widths.scale.body(13)
                 font.weight: Font.DemiBold
 
                 TapHandler {
@@ -105,8 +116,13 @@ Column {
                     }
 
                     objectName: "way-" + modelData.identifier
-                    width: ways.width
-                    height: 34
+                    // A name a row, and not the block's width: at 1920 a way of twelve
+                    // letters lit a bar of twelve hundred pixels. Its height from its words,
+                    // which a literal 34 cut at a larger desktop text size.
+                    width: Math.min(ways.width, Math.max(Widths.scale.column(320),
+                                                         wayName.implicitWidth + 2 * wayName.x))
+                    height: Math.max(Widths.scale.size(34),
+                                     wayName.implicitHeight + 2 * Widths.scale.size(8))
                     radius: Theme.cardRadius
                     color: modelData.chosen ? Theme.emeraldWash : Theme.surface
 
@@ -132,12 +148,17 @@ Column {
                     }
 
                     Text {
-                        x: 14
+                        id: wayName
+
+                        x: Widths.scale.size(14)
+                        width: parent.width - 2 * x
                         anchors.verticalCenter: parent.verticalCenter
+                        textFormat: Text.PlainText
                         text: parent.modelData.name
                         color: Theme.ink
                         font.family: Theme.textFamily
-                        font.pixelSize: 13
+                        font.pixelSize: Widths.scale.body(13)
+                        elide: Text.ElideRight
                     }
                 }
             }
@@ -146,7 +167,7 @@ Column {
 
     ElsewhereBlock {
         objectName: "outside-block"
-        width: parent.width
+        width: tab.span
         title: SeriesCaptions.outsideHeading
         line: SeriesCaptions.outsideLine
         tiles: tab.block.outside

@@ -1,9 +1,13 @@
 // The three permanent search scopes: overview, series and files with their exact counts.
+//
+// A `PageStrip`, as the settings' tabs and the filters are: on 23/10/2026 these pills stood
+// 9 pixels under the bar, a literal, where the « Reprendre » card on the shelf beside them
+// stood 16, and the owner saw the two screens start at different heights.
 
 import QtQuick
 import Leaf
 
-Item {
+PageStrip {
     id: tabs
 
     required property NavigationCursor navigationCursor
@@ -13,7 +17,6 @@ Item {
     signal wentPast(bool forward)
 
     objectName: "search-scope-tabs"
-    height: 52
 
     readonly property var choices: [
         { "name": "overview", "label": Captions.overviewLabel },
@@ -72,18 +75,11 @@ Item {
         }
     }
 
-    Rectangle {
-        anchors.fill: parent
-        color: Theme.paper
-    }
-
     Row {
         id: buttons
 
-        x: Widths.shelfMargin
-        y: 9
         height: 34
-        spacing: 6
+        spacing: Widths.space.pill
 
         Repeater {
             id: tabRepeater
@@ -146,6 +142,7 @@ Item {
                     id: word
                     objectName: tab.objectName + "-text"
                     anchors.centerIn: parent
+                    textFormat: Text.PlainText
                     text: tab.modelData.label
                     color: tab.chosen ? Theme.emerald : Theme.inkSoft
                     font.family: Theme.textFamily

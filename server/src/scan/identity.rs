@@ -181,9 +181,9 @@ pub fn minted() -> String {
 /// byte of the library touched for one field. So an entry is « this file, in this edition »,
 /// which no rename of a folder above it changes.
 ///
-/// A file renamed is therefore another entry, and that is the meaning intended: following a
-/// file through its rename would mean identifying it by its contents, and the same volume
-/// scanned twice is not byte for byte the same file.
+/// A file renamed is therefore another entry to the index, and the scan follows it through
+/// the rename by its size instead — see `Scanner::renamed`. Identifying it by its contents
+/// would not do: the same volume scanned twice is not byte for byte the same file.
 pub fn under(parent: &str, leaf: &str) -> String {
     super::scanner::short(&format!("{parent}/{leaf}"))
 }

@@ -41,6 +41,7 @@ Item {
         Text {
             objectName: state.objectName + "-label"
             width: parent.width
+            textFormat: Text.PlainText
             text: state.label
             color: Theme.ink
             font.family: Theme.textFamily
@@ -53,6 +54,7 @@ Item {
             objectName: state.objectName + "-detail"
             width: parent.width
             visible: state.detail.length > 0
+            textFormat: Text.PlainText
             text: state.detail
             color: Theme.inkSoft
             font.family: Theme.textFamily

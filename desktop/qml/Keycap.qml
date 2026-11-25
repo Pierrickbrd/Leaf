@@ -26,7 +26,11 @@ Rectangle {
     /// screen's) and not on a card of its own: the full key made every line of it taller than
     /// the words it explains.
     property bool compact: false
-    readonly property int face: Widths.scale.icon(cap.compact ? 20 : 28)
+    // Twenty-eight, or its word and room round it when the desktop's text makes the word
+    // taller than a key drawn for it.
+    readonly property int face: Math.max(Widths.scale.icon(cap.compact ? 20 : 28),
+                                         Math.ceil(word.implicitHeight)
+                                         + Widths.scale.icon(cap.compact ? 6 : 8))
     readonly property int lip: Widths.scale.icon(cap.compact ? 4 : 6)
     readonly property real content: cap.glyph.length > 0 ? mark.width : word.implicitWidth
 
@@ -58,6 +62,7 @@ Rectangle {
             objectName: "keycap-text"
             anchors.centerIn: parent
             visible: cap.glyph.length === 0
+            textFormat: Text.PlainText
             text: cap.text
             color: Theme.onEmerald
             font.family: Theme.textFamily

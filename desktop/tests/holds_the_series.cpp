@@ -4,6 +4,7 @@
 #include "Series.h"
 #include "Server.h"
 #include "Settings.h"
+#include "Words.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -92,7 +93,38 @@ QString valueOf(const QVariantList &rows, const QString &label)
 /// a test that reads one of them should not have to say `.toList()` twenty times.
 QVariantList rowsOf(const Series *page, const QString &which)
 {
-    return page->facts().value(which).toList();
+    return page->description()->facts().value(which).toList();
+}
+
+/// A volume credited `authors` and `artists`, each its own or taken from the series.
+Api::Entry aVolume(const QStringList &authors, const QStringList &artists,
+                   bool authorsInherited = false, bool artistsInherited = false)
+{
+    Api::Entry one;
+    one.credits.authors = authors;
+    one.credits.artists = artists;
+    one.authorsInherited = authorsInherited;
+    one.artistsInherited = artistsInherited;
+    return one;
+}
+
+/// A series called `work`, credited `credits` by its volumes, declaring `authors` and
+/// `artists` as its default.
+QJsonObject aSeries(const QString &work, const QStringList &authors, const QStringList &artists)
+{
+    QJsonObject one = elfes();
+    one.insert(u"id"_s, u"one"_s);
+    one.insert(u"name"_s, work);
+    one.insert(u"work"_s, work);
+    one.remove(u"universe"_s);
+    one.remove(u"universeId"_s);
+    one.insert(u"declaredAuthors"_s, QJsonArray::fromStringList(authors));
+    one.insert(u"declaredArtists"_s, QJsonArray::fromStringList(artists));
+    // Credited with its defaults, as the server's union of volumes that inherit them is —
+    // and not with Elfes' writers, who are nobody's in these series.
+    one.insert(u"authors"_s, QJsonArray::fromStringList(authors));
+    one.insert(u"artists"_s, QJsonArray::fromStringList(artists));
+    return one;
 }
 
 } // namespace
@@ -160,6 +192,24 @@ private slots:
         QVERIFY(m_pretend->heard.isEmpty());
     }
 
+    /// A webtoon holds chapters and no volume: it is counted in chapters. « 0 tome » over a
+    /// hundred and twenty chapters said the series was empty (test of 24/11/2026).
+    void a_series_of_chapters_is_counted_in_chapters()
+    {
+        const QJsonObject webtoon{
+            {u"id"_s, u"cohabitation"_s}, {u"workId"_s, u"cohabitation"_s},
+            {u"name"_s, u"Cohabitation"_s}, {u"work"_s, u"Cohabitation"_s},
+            {u"medium"_s, u"webtoon"_s},  {u"readingDirection"_s, u"VERTICAL"_s},
+            {u"edition"_s, u"Cohabitation"_s}, {u"ownedVolumes"_s, 0},
+            {u"entryCount"_s, 120},       {u"chapterCount"_s, 120},
+            {u"arcCount"_s, 0},           {u"ageRating"_s, u"18+"_s},
+        };
+        serve(body(webtoon), shelfOf({}));
+        m_page->point(u"cohabitation"_s);
+        settle();
+        QCOMPARE(m_page->description()->weights(), u"120 chapitres · 18+ · Verticale"_s);
+    }
+
     void the_three_levels_are_kept_apart_and_worded()
     {
         m_page->point(u"albums"_s);
@@ -172,10 +222,12 @@ private slots:
         QCOMPARE(m_page->universeId(), u"u-arran"_s);
         QCOMPARE(m_page->work(), u"Elfes"_s);
         QCOMPARE(m_page->edition(), u"Albums"_s);
-        // Who made it, then what it weighs — and the count follows the medium, so a BD is
-        // counted in albums.
-        QCOMPARE(m_page->makers(), u"Jean-Luc Istin, Nicolas Jarry · Soleil · BD · En parution"_s);
-        QCOMPARE(m_page->weights(), u"29 albums · 5 arcs · Tout public · Gauche à droite"_s);
+        // Who made it — who wrote and who drew — then what it weighs, and the count follows
+        // the medium, so a BD is counted in albums.
+        QCOMPARE(m_page->description()->makers(),
+                 u"Jean-Luc Istin, Nicolas Jarry, Kyko Duarte · Soleil · BD · En parution"_s);
+        QCOMPARE(m_page->description()->weights(),
+                 u"29 albums · 5 arcs · Tout public · Gauche à droite"_s);
         QVERIFY(m_page->cover().endsWith(u"/series/albums/cover"_s));
     }
 
@@ -235,6 +287,23 @@ private slots:
         QCOMPARE(m_page->work(), u"Elfes"_s);
     }
 
+    /// One person who writes and draws is one author on the page: « Scénario » and « Dessin »
+    /// with the same name read as two people.
+    void the_description_says_author_once_for_one_person()
+    {
+        QJsonObject titan = elfes();
+        titan[u"authors"_s] = QJsonArray{u"Hajime Isayama"_s};
+        titan[u"artists"_s] = QJsonArray{u"Hajime Isayama"_s};
+        serve(body(titan), shelfOf({titan}));
+
+        m_page->point(u"albums"_s);
+        settle();
+
+        QCOMPARE(valueOf(rowsOf(m_page, u"credits"_s), u"Auteur"_s), u"Hajime Isayama"_s);
+        QVERIFY(valueOf(rowsOf(m_page, u"credits"_s), u"Scénario"_s).isEmpty());
+        QVERIFY(valueOf(rowsOf(m_page, u"credits"_s), u"Dessin"_s).isEmpty());
+    }
+
     void the_description_leaves_out_what_is_not_recorded()
     {
         m_page->point(u"albums"_s);
@@ -246,7 +315,7 @@ private slots:
         QCOMPARE(valueOf(rowsOf(m_page, u"credits"_s), u"Collection"_s), u"Soleil Celtic"_s);
         // What the publisher announces sits beside the state of the run: « en cours » alone
         // leaves « of how many? » unanswered.
-        QCOMPARE(valueOf(rowsOf(m_page, u"nature"_s), u"Statut"_s), u"En parution · 30 albums annoncés"_s);
+        QCOMPARE(valueOf(rowsOf(m_page, u"nature"_s), u"Statut"_s), u"En parution\u00A0· 30 albums annoncés"_s);
         QCOMPARE(valueOf(rowsOf(m_page, u"nature"_s), u"Couleur"_s), u"Couleur"_s);
 
         QJsonObject bare = elfes();
@@ -393,8 +462,8 @@ private slots:
     {
         m_page->point(u"albums"_s);
         settle();
-        QCOMPARE(m_page->genres(), QStringList({u"Fantasy"_s, u"Elfes"_s}));
-        QCOMPARE(m_page->summary(), u"Cinq peuples elfiques."_s);
+        QCOMPARE(m_page->description()->genres(), QStringList({u"Fantasy"_s, u"Elfes"_s}));
+        QCOMPARE(m_page->description()->summary(), u"Cinq peuples elfiques."_s);
         QCOMPARE(m_page->missingVolumes(), QVariantList({7.0}));
     }
 
@@ -410,7 +479,7 @@ private slots:
         m_page->point(u"albums"_s);
         settle();
 
-        QVERIFY(m_page->makers().startsWith(u"Manu Larcenet"_s));
+        QVERIFY(m_page->description()->makers().startsWith(u"Manu Larcenet"_s));
         // And the description credits the same name: the two read the writers by different
         // routes, and only one of them was ever taught the old singular.
         QCOMPARE(valueOf(rowsOf(m_page, u"credits"_s), u"Scénario"_s), u"Manu Larcenet"_s);
@@ -449,10 +518,10 @@ private slots:
         QVERIFY(m_page->work().isEmpty());
         QVERIFY(m_page->edition().isEmpty());
         QVERIFY(m_page->cover().isEmpty());
-        QVERIFY(m_page->makers().isEmpty());
-        QVERIFY(m_page->weights().isEmpty());
-        QVERIFY(m_page->genres().isEmpty());
-        QVERIFY(m_page->summary().isEmpty());
+        QVERIFY(m_page->description()->makers().isEmpty());
+        QVERIFY(m_page->description()->weights().isEmpty());
+        QVERIFY(m_page->description()->genres().isEmpty());
+        QVERIFY(m_page->description()->summary().isEmpty());
         QVERIFY(rowsOf(m_page, u"credits"_s).isEmpty());
         QVERIFY(rowsOf(m_page, u"nature"_s).isEmpty());
         QVERIFY(rowsOf(m_page, u"holding"_s).isEmpty());
@@ -503,6 +572,147 @@ private slots:
         settle();
 
         QCOMPARE(m_page->oneShotEntry(), u"le-combat-ordinaire"_s);
+    }
+
+    /// The series' people are those of all its editions, and the volumes shown only count
+    /// them: the list of volumes is one edition's, and a writer credited in the other
+    /// vanished from the header and the description as soon as they had answered.
+    void the_people_are_the_same_whichever_edition_is_shown()
+    {
+        QJsonObject series = aSeries(u"Lucky Luke"_s, {u"Morris"_s}, {u"Morris"_s});
+        series.insert(u"authors"_s, QJsonArray{u"Morris"_s, u"Jul"_s});
+        series.insert(u"artists"_s, QJsonArray{u"Morris"_s, u"Achdé"_s});
+        serve(body(series), shelfOf({}));
+        m_page->point(u"one"_s);
+        settle();
+        m_page->description()->takeVolumes(u"one"_s,
+                                           {aVolume({u"Morris"_s}, {u"Morris"_s}, true, true)});
+
+        QStringList names;
+        for (const Description::Person &one : m_page->description()->peopleOrdered())
+            names << one.name;
+        QCOMPARE(names, (QStringList{u"Morris"_s, u"Jul"_s, u"Achdé"_s}));
+        QCOMPARE(m_page->description()->peopleOrdered().constFirst().volumes, 1);
+        QVERIFY(m_page->description()->makers().startsWith(u"Morris, Jul, Achdé"_s));
+        const QVariantList credits = rowsOf(m_page, u"credits"_s);
+        QCOMPARE(valueOf(credits, u"Scénario"_s), u"Jul"_s);
+        QCOMPARE(valueOf(credits, u"Dessin"_s), u"Achdé"_s);
+    }
+
+    /// The people of a series, read off its volumes: the series' default first, then whoever
+    /// has the most volumes, then whoever came first. The series listed them in the order its
+    /// volumes were read, so a writer of one late volume could stand before the one of sixty.
+    void people_put_the_series_default_first_then_the_most_volumes()
+    {
+        const QStringList pair{u"Morris"_s, u"René Goscinny"_s};
+        serve(body(aSeries(u"Lucky Luke"_s, pair, {u"Morris"_s})), shelfOf({}));
+        m_page->point(u"one"_s);
+        settle();
+        QList<Api::Entry> volumes;
+        volumes << aVolume({u"Bob de Groot"_s}, {u"Morris"_s}, false, true);
+        for (int at = 0; at < 6; ++at)
+            volumes << aVolume(pair, {u"Morris"_s}, true, true);
+        for (int at = 0; at < 3; ++at)
+            volumes << aVolume({u"Jul"_s}, {u"Achdé"_s});
+        volumes << aVolume({u"Bob de Groot"_s}, {u"Morris"_s}, false, true);
+        volumes << aVolume({u"Laurent Gerra"_s}, {u"Achdé"_s});
+        m_page->description()->takeVolumes(u"one"_s, volumes);
+
+        QStringList names;
+        for (const Description::Person &one : m_page->description()->peopleOrdered())
+            names << one.name;
+        QCOMPARE(names, (QStringList{u"Morris"_s, u"René Goscinny"_s, u"Achdé"_s, u"Jul"_s,
+                                     u"Bob de Groot"_s, u"Laurent Gerra"_s}));
+        QCOMPARE(m_page->description()->peopleOrdered().constFirst().volumes, 8);
+        QVERIFY(m_page->description()->makers().startsWith(u"Morris, René Goscinny et 4 autres"_s));
+        const QVariantList credits = rowsOf(m_page, u"credits"_s);
+        QCOMPARE(valueOf(credits, u"Auteur"_s), u"Morris"_s);
+        QCOMPARE(valueOf(credits, u"Scénario"_s), u"René Goscinny, Jul, Bob de Groot, Laurent Gerra"_s);
+        QCOMPARE(valueOf(credits, u"Dessin"_s), u"Achdé"_s);
+
+        const QVariantList people = m_page->description()->people();
+        QCOMPARE(people.size(), 6);
+        QCOMPARE(people.at(0).toMap().value(u"section"_s).toString(), u"Auteur"_s);
+        QCOMPARE(people.at(0).toMap().value(u"count"_s).toString(), u"8 albums"_s);
+        QCOMPARE(people.at(1).toMap().value(u"name"_s).toString(), u"René Goscinny"_s);
+        QCOMPARE(people.at(1).toMap().value(u"section"_s).toString(), u"Scénario"_s);
+        QCOMPARE(people.at(5).toMap().value(u"name"_s).toString(), u"Achdé"_s);
+        QCOMPARE(people.at(5).toMap().value(u"section"_s).toString(), u"Dessin"_s);
+        QCOMPARE(m_page->description()->peopleTitle(), u"Les auteurs de Lucky Luke"_s);
+        QCOMPARE(m_page->description()->peopleCount(), Words::peopleCount(6, Api::Medium::Bd));
+    }
+
+    /// A volume credited with what its series declares says nothing under its title: sixty
+    /// grey lines repeating « Morris, René Goscinny » hide the three where the team changed.
+    void a_volume_that_inherits_draws_no_credit_line()
+    {
+        QVERIFY(Words::volumeCredits(aVolume({u"Morris"_s}, {u"Morris"_s}, true, true)).isEmpty());
+    }
+
+    /// One that says its own names draws them, both roles, even the one it inherits: the line
+    /// says who made this volume, not which half of it differs.
+    void a_volume_that_differs_draws_its_own()
+    {
+        QCOMPARE(Words::volumeCredits(aVolume({u"Jul"_s}, {u"Achdé"_s})),
+                 u"Scénario\u00A0: Jul\u00A0· Dessin\u00A0: Achdé"_s);
+        QCOMPARE(Words::volumeCredits(aVolume({u"Jul"_s}, {u"Achdé"_s}, false, true)),
+                 u"Scénario\u00A0: Jul\u00A0· Dessin\u00A0: Achdé"_s);
+    }
+
+    /// 5b, first column: one person writes and draws every volume. One « Auteur » line, and
+    /// no volume says a word under its title.
+    void the_three_cases_of_5b_one_person_makes_it_all()
+    {
+        const QStringList isayama{u"Hajime Isayama"_s};
+        serve(body(aSeries(u"L’Attaque des Titans"_s, isayama, isayama)), shelfOf({}));
+        m_page->point(u"one"_s);
+        settle();
+        m_page->description()->takeVolumes(u"one"_s, {aVolume(isayama, isayama, true, true),
+                                      aVolume(isayama, isayama, true, true)});
+        const QVariantList credits = rowsOf(m_page, u"credits"_s);
+        QCOMPARE(valueOf(credits, u"Auteur"_s), u"Hajime Isayama"_s);
+        QVERIFY(valueOf(credits, u"Scénario"_s).isEmpty());
+        QVERIFY(m_page->description()->makers().startsWith(u"Hajime Isayama ·"_s));
+    }
+
+    /// 5b, second column: a team, then takeovers. The volumes that inherit say nothing, the
+    /// takeovers say theirs, and the header names the default first.
+    void the_three_cases_of_5b_a_team_then_takeovers()
+    {
+        const QStringList pair{u"Morris"_s, u"René Goscinny"_s};
+        serve(body(aSeries(u"Lucky Luke"_s, pair, {u"Morris"_s})), shelfOf({}));
+        m_page->point(u"one"_s);
+        settle();
+        const Api::Entry nine = aVolume(pair, {u"Morris"_s}, true, true);
+        const Api::Entry seventyTwo = aVolume({u"Jul"_s}, {u"Achdé"_s});
+        m_page->description()->takeVolumes(u"one"_s, {seventyTwo, nine, seventyTwo});
+        QVERIFY(Words::volumeCredits(nine).isEmpty());
+        QVERIFY(!Words::volumeCredits(seventyTwo).isEmpty());
+        QVERIFY(m_page->description()->makers().startsWith(u"Morris, René Goscinny et 2 autres"_s));
+    }
+
+    /// 5b, third column: no default, a duo per volume. Every role lists its people by the
+    /// order they came, three of them and the rest counted.
+    void the_three_cases_of_5b_a_duo_per_volume()
+    {
+        serve(body(aSeries(u"Sept"_s, {}, {})), shelfOf({}));
+        m_page->point(u"one"_s);
+        settle();
+        QList<Api::Entry> volumes;
+        for (const auto &[writer, drawer] :
+             {std::pair(u"Fabien Vehlmann"_s, u"Sean Phillips"_s),
+              std::pair(u"Alain Ayroles"_s, u"Luigi Critone"_s),
+              std::pair(u"Pierre Boisserie"_s, u"Éric Stalner"_s),
+              std::pair(u"David Chauvel"_s, u"Michel Durand"_s),
+              std::pair(u"Jean Dufaux"_s, u"Christian Rossi"_s)})
+            volumes << aVolume({writer}, {drawer});
+        m_page->description()->takeVolumes(u"one"_s, volumes);
+        const QVariantList credits = rowsOf(m_page, u"credits"_s);
+        QCOMPARE(valueOf(credits, u"Scénario"_s), u"Fabien Vehlmann, Alain Ayroles, Pierre Boisserie et 2 autres"_s);
+        QCOMPARE(valueOf(credits, u"Dessin"_s), u"Sean Phillips, Luigi Critone, Éric Stalner et 2 autres"_s);
+        QVERIFY(m_page->description()->makers().startsWith(
+            u"Fabien Vehlmann, Sean Phillips et 8 autres"_s));
+        QVERIFY(!Words::volumeCredits(volumes.at(1)).isEmpty());
     }
 };
 

@@ -17,12 +17,22 @@ Rectangle {
 
     property int thickness: 2
     property int cornerRadius: Theme.coverRadius
+    /// How far past the item the ring's gap begins: nothing for a ring against its control,
+    /// more for one that has to clear a mark of its own drawn round the item — the profile
+    /// reading now, on « Qui lit ? ». The ring stays concentric with the item either way.
+    property int standOff: 0
+
+    /// A ring drawn inside the item, on its own edge, for a control that stands in a list that
+    /// clips it and whose neighbours touch it: round it, the ring was cut off by the list on
+    /// three sides and covered by the next row on the fourth. The control is tinted as it is
+    /// under the pointer, so the ring is its own edge and not a frame round something wider.
+    property bool inside: false
 
     anchors.fill: parent
-    anchors.margins: -(Theme.focusGap + thickness)
-    radius: cornerRadius + Theme.focusGap + thickness
+    anchors.margins: inside ? 0 : -(standOff + Theme.focusGap + thickness)
+    radius: inside ? cornerRadius : cornerRadius + standOff + Theme.focusGap + thickness
 
-    color: "transparent"
+    color: inside ? Theme.onPaper : "transparent"
     border.color: Theme.emerald
     border.width: thickness
     /// What the ring follows. A control whose focus is not its own `activeFocus` names it here
