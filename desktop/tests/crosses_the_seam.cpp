@@ -7511,6 +7511,14 @@ private slots:
                                   R"("at":""}],"toSend":["Tome 1.cbz"],)"
                                   R"("alreadyThere":[],"bytesToSend":64})"));
             }
+            // The file itself is never answered: the card is meant to stay in flight while
+            // the assertions below look at it. It used to be given the shelf's empty list,
+            // which is not what a transfer expects back — the card went to `Failed` on its own
+            // and the test saw `Sending` only when it polled before that happened. Alone it
+            // always did; on an instrumented build sharing four cores it missed it one run in
+            // four. Nothing to say holds the connection open (see `Pretend::reply`).
+            if (request.startsWith("PUT /import/"))
+                return {};
             return aReply(200, QByteArrayLiteral("application/json"),
                           QByteArrayLiteral(R"({"items":[],"total":0})"));
         };
