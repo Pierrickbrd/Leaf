@@ -7511,6 +7511,14 @@ private slots:
                                   R"("at":""}],"toSend":["Tome 1.cbz"],)"
                                   R"("alreadyThere":[],"bytesToSend":64})"));
             }
+            // The file itself is never answered: the card is meant to stay in flight while
+            // the assertions below look at it. It used to be given the shelf's empty list,
+            // which is not what a transfer expects back — the card went to `Failed` on its own
+            // and the test saw `Sending` only when it polled before that happened. Alone it
+            // always did; on an instrumented build sharing four cores it missed it one run in
+            // four. Nothing to say holds the connection open (see `Pretend::reply`).
+            if (request.startsWith("PUT /import/"))
+                return {};
             return aReply(200, QByteArrayLiteral("application/json"),
                           QByteArrayLiteral(R"({"items":[],"total":0})"));
         };
@@ -20868,10 +20876,90 @@ int reexecuteOnItsOwnDisplay(int argc, char *argv[])
     fprintf(stderr, "crosses-the-seam could not start xvfb-run: %s\n", strerror(errno));
     return 1;
 }
+
+/// Every case of the class, in the order QTest runs them: its private slots without an
+/// argument, less the four QTest calls around them and the `_data` functions that feed one.
+QStringList everyCase()
+{
+    static const QSet<QString> aroundThem{u"initTestCase"_s, u"cleanupTestCase"_s, u"init"_s,
+                                          u"cleanup"_s};
+    const QMetaObject &meta = CrossesTheSeam::staticMetaObject;
+    QStringList cases;
+    for (int i = meta.methodOffset(); i < meta.methodCount(); ++i) {
+        const QMetaMethod method = meta.method(i);
+        const QString name = QString::fromUtf8(method.name());
+        if (method.methodType() == QMetaMethod::Slot && method.access() == QMetaMethod::Private
+            && method.parameterCount() == 0 && !name.endsWith(u"_data"_s)
+            && !aroundThem.contains(name))
+            cases << name;
+    }
+    return cases;
+}
+
+/// The cases of share `index` out of `shares`, dealt out one at a time like cards. Dealt, not
+/// cut in blocks: the slow ones come in runs — sixteen webtoon cases wait on the bars, one
+/// after another — and a block of them would be one share's whole afternoon.
+QStringList shareOf(const QStringList &cases, int index, int shares)
+{
+    QStringList share;
+    for (qsizetype i = index; i < cases.size(); i += shares)
+        share << cases.at(i);
+    return share;
+}
+
+/// `1/3` is the second of three shares. Nothing else is a share: a typo in the variable must
+/// stop the run, not run everything or nothing.
+bool parseShare(const QByteArray &text, int *index, int *shares)
+{
+    const QList<QByteArray> parts = text.split('/');
+    bool one = false;
+    bool two = false;
+    if (parts.size() != 2)
+        return false;
+    *index = parts.at(0).toInt(&one);
+    *shares = parts.at(1).toInt(&two);
+    return one && two && *shares >= 1 && *index >= 0 && *index < *shares;
+}
+
+/// `crosses-the-seam --shard-plan 3`: needs no display, and says whether three shares hold
+/// every case once and none of them is empty. A share that silently held nothing would pass,
+/// and the suite it was cut from would be smaller by that much with nothing to say so.
+int checkTheShares(const QByteArray &count)
+{
+    bool counted = false;
+    const int shares = count.toInt(&counted);
+    const QStringList cases = everyCase();
+    if (!counted || shares < 1 || cases.isEmpty()) {
+        fprintf(stderr, "crosses-the-seam --shard-plan needs a number of shares, and cases\n");
+        return 1;
+    }
+    QStringList dealt;
+    for (int i = 0; i < shares; ++i) {
+        const QStringList share = shareOf(cases, i, shares);
+        if (share.isEmpty()) {
+            fprintf(stderr, "share %d of %d holds no case\n", i, shares);
+            return 1;
+        }
+        dealt << share;
+    }
+    dealt.sort();
+    QStringList sorted = cases;
+    sorted.sort();
+    if (dealt != sorted) {
+        fprintf(stderr, "the %d shares do not hold the %lld cases, each once\n", shares,
+                static_cast<long long>(cases.size()));
+        return 1;
+    }
+    printf("%d shares hold the %lld cases, each once\n", shares,
+           static_cast<long long>(cases.size()));
+    return 0;
+}
 } // namespace
 
 int main(int argc, char *argv[])
 {
+    if (argc == 3 && qstrcmp(argv[1], "--shard-plan") == 0)
+        return checkTheShares(argv[2]);
     if (!qEnvironmentVariableIsSet(ownDisplay))
         return reexecuteOnItsOwnDisplay(argc, argv);
     // Defensive: whoever sets the marker by hand still never reaches the real display.
@@ -20883,6 +20971,26 @@ int main(int argc, char *argv[])
     app.setAttribute(Qt::AA_Use96Dpi, true);
     CrossesTheSeam tc;
     QTest::setMainSourcePath(__FILE__);
-    return QTest::qExec(&tc, argc, argv);
+
+    // One share of the cases, when asked for one (`LEAF_SHARD=1/3`): QTest runs the functions
+    // named after its options, and `initTestCase` and `cleanupTestCase` around them.
+    QStringList arguments;
+    for (int i = 0; i < argc; ++i)
+        arguments << QString::fromLocal8Bit(argv[i]);
+    if (qEnvironmentVariableIsSet("LEAF_SHARD")) {
+        int index = 0;
+        int shares = 1;
+        if (!parseShare(qgetenv("LEAF_SHARD"), &index, &shares)) {
+            fprintf(stderr, "LEAF_SHARD is « index/shares », such as 0/3\n");
+            return 1;
+        }
+        const QStringList share = shareOf(everyCase(), index, shares);
+        if (share.isEmpty()) {
+            fprintf(stderr, "LEAF_SHARD=%d/%d holds no case\n", index, shares);
+            return 1;
+        }
+        arguments << share;
+    }
+    return QTest::qExec(&tc, arguments);
 }
 #include "crosses_the_seam.moc"

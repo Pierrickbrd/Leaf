@@ -3,7 +3,7 @@ description: >
   The Qt the client is built against, from the packages of the runner's own distribution,
   with the downloaded packages kept between runs.
 
-# One list for the two workflows that build the client. It was written out twice, and two
+# One list for the two jobs that build the client. It was written out twice, and two
 # copies of a list are two lists the day one of them gains a module.
 #
 # The packages themselves are kept: the sonar job spent 6 min 28 s fetching 55.3 MB from a
