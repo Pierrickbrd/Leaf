@@ -110,7 +110,9 @@ jobs:
           key: ccache-coverage-${{ github.sha }}
 
       - name: coverage, C++
-        run: xvfb-run -a ctest --test-dir desktop/coverage --output-on-failure
+        run: |
+          xvfb-run -a ctest --test-dir desktop/coverage -R '^crosses-the-seam-[0-9]+$' -j3 --output-on-failure
+          xvfb-run -a ctest --test-dir desktop/coverage -E '^crosses-the-seam-[0-9]+$' --output-on-failure
 
       # From inside the build tree, because that is where gcov may write its intermediates.
       # `--fail-under-line` is not a coverage target — the quality gate is that. It is a

@@ -1166,7 +1166,23 @@ set_tests_properties(keeps-the-key talks-to-the-server keeps-its-contrast embeds
 # the binary, and `xvfb-run -a` on it without QT_QPA_PLATFORM=xcb, so Qt took the Wayland
 # platform that a GNOME session advertises and ignored Xvfb. Nested under
 # CI's own `xvfb-run -a ctest`, the inner one starts a second server and points DISPLAY at it.
-add_test(NAME crosses-the-seam COMMAND crosses-the-seam)
+#
+# Cut in shares that run side by side. It took 390 s of the 450 the client's tests take, on a
+# runner with four cores whose time it spent waiting for animations to end, not computing:
+# 364 independent cases, the slowest 17 s. Each share starts on a display of its own, as the
+# whole did, so none can move another's pointer. `LEAF_SHARD` hands each its cases, dealt out
+# in turn, and a test beside them refuses a cut that loses or doubles one. The workflows run
+# the shares with `ctest -j`; a plain `ctest` runs them one after the other, which is the old
+# time and the same coverage.
+set(leaf_seam_shards 3)
+math(EXPR leaf_seam_last "${leaf_seam_shards} - 1")
+foreach(leaf_share RANGE 0 ${leaf_seam_last})
+    add_test(NAME crosses-the-seam-${leaf_share} COMMAND crosses-the-seam)
+    set_tests_properties(crosses-the-seam-${leaf_share} PROPERTIES
+        ENVIRONMENT "LEAF_SHARD=${leaf_share}/${leaf_seam_shards}")
+endforeach()
+add_test(NAME crosses-the-seam-shares-hold-every-case
+    COMMAND crosses-the-seam --shard-plan ${leaf_seam_shards})
 
 # Every test its own home, emptied before each run. `QStandardPaths` test mode puts the
 # preferences under `$HOME/.qttest`, one file for every executable: holds-the-reader left

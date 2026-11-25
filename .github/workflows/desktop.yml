@@ -108,7 +108,12 @@ jobs:
       # keyring branch is the one that runs on a desktop. Between the two machines both are
       # exercised — which is why the file half is a plain function taking its own path,
       # rather than something reachable only by luck of environment.
-      - run: xvfb-run -a ctest --test-dir build --output-on-failure
+      # `crosses-the-seam` is 359 cases in one binary and took 439 s of a 453 s ctest, alone. It is
+      # cut into three shares (see desktop/CMakeLists.txt) that each open their own display, so
+      # they run side by side; everything else stays serial, as before. A fourth test fails if
+      # the shares stop adding up to every case.
+      - run: xvfb-run -a ctest --test-dir build -R '^crosses-the-seam-[0-9]+$' -j3 --output-on-failure
+      - run: xvfb-run -a ctest --test-dir build -E '^crosses-the-seam-[0-9]+$' --output-on-failure
 
       # Linking is not opening. The module's resource path moved between Qt 6.4 and 6.5, so
       # a build that links perfectly can still exit at once with nothing on screen.
